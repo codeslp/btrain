@@ -121,14 +121,6 @@ The workflow: `/speckit.specify` → `/speckit.plan` → `/speckit.tasks` → `b
 
 btrain coordinates agents that have access to your filesystem. Understand these trust boundaries:
 
-### API Keys
-
-btrain itself does **not** use API keys. However, the agents it coordinates do.
-
-- `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are used by `btrain review run` (the automated review script)
-- These keys are read from your environment — btrain never stores, logs, or transmits them
-- **Risk**: If an agent edits `.bashrc`, `.zshrc`, or `.env` files, it could exfiltrate keys. Use your agent's permission model to block writes to dotfiles.
-
 ### Agent Permission Models
 
 Each agent CLI has its own permission/sandbox model. btrain does **not** bypass these.
@@ -343,8 +335,6 @@ $BRAIN_TRAIN_HOME/                  # Default: ~/.btrain
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `BRAIN_TRAIN_HOME` | No | `~/.btrain` | Override global config directory |
-| `ANTHROPIC_API_KEY` | Review only | — | Required for `btrain review run` |
-| `OPENAI_API_KEY` | Review only | — | Required for `btrain review run` |
 | `HANDOFF_HISTORY_PATH` | Watcher only | — | Path to the history log file |
 
 ---

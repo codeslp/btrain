@@ -185,13 +185,6 @@ cd btrain && npm link</code></pre>
       <h2>Understand the trust boundaries</h2>
       <div class="security-grid">
         <div class="security-item">
-          <h3>🔑 API Keys</h3>
-          <p>btrain itself uses <strong>zero API keys</strong>. The automated review mode (<code>btrain review run</code>) reads <code>ANTHROPIC_API_KEY</code> and <code>OPENAI_API_KEY</code> from your environment. btrain never stores, logs, or transmits them.</p>
-          <div class="security-warning">
-            <strong>⚠️ Risk:</strong> If an agent edits shell config files (<code>.bashrc</code>, <code>.zshrc</code>), it could exfiltrate keys. Block agent writes to dotfiles via your agent's permission model.
-          </div>
-        </div>
-        <div class="security-item">
           <h3>🔒 Agent Permissions</h3>
           <p>Each agent CLI has its own sandbox. btrain does not bypass these.</p>
           <table class="security-table">
