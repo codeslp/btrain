@@ -696,6 +696,29 @@ code {
   vertical-align: middle;
 }
 
+/* ── About ── */
+.about-content {
+  max-width: 700px;
+}
+
+.about-text p {
+  color: var(--text-dim);
+  margin-bottom: 18px;
+  line-height: 1.7;
+  font-size: 0.95rem;
+}
+
+.about-text em {
+  color: var(--accent-light);
+  font-style: italic;
+}
+
+.about-links {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
 /* ── Footer ── */
 .footer {
   padding: 48px 0;
