@@ -1,0 +1,24 @@
+# btrain project config
+name = "your-repo"
+repo_path = "/absolute/path/to/your-repo"
+handoff_path = ".claude/collab/HANDOFF.md"
+default_review_mode = "manual"
+created_at = ""
+
+[agents]
+writer_default = ""
+reviewer_default = ""
+
+[agents.runners]
+# "Claude" = "claude -p"       # CLI dispatch via Claude Code
+# "GPT-5 Codex" = "codex"      # CLI dispatch via Codex
+# "Antigravity" = "notify"     # IDE-only, manual relay
+
+[reviews]
+parallel_enabled = true
+sequential_enabled = false
+sequential_triggers = []
+parallel_script = ""
+
+[instructions]
+project_notes = ""

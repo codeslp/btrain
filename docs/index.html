@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>brain_train — Multi-Agent AI Coordination</title>
+  <meta name="description" content="A file-backed handoff protocol for coordinating AI coding agents. One writes, one reviews. No database. No cloud. Just a markdown file.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Nav -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="#" class="nav-logo">
+        <span class="logo-icon">⚡</span> brain_train
+      </a>
+      <button class="nav-toggle" aria-label="Toggle menu" onclick="document.querySelector('.nav-links').classList.toggle('open')">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="nav-links">
+        <a href="#problem">Why</a>
+        <a href="#how">How</a>
+        <a href="#security">Security</a>
+        <a href="#compare">Compare</a>
+        <a href="#speckit">Spec Kit</a>
+        <a href="https://github.com/codeslp/btrain" class="btn btn-sm">GitHub →</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-brand">
+        <h1 class="brand-title">brain_train</h1>
+      </div>
+      <div class="hero-image-wrap">
+        <img src="hero-train.jpg" alt="B-Train datacenter locomotive pulling Codex and Claude AI data center cars through mountains at night" class="hero-image">
+      </div>
+      <div class="hero-badge">File-backed · Zero dependencies · MIT licensed</div>
+      <p class="hero-tagline">Stop your AI agents from stepping on each other</p>
+      <p class="hero-sub">
+        A handoff protocol for multi-agent AI coding.<br>
+        One agent writes. One reviews. A single markdown file keeps them in sync.
+      </p>
+      <div class="hero-cta">
+        <a href="#quickstart" class="btn btn-primary">Get Started</a>
+        <a href="https://github.com/codeslp/btrain" class="btn btn-ghost">View on GitHub</a>
+      </div>
+      <div class="hero-terminal">
+        <div class="terminal-bar">
+          <span class="dot red"></span>
+          <span class="dot yellow"></span>
+          <span class="dot green"></span>
+          <span class="terminal-title">terminal</span>
+        </div>
+        <pre class="terminal-body"><code><span class="t-prompt">$</span> btrain handoff
+
+<span class="t-dim">repo:</span> <span class="t-value">my-app</span>
+<span class="t-dim">task:</span> <span class="t-value">Implement auth middleware</span>
+<span class="t-dim">status:</span> <span class="t-status">needs-review</span>
+<span class="t-dim">owner:</span> <span class="t-value">Claude</span>
+<span class="t-dim">reviewer:</span> <span class="t-value">GPT-5 Codex</span>
+
+<span class="t-guidance">Waiting on GPT-5 Codex to review.</span>
+<span class="t-guidance">If you are GPT-5 Codex: do the review, then run</span>
+<span class="t-guidance">`btrain handoff resolve --summary "..."`</span></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Problem -->
+  <section id="problem" class="section">
+    <div class="container">
+      <div class="section-label">The Problem</div>
+      <h2>Multi-agent coding is chaos<br>without coordination</h2>
+      <div class="cards">
+        <div class="card">
+          <div class="card-icon">🔀</div>
+          <h3>Context Desync</h3>
+          <p>Agent A edits files that Agent B has cached. Neither knows the other's changes exist.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">👻</div>
+          <h3>Status Ambiguity</h3>
+          <p>Both agents think they're the one working. File conflicts and duplicated effort follow.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🔍</div>
+          <h3>No Audit Trail</h3>
+          <p>Three handoffs ago, something broke. Good luck figuring out which agent did what.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🤷</div>
+          <h3>Review Confusion</h3>
+          <p>Who reviews what? When? How does the reviewer know what changed and why?</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section id="how" class="section section-dark">
+    <div class="container">
+      <div class="section-label">How It Works</div>
+      <h2>One file. One protocol.<br>Any agent.</h2>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-number">1</div>
+          <h3>Claim</h3>
+          <p>An agent claims a task via <code>btrain handoff claim</code>. Status → <strong>in-progress</strong>.</p>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="flow-number">2</div>
+          <h3>Work</h3>
+          <p>The owner does the work. The reviewer waits. Locked files prevent conflicts.</p>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="flow-number">3</div>
+          <h3>Review</h3>
+          <p>Owner runs <code>btrain handoff update</code>. Status → <strong>needs-review</strong>. Reviewer acts.</p>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="flow-number">4</div>
+          <h3>Resolve</h3>
+          <p>Reviewer runs <code>btrain handoff resolve</code>. Status → <strong>resolved</strong>. Next task.</p>
+        </div>
+      </div>
+      <div class="flow-detail">
+        <p>The entire state lives in <code>.claude/collab/HANDOFF.md</code> — a git-tracked markdown file. No database. No external service. Every transition is a CLI command.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section id="quickstart" class="section">
+    <div class="container">
+      <div class="section-label">Quick Start</div>
+      <h2>Running in 60 seconds</h2>
+      <div class="code-steps">
+        <div class="code-step">
+          <div class="code-step-label">Install</div>
+          <div class="code-block">
+            <pre><code>git clone https://github.com/codeslp/btrain.git
+cd btrain && npm link</code></pre>
+          </div>
+        </div>
+        <div class="code-step">
+          <div class="code-step-label">Bootstrap a repo</div>
+          <div class="code-block">
+            <pre><code>btrain init /path/to/your/repo --hooks</code></pre>
+          </div>
+        </div>
+        <div class="code-step">
+          <div class="code-step-label">Claim a task</div>
+          <div class="code-block">
+            <pre><code>btrain handoff claim \
+  --task "Implement auth middleware" \
+  --owner "Claude" \
+  --reviewer "GPT-5 Codex"</code></pre>
+          </div>
+        </div>
+        <div class="code-step">
+          <div class="code-step-label">Type <code>bth</code> in each agent chat</div>
+          <div class="code-block">
+            <pre><code># Claude sees: "in-progress, you're the owner → do the work"
+# Codex sees: "needs-review, you're the reviewer → review it"
+# That's it. They follow the protocol.</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Security -->
+  <section id="security" class="section section-dark">
+    <div class="container">
+      <div class="section-label">Security & Trust</div>
+      <h2>Understand the trust boundaries</h2>
+      <div class="security-grid">
+        <div class="security-item">
+          <h3>🔑 API Keys</h3>
+          <p>btrain itself uses <strong>zero API keys</strong>. The automated review mode (<code>btrain review run</code>) reads <code>ANTHROPIC_API_KEY</code> and <code>OPENAI_API_KEY</code> from your environment. btrain never stores, logs, or transmits them.</p>
+          <div class="security-warning">
+            <strong>⚠️ Risk:</strong> If an agent edits shell config files (<code>.bashrc</code>, <code>.zshrc</code>), it could exfiltrate keys. Block agent writes to dotfiles via your agent's permission model.
+          </div>
+        </div>
+        <div class="security-item">
+          <h3>🔒 Agent Permissions</h3>
+          <p>Each agent CLI has its own sandbox. btrain does not bypass these.</p>
+          <table class="security-table">
+            <thead>
+              <tr><th>Agent</th><th>Recommended</th><th>Avoid</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Claude Code</td>
+                <td>Default allowlist</td>
+                <td><code>--permission-mode bypassPermissions</code></td>
+              </tr>
+              <tr>
+                <td>Codex CLI</td>
+                <td>Default sandbox</td>
+                <td><code>--full-auto</code> in untrusted repos</td>
+              </tr>
+              <tr>
+                <td>Antigravity</td>
+                <td>VS Code defaults</td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="security-item">
+          <h3>🛡️ Review Trust Levels</h3>
+          <p>Automated reviews are decision-support tools, not replacements for judgment.</p>
+          <table class="security-table">
+            <thead>
+              <tr><th>Mode</th><th>Process</th><th>Trust</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Manual</td><td>Human reviews in agent chat</td><td>Full oversight</td></tr>
+              <tr><td>Parallel</td><td>3 LLM reviewers run independently</td><td>Read the report</td></tr>
+              <tr><td>Hybrid</td><td>Parallel + sequential chain for sensitive paths</td><td>Read the report</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="security-item">
+          <h3>🚧 Pre-Commit Guard</h3>
+          <p>Run <code>btrain init . --hooks</code> to install a git hook that blocks commits when <code>HANDOFF.md</code> shows <code>needs-review</code> and non-handoff files are staged. This prevents the owner from committing while the reviewer is working.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison -->
+  <section id="compare" class="section">
+    <div class="container">
+      <div class="section-label">Comparison</div>
+      <h2>How btrain compares</h2>
+      <div class="compare-table-wrap">
+        <table class="compare-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>brain_train</th>
+              <th>Claude Squad</th>
+              <th>Manual Relay</th>
+              <th>CrewAI / AutoGen</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Approach</td>
+              <td>Sequential handoff protocol</td>
+              <td>Parallel workspace multiplexer</td>
+              <td>Copy-paste between agent chats</td>
+              <td>Python agent pipelines</td>
+            </tr>
+            <tr>
+              <td>State storage</td>
+              <td>1 markdown file in git</td>
+              <td>tmux sessions + git worktrees</td>
+              <td>Human memory</td>
+              <td>In-memory / custom</td>
+            </tr>
+            <tr>
+              <td>Dependencies</td>
+              <td>0 (Node.js built-ins)</td>
+              <td>tmux, gh</td>
+              <td>None</td>
+              <td>Python packages</td>
+            </tr>
+            <tr>
+              <td>Agent support</td>
+              <td>Any (Claude, Codex, Antigravity, ...)</td>
+              <td>Claude Code, Codex, Aider</td>
+              <td>Any</td>
+              <td>LLM APIs (not IDE agents)</td>
+            </tr>
+            <tr>
+              <td>Review workflow</td>
+              <td>Built-in (manual, parallel, hybrid)</td>
+              <td>Manual (git diff)</td>
+              <td>Ad hoc</td>
+              <td>Custom</td>
+            </tr>
+            <tr>
+              <td>Audit trail</td>
+              <td>Git history + Previous Handoffs section</td>
+              <td>Git branches</td>
+              <td>None</td>
+              <td>Custom logging</td>
+            </tr>
+            <tr>
+              <td>Setup time</td>
+              <td>~60 seconds</td>
+              <td>~5 minutes</td>
+              <td>None</td>
+              <td>Python env setup</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Spec Kit -->
+  <section id="speckit" class="section">
+    <div class="container">
+      <div class="section-label">Recommended Pairing</div>
+      <h2>btrain + Spec Kit</h2>
+      <div class="speckit-content">
+        <div class="speckit-text">
+          <p>btrain was built and spec'd using <a href="https://github.com/the-spec-kit/spec-kit">Spec Kit</a>, a spec-driven planning tool for AI coding projects. We recommend using them together.</p>
+          <p><strong>Spec Kit</strong> handles planning — constitution, specs, plans, tasks. <strong>btrain</strong> handles execution — who works on what, when, and how the handoff flows.</p>
+          <h3>Future integration <span class="future-badge">Planned</span></h3>
+          <p>The obvious next step: <code>btrain handoff claim --from-spec specs/001-feature/tasks.md</code> — auto-create a handoff from the next unchecked task in a Spec Kit tasks file. This would close the loop between planning and execution, letting agents self-assign work from the spec backlog.</p>
+        </div>
+        <div class="speckit-flow">
+          <div class="speckit-step">
+            <div class="speckit-step-num">1</div>
+            <div class="speckit-step-text"><code>/speckit.specify</code> — Create the feature spec</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">2</div>
+            <div class="speckit-step-text"><code>/speckit.plan</code> — Generate the implementation plan</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">3</div>
+            <div class="speckit-step-text"><code>/speckit.tasks</code> — Break into ordered tasks</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">4</div>
+            <div class="speckit-step-text"><code>btrain handoff claim</code> — Claim a task, start the relay</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">5</div>
+            <div class="speckit-step-text"><code>bth</code> — Agents work + review until resolved</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Loop Status -->
+  <section id="loop" class="section section-dark">
+    <div class="container">
+      <div class="section-label">Transparency</div>
+      <h2>What we tried: btrain loop</h2>
+      <div class="loop-content">
+        <p>We built <code>btrain loop</code> to automate the <code>bth</code> relay — watch <code>HANDOFF.md</code>, dispatch the right agent CLI, repeat until resolved. <strong>The implementation works.</strong> 29 tests pass, including streaming progress, dry-run, max-rounds guards, and notify-mode fallback.</p>
+        <h3>Why it doesn't fully work in practice</h3>
+        <p>Both Claude Code and Codex CLI have sandbox models that block the nested subprocess calls that <code>btrain loop</code> needs:</p>
+        <div class="loop-issues">
+          <div class="loop-issue">
+            <strong>Codex</strong> (<code>--full-auto</code>)
+            <p>Its sandbox uses <code>sandbox-exec</code> which blocks child processes from running btrain.<br>
+            <code class="error">sandbox_apply: Operation not permitted</code></p>
+          </div>
+          <div class="loop-issue">
+            <strong>Claude Code</strong> (<code>-p</code>)
+            <p>Requires <code>--permission-mode bypassPermissions</code> which is unsafe for production.</p>
+          </div>
+          <div class="loop-issue">
+            <strong>Antigravity</strong>
+            <p>IDE-embedded with no CLI — uses <code>notify</code> mode (loop waits for manual action).</p>
+          </div>
+        </div>
+        <h3>Current recommendation</h3>
+        <p>Use <code>bth</code> manually in each agent's chat window. The loop infrastructure exists and will become practical as agent CLIs improve their headless orchestration support. <code>btrain loop --dry-run</code> still works for testing your runner configuration.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-logo">
+        <span class="logo-icon">⚡</span> brain_train
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/codeslp/btrain">GitHub</a>
+        <a href="https://github.com/codeslp/btrain#readme">Docs</a>
+        <a href="https://github.com/codeslp/btrain/blob/main/LICENSE">MIT License</a>
+      </div>
+      <p class="footer-copy">© 2026 brain_train. A file-backed handoff protocol for multi-agent AI coding.</p>
+    </div>
+  </footer>
+</body>
+</html>

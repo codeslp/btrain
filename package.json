@@ -1,0 +1,22 @@
+{
+  "name": "btrain",
+  "version": "1.0.0",
+  "description": "A file-backed handoff protocol for multi-agent AI coding coordination",
+  "type": "module",
+  "bin": {
+    "btrain": "./src/brain_train/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.mjs'",
+    "btrain": "node src/brain_train/cli.mjs",
+    "collab:watch-handoff-history": "node scripts/handoff-history-watcher.mjs",
+    "collab:register-handoff-watch": "bash scripts/register-handoff-watch-path.sh",
+    "collab:install-handoff-history-agent": "bash scripts/install-handoff-history-launch-agent.sh"
+  },
+  "keywords": ["ai", "multi-agent", "handoff", "collaboration", "coding-assistant", "claude", "codex"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codeslp/btrain.git"
+  }
+}
