@@ -145,6 +145,7 @@ body {
   height: 6px;
   background: var(--track-color);
   box-shadow: 0 0 12px rgba(108, 92, 231, 0.3);
+  z-index: 12;
 }
 .track::before {
   content: '';
@@ -159,6 +160,392 @@ body {
     transparent 50px
   );
 }
+
+/* ── Scenery: little towns ── */
+.scenery-towns {
+  position: absolute;
+  bottom: 6px; left: 0; right: 0;
+  height: 120px;
+  z-index: 3;
+}
+.town {
+  position: absolute;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+.town-1 { left: 8%; }
+.town-2 { left: 52%; }
+.town-3 { left: 82%; }
+.building {
+  position: relative;
+  background: #0d0d1e;
+  border-radius: 2px 2px 0 0;
+}
+.building .window {
+  position: absolute;
+  width: 4px; height: 4px;
+  background: #ffeaa7;
+  border-radius: 1px;
+  box-shadow: 0 0 4px #ffeaa7, 0 0 8px rgba(255,234,167,0.3);
+  animation: windowFlicker 4s ease-in-out infinite;
+}
+@keyframes windowFlicker {
+  0%, 100% { opacity: 1; }
+  30% { opacity: 0.7; }
+  50% { opacity: 1; }
+  80% { opacity: 0.5; }
+}
+.b1 { width: 12px; height: 28px; }
+.b1 .window:nth-child(1) { top: 5px; left: 2px; }
+.b1 .window:nth-child(2) { top: 5px; right: 2px; }
+.b1 .window:nth-child(3) { top: 15px; left: 2px; }
+.b2 { width: 16px; height: 40px; }
+.b2 .window:nth-child(1) { top: 6px; left: 2px; }
+.b2 .window:nth-child(2) { top: 6px; right: 2px; }
+.b2 .window:nth-child(3) { top: 16px; left: 2px; }
+.b2 .window:nth-child(4) { top: 16px; right: 2px; }
+.b2 .window:nth-child(5) { top: 26px; left: 2px; }
+.b3 { width: 10px; height: 22px; }
+.b3 .window:nth-child(1) { top: 4px; left: 3px; }
+.b3 .window:nth-child(2) { top: 12px; left: 3px; }
+.b4 { width: 14px; height: 34px; }
+.b4 .window:nth-child(1) { top: 5px; left: 2px; }
+.b4 .window:nth-child(2) { top: 5px; right: 2px; }
+.b4 .window:nth-child(3) { top: 14px; left: 2px; }
+.b4 .window:nth-child(4) { top: 14px; right: 2px; }
+
+/* ── Scenery: trees and plants ── */
+.scenery-nature {
+  position: absolute;
+  bottom: 6px; left: 0; right: 0;
+  height: 100px;
+  z-index: 4;
+}
+.tree {
+  position: absolute;
+  bottom: 0;
+}
+.pine {
+  width: 0; height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 24px solid #0a1a12;
+  position: relative;
+}
+.pine::after {
+  content: '';
+  position: absolute;
+  bottom: -30px;
+  left: -5px;
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 18px solid #0a1a12;
+}
+.pine-trunk {
+  position: absolute;
+  bottom: 0;
+  left: 50%; transform: translateX(-50%);
+  width: 3px; height: 8px;
+  background: #1a0e08;
+}
+.bush {
+  position: absolute;
+  bottom: 0;
+  width: 14px; height: 8px;
+  background: #0a1810;
+  border-radius: 50% 50% 0 0;
+}
+.tree-1 { left: 3%; }
+.tree-2 { left: 18%; }
+.tree-3 { left: 33%; }
+.tree-4 { left: 46%; }
+.tree-5 { left: 65%; }
+.tree-6 { left: 75%; }
+.tree-7 { left: 92%; }
+.bush-1 { left: 12%; }
+.bush-2 { left: 38%; }
+.bush-3 { left: 58%; }
+.bush-4 { left: 88%; }
+
+/* ── Scenery: animals ── */
+.scenery-animals {
+  position: absolute;
+  bottom: 6px; left: 0; right: 0;
+  height: 60px;
+  z-index: 5;
+  font-size: 14px;
+  line-height: 1;
+}
+.animal {
+  position: absolute;
+  bottom: 0;
+  opacity: 0.6;
+  filter: brightness(0.4);
+  transition: opacity 0.8s, filter 0.8s;
+}
+.animal.lit {
+  opacity: 1;
+  filter: brightness(1) drop-shadow(0 0 6px rgba(255,200,100,0.5));
+}
+.deer { left: 15%; font-size: 16px; }
+.rabbit { left: 42%; font-size: 12px; bottom: 0; }
+.owl { left: 70%; bottom: 30px; font-size: 13px; }
+.fox { left: 90%; font-size: 13px; }
+.bear { left: 28%; font-size: 15px; }
+.frog { left: 60%; font-size: 11px; }
+
+/* ── The Train ── */
+.train-container {
+  position: absolute;
+  bottom: 8px;
+  left: -320px;
+  z-index: 10;
+  display: flex;
+  align-items: flex-end;
+  animation: trainMove 25s linear infinite;
+  will-change: transform;
+}
+@keyframes trainMove {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(calc(100vw + 400px)); }
+}
+
+.loco {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  animation: trainBob 0.3s ease-in-out infinite;
+}
+@keyframes trainBob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.5px); }
+}
+
+/* Locomotive body */
+.loco-body {
+  width: 60px; height: 32px;
+  background: linear-gradient(180deg, #2d1b4e 0%, #1a0e30 100%);
+  border-radius: 4px 12px 2px 2px;
+  position: relative;
+  border: 1px solid #3d2b5e;
+}
+.loco-body::before {
+  content: '';
+  position: absolute;
+  bottom: 0; left: -10px;
+  width: 14px; height: 14px;
+  background: #1a0e30;
+  border-radius: 50%;
+  border: 1px solid #3d2b5e;
+}
+/* Cabin */
+.loco-cabin {
+  position: absolute;
+  top: -14px; right: 2px;
+  width: 20px; height: 18px;
+  background: #2d1b4e;
+  border-radius: 3px 3px 0 0;
+  border: 1px solid #3d2b5e;
+  border-bottom: none;
+}
+.loco-cabin .cab-window {
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 14px; height: 8px;
+  background: rgba(255,200,100,0.6);
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(255,200,100,0.3);
+}
+/* Smokestack */
+.smokestack {
+  position: absolute;
+  top: -12px; left: 10px;
+  width: 8px; height: 14px;
+  background: #1a0e30;
+  border-radius: 2px 2px 0 0;
+  border: 1px solid #3d2b5e;
+}
+.smokestack::before {
+  content: '';
+  position: absolute;
+  top: -3px; left: -2px;
+  width: 12px; height: 4px;
+  background: #2d1b4e;
+  border-radius: 2px;
+  border: 1px solid #3d2b5e;
+}
+/* Headlight */
+.headlight {
+  position: absolute;
+  bottom: 12px; left: -10px;
+  width: 6px; height: 6px;
+  background: #fff8dc;
+  border-radius: 50%;
+  box-shadow: 0 0 8px #fff8dc, 0 0 20px rgba(255,248,220,0.5);
+}
+/* Headlight beam */
+.headlight-beam {
+  position: absolute;
+  bottom: 0; left: -310px;
+  width: 300px; height: 60px;
+  background: linear-gradient(90deg, rgba(255,248,220,0.02) 0%, rgba(255,248,220,0.08) 70%, rgba(255,248,220,0.2) 100%);
+  clip-path: polygon(100% 30%, 0% 0%, 0% 100%, 100% 70%);
+  pointer-events: none;
+}
+
+/* Loco wheels */
+.loco-wheels {
+  position: absolute;
+  bottom: -5px; left: 5px;
+  display: flex; gap: 14px;
+}
+.wheel {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #333;
+  border: 2px solid #555;
+  animation: wheelSpin 0.4s linear infinite;
+}
+.wheel-big {
+  width: 14px; height: 14px;
+  border: 2px solid #555;
+  background: radial-gradient(circle, #444 40%, #333 100%);
+}
+@keyframes wheelSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Tender */
+.tender {
+  width: 30px; height: 24px;
+  background: linear-gradient(180deg, #22133a, #150c28);
+  border-radius: 2px;
+  border: 1px solid #3d2b5e;
+  margin-left: 3px;
+  position: relative;
+}
+.tender::after {
+  content: '';
+  position: absolute;
+  top: 4px; left: 4px; right: 4px;
+  height: 8px;
+  background: #0e0818;
+  border-radius: 1px;
+}
+
+/* Cars */
+.train-car {
+  width: 44px; height: 22px;
+  background: linear-gradient(180deg, #1b2a4a, #0e1830);
+  border-radius: 3px;
+  border: 1px solid #2a3a5e;
+  margin-left: 4px;
+  position: relative;
+}
+.train-car::before {
+  content: '';
+  position: absolute;
+  bottom: -4px; left: 6px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #333;
+  border: 1.5px solid #555;
+  box-shadow: 22px 0 0 0 #333;
+  animation: wheelSpin 0.5s linear infinite;
+}
+.car-window {
+  position: absolute;
+  top: 4px;
+  width: 6px; height: 6px;
+  background: rgba(255,200,100,0.35);
+  border-radius: 1px;
+}
+.car-window:nth-child(1) { left: 5px; }
+.car-window:nth-child(2) { left: 15px; }
+.car-window:nth-child(3) { left: 25px; }
+.car-window:nth-child(4) { left: 35px; }
+
+/* Caboose */
+.caboose {
+  width: 36px; height: 24px;
+  background: linear-gradient(180deg, #4a1b2a, #300e18);
+  border-radius: 3px;
+  border: 1px solid #5e2a3a;
+  margin-left: 4px;
+  position: relative;
+}
+.caboose::before {
+  content: '';
+  position: absolute;
+  top: -8px; left: 8px;
+  width: 16px; height: 10px;
+  background: #4a1b2a;
+  border-radius: 2px 2px 0 0;
+  border: 1px solid #5e2a3a;
+  border-bottom: none;
+}
+.caboose::after {
+  content: '';
+  position: absolute;
+  bottom: -4px; left: 5px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #333;
+  border: 1.5px solid #555;
+  box-shadow: 18px 0 0 0 #333;
+  animation: wheelSpin 0.5s linear infinite;
+}
+.caboose-light {
+  position: absolute;
+  top: -5px; right: -2px;
+  width: 4px; height: 4px;
+  background: #ff4444;
+  border-radius: 50%;
+  box-shadow: 0 0 6px #ff4444;
+  animation: tailBlink 1.5s ease-in-out infinite;
+}
+@keyframes tailBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ── Steam puffs ── */
+.steam-container {
+  position: absolute;
+  top: -24px; left: 8px;
+  width: 40px; height: 40px;
+}
+.steam-puff {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(200, 200, 220, 0.15);
+  animation: steamRise 2s ease-out infinite;
+  bottom: 0;
+  left: 4px;
+}
+@keyframes steamRise {
+  0% {
+    transform: translate(0, 0) scale(0.3);
+    opacity: 0.6;
+  }
+  40% {
+    opacity: 0.35;
+  }
+  100% {
+    transform: translate(-30px, -50px) scale(1.8);
+    opacity: 0;
+  }
+}
+.puff-1 { width: 12px; height: 12px; animation-delay: 0s; }
+.puff-2 { width: 16px; height: 16px; animation-delay: 0.5s; left: 0; }
+.puff-3 { width: 10px; height: 10px; animation-delay: 1s; left: 6px; }
+.puff-4 { width: 14px; height: 14px; animation-delay: 1.5s; left: 2px; }
+.puff-5 { width: 18px; height: 18px; animation-delay: 0.7s; left: -2px; }
+.puff-6 { width: 11px; height: 11px; animation-delay: 1.2s; left: 8px; }
 
 /* ── Header ── */
 .header {
@@ -434,6 +821,69 @@ body {
     '    <div class="mountain mountain-4"></div>',
     '    <div class="mountain mountain-5"></div>',
     '  </div>',
+    '  <div class="scenery-nature">',
+    '    <div class="tree tree-1"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="tree tree-2"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="tree tree-3"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="tree tree-4"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="tree tree-5"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="tree tree-6"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="tree tree-7"><div class="pine"></div><div class="pine-trunk"></div></div>',
+    '    <div class="bush bush-1"></div>',
+    '    <div class="bush bush-2"></div>',
+    '    <div class="bush bush-3"></div>',
+    '    <div class="bush bush-4"></div>',
+    '  </div>',
+    '  <div class="scenery-towns">',
+    '    <div class="town town-1">',
+    '      <div class="building b1"><div class="window"></div><div class="window"></div><div class="window"></div></div>',
+    '      <div class="building b2"><div class="window"></div><div class="window"></div><div class="window"></div><div class="window"></div><div class="window"></div></div>',
+    '      <div class="building b3"><div class="window"></div><div class="window"></div></div>',
+    '    </div>',
+    '    <div class="town town-2">',
+    '      <div class="building b3"><div class="window"></div><div class="window"></div></div>',
+    '      <div class="building b4"><div class="window"></div><div class="window"></div><div class="window"></div><div class="window"></div></div>',
+    '      <div class="building b1"><div class="window"></div><div class="window"></div><div class="window"></div></div>',
+    '      <div class="building b2"><div class="window"></div><div class="window"></div><div class="window"></div><div class="window"></div><div class="window"></div></div>',
+    '    </div>',
+    '    <div class="town town-3">',
+    '      <div class="building b1"><div class="window"></div><div class="window"></div><div class="window"></div></div>',
+    '      <div class="building b3"><div class="window"></div><div class="window"></div></div>',
+    '    </div>',
+    '  </div>',
+    '  <div class="scenery-animals">',
+    '    <div class="animal deer">🦌</div>',
+    '    <div class="animal bear">🐻</div>',
+    '    <div class="animal rabbit">🐇</div>',
+    '    <div class="animal frog">🐸</div>',
+    '    <div class="animal owl">🦉</div>',
+    '    <div class="animal fox">🦊</div>',
+    '  </div>',
+    '  <!-- The Train -->',
+    '  <div class="train-container" id="trainContainer">',
+    '    <div class="loco">',
+    '      <div class="headlight-beam"></div>',
+    '      <div class="loco-body">',
+    '        <div class="smokestack">',
+    '          <div class="steam-container">',
+    '            <div class="steam-puff puff-1"></div>',
+    '            <div class="steam-puff puff-2"></div>',
+    '            <div class="steam-puff puff-3"></div>',
+    '            <div class="steam-puff puff-4"></div>',
+    '            <div class="steam-puff puff-5"></div>',
+    '            <div class="steam-puff puff-6"></div>',
+    '          </div>',
+    '        </div>',
+    '        <div class="loco-cabin"><div class="cab-window"></div></div>',
+    '        <div class="headlight"></div>',
+    '        <div class="loco-wheels"><div class="wheel wheel-big"></div><div class="wheel"></div><div class="wheel wheel-big"></div></div>',
+    '      </div>',
+    '    </div>',
+    '    <div class="tender"></div>',
+    '    <div class="train-car"><div class="car-window"></div><div class="car-window"></div><div class="car-window"></div></div>',
+    '    <div class="train-car"><div class="car-window"></div><div class="car-window"></div><div class="car-window"></div><div class="car-window"></div></div>',
+    '    <div class="caboose"><div class="caboose-light"></div></div>',
+    '  </div>',
     '  <div class="track"></div>',
     '</div>',
     '',
@@ -460,18 +910,39 @@ body {
 // Generate twinkling stars
 (function() {
   var container = document.getElementById("stars");
-  for (var i = 0; i < 60; i++) {
+  for (var i = 0; i < 80; i++) {
     var s = document.createElement("div");
     s.className = "star";
     var size = Math.random() * 2 + 1;
     s.style.width = size + "px";
     s.style.height = size + "px";
     s.style.left = Math.random() * 100 + "%";
-    s.style.top = Math.random() * 70 + "%";
+    s.style.top = Math.random() * 60 + "%";
     s.style.animationDelay = (Math.random() * 5) + "s";
     s.style.animationDuration = (2 + Math.random() * 4) + "s";
     container.appendChild(s);
   }
+})();
+
+// Illuminate animals as the train passes
+(function() {
+  var animals = document.querySelectorAll(".animal");
+  function checkLight() {
+    var train = document.getElementById("trainContainer");
+    if (!train) return;
+    var trainRect = train.getBoundingClientRect();
+    var trainX = trainRect.left;
+    animals.forEach(function(a) {
+      var aRect = a.getBoundingClientRect();
+      var dist = aRect.left - trainX;
+      if (dist > -50 && dist < 350) {
+        a.classList.add("lit");
+      } else {
+        a.classList.remove("lit");
+      }
+    });
+  }
+  setInterval(checkLight, 100);
 })();
 
 var POLL_MS = 3000;
