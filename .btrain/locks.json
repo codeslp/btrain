@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "locks": [
+    {
+      "path": "src/brain_train/dashboard.mjs",
+      "lane": "a",
+      "owner": "Gemini",
+      "acquired_at": "2026-03-16T04:34:23.332Z"
+    }
+  ]
+}

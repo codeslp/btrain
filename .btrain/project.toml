@@ -1,0 +1,5 @@
+[project]
+name = "btrain"
+
+[lanes]
+ids = ["a", "b"]

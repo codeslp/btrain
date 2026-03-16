@@ -1,5 +1,11 @@
 import http from "node:http"
+import fs from "node:fs"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { getStatus, listLocks, getBrainTrainHome } from "./core.mjs"
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const ASSETS_DIR = path.join(__dirname, "assets")
 
 function buildDashboardHTML() {
   const html = [
@@ -8,50 +14,34 @@ function buildDashboardHTML() {
     '<head>',
     '  <meta charset="UTF-8">',
     '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-    '  <title>btrain — Lane Dashboard</title>',
+    '  <title>btrain \u2014 Lane Dashboard</title>',
     '  <link rel="preconnect" href="https://fonts.googleapis.com">',
     '  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>',
     '  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">',
-    '  <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.x/dist/pixi.min.js"></' + 'script>',
+    '  <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></' + 'script>',
     '<style>',
     `
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
-  --bg: #080810;
-  --bg-card: #10101c;
-  --bg-card-hover: #161628;
-  --border: #1e1e38;
-  --text: #e4e4ef;
-  --text-dim: #7878a0;
-  --accent: #6c5ce7;
-  --accent-glow: rgba(108, 92, 231, 0.2);
-  --green: #00d68f;
-  --green-glow: rgba(0, 214, 143, 0.35);
-  --yellow: #ffc107;
-  --yellow-glow: rgba(255, 193, 7, 0.3);
-  --blue: #54a0ff;
-  --blue-glow: rgba(84, 160, 255, 0.3);
-  --orange: #ff9f43;
-  --orange-glow: rgba(255, 159, 67, 0.2);
+  --bg: #080810; --bg-card: #10101c; --bg-card-hover: #161628;
+  --border: #1e1e38; --text: #e4e4ef; --text-dim: #7878a0;
+  --accent: #6c5ce7; --accent-glow: rgba(108,92,231,0.2);
+  --green: #00d68f; --green-glow: rgba(0,214,143,0.35);
+  --yellow: #ffc107; --yellow-glow: rgba(255,193,7,0.3);
+  --blue: #54a0ff; --blue-glow: rgba(84,160,255,0.3);
+  --orange: #ff9f43; --orange-glow: rgba(255,159,67,0.2);
   --red: #ff6b6b;
   --font: 'Inter', -apple-system, system-ui, sans-serif;
   --mono: 'JetBrains Mono', monospace;
 }
 body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }
-
-/* Scene canvas */
-#scene-container {
-  position: fixed; top: 0; left: 0; right: 0; height: 380px;
-  z-index: 0; overflow: hidden;
-}
+#scene-container { position: fixed; top: 0; left: 0; right: 0; height: 420px; z-index: 0; overflow: hidden; }
 #scene-container canvas { display: block; }
-
-/* Header */
 .header {
   position: sticky; top: 0; padding: 1rem 2rem;
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
-  background: rgba(8, 8, 16, 0.88); backdrop-filter: blur(24px); z-index: 100;
+  background: rgba(8,8,16,0.88); backdrop-filter: blur(24px); z-index: 100;
 }
 .header-left { display: flex; align-items: center; gap: 0.75rem; }
 .logo { font-size: 1.3rem; font-weight: 800; letter-spacing: -0.02em; }
@@ -63,47 +53,22 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
   letter-spacing: 0.05em; text-transform: uppercase;
 }
 .header-right { display: flex; align-items: center; gap: 1rem; }
-.pulse-dot {
-  width: 8px; height: 8px; border-radius: 50%; background: var(--green);
-  animation: pulse 2s ease-in-out infinite;
-}
-@keyframes pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,214,143,0.4); }
-  50% { opacity: 0.7; box-shadow: 0 0 0 8px rgba(0,214,143,0); }
-}
+.pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(0,214,143,0.4)} 50%{opacity:0.7;box-shadow:0 0 0 8px rgba(0,214,143,0)} }
 .poll-label { font-size: 0.78rem; color: var(--text-dim); }
-
-/* Main */
-.main { position: relative; z-index: 1; padding: 2rem; padding-top: 410px; max-width: 1100px; margin: 0 auto; }
-
-/* Repo */
+.main { position: relative; z-index: 1; padding: 2rem; padding-top: 450px; max-width: 1100px; margin: 0 auto; }
 .repo-section { margin-bottom: 3rem; }
 .repo-header { margin-bottom: 1.25rem; }
 .repo-name { font-size: 1.4rem; font-weight: 800; letter-spacing: -0.02em; }
 .repo-path { font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim); margin-top: 0.15rem; }
-
-/* Train track for lane cards */
 .train-track { position: relative; padding: 1.5rem 0; }
-.train-track::before {
-  content: ''; position: absolute; top: 50%; left: 0; right: 0;
-  height: 4px; background: #2a2a44; transform: translateY(-50%); border-radius: 2px;
-}
-
-.lanes-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 1.25rem; position: relative; z-index: 1;
-}
-
-/* Lane card */
+.train-track::before { content:''; position:absolute; top:50%; left:0; right:0; height:4px; background:#2a2a44; transform:translateY(-50%); border-radius:2px; }
+.lanes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1.25rem; position: relative; z-index: 1; }
 .lane-card {
-  background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 16px; padding: 1.5rem; position: relative;
-  overflow: hidden; transition: all 0.4s ease;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
+  padding: 1.5rem; position: relative; overflow: hidden; transition: all 0.4s ease;
 }
-.lane-card::before {
-  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-  background: var(--border); transition: background 0.5s, box-shadow 0.5s;
-}
+.lane-card::before { content:''; position:absolute; top:0; left:0; right:0; height:3px; background:var(--border); transition:background 0.5s, box-shadow 0.5s; }
 .lane-card:hover { background: var(--bg-card-hover); transform: translateY(-3px); }
 .lane-card.status-in-progress::before { background: var(--blue); box-shadow: 0 0 20px var(--blue-glow), 0 0 60px var(--blue-glow); }
 .lane-card.status-needs-review::before { background: var(--yellow); box-shadow: 0 0 20px var(--yellow-glow), 0 0 60px var(--yellow-glow); }
@@ -111,7 +76,6 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .lane-card.status-in-progress { border-color: rgba(84,160,255,0.25); box-shadow: 0 8px 40px rgba(84,160,255,0.08); animation: chug 0.6s ease-in-out infinite; }
 .lane-card.status-needs-review { border-color: rgba(255,193,7,0.2); box-shadow: 0 8px 40px rgba(255,193,7,0.06); }
 @keyframes chug { 0%,100%{transform:translateX(0)} 25%{transform:translateX(2px) translateY(-1px)} 75%{transform:translateX(-1px) translateY(0.5px)} }
-
 .lane-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .lane-id { font-family: var(--mono); font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); display: flex; align-items: center; gap: 0.4rem; }
 .lane-id::before { content: '\\1F683'; font-size: 0.9rem; }
@@ -128,8 +92,6 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .meta-value { color: var(--text); }
 .meta-value.dim { color: var(--text-dim); font-style: italic; }
 .single-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem; }
-
-/* Locks */
 .locks-section { margin-top: 1.25rem; }
 .locks-title { font-size: 0.82rem; font-weight: 600; margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; }
 .lock-count { font-size: 0.65rem; background: var(--orange-glow); color: var(--orange); padding: 0.12rem 0.5rem; border-radius: 20px; font-weight: 600; }
@@ -141,7 +103,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .error-banner { background: rgba(255,107,107,0.08); border: 1px solid rgba(255,107,107,0.2); border-radius: 8px; padding: 0.75rem 1rem; color: var(--red); font-size: 0.82rem; margin-bottom: 1.5rem; display: none; }
 .empty-state { text-align: center; padding: 3rem 2rem; color: var(--text-dim); }
 .empty-state h2 { font-size: 1.15rem; margin-bottom: 0.4rem; color: var(--text); }
-@media (max-width: 600px) { .header{padding:0.75rem 1rem} .main{padding:1rem;padding-top:390px} .lanes-grid{grid-template-columns:1fr} }
+@media(max-width:600px){.header{padding:0.75rem 1rem}.main{padding:1rem;padding-top:440px}.lanes-grid{grid-template-columns:1fr}}
 `,
     '</style>',
     '</head>',
@@ -151,12 +113,12 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
     '',
     '<header class="header">',
     '  <div class="header-left">',
-    '    <div class="logo"><span class="logo-icon">⚡</span> btrain</div>',
+    '    <div class="logo"><span class="logo-icon">\u26A1</span> btrain</div>',
     '    <span class="header-badge">Lane Dashboard</span>',
     '  </div>',
     '  <div class="header-right">',
     '    <div class="pulse-dot"></div>',
-    '    <span class="poll-label">Live · 3s</span>',
+    '    <span class="poll-label">Live \u00B7 3s</span>',
     '  </div>',
     '</header>',
     '',
@@ -169,494 +131,443 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
     '',
     '<script>',
     `
-// ═══════════════════════════════════════════════
-// PixiJS Scene — Mountains, Towns, Train, Steam
-// ═══════════════════════════════════════════════
-var W, H = 380;
-var sceneEl = document.getElementById("scene-container");
-W = window.innerWidth;
+var W = window.innerWidth;
+var H = 420;
+var GROUND_Y = H - 35;
+var WORLD_W = 172800; // ~2 minutes between villages at 1.5px/frame × 60fps
 
-var app = new PIXI.Application({ width: W, height: H, backgroundColor: 0x080810, antialias: true });
-sceneEl.appendChild(app.view);
+// Village definitions — spaced ~10800px apart along the virtual world
+var VILLAGE_DEFS = [
+  { key: "buildings",  worldX: 800,    scale: 0.13 },
+  { key: "swiss",      worldX: 11600,  scale: 0.12 },
+  { key: "japanese",   worldX: 22400,  scale: 0.12 },
+  { key: "tuscan",     worldX: 33200,  scale: 0.12 },
+  { key: "nordic",     worldX: 44000,  scale: 0.12 },
+  { key: "greek",      worldX: 54800,  scale: 0.11 },
+  { key: "cyberpunk",  worldX: 65600,  scale: 0.11 },
+  { key: "celtic",     worldX: 76400,  scale: 0.12 },
+  { key: "english",    worldX: 87200,  scale: 0.12 },
+  { key: "indian",     worldX: 98000,  scale: 0.12 },
+  { key: "mexican",    worldX: 108800, scale: 0.12 },
+  { key: "russian",    worldX: 119600, scale: 0.12 },
+  { key: "thai",       worldX: 130400, scale: 0.12 },
+  { key: "egyptian",   worldX: 141200, scale: 0.12 },
+  { key: "steampunk",  worldX: 152000, scale: 0.12 },
+  { key: "futuristic", worldX: 162800, scale: 0.11 },
+];
+
+// Tree positions — 200 trees spread across the world for dense forests between villages
+var TREE_WORLD_XS = [];
+for (var _ti = 0; _ti < 200; _ti++) {
+  TREE_WORLD_XS.push(Math.random() * WORLD_W);
+}
+TREE_WORLD_XS.sort(function(a,b){return a-b;});
+
+// Animal definitions — scattered throughout the world between villages
+var ANIMAL_POOL = [
+  "\ud83e\udd8c", "\ud83d\udc3b", "\ud83d\udc07", "\ud83d\udc38",
+  "\ud83e\udd89", "\ud83e\udd8a", "\ud83d\udc3f\ufe0f", "\ud83d\udc3a",
+  "\ud83e\udda5", "\ud83e\udd94", "\ud83d\udc22", "\ud83e\udda8",
+];
+var ANIMAL_DEFS = [];
+for (var _ai = 0; _ai < 60; _ai++) {
+  ANIMAL_DEFS.push({
+    ch: ANIMAL_POOL[Math.floor(Math.random() * ANIMAL_POOL.length)],
+    worldX: Math.random() * WORLD_W,
+    s: 13 + Math.floor(Math.random() * 8),
+  });
+}
+ANIMAL_DEFS.sort(function(a,b){return a.worldX - b.worldX;});
+
+// Phaser 3 scene
+var TrainScene = new Phaser.Class({
+  Extends: Phaser.Scene,
+  initialize: function TrainScene() {
+    Phaser.Scene.call(this, { key: "TrainScene" });
+    this.trainWorldX = -500;
+    this.trainSpeed = 1.5;
+    this.glowActive = false;
+    this.glowAlpha = 0;
+    this.villageSprites = [];
+    this.treeSprites = [];
+    this.animalSprites = [];
+    this.stars = [];
+    this.fireflies = [];
+    this.steamPuffs = [];
+    this.windowFlickers = [];
+  },
+  preload: function() {
+    var v = "?v=" + Date.now(); // Cache-busting
+    this.load.image("mountains", "/assets/mountains.png" + v);
+    this.load.image("train", "/assets/train.png" + v);
+    this.load.image("cars", "/assets/cars.png" + v);
+    this.load.image("trees", "/assets/trees.png" + v);
+    // Load all village sprites
+    var villageKeys = ["buildings","swiss","japanese","futuristic","tuscan","nordic","greek","cyberpunk","celtic","english","indian","mexican","russian","thai","egyptian","steampunk"];
+    for (var vi = 0; vi < villageKeys.length; vi++) {
+      this.load.image(villageKeys[vi], "/assets/" + villageKeys[vi] + ".png" + v);
+    }
+  },
+  create: function() {
+    var self = this;
+
+    // --- Depth 0: Background mountains (tiled, parallax) ---
+    this.bg1 = this.add.tileSprite(W/2, H/2, W, H, "mountains");
+    this.bg1.setDisplaySize(W, H);
+    this.bg1.setDepth(0);
+
+    // --- Depth 1: Mountain glow overlay ---
+    this.glowRect = this.add.rectangle(W/2, H/2, W, H, 0x00d68f, 0);
+    this.glowRect.setDepth(1);
+
+    // --- Depth 2: Starfield ---
+    this.starGfx = this.add.graphics();
+    this.starGfx.setDepth(2);
+    for (var si = 0; si < 100; si++) {
+      this.stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H * 0.55,
+        r: 0.5 + Math.random() * 1.2,
+        phase: Math.random() * Math.PI * 2,
+        speed: 0.001 + Math.random() * 0.003,
+      });
+    }
+
+    // --- Depth 5: Ground strip ---
+    this.groundRect = this.add.rectangle(W/2, GROUND_Y + 17, W, 34, 0x080810);
+    this.groundRect.setDepth(5);
+
+    // --- Depth 6: Trees (parallax 0.4x) ---
+    for (var ti = 0; ti < TREE_WORLD_XS.length; ti++) {
+      var treeScale = 0.08 + Math.random() * 0.06;
+      var tree = this.add.image(0, GROUND_Y - 10, "trees");
+      tree.setScale(treeScale);
+      tree.setOrigin(0.5, 1);
+      tree.setDepth(6);
+      tree.setAlpha(0.6 + Math.random() * 0.4);
+      tree._worldX = TREE_WORLD_XS[ti];
+      this.treeSprites.push(tree);
+    }
+
+    // --- Depth 7: Villages (parallax 0.7x) ---
+    for (var vi = 0; vi < VILLAGE_DEFS.length; vi++) {
+      var vd = VILLAGE_DEFS[vi];
+      var vSprite = this.add.image(0, GROUND_Y, vd.key);
+      vSprite.setScale(vd.scale);
+      vSprite.setOrigin(0.5, 1);
+      vSprite.setDepth(7);
+      vSprite._worldX = vd.worldX;
+      vSprite._baseAlpha = 0.85;
+      vSprite.setAlpha(0.85);
+      this.villageSprites.push(vSprite);
+
+      // Window flicker overlays for this village
+      var flickerCount = 2 + Math.floor(Math.random() * 3);
+      for (var fi = 0; fi < flickerCount; fi++) {
+        this.windowFlickers.push({
+          villageIdx: vi,
+          offX: (Math.random() - 0.5) * 40 * vd.scale,
+          offY: -(20 + Math.random() * 50) * vd.scale,
+          w: 3 + Math.random() * 4,
+          h: 3 + Math.random() * 3,
+          alpha: 0.3 + Math.random() * 0.4,
+          nextFlicker: 0,
+        });
+      }
+    }
+
+    // --- Depth 8: Animals ---
+    for (var ai = 0; ai < ANIMAL_DEFS.length; ai++) {
+      var ad = ANIMAL_DEFS[ai];
+      var isOwl = ad.ch === "\ud83e\udd89";
+      var at = this.add.text(0, GROUND_Y - ad.s - (isOwl ? 30 : 4), ad.ch, { fontSize: ad.s + "px" });
+      at.setDepth(8);
+      at.setAlpha(0.25);
+      at._worldX = ad.worldX;
+      this.animalSprites.push(at);
+    }
+
+    // --- Depth 9: Railroad track ---
+    this.trackGfx = this.add.graphics();
+    this.trackGfx.setDepth(9);
+    this._drawTrack();
+
+    // --- Depth 10: Headlight ---
+    this.headlightGfx = this.add.graphics();
+    this.headlightGfx.setDepth(10);
+
+    // --- Depth 14-15: Train (flipped to face right / forward) ---
+    this.trainLoco = this.add.image(0, GROUND_Y - 5, "train");
+    this.trainLoco.setScale(0.22);
+    this.trainLoco.setFlipX(true);
+    this.trainLoco.setOrigin(1, 1);
+    this.trainLoco.setDepth(15);
+
+    this.trainCars = this.add.image(0, GROUND_Y - 5, "cars");
+    this.trainCars.setScale(0.22);
+    this.trainCars.setFlipX(true);
+    this.trainCars.setOrigin(0, 1);
+    this.trainCars.setDepth(14);
+
+    // --- Depth 16: Steam + tail light ---
+    this.steamGfx = this.add.graphics();
+    this.steamGfx.setDepth(16);
+
+    this.tailGfx = this.add.graphics();
+    this.tailGfx.setDepth(16);
+
+    // --- Depth 17: Fireflies ---
+    this.fireflyGfx = this.add.graphics();
+    this.fireflyGfx.setDepth(17);
+    for (var ffi = 0; ffi < 18; ffi++) {
+      this.fireflies.push({
+        worldX: Math.random() * WORLD_W,
+        baseY: GROUND_Y - 30 - Math.random() * 100,
+        phase: Math.random() * Math.PI * 2,
+        freq: 0.0005 + Math.random() * 0.002,
+        freq2: 0.0008 + Math.random() * 0.001,
+        r: 1.5 + Math.random() * 2,
+      });
+    }
+
+    // --- Depth 18: Vignette overlay ---
+    this.vignetteGfx = this.add.graphics();
+    this.vignetteGfx.setDepth(18);
+    this._drawVignette();
+
+    // Expose glow control
+    window.setMountainGlow = function(active) { self.glowActive = active; };
+  },
+
+  _drawTrack: function() {
+    this.trackGfx.clear();
+    this.trackGfx.fillStyle(0x2a2a44, 1);
+    this.trackGfx.fillRect(0, GROUND_Y - 2, W, 4);
+    this.trackGfx.fillStyle(0x222240, 1);
+    for (var ti = 0; ti < Math.ceil(W / 16); ti++) {
+      this.trackGfx.fillRect(ti * 16, GROUND_Y - 5, 2, 10);
+    }
+  },
+
+  _drawVignette: function() {
+    this.vignetteGfx.clear();
+    // Left edge vignette
+    for (var vi = 0; vi < 60; vi++) {
+      var a = (1 - vi / 60) * 0.4;
+      this.vignetteGfx.fillStyle(0x080810, a);
+      this.vignetteGfx.fillRect(vi, 0, 1, H);
+    }
+    // Right edge vignette
+    for (var vr = 0; vr < 60; vr++) {
+      var ar = (1 - vr / 60) * 0.4;
+      this.vignetteGfx.fillStyle(0x080810, ar);
+      this.vignetteGfx.fillRect(W - vr, 0, 1, H);
+    }
+  },
+
+  // Convert world-X to screen-X with parallax
+  _worldToScreen: function(worldX, parallax) {
+    var camOffset = this.trainWorldX * parallax;
+    var screenX = worldX - camOffset;
+    // Wrap around the world
+    screenX = ((screenX % WORLD_W) + WORLD_W) % WORLD_W;
+    // Center in viewport: offset so train is roughly at screen center
+    screenX = screenX - this.trainWorldX + W * 0.35;
+    // Wrap to keep on screen vicinity
+    while (screenX > WORLD_W * 0.6)  screenX -= WORLD_W;
+    while (screenX < -WORLD_W * 0.4) screenX += WORLD_W;
+    return screenX;
+  },
+
+  update: function(time, delta) {
+    // === Parallax scroll background ===
+    this.bg1.tilePositionX += 0.15;
+
+    // === Mountain glow ===
+    var targetAlpha = this.glowActive ? 0.08 : 0;
+    this.glowAlpha += (targetAlpha - this.glowAlpha) * 0.02;
+    this.glowRect.setAlpha(this.glowAlpha);
+
+    // === Move train in world space ===
+    this.trainWorldX += this.trainSpeed;
+    if (this.trainWorldX > WORLD_W + 600) this.trainWorldX = -600;
+
+    var bob = Math.sin(time * 0.003) * 2;
+    var trainScreenX = W * 0.35; // Train stays at ~35% of screen
+    var locoW = this.trainLoco.displayWidth;
+
+    this.trainLoco.setPosition(trainScreenX, GROUND_Y - 5 + bob);
+    this.trainCars.setPosition(trainScreenX - locoW, GROUND_Y - 5 + bob);
+
+    // === Update village positions (0.7x parallax) ===
+    for (var vi = 0; vi < this.villageSprites.length; vi++) {
+      var vs = this.villageSprites[vi];
+      var vScreenX = this._worldToScreen(vs._worldX, 0.7);
+      vs.setPosition(vScreenX, GROUND_Y);
+      vs.setVisible(vScreenX > -300 && vScreenX < W + 300);
+    }
+
+    // === Update tree positions (0.4x parallax) ===
+    for (var ti = 0; ti < this.treeSprites.length; ti++) {
+      var ts = this.treeSprites[ti];
+      var tScreenX = this._worldToScreen(ts._worldX, 0.4);
+      ts.setPosition(tScreenX, GROUND_Y - 10);
+      ts.setVisible(tScreenX > -100 && tScreenX < W + 100);
+    }
+
+    // === Update animal positions (0.8x parallax) ===
+    for (var ai = 0; ai < this.animalSprites.length; ai++) {
+      var aSprite = this.animalSprites[ai];
+      var aScreenX = this._worldToScreen(aSprite._worldX, 0.8);
+      aSprite.setPosition(aScreenX, aSprite.y);
+      aSprite.setVisible(aScreenX > -50 && aScreenX < W + 50);
+    }
+
+    // === Headlight beam (front of loco = trainScreenX, facing right) ===
+    this.headlightGfx.clear();
+    var hlX = trainScreenX;
+    var hlY = GROUND_Y - 30 + bob;
+    this.headlightGfx.fillStyle(0xfff8dc, 0.03);
+    this.headlightGfx.fillTriangle(hlX, hlY, hlX + 280, hlY - 40, hlX + 280, hlY + 40);
+    this.headlightGfx.fillStyle(0xfff8dc, 0.06);
+    this.headlightGfx.fillTriangle(hlX, hlY, hlX + 140, hlY - 20, hlX + 140, hlY + 20);
+
+    // === Illuminate animals near headlight ===
+    for (var ai2 = 0; ai2 < this.animalSprites.length; ai2++) {
+      var a = this.animalSprites[ai2];
+      if (!a.visible) { a.setAlpha(a.alpha + (0.25 - a.alpha) * 0.04); continue; }
+      var dist = a.x - hlX;
+      if (dist > -50 && dist < 320) {
+        var intensity = 1.0 - Math.abs(dist - 140) / 180;
+        a.setAlpha(Math.min(1, 0.25 + Math.max(0, intensity) * 0.75));
+      } else {
+        a.setAlpha(a.alpha + (0.25 - a.alpha) * 0.04);
+      }
+    }
+
+    // === Illuminate villages near headlight ===
+    for (var vi2 = 0; vi2 < this.villageSprites.length; vi2++) {
+      var vv = this.villageSprites[vi2];
+      if (!vv.visible) continue;
+      var vDist = vv.x - hlX;
+      if (vDist > -100 && vDist < 400) {
+        var vInt = 1.0 - Math.abs(vDist - 150) / 250;
+        vv.setAlpha(Math.min(1, 0.85 + Math.max(0, vInt) * 0.15));
+      } else {
+        vv.setAlpha(vv.alpha + (0.85 - vv.alpha) * 0.03);
+      }
+    }
+
+    // === Starfield ===
+    this.starGfx.clear();
+    for (var si = 0; si < this.stars.length; si++) {
+      var star = this.stars[si];
+      var starAlpha = 0.25 + 0.75 * Math.abs(Math.sin(time * star.speed + star.phase));
+      this.starGfx.fillStyle(0xeeeeff, starAlpha);
+      this.starGfx.fillCircle(star.x, star.y, star.r);
+    }
+
+    // === Fireflies ===
+    this.fireflyGfx.clear();
+    for (var fi = 0; fi < this.fireflies.length; fi++) {
+      var ff = this.fireflies[fi];
+      var ffScreenX = this._worldToScreen(ff.worldX, 0.7);
+      if (ffScreenX < -50 || ffScreenX > W + 50) continue;
+      var ffX = ffScreenX + Math.sin(time * ff.freq + ff.phase) * 15;
+      var ffY = ff.baseY + Math.cos(time * ff.freq2 + ff.phase) * 10;
+      var ffAlpha = 0.15 + 0.45 * Math.abs(Math.sin(time * ff.freq * 1.5 + ff.phase));
+      // Outer glow
+      this.fireflyGfx.fillStyle(0xaaff44, ffAlpha * 0.3);
+      this.fireflyGfx.fillCircle(ffX, ffY, ff.r * 2.5);
+      // Core
+      this.fireflyGfx.fillStyle(0xeeff88, ffAlpha);
+      this.fireflyGfx.fillCircle(ffX, ffY, ff.r);
+    }
+
+    // === Window flicker ===
+    for (var wfi = 0; wfi < this.windowFlickers.length; wfi++) {
+      var wf = this.windowFlickers[wfi];
+      var wfVillage = this.villageSprites[wf.villageIdx];
+      if (!wfVillage || !wfVillage.visible) continue;
+      if (time > wf.nextFlicker) {
+        wf.alpha = 0.2 + Math.random() * 0.5;
+        wf.nextFlicker = time + 200 + Math.random() * 800;
+      }
+    }
+    // Draw window flickers (use headlight graphics layer to avoid extra objects)
+    for (var wfi2 = 0; wfi2 < this.windowFlickers.length; wfi2++) {
+      var wf2 = this.windowFlickers[wfi2];
+      var wfV = this.villageSprites[wf2.villageIdx];
+      if (!wfV || !wfV.visible) continue;
+      this.headlightGfx.fillStyle(0xffaa33, wf2.alpha * 0.4);
+      this.headlightGfx.fillRect(
+        wfV.x + wf2.offX - wf2.w/2,
+        wfV.y + wf2.offY - wf2.h/2,
+        wf2.w, wf2.h
+      );
+    }
+
+    // === Steam puffs (from smokestack, near front of loco) ===
+    if (Math.random() > 0.85) {
+      this.steamPuffs.push({
+        x: trainScreenX - locoW * 0.3,
+        y: GROUND_Y - 60 + bob,
+        r: 3 + Math.random() * 5,
+        vx: -0.3 - Math.random() * 0.6,
+        vy: -0.5 - Math.random() * 1.0,
+        life: 1.0,
+        decay: 0.006 + Math.random() * 0.008,
+        grow: 1.005 + Math.random() * 0.008,
+      });
+    }
+    this.steamGfx.clear();
+    for (var pi = this.steamPuffs.length - 1; pi >= 0; pi--) {
+      var sp = this.steamPuffs[pi];
+      sp.x += sp.vx;
+      sp.y += sp.vy;
+      sp.vy *= 0.997;
+      sp.life -= sp.decay;
+      sp.r *= sp.grow;
+      if (sp.life <= 0) {
+        this.steamPuffs.splice(pi, 1);
+        continue;
+      }
+      this.steamGfx.fillStyle(0xccccdd, sp.life * 0.25);
+      this.steamGfx.fillCircle(sp.x, sp.y, sp.r);
+    }
+
+    // === Tail light blink (rear of last car) ===
+    this.tailGfx.clear();
+    var carsW = this.trainCars.displayWidth;
+    var tailX = trainScreenX - locoW - carsW;
+    var tailBrightness = 0.3 + 0.7 * Math.abs(Math.sin(time * 0.004));
+    this.tailGfx.fillStyle(0xff4444, tailBrightness);
+    this.tailGfx.fillCircle(tailX + 5, GROUND_Y - 22 + bob, 4);
+    this.tailGfx.fillStyle(0xff4444, tailBrightness * 0.3);
+    this.tailGfx.fillCircle(tailX + 5, GROUND_Y - 22 + bob, 8);
+  },
+});
+
+var game = new Phaser.Game({
+  type: Phaser.AUTO,
+  width: W,
+  height: H,
+  parent: "scene-container",
+  transparent: true,
+  scene: [TrainScene],
+  backgroundColor: "#080810",
+  scale: { mode: Phaser.Scale.NONE },
+  render: { antialias: true, pixelArt: false },
+});
 
 window.addEventListener("resize", function() {
   W = window.innerWidth;
-  app.renderer.resize(W, H);
+  game.scale.resize(W, H);
 });
 
-// ── Sky gradient ──
-var skyGfx = new PIXI.Graphics();
-function drawSky() {
-  skyGfx.clear();
-  // Deep night gradient
-  skyGfx.beginFill(0x0a0a1a); skyGfx.drawRect(0, 0, W, H * 0.3); skyGfx.endFill();
-  skyGfx.beginFill(0x0c1225); skyGfx.drawRect(0, H * 0.3, W, H * 0.3); skyGfx.endFill();
-  skyGfx.beginFill(0x0e1830); skyGfx.drawRect(0, H * 0.6, W, H * 0.4); skyGfx.endFill();
-}
-drawSky();
-app.stage.addChild(skyGfx);
-
-// ── Stars ──
-var starsContainer = new PIXI.Container();
-var stars = [];
-for (var i = 0; i < 120; i++) {
-  var sg = new PIXI.Graphics();
-  var sz = Math.random() * 2 + 0.5;
-  sg.beginFill(0xffffff, Math.random() * 0.5 + 0.3);
-  sg.drawCircle(0, 0, sz);
-  sg.endFill();
-  sg.x = Math.random() * W * 1.5;
-  sg.y = Math.random() * H * 0.55;
-  sg._twinkleSpeed = 0.02 + Math.random() * 0.03;
-  sg._twinklePhase = Math.random() * Math.PI * 2;
-  stars.push(sg);
-  starsContainer.addChild(sg);
-}
-app.stage.addChild(starsContainer);
-
-// ── Mountain glow overlay ──
-var glowGfx = new PIXI.Graphics();
-var glowAlpha = 0;
-var glowTarget = 0;
-app.stage.addChild(glowGfx);
-
-function drawGlow() {
-  glowGfx.clear();
-  if (glowAlpha > 0.01) {
-    glowGfx.beginFill(0x00d68f, glowAlpha * 0.15);
-    glowGfx.drawRect(0, H * 0.2, W, H * 0.8);
-    glowGfx.endFill();
-  }
-}
-
-// ── Mountain layers (parallax) ──
-function drawMountainLayer(container, peaks, color, offsetY) {
-  var g = new PIXI.Graphics();
-  g.beginFill(color);
-  g.moveTo(0, H);
-  for (var j = 0; j < peaks.length; j++) {
-    g.lineTo(peaks[j][0], peaks[j][1] + offsetY);
-  }
-  g.lineTo(W * 2, H);
-  g.closePath();
-  g.endFill();
-  container.addChild(g);
-  return g;
-}
-
-var mtBack = new PIXI.Container();
-var mtMid = new PIXI.Container();
-var mtFront = new PIXI.Container();
-
-// Back mountains (larger, dimmer)
-var backPeaks = [[0,H],[W*0.08,H*0.25],[W*0.18,H*0.55],[W*0.30,H*0.2],[W*0.42,H*0.50],[W*0.55,H*0.15],[W*0.68,H*0.45],[W*0.80,H*0.22],[W*0.92,H*0.48],[W*1.05,H*0.18],[W*1.2,H]];
-drawMountainLayer(mtBack, backPeaks, 0x0c0c22, 0);
-
-// Mid mountains
-var midPeaks = [[0,H],[W*0.05,H*0.55],[W*0.15,H*0.32],[W*0.28,H*0.60],[W*0.38,H*0.28],[W*0.52,H*0.55],[W*0.65,H*0.22],[W*0.75,H*0.50],[W*0.88,H*0.30],[W*1.0,H*0.55],[W*1.1,H]];
-drawMountainLayer(mtMid, midPeaks, 0x10102a, 0);
-
-// Front mountains
-var frontPeaks = [[0,H],[W*0.1,H*0.45],[W*0.22,H*0.65],[W*0.35,H*0.38],[W*0.48,H*0.62],[W*0.6,H*0.35],[W*0.72,H*0.58],[W*0.85,H*0.40],[W*0.95,H*0.60],[W*1.1,H]];
-drawMountainLayer(mtFront, frontPeaks, 0x141432, 0);
-
-app.stage.addChild(mtBack);
-app.stage.addChild(mtMid);
-app.stage.addChild(mtFront);
-
-// ── Ground strip ──
-var ground = new PIXI.Graphics();
-ground.beginFill(0x0a0a18);
-ground.drawRect(0, H - 30, W * 2, 30);
-ground.endFill();
-app.stage.addChild(ground);
-
-// ── Trees ──
-var treesContainer = new PIXI.Container();
-var treePositions = [0.03,0.09,0.16,0.24,0.31,0.38,0.45,0.53,0.61,0.68,0.74,0.81,0.88,0.95];
-for (var t = 0; t < treePositions.length; t++) {
-  var tg = new PIXI.Graphics();
-  var tx = W * treePositions[t] + (Math.random()-0.5)*20;
-  var th = 18 + Math.random() * 22;
-  var tw = 8 + Math.random() * 6;
-  // Trunk
-  tg.beginFill(0x1a0e08);
-  tg.drawRect(tx - 1.5, H - 30, 3, 8);
-  tg.endFill();
-  // Canopy (layered triangles)
-  for (var layer = 0; layer < 3; layer++) {
-    var ly = H - 30 - th + layer * (th * 0.3);
-    var lw = tw * (1 - layer * 0.15);
-    tg.beginFill(layer === 0 ? 0x0a2215 : layer === 1 ? 0x0c2a1a : 0x0e3520);
-    tg.moveTo(tx, ly);
-    tg.lineTo(tx + lw, ly + th * 0.45);
-    tg.lineTo(tx - lw, ly + th * 0.45);
-    tg.closePath();
-    tg.endFill();
-  }
-  treesContainer.addChild(tg);
-}
-app.stage.addChild(treesContainer);
-
-// ── Buildings / towns ──
-var townsContainer = new PIXI.Container();
-var townDefs = [
-  {x: W*0.06, buildings: [{w:10,h:28},{w:14,h:38},{w:8,h:20}]},
-  {x: W*0.35, buildings: [{w:12,h:25},{w:16,h:42},{w:10,h:30},{w:14,h:35}]},
-  {x: W*0.58, buildings: [{w:8,h:22},{w:12,h:30}]},
-  {x: W*0.78, buildings: [{w:14,h:32},{w:10,h:26},{w:16,h:40},{w:8,h:20}]},
-];
-for (var ti = 0; ti < townDefs.length; ti++) {
-  var town = townDefs[ti];
-  var bx = town.x;
-  for (var bi = 0; bi < town.buildings.length; bi++) {
-    var bd = town.buildings[bi];
-    var bg = new PIXI.Graphics();
-    bg.beginFill(0x0c0c1e);
-    bg.drawRect(bx, H - 30 - bd.h, bd.w, bd.h);
-    bg.endFill();
-    // Windows
-    for (var wy = 0; wy < Math.floor(bd.h / 10); wy++) {
-      for (var wx = 0; wx < Math.floor(bd.w / 6); wx++) {
-        if (Math.random() > 0.3) {
-          var wg = new PIXI.Graphics();
-          var winX = bx + 3 + wx * 6;
-          var winY = H - 30 - bd.h + 5 + wy * 10;
-          var lit = Math.random() > 0.2;
-          wg.beginFill(lit ? 0xffeaa7 : 0x222230, lit ? 0.9 : 0.3);
-          wg.drawRect(winX, winY, 3, 3);
-          wg.endFill();
-          if (lit) {
-            wg._flicker = true;
-            wg._flickerPhase = Math.random() * Math.PI * 2;
-          }
-          townsContainer.addChild(wg);
-        }
-      }
-    }
-    townsContainer.addChild(bg);
-    bx += bd.w + 3;
-  }
-}
-app.stage.addChild(townsContainer);
-
-// ── Animals ──
-var animalsContainer = new PIXI.Container();
-var animalDefs = [
-  {emoji:"🦌",x:W*0.12,s:18},
-  {emoji:"🐻",x:W*0.25,s:16},
-  {emoji:"🐇",x:W*0.40,s:13},
-  {emoji:"🐸",x:W*0.50,s:11},
-  {emoji:"🦉",x:W*0.67,s:14},
-  {emoji:"🦊",x:W*0.85,s:14},
-  {emoji:"🐿",x:W*0.72,s:12},
-];
-var animalSprites = [];
-for (var ai = 0; ai < animalDefs.length; ai++) {
-  var ad = animalDefs[ai];
-  var at = new PIXI.Text(ad.emoji, {fontSize: ad.s});
-  at.x = ad.x;
-  at.y = H - 30 - ad.s - (ad.emoji === "🦉" ? 25 : 2);
-  at.alpha = 0.3;
-  at._baseAlpha = 0.3;
-  animalSprites.push(at);
-  animalsContainer.addChild(at);
-}
-app.stage.addChild(animalsContainer);
-
-// ── Railroad track ──
-var trackGfx = new PIXI.Graphics();
-trackGfx.beginFill(0x2a2a44);
-trackGfx.drawRect(0, H - 8, W, 4);
-trackGfx.endFill();
-// Rails
-trackGfx.lineStyle(1, 0x3a3a5a);
-trackGfx.moveTo(0, H - 8); trackGfx.lineTo(W, H - 8);
-trackGfx.moveTo(0, H - 5); trackGfx.lineTo(W, H - 5);
-// Ties
-for (var ti2 = 0; ti2 < W; ti2 += 18) {
-  trackGfx.lineStyle(2, 0x222240);
-  trackGfx.moveTo(ti2, H - 10);
-  trackGfx.lineTo(ti2, H - 3);
-}
-app.stage.addChild(trackGfx);
-
-// ═══════════════════════
-// THE TRAIN
-// ═══════════════════════
-var trainContainer = new PIXI.Container();
-trainContainer.y = 0;
-trainContainer.x = -300;
-
-function drawWheel(parent, cx, cy, r) {
-  var wh = new PIXI.Graphics();
-  wh.beginFill(0x333344);
-  wh.drawCircle(cx, cy, r);
-  wh.endFill();
-  wh.lineStyle(1, 0x555566);
-  wh.drawCircle(cx, cy, r);
-  // Spokes
-  wh.lineStyle(0.5, 0x444455);
-  for (var sp = 0; sp < 4; sp++) {
-    var ang = sp * Math.PI / 2;
-    wh.moveTo(cx, cy);
-    wh.lineTo(cx + Math.cos(ang) * r * 0.8, cy + Math.sin(ang) * r * 0.8);
-  }
-  wh._cx = cx; wh._cy = cy; wh._r = r;
-  parent.addChild(wh);
-  return wh;
-}
-
-// Headlight beam
-var beam = new PIXI.Graphics();
-beam.beginFill(0xfff8dc, 0.04);
-beam.moveTo(0, 0);
-beam.lineTo(280, -35);
-beam.lineTo(280, 35);
-beam.closePath();
-beam.endFill();
-beam.beginFill(0xfff8dc, 0.08);
-beam.moveTo(0, 0);
-beam.lineTo(150, -18);
-beam.lineTo(150, 18);
-beam.closePath();
-beam.endFill();
-beam.x = 80; beam.y = H - 28;
-trainContainer.addChild(beam);
-
-// Locomotive body
-var loco = new PIXI.Graphics();
-// Boiler
-loco.beginFill(0x2d1b4e);
-loco.drawRoundedRect(0, H - 52, 65, 35, 4);
-loco.endFill();
-loco.lineStyle(1, 0x4d3b6e);
-loco.drawRoundedRect(0, H - 52, 65, 35, 4);
-// Boiler bands
-loco.lineStyle(1, 0x3d2b5e);
-loco.moveTo(15, H-52); loco.lineTo(15, H-17);
-loco.moveTo(35, H-52); loco.lineTo(35, H-17);
-loco.moveTo(50, H-52); loco.lineTo(50, H-17);
-// Cowcatcher
-loco.lineStyle(0);
-loco.beginFill(0x1a0e30);
-loco.moveTo(65, H-17);
-loco.lineTo(78, H-12);
-loco.lineTo(78, H-8);
-loco.lineTo(65, H-8);
-loco.closePath();
-loco.endFill();
-// Cabin
-loco.beginFill(0x2d1b4e);
-loco.drawRect(-5, H - 70, 24, 22);
-loco.endFill();
-loco.lineStyle(1, 0x4d3b6e);
-loco.drawRect(-5, H - 70, 24, 22);
-// Cabin roof
-loco.lineStyle(0);
-loco.beginFill(0x1a0e30);
-loco.drawRect(-8, H - 73, 30, 4);
-loco.endFill();
-// Cabin window (warm glow)
-loco.beginFill(0xffc864, 0.7);
-loco.drawRect(-1, H - 66, 16, 10);
-loco.endFill();
-// Smokestack
-loco.beginFill(0x1a0e30);
-loco.drawRect(50, H - 68, 8, 18);
-loco.endFill();
-loco.beginFill(0x2d1b4e);
-loco.drawRect(47, H - 72, 14, 5);
-loco.endFill();
-// Headlight
-loco.beginFill(0xfff8dc);
-loco.drawCircle(74, H - 28, 4);
-loco.endFill();
-trainContainer.addChild(loco);
-
-// Locomotive wheels
-var locoWheels = [];
-locoWheels.push(drawWheel(trainContainer, 10, H-8, 7));
-locoWheels.push(drawWheel(trainContainer, 30, H-8, 9));
-locoWheels.push(drawWheel(trainContainer, 52, H-8, 9));
-
-// Tender
-var tender = new PIXI.Graphics();
-tender.beginFill(0x1a1030);
-tender.drawRect(-30, H - 42, 28, 28);
-tender.endFill();
-tender.lineStyle(1, 0x3d2b5e);
-tender.drawRect(-30, H - 42, 28, 28);
-// Coal
-tender.lineStyle(0);
-tender.beginFill(0x0a0614);
-tender.drawRect(-27, H - 39, 22, 10);
-tender.endFill();
-trainContainer.addChild(tender);
-drawWheel(trainContainer, -22, H-8, 6);
-drawWheel(trainContainer, -10, H-8, 6);
-
-// Cars
-function drawCar(xOff, color, numWindows) {
-  var car = new PIXI.Graphics();
-  car.beginFill(color);
-  car.drawRoundedRect(xOff, H - 38, 48, 24, 3);
-  car.endFill();
-  car.lineStyle(1, 0x3a4a6e);
-  car.drawRoundedRect(xOff, H - 38, 48, 24, 3);
-  // Windows
-  car.lineStyle(0);
-  for (var wi = 0; wi < numWindows; wi++) {
-    car.beginFill(0xffc864, 0.3);
-    car.drawRect(xOff + 6 + wi * 11, H - 34, 7, 7);
-    car.endFill();
-  }
-  trainContainer.addChild(car);
-  drawWheel(trainContainer, xOff + 10, H-8, 5);
-  drawWheel(trainContainer, xOff + 38, H-8, 5);
-}
-drawCar(-82, 0x1b2a4a, 3);
-drawCar(-134, 0x1b2a4a, 4);
-
-// Caboose
-var cab = new PIXI.Graphics();
-cab.beginFill(0x4a1b2a);
-cab.drawRoundedRect(-180, H - 38, 40, 24, 3);
-cab.endFill();
-cab.lineStyle(1, 0x6e3a4a);
-cab.drawRoundedRect(-180, H - 38, 40, 24, 3);
-// Cupola
-cab.lineStyle(0);
-cab.beginFill(0x4a1b2a);
-cab.drawRect(-170, H - 50, 18, 14);
-cab.endFill();
-cab.lineStyle(1, 0x6e3a4a);
-cab.drawRect(-170, H - 50, 18, 14);
-// Caboose window
-cab.lineStyle(0);
-cab.beginFill(0xffc864, 0.3);
-cab.drawRect(-166, H - 46, 10, 6);
-cab.endFill();
-trainContainer.addChild(cab);
-drawWheel(trainContainer, -170, H-8, 5);
-drawWheel(trainContainer, -148, H-8, 5);
-
-// Tail light
-var tailLight = new PIXI.Graphics();
-tailLight.beginFill(0xff4444);
-tailLight.drawCircle(-180, H - 26, 3);
-tailLight.endFill();
-trainContainer.addChild(tailLight);
-
-app.stage.addChild(trainContainer);
-
-// ═══════════════════════
-// STEAM PARTICLES
-// ═══════════════════════
-var steamParticles = [];
-var steamContainer = new PIXI.Container();
-app.stage.addChild(steamContainer);
-
-function emitSteam() {
-  var p = new PIXI.Graphics();
-  var sz = 3 + Math.random() * 5;
-  p.beginFill(0xccccdd, 0.25);
-  p.drawCircle(0, 0, sz);
-  p.endFill();
-  p.x = trainContainer.x + 54;
-  p.y = H - 74;
-  p._vx = -0.3 - Math.random() * 0.8;
-  p._vy = -0.8 - Math.random() * 1.2;
-  p._life = 1.0;
-  p._decay = 0.008 + Math.random() * 0.01;
-  p._growRate = 1.01 + Math.random() * 0.015;
-  steamParticles.push(p);
-  steamContainer.addChild(p);
-}
-
-// ═══════════════════════
-// ANIMATION LOOP
-// ═══════════════════════
-var trainSpeed = 1.8;
-var elapsed = 0;
-var steamTimer = 0;
-
-app.ticker.add(function(delta) {
-  elapsed += delta;
-  steamTimer += delta;
-
-  // Stars twinkle
-  for (var si = 0; si < stars.length; si++) {
-    var st = stars[si];
-    st.alpha = 0.2 + 0.6 * Math.abs(Math.sin(elapsed * st._twinkleSpeed + st._twinklePhase));
-  }
-
-  // Mountain glow
-  glowAlpha += (glowTarget - glowAlpha) * 0.02;
-  drawGlow();
-
-  // Move train
-  trainContainer.x += trainSpeed * delta;
-  if (trainContainer.x > W + 350) {
-    trainContainer.x = -350;
-  }
-
-  // Train bob
-  trainContainer.y = Math.sin(elapsed * 0.15) * 1.2;
-
-  // Tail light blink
-  tailLight.alpha = 0.4 + 0.6 * Math.abs(Math.sin(elapsed * 0.05));
-
-  // Illuminate animals near train
-  var headX = trainContainer.x + 74;
-  for (var ani = 0; ani < animalSprites.length; ani++) {
-    var a = animalSprites[ani];
-    var dist = a.x - headX;
-    if (dist > -40 && dist < 320) {
-      var intensity = 1.0 - Math.abs(dist - 140) / 180;
-      a.alpha = Math.min(1, 0.3 + Math.max(0, intensity) * 0.7);
-    } else {
-      a.alpha += (0.3 - a.alpha) * 0.05;
-    }
-  }
-
-  // Window flickering
-  var children = townsContainer.children;
-  for (var ci = 0; ci < children.length; ci++) {
-    var ch = children[ci];
-    if (ch._flicker) {
-      ch.alpha = 0.5 + 0.5 * Math.abs(Math.sin(elapsed * 0.02 + ch._flickerPhase));
-    }
-  }
-
-  // Emit steam
-  if (steamTimer > 2) {
-    steamTimer = 0;
-    emitSteam();
-    if (Math.random() > 0.3) emitSteam();
-  }
-
-  // Update steam particles
-  for (var pi = steamParticles.length - 1; pi >= 0; pi--) {
-    var sp = steamParticles[pi];
-    sp.x += sp._vx * delta;
-    sp.y += sp._vy * delta;
-    sp._vy *= 0.995;
-    sp._life -= sp._decay * delta;
-    sp.alpha = sp._life * 0.3;
-    sp.scale.x *= sp._growRate;
-    sp.scale.y *= sp._growRate;
-    if (sp._life <= 0) {
-      steamContainer.removeChild(sp);
-      sp.destroy();
-      steamParticles.splice(pi, 1);
-    }
-  }
-});
-
-// ═══════════════════════
-// DASHBOARD DATA LOGIC
-// ═══════════════════════
+// ============================
+// DASHBOARD DATA
+// ============================
 var POLL_MS = 3000;
 var lastJson = "";
 
@@ -711,7 +622,7 @@ function renderLocks(locks) {
       + '</div>';
   }).join("");
   return '<div class="locks-section">'
-    + '<div class="locks-title">🔒 File Locks <span class="lock-count">' + locks.length + '</span></div>'
+    + '<div class="locks-title">\ud83d\udd12 File Locks <span class="lock-count">' + locks.length + '</span></div>'
     + '<div class="lock-list">' + items + '</div></div>';
 }
 
@@ -721,13 +632,11 @@ function render(data) {
       '<div class="empty-state"><h2>No repos registered</h2><p>Run <code>btrain init /path/to/repo</code></p></div>';
     return;
   }
-
-  // Update mountain glow based on active lanes
   var anyActive = data.repos.some(function(r) {
     if (r.lanes) return r.lanes.some(function(l) { return l.status === "in-progress" || l.status === "needs-review"; });
     return r.current && (r.current.status === "in-progress" || r.current.status === "needs-review");
   });
-  glowTarget = anyActive ? 1.0 : 0.0;
+  if (window.setMountainGlow) window.setMountainGlow(anyActive);
 
   var html = data.repos.map(function(repo) {
     var lanesHtml = "";
@@ -735,9 +644,7 @@ function render(data) {
       lanesHtml = '<div class="train-track"><div class="lanes-grid">'
         + repo.lanes.map(renderLaneCard).join("")
         + '</div></div>';
-    } else {
-      lanesHtml = renderSingleLane(repo);
-    }
+    } else { lanesHtml = renderSingleLane(repo); }
     return '<div class="repo-section">'
       + '<div class="repo-header"><div class="repo-name">' + esc(repo.name) + '</div><div class="repo-path">' + esc(repo.path) + '</div></div>'
       + lanesHtml + renderLocks(repo.locks) + '</div>';
@@ -762,7 +669,7 @@ function fetchState() {
 fetchState();
 setInterval(fetchState, POLL_MS);
 `,
-    '</script>',
+    '</' + 'script>',
     '</body>',
     '</html>',
   ].join('\n')
@@ -770,10 +677,13 @@ setInterval(fetchState, POLL_MS);
   return html
 }
 
+const MIME_TYPES = { ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml" }
+
 export async function startDashboard({ port = 3456 } = {}) {
   const dashboardHTML = buildDashboardHTML()
 
   const server = http.createServer(async (req, res) => {
+    // API endpoint
     if (req.url === "/api/state") {
       try {
         const statuses = await getStatus()
@@ -781,18 +691,11 @@ export async function startDashboard({ port = 3456 } = {}) {
         for (const status of statuses) {
           const repo = { ...status }
           if (status.locks === undefined && status.lanes) {
-            try {
-              repo.locks = await listLocks(status.path)
-            } catch {
-              repo.locks = []
-            }
+            try { repo.locks = await listLocks(status.path) } catch { repo.locks = [] }
           }
           repos.push(repo)
         }
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        })
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" })
         res.end(JSON.stringify({ home: getBrainTrainHome(), repos }))
       } catch (err) {
         res.writeHead(500, { "Content-Type": "application/json" })
@@ -801,6 +704,27 @@ export async function startDashboard({ port = 3456 } = {}) {
       return
     }
 
+    // Static assets
+    if (req.url.startsWith("/assets/")) {
+      const urlPath = req.url.split("?")[0] // Strip query params (cache-busting)
+      const fileName = path.basename(urlPath)
+      const filePath = path.join(ASSETS_DIR, fileName)
+      try {
+        const data = fs.readFileSync(filePath)
+        const ext = path.extname(fileName)
+        res.writeHead(200, {
+          "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
+          "Cache-Control": "no-cache",
+        })
+        res.end(data)
+      } catch {
+        res.writeHead(404)
+        res.end("Not found")
+      }
+      return
+    }
+
+    // Dashboard HTML
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
     res.end(dashboardHTML)
   })
