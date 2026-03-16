@@ -44,6 +44,7 @@ Usage:
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>]                                                  Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the pre-commit guard hook
+  btrain dashboard [--port <number>]                                              Open a live lane monitor in your browser
   btrain repos                                                                   List registered repos
 
 Handoff/Lane Options:
@@ -540,6 +541,16 @@ async function run() {
       console.log(`  lane ${lock.lane}: ${lock.path} (${lock.owner}, ${lock.acquired_at})`)
     }
     return
+  }
+
+  if (command === "dashboard") {
+    const options = parseOptions(rest)
+    const port = options.port ? Number(options.port) : 3456
+    const { startDashboard } = await import("./dashboard.mjs")
+    const { url } = await startDashboard({ port })
+    console.log(`btrain dashboard running at ${url}`)
+    console.log("Press Ctrl+C to stop.")
+    return new Promise(() => {}) // keep alive
   }
 
   throw new Error(`Unknown command: ${command}`)
