@@ -304,6 +304,7 @@ body {
   left: -320px;
   z-index: 10;
   display: flex;
+  flex-direction: row-reverse;
   align-items: flex-end;
   animation: trainMove 25s linear infinite;
   will-change: transform;
@@ -335,7 +336,7 @@ body {
 .loco-body::before {
   content: '';
   position: absolute;
-  bottom: 0; left: -10px;
+  bottom: 0; right: -10px;
   width: 14px; height: 14px;
   background: #1a0e30;
   border-radius: 50%;
@@ -344,7 +345,7 @@ body {
 /* Cabin */
 .loco-cabin {
   position: absolute;
-  top: -14px; right: 2px;
+  top: -14px; left: 2px;
   width: 20px; height: 18px;
   background: #2d1b4e;
   border-radius: 3px 3px 0 0;
@@ -362,7 +363,7 @@ body {
 /* Smokestack */
 .smokestack {
   position: absolute;
-  top: -12px; left: 10px;
+  top: -12px; right: 10px;
   width: 8px; height: 14px;
   background: #1a0e30;
   border-radius: 2px 2px 0 0;
@@ -380,7 +381,7 @@ body {
 /* Headlight */
 .headlight {
   position: absolute;
-  bottom: 12px; left: -10px;
+  bottom: 12px; right: -10px;
   width: 6px; height: 6px;
   background: #fff8dc;
   border-radius: 50%;
@@ -389,10 +390,10 @@ body {
 /* Headlight beam */
 .headlight-beam {
   position: absolute;
-  bottom: 0; left: -310px;
+  bottom: 0; right: -310px;
   width: 300px; height: 60px;
-  background: linear-gradient(90deg, rgba(255,248,220,0.02) 0%, rgba(255,248,220,0.08) 70%, rgba(255,248,220,0.2) 100%);
-  clip-path: polygon(100% 30%, 0% 0%, 0% 100%, 100% 70%);
+  background: linear-gradient(270deg, rgba(255,248,220,0.02) 0%, rgba(255,248,220,0.08) 70%, rgba(255,248,220,0.2) 100%);
+  clip-path: polygon(0% 30%, 100% 0%, 100% 100%, 0% 70%);
   pointer-events: none;
 }
 
