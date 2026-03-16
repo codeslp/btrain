@@ -26,6 +26,10 @@ const CORE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.resolve(CORE_DIR, "..", "..", "scripts", "option_a_review.py")
 const SUPPORTED_REVIEW_MODES = new Set(["manual", "parallel", "hybrid"])
 const DEFAULT_HANDOFF_RELATIVE_PATH = ".claude/collab/HANDOFF.md"
+const DEFAULT_LANE_A_HANDOFF_PATH = ".claude/collab/HANDOFF_A.md"
+const DEFAULT_LANE_B_HANDOFF_PATH = ".claude/collab/HANDOFF_B.md"
+const LOCKS_FILENAME = "locks.json"
+const DEFAULT_LANE_COUNT = 2
 const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
@@ -179,38 +183,250 @@ function renderPreCommitHook() {
   return [
     "#!/bin/sh",
     HOOK_MARKER,
-    "# Blocks commits when HANDOFF.md status is 'needs-review' and non-handoff files are staged.",
+    "# Blocks commits that touch files locked by another lane.",
+    "# Also blocks when any HANDOFF is in 'needs-review' and non-handoff files are staged.",
     "# Installed by: btrain init --hooks",
     "# Bypass with: git commit --no-verify",
     "",
-    'HANDOFF=".claude/collab/HANDOFF.md"',
+    'BTRAIN_DIR=".btrain"',
+    'LOCKS_FILE="$BTRAIN_DIR/locks.json"',
     "",
-    'if [ ! -f "$HANDOFF" ]; then',
-    "  exit 0",
-    "fi",
-    "",
-    'STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
-    "",
-    'if [ "$STATUS" = "needs-review" ]; then',
+    "# Check lock registry for cross-lane conflicts",
+    'if [ -f "$LOCKS_FILE" ]; then',
     '  STAGED=$(git diff --cached --name-only)',
-    '  NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF\\.md$")',
-    "",
-    '  if [ -n "$NON_HANDOFF" ]; then',
-    '    echo ""',
-    "    echo \"btrain: blocked — HANDOFF.md status is 'needs-review'.\"",
-    '    echo "Only the reviewer should be committing right now, and only to HANDOFF.md."',
-    '    echo ""',
-    '    echo "Staged non-handoff files:"',
-    '    echo "$NON_HANDOFF" | sed \'s/^/  /\'',
-    '    echo ""',
-    '    echo "To bypass: git commit --no-verify"',
-    "    exit 1",
-    "  fi",
+    '  if [ -n "$STAGED" ]; then',
+    '    # Use node to check locks if available',
+    '    if command -v node >/dev/null 2>&1; then',
+    '      LOCK_SCRIPT=$(mktemp)',
+    '      cat > "$LOCK_SCRIPT" << \'BTRAIN_EOF\'',
+    "const fs = require('node:fs');",
+    "const locks = JSON.parse(fs.readFileSync(process.env.LOCKS_FILE, 'utf8'));",
+    "const staged = process.argv.slice(1);",
+    "const conflicts = [];",
+    "for (const lock of locks.locks || []) {",
+    "  for (const file of staged) {",
+    "    const lp = lock.path.endsWith('/') ? lock.path : lock.path + '/';",
+    "    if (file === lock.path || file.startsWith(lp)) {",
+    "      conflicts.push(lock.lane + ':' + lock.path + ' (owner: ' + lock.owner + ')');",
+    "    }",
+    "  }",
+    "}",
+    "if (conflicts.length) { console.log(conflicts.join('\\\\n')); process.exit(1); }",
+    "BTRAIN_EOF",
+    '      CONFLICTS=$(LOCKS_FILE="$LOCKS_FILE" node "$LOCK_SCRIPT" $STAGED 2>/dev/null)',
+    '      LOCK_EXIT=$?',
+    '      rm -f "$LOCK_SCRIPT"',
+    '      if [ $LOCK_EXIT -ne 0 ]; then',
+    '        echo ""',
+    '        echo "btrain: blocked — staged files are locked by another lane."',
+    '        echo ""',
+    '        echo "Conflicting locks:"',
+    '        echo "$CONFLICTS" | sed \'s/^/  /\'',
+    '        echo ""',
+    '        echo "To bypass: git commit --no-verify"',
+    '        exit 1',
+    '      fi',
+    '    fi',
+    '  fi',
     "fi",
+    "",
+    "# Legacy single-handoff guard",
+    'for HANDOFF in .claude/collab/HANDOFF.md .claude/collab/HANDOFF_A.md .claude/collab/HANDOFF_B.md; do',
+    '  if [ -f "$HANDOFF" ]; then',
+    '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
+    '    if [ "$STATUS" = "needs-review" ]; then',
+    '      STAGED=$(git diff --cached --name-only)',
+    '      NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF")',
+    '      if [ -n "$NON_HANDOFF" ]; then',
+    '        echo ""',
+    "        echo \"btrain: blocked — $HANDOFF status is 'needs-review'.\"",
+    '        echo "Only the reviewer should be committing right now."',
+    '        echo ""',
+    '        echo "Staged non-handoff files:"',
+    '        echo "$NON_HANDOFF" | sed \'s/^/  /\'',
+    '        echo ""',
+    '        echo "To bypass: git commit --no-verify"',
+    '        exit 1',
+    '      fi',
+    '    fi',
+    '  fi',
+    "done",
     "",
     "exit 0",
     "",
   ].join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Lane configuration
+// ---------------------------------------------------------------------------
+
+function getLaneConfigs(config) {
+  const lanes = config?.lanes
+  if (!lanes || lanes.enabled === false) {
+    return null
+  }
+
+  const laneConfigs = []
+  const laneIds = ["a", "b"]
+
+  for (const id of laneIds) {
+    const laneSection = lanes[id]
+    const handoffPath = laneSection?.handoff_path || (id === "a" ? DEFAULT_LANE_A_HANDOFF_PATH : DEFAULT_LANE_B_HANDOFF_PATH)
+    laneConfigs.push({ id, handoffPath })
+  }
+
+  return laneConfigs
+}
+
+function isLanesEnabled(config) {
+  return getLaneConfigs(config) !== null
+}
+
+function getLaneHandoffPath(repoRoot, config, laneId) {
+  const laneConfigs = getLaneConfigs(config)
+  if (!laneConfigs) {
+    return null
+  }
+
+  const lane = laneConfigs.find((l) => l.id === laneId)
+  if (!lane) {
+    throw new Error(`Unknown lane: ${laneId}. Available lanes: ${laneConfigs.map((l) => l.id).join(", ")}`)
+  }
+
+  const configuredPath = lane.handoffPath
+  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(repoRoot, configuredPath)
+}
+
+async function readLaneState(repoRoot, config, laneId) {
+  const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
+  if (!handoffPath || !(await pathExists(handoffPath))) {
+    return { ...DEFAULT_CURRENT, _laneId: laneId }
+  }
+
+  const content = await readText(handoffPath)
+  return { ...parseCurrentSection(content), _laneId: laneId }
+}
+
+async function readAllLaneStates(repoRoot, config) {
+  const laneConfigs = getLaneConfigs(config)
+  if (!laneConfigs) {
+    return null
+  }
+
+  const states = []
+  for (const lane of laneConfigs) {
+    states.push(await readLaneState(repoRoot, config, lane.id))
+  }
+  return states
+}
+
+function findAvailableLane(laneStates) {
+  // Prefer idle > resolved lanes
+  const idle = laneStates.find((s) => s.status === "idle")
+  if (idle) return idle._laneId
+
+  const resolved = laneStates.find((s) => s.status === "resolved")
+  if (resolved) return resolved._laneId
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Lock registry
+// ---------------------------------------------------------------------------
+
+function getLocksPath(repoRoot) {
+  return path.join(repoRoot, ".btrain", LOCKS_FILENAME)
+}
+
+async function readLockRegistry(repoRoot) {
+  const locksPath = getLocksPath(repoRoot)
+  return readJson(locksPath, { version: 1, locks: [] })
+}
+
+async function writeLockRegistry(repoRoot, registry) {
+  const locksPath = getLocksPath(repoRoot)
+  await writeJson(locksPath, registry)
+}
+
+function checkLockConflicts(registry, laneId, files) {
+  const conflicts = []
+  for (const lock of registry.locks) {
+    if (lock.lane === laneId) continue
+
+    for (const file of files) {
+      const lockPath = lock.path.endsWith("/") ? lock.path : lock.path + "/"
+      const filePath = file.endsWith("/") ? file : file + "/"
+
+      if (
+        file === lock.path ||
+        lock.path === file ||
+        file.startsWith(lockPath) ||
+        lock.path.startsWith(filePath)
+      ) {
+        conflicts.push({
+          file,
+          lockedBy: lock.lane,
+          owner: lock.owner,
+          path: lock.path,
+        })
+      }
+    }
+  }
+  return conflicts
+}
+
+async function acquireLocks(repoRoot, laneId, owner, files) {
+  if (!files || files.length === 0) return []
+
+  const registry = await readLockRegistry(repoRoot)
+  const conflicts = checkLockConflicts(registry, laneId, files)
+
+  if (conflicts.length > 0) {
+    const conflictMessages = conflicts.map(
+      (c) => `  ${c.file} — locked by lane ${c.lockedBy} (${c.owner}): ${c.path}`,
+    )
+    throw new Error(`File lock conflict:\n${conflictMessages.join("\n")}`)
+  }
+
+  // Remove existing locks for this lane first
+  registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
+
+  // Add new locks
+  const now = formatIsoTimestamp()
+  for (const file of files) {
+    registry.locks.push({
+      path: file,
+      lane: laneId,
+      owner,
+      acquired_at: now,
+    })
+  }
+
+  await writeLockRegistry(repoRoot, registry)
+  return registry.locks.filter((lock) => lock.lane === laneId)
+}
+
+async function releaseLocks(repoRoot, laneId) {
+  const registry = await readLockRegistry(repoRoot)
+  const released = registry.locks.filter((lock) => lock.lane === laneId)
+  registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
+  await writeLockRegistry(repoRoot, registry)
+  return released
+}
+
+async function listLocks(repoRoot) {
+  const registry = await readLockRegistry(repoRoot)
+  return registry.locks
+}
+
+async function forceReleaseLock(repoRoot, lockPath) {
+  const registry = await readLockRegistry(repoRoot)
+  const before = registry.locks.length
+  registry.locks = registry.locks.filter((lock) => lock.path !== lockPath)
+  await writeLockRegistry(repoRoot, registry)
+  return before - registry.locks.length
 }
 
 async function installPreCommitHook(repoRoot) {
@@ -259,6 +475,7 @@ function getRepoPaths(repoRoot) {
     brainTrainDir: path.join(repoRoot, ".btrain"),
     projectTomlPath: path.join(repoRoot, ".btrain", "project.toml"),
     reviewsDir: path.join(repoRoot, ".btrain", "reviews"),
+    locksPath: path.join(repoRoot, ".btrain", LOCKS_FILENAME),
     handoffPath: path.resolve(repoRoot, DEFAULT_HANDOFF_RELATIVE_PATH),
     agentsPath: path.join(repoRoot, "AGENTS.md"),
     claudePath: path.join(repoRoot, "CLAUDE.md"),
@@ -325,6 +542,15 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF.md` directly.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
   "- Repo config lives at `.btrain/project.toml`.",
+  "",
+  "### Multi-Lane Workflow",
+  "",
+  "When `[lanes]` is enabled in `project.toml`, agents work concurrently on separate lanes:",
+  "",
+  "- Use `--lane a` or `--lane b` with `handoff claim|update|resolve`.",
+  "- Lock files with `--files \"path/\"` when claiming to prevent cross-lane collisions.",
+  "- Run `btrain locks` to see active file locks.",
+  "- When your lane is done, the other agent reviews it while continuing their own work.",
   "",
   MANAGED_END,
 ].join("\n")
@@ -553,6 +779,26 @@ async function initRepo(repoPathInput, options = {}) {
     await writeText(repoPaths.handoffPath, renderTemplate(handoffTemplate, templateVars))
   }
 
+  // Initialize lane handoff files if lanes are configured
+  const config = await readProjectConfig(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+  if (laneConfigs) {
+    for (const lane of laneConfigs) {
+      const laneHandoffPath = path.isAbsolute(lane.handoffPath)
+        ? lane.handoffPath
+        : path.resolve(repoRoot, lane.handoffPath)
+      await ensureDir(path.dirname(laneHandoffPath))
+      if (!(await pathExists(laneHandoffPath))) {
+        const handoffTemplate = await loadTemplate("handoff.md")
+        await writeText(laneHandoffPath, renderTemplate(handoffTemplate, { ...templateVars, repoName: `${repoName} (lane ${lane.id})` }))
+      }
+    }
+    // Initialize empty lock registry
+    if (!(await pathExists(repoPaths.locksPath))) {
+      await writeLockRegistry(repoRoot, { version: 1, locks: [] })
+    }
+  }
+
   upsertRepoEntry(registry, {
     name: repoName,
     path: repoRoot,
@@ -616,8 +862,9 @@ function buildCurrentSection(current) {
   }
 
   const lockedFiles = Array.isArray(merged.lockedFiles) ? merged.lockedFiles.join(", ") : ""
+  const laneId = merged._laneId || merged.lane || ""
 
-  return [
+  const lines = [
     "## Current",
     "",
     `Task: ${merged.task || ""}`,
@@ -629,7 +876,13 @@ function buildCurrentSection(current) {
     `Next Action: ${merged.nextAction || ""}`,
     `Base: ${merged.base || ""}`,
     `Last Updated: ${merged.lastUpdated || ""}`,
-  ].join("\n")
+  ]
+
+  if (laneId) {
+    lines.splice(2, 0, `Lane: ${laneId}`)
+  }
+
+  return lines.join("\n")
 }
 
 function buildContextForReviewerSection(options = {}) {
@@ -677,6 +930,7 @@ function parseCurrentSection(content) {
     "next action": "nextAction",
     base: "base",
     "last updated": "lastUpdated",
+    lane: "lane",
   }
 
   for (const line of bounds.text.split("\n")) {
@@ -751,11 +1005,15 @@ async function updateHandoff(repoRoot, updates, options = {}) {
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const repoName = normalizeRepoName(repoRoot)
 
-  if (!(await pathExists(repoPaths.handoffPath))) {
-    await writeText(repoPaths.handoffPath, renderHandoffTemplate(repoName))
+  // Use override handoff path for lane-specific operations
+  const handoffPath = options.overrideHandoffPath || repoPaths.handoffPath
+
+  if (!(await pathExists(handoffPath))) {
+    await ensureDir(path.dirname(handoffPath))
+    await writeText(handoffPath, renderHandoffTemplate(repoName))
   }
 
-  const existingContent = await readText(repoPaths.handoffPath)
+  const existingContent = await readText(handoffPath)
   const existingCurrent = parseCurrentSection(existingContent)
   const nextCurrent = {
     ...existingCurrent,
@@ -798,7 +1056,7 @@ async function updateHandoff(repoRoot, updates, options = {}) {
     )
   }
 
-  await writeText(repoPaths.handoffPath, nextContent)
+  await writeText(handoffPath, nextContent)
   return nextCurrent
 }
 
@@ -807,19 +1065,60 @@ async function claimHandoff(repoRoot, options) {
     throw new Error("`btrain handoff claim` requires --task, --owner, and --reviewer.")
   }
 
+  const config = await readProjectConfig(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+  let laneId = options.lane || null
+
+  // If lanes are enabled, auto-select a lane if none specified
+  if (laneConfigs && !laneId) {
+    const laneStates = await readAllLaneStates(repoRoot, config)
+    laneId = findAvailableLane(laneStates)
+    if (!laneId) {
+      throw new Error("No available lanes. All lanes are currently in-progress or needs-review.")
+    }
+  }
+
+  // Acquire file locks if lanes enabled and files specified
+  const files = options.files ? parseCsvList(options.files) : []
+  if (laneConfigs && laneId && files.length > 0) {
+    await acquireLocks(repoRoot, laneId, options.owner, files)
+  }
+
+  const updates = {
+    task: options.task,
+    owner: options.owner,
+    reviewer: options.reviewer,
+    status: "in-progress",
+    reviewMode: options.mode || "manual",
+    lockedFiles: files,
+    nextAction: options.next || "Continue implementation and prepare reviewer context.",
+    base: options.base || "",
+    lastUpdated: `${options.owner} ${formatIsoTimestamp()}`,
+  }
+
+  if (laneId) {
+    updates._laneId = laneId
+    updates.lane = laneId
+  }
+
+  // If lanes enabled, write to lane-specific handoff file
+  if (laneConfigs && laneId) {
+    const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
+    return updateHandoff(
+      repoRoot,
+      updates,
+      {
+        contextSectionText: buildContextForReviewerSection(),
+        reviewResponseText: buildPendingReviewResponseSection(),
+        config,
+        overrideHandoffPath: handoffPath,
+      },
+    )
+  }
+
   return updateHandoff(
     repoRoot,
-    {
-      task: options.task,
-      owner: options.owner,
-      reviewer: options.reviewer,
-      status: "in-progress",
-      reviewMode: options.mode || "manual",
-      lockedFiles: options.files ? parseCsvList(options.files) : [],
-      nextAction: options.next || "Continue implementation and prepare reviewer context.",
-      base: options.base || "",
-      lastUpdated: `${options.owner} ${formatIsoTimestamp()}`,
-    },
+    updates,
     {
       contextSectionText: buildContextForReviewerSection(),
       reviewResponseText: buildPendingReviewResponseSection(),
@@ -855,16 +1154,49 @@ async function patchHandoff(repoRoot, options) {
   }
 
   updates.lastUpdated = `${options.actor || "btrain"} ${formatIsoTimestamp()}`
+
+  // Lane-aware patch
+  const laneId = options.lane
+  if (laneId) {
+    const config = await readProjectConfig(repoRoot)
+    const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
+    if (handoffPath) {
+      return updateHandoff(repoRoot, updates, { config, overrideHandoffPath: handoffPath })
+    }
+  }
+
   return updateHandoff(repoRoot, updates)
 }
 
 async function resolveHandoff(repoRoot, options) {
   const actorLabel = options.actor || options.owner || "btrain"
-  const existingCurrent = await readCurrentState(repoRoot)
+  const laneId = options.lane
+  let overrideHandoffPath = null
+  let config = null
+
+  // Lane-aware resolve: read state from lane-specific file
+  if (laneId) {
+    config = await readProjectConfig(repoRoot)
+    overrideHandoffPath = getLaneHandoffPath(repoRoot, config, laneId)
+  }
+
+  let existingCurrent
+  if (overrideHandoffPath && (await pathExists(overrideHandoffPath))) {
+    const content = await readText(overrideHandoffPath)
+    existingCurrent = parseCurrentSection(content)
+  } else {
+    existingCurrent = await readCurrentState(repoRoot)
+  }
+
   const previousHandoffEntry =
     existingCurrent.task || options.summary
       ? buildPreviousHandoffEntry(existingCurrent, options.summary, actorLabel)
       : null
+
+  // Release locks for this lane
+  if (laneId) {
+    await releaseLocks(repoRoot, laneId)
+  }
 
   return updateHandoff(
     repoRoot,
@@ -877,15 +1209,78 @@ async function resolveHandoff(repoRoot, options) {
       actorLabel,
       previousHandoffEntry,
       reviewResponseSummary: options.summary,
+      config,
+      overrideHandoffPath,
     },
   )
+}
+
+function buildLaneGuidance(laneId, current) {
+  const prefix = `[Lane ${laneId}] `
+
+  switch (current.status) {
+    case "needs-review": {
+      const reviewer = current.reviewer || "the reviewer"
+      const owner = current.owner || "the owner"
+      const reviewMode = normalizeReviewMode(current.reviewMode) || "manual"
+      const reviewerInstruction =
+        reviewMode === "parallel" || reviewMode === "hybrid"
+          ? `${reviewer}: run \`btrain review run\`, then \`btrain handoff resolve --lane ${laneId} --summary "..."\`.`
+          : `${reviewer}: review, then \`btrain handoff resolve --lane ${laneId} --summary "..."\`.`
+      return [
+        `${prefix}Waiting on ${reviewer} to review.`,
+        reviewerInstruction,
+        `${owner}: work on your other lane while waiting.`,
+      ].join("\n")
+    }
+    case "in-progress": {
+      const owner = current.owner || "the owner"
+      return [
+        `${prefix}${owner} is working on this.`,
+        `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
+      ].join("\n")
+    }
+    case "resolved":
+      return `${prefix}Resolved. Ready for a new task: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`
+    case "idle":
+      return `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`
+    default:
+      return `${prefix}Status: ${current.status}`
+  }
 }
 
 async function checkHandoff(repoRoot) {
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
-  const current = await readCurrentState(repoRoot)
   const repoName = config?.name || normalizeRepoName(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+
+  // Multi-lane mode
+  if (laneConfigs) {
+    const laneStates = await readAllLaneStates(repoRoot, config)
+    const locks = await listLocks(repoRoot)
+    const laneGuidances = laneStates.map((state) => buildLaneGuidance(state._laneId, state))
+
+    let guidance = laneGuidances.join("\n\n")
+
+    if (locks.length > 0) {
+      const lockLines = locks.map((l) => `  ${l.lane}: ${l.path} (${l.owner})`)
+      guidance += `\n\nActive locks:\n${lockLines.join("\n")}`
+    }
+
+    return {
+      repoName,
+      repoRoot,
+      handoffPath: repoPaths.handoffPath,
+      current: laneStates[0] || { ...DEFAULT_CURRENT },
+      lanes: laneStates,
+      locks,
+      guidance,
+    }
+  }
+
+  // Single-lane mode (backward compatible)
+  const current = await readCurrentState(repoRoot)
 
   let guidance
 
@@ -2743,7 +3138,7 @@ async function getRepoStatus(repoRoot) {
   const previousHandoffs = countPreviousHandoffs(handoffContent)
   const templateDrift = await detectTemplateDrift(repoRoot)
 
-  return {
+  const status = {
     name: repoName,
     path: repoRoot,
     current,
@@ -2751,6 +3146,15 @@ async function getRepoStatus(repoRoot) {
     previousHandoffs,
     templateDrift,
   }
+
+  // Add lane info if enabled
+  const laneConfigs = getLaneConfigs(config)
+  if (laneConfigs) {
+    status.lanes = await readAllLaneStates(repoRoot, config)
+    status.locks = await listLocks(repoRoot)
+  }
+
+  return status
 }
 
 async function getStatus({ repoRoot } = {}) {
@@ -2842,6 +3246,69 @@ async function doctorRepo(repoRoot) {
     }
   }
 
+  // Lane-specific checks
+  const laneConfigs = getLaneConfigs(config)
+  if (laneConfigs) {
+    for (const lane of laneConfigs) {
+      const laneHandoffPath = path.isAbsolute(lane.handoffPath)
+        ? lane.handoffPath
+        : path.resolve(repoRoot, lane.handoffPath)
+
+      if (!(await pathExists(laneHandoffPath))) {
+        issues.push(`Missing lane ${lane.id} handoff file: ${laneHandoffPath}. Run \`btrain init .\`.`)
+      } else {
+        const content = await readText(laneHandoffPath)
+        if (!findSectionBounds(content, "Current")) {
+          warnings.push(`Lane ${lane.id} handoff is missing a \`## Current\` section.`)
+        }
+      }
+    }
+
+    // Check locks.json
+    if (!(await pathExists(repoPaths.locksPath))) {
+      warnings.push("Missing `locks.json`. Run `btrain init .` to create it.")
+    } else {
+      try {
+        const registry = await readLockRegistry(repoRoot)
+        if (!Array.isArray(registry.locks)) {
+          issues.push("`locks.json` is malformed: `locks` is not an array.")
+        } else {
+          // Check for stale locks (locks on resolved/idle lanes)
+          const laneStates = await readAllLaneStates(repoRoot, config)
+          for (const lock of registry.locks) {
+            const laneState = laneStates?.find((s) => s._laneId === lock.lane)
+            if (laneState && (laneState.status === "resolved" || laneState.status === "idle")) {
+              warnings.push(
+                `Stale lock: lane ${lock.lane} has lock on \`${lock.path}\` but status is \`${laneState.status}\`. Run \`btrain locks release-lane --lane ${lock.lane}\`.`,
+              )
+            }
+          }
+
+          // Check for cross-lane overlapping locks
+          const laneIds = [...new Set(registry.locks.map((l) => l.lane))]
+          for (const laneId of laneIds) {
+            const otherLocks = registry.locks.filter((l) => l.lane !== laneId)
+            const thisLaneLocks = registry.locks.filter((l) => l.lane === laneId)
+            for (const lock of thisLaneLocks) {
+              const conflicts = checkLockConflicts(
+                { locks: otherLocks },
+                "__check__",
+                [lock.path],
+              )
+              if (conflicts.length > 0) {
+                warnings.push(
+                  `Lock overlap: lane ${lock.lane} (\`${lock.path}\`) conflicts with lane ${conflicts[0].lockedBy} (\`${conflicts[0].path}\`).`,
+                )
+              }
+            }
+          }
+        }
+      } catch {
+        issues.push("`locks.json` is not valid JSON.")
+      }
+    }
+  }
+
   return {
     repoRoot,
     healthy: issues.length === 0,
@@ -2876,19 +3343,29 @@ async function doctor({ repoRoot } = {}) {
 }
 
 export {
+  acquireLocks,
   checkHandoff,
+  checkLockConflicts,
   claimHandoff,
   doctor,
+  findAvailableLane,
   findRepoRoot,
+  forceReleaseLock,
   getBrainTrainHome,
+  getLaneConfigs,
   getRepoPaths,
   getReviewStatus,
   getStatus,
   initRepo,
   installPreCommitHook,
+  isLanesEnabled,
+  listLocks,
   listRepos,
   parseCsvList,
+  readAllLaneStates,
+  readLockRegistry,
   registerRepo,
+  releaseLocks,
   patchHandoff,
   resolveHandoff,
   resolveRepoRoot,

@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { parseCsvList } from "../src/brain_train/core.mjs"
+import { parseCsvList, checkLockConflicts, findAvailableLane, getLaneConfigs } from "../src/brain_train/core.mjs"
 
 // ──────────────────────────────────────────────
 // Helpers
@@ -789,3 +789,334 @@ describe("custom handoff_path", () => {
     assert.ok(loopStdout.includes("task: Custom path task"), loopStdout)
   })
 })
+
+// ──────────────────────────────────────────────
+// Helper: enable lanes in project.toml
+// ──────────────────────────────────────────────
+
+async function enableLanes(tmpDir) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const lanesSection = [
+    "",
+    "[lanes]",
+    "enabled = true",
+    "",
+    "[lanes.a]",
+    'handoff_path = ".claude/collab/HANDOFF_A.md"',
+    "",
+    "[lanes.b]",
+    'handoff_path = ".claude/collab/HANDOFF_B.md"',
+  ].join("\n")
+
+  await fs.writeFile(tomlPath, toml + lanesSection, "utf8")
+}
+
+// ──────────────────────────────────────────────
+// Unit tests: checkLockConflicts
+// ──────────────────────────────────────────────
+
+describe("checkLockConflicts", () => {
+  it("returns empty when no locks exist", () => {
+    const registry = { version: 1, locks: [] }
+    const conflicts = checkLockConflicts(registry, "a", ["src/foo.mjs"])
+    assert.deepStrictEqual(conflicts, [])
+  })
+
+  it("returns empty when file is locked by the same lane", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/foo.mjs", lane: "a", owner: "Claude" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/foo.mjs"])
+    assert.deepStrictEqual(conflicts, [])
+  })
+
+  it("detects exact path conflict from another lane", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/foo.mjs", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/foo.mjs"])
+    assert.equal(conflicts.length, 1)
+    assert.equal(conflicts[0].lockedBy, "b")
+    assert.equal(conflicts[0].owner, "Gemini")
+  })
+
+  it("detects directory prefix conflict", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/auth/", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/auth/login.mjs"])
+    assert.equal(conflicts.length, 1)
+  })
+
+  it("detects when a claimed file is a parent of a locked path", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/auth/login.mjs", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/auth/"])
+    assert.equal(conflicts.length, 1)
+  })
+
+  it("returns empty for non-overlapping paths", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/auth/", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/scoring/engine.mjs"])
+    assert.deepStrictEqual(conflicts, [])
+  })
+})
+
+// ──────────────────────────────────────────────
+// Unit tests: findAvailableLane
+// ──────────────────────────────────────────────
+
+describe("findAvailableLane", () => {
+  it("picks idle lane over resolved", () => {
+    const states = [
+      { _laneId: "a", status: "in-progress" },
+      { _laneId: "b", status: "idle" },
+    ]
+    assert.equal(findAvailableLane(states), "b")
+  })
+
+  it("picks resolved lane when no idle", () => {
+    const states = [
+      { _laneId: "a", status: "in-progress" },
+      { _laneId: "b", status: "resolved" },
+    ]
+    assert.equal(findAvailableLane(states), "b")
+  })
+
+  it("returns null when all lanes are busy", () => {
+    const states = [
+      { _laneId: "a", status: "in-progress" },
+      { _laneId: "b", status: "needs-review" },
+    ]
+    assert.equal(findAvailableLane(states), null)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Unit tests: getLaneConfigs
+// ──────────────────────────────────────────────
+
+describe("getLaneConfigs", () => {
+  it("returns null when no lanes section exists", () => {
+    assert.equal(getLaneConfigs({}), null)
+    assert.equal(getLaneConfigs({ name: "test" }), null)
+  })
+
+  it("returns null when lanes.enabled is false", () => {
+    assert.equal(getLaneConfigs({ lanes: { enabled: false } }), null)
+  })
+
+  it("returns lane configs with defaults when lanes is enabled", () => {
+    const configs = getLaneConfigs({ lanes: { enabled: true } })
+    assert.ok(configs)
+    assert.equal(configs.length, 2)
+    assert.equal(configs[0].id, "a")
+    assert.equal(configs[1].id, "b")
+  })
+
+  it("uses custom handoff paths from config", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        a: { handoff_path: "custom/A.md" },
+        b: { handoff_path: "custom/B.md" },
+      },
+    })
+    assert.equal(configs[0].handoffPath, "custom/A.md")
+    assert.equal(configs[1].handoffPath, "custom/B.md")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: multi-lane handoff lifecycle
+// ──────────────────────────────────────────────
+
+describe("multi-lane handoff lifecycle", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    // Re-run init to create lane handoff files
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("init creates per-lane handoff files", async () => {
+    const handoffA = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+    const locksFile = path.join(tmpDir, ".btrain", "locks.json")
+
+    await assert.doesNotReject(fs.access(handoffA), "HANDOFF_A.md should exist")
+    await assert.doesNotReject(fs.access(handoffB), "HANDOFF_B.md should exist")
+    await assert.doesNotReject(fs.access(locksFile), "locks.json should exist")
+  })
+
+  it("handoff shows both lanes", async () => {
+    const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("lane a"), `Expected lane a output: ${stdout}`)
+    assert.ok(stdout.includes("lane b"), `Expected lane b output: ${stdout}`)
+  })
+
+  it("claim with --lane targets specific lane", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Auth work", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/auth/"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("status: in-progress"), `Expected in-progress: ${stdout}`)
+    assert.ok(stdout.includes("Auth work"), `Expected task name: ${stdout}`)
+
+    // Verify lane-specific handoff file was written
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Auth work"), "Lane A handoff should contain the task")
+    assert.ok(contentA.includes("Status: in-progress"), "Lane A should be in-progress")
+
+    // Verify lane B is still idle
+    const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
+    assert.ok(contentB.includes("Status: idle"), "Lane B should still be idle")
+  })
+
+  it("claim on lane b while lane a is in-progress", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Scoring work", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/scoring/"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("Scoring work"), `Expected task name: ${stdout}`)
+
+    // Both lanes should be in-progress
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
+    assert.ok(contentA.includes("Status: in-progress"), "Lane A should be in-progress")
+    assert.ok(contentB.includes("Status: in-progress"), "Lane B should be in-progress")
+  })
+
+  it("locks are created during lane claim", async () => {
+    const { stdout } = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("src/auth/"), `Expected auth lock: ${stdout}`)
+    assert.ok(stdout.includes("src/scoring/"), `Expected scoring lock: ${stdout}`)
+    assert.ok(stdout.includes("lane a"), `Expected lane a lock: ${stdout}`)
+    assert.ok(stdout.includes("lane b"), `Expected lane b lock: ${stdout}`)
+  })
+
+  it("update lane a to needs-review", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "Claude"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("lane a"), stdout)
+
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Status: needs-review"), "Lane A should be needs-review")
+
+    // Lane B should still be in-progress
+    const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
+    assert.ok(contentB.includes("Status: in-progress"), "Lane B should still be in-progress")
+  })
+
+  it("resolve lane a releases its locks", async () => {
+    await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Auth done", "--actor", "Gemini"],
+      tmpDir,
+    )
+
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Status: resolved"), "Lane A should be resolved")
+
+    // Lane A locks should be released, Lane B locks should remain
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneALocks = locks.locks.filter((l) => l.lane === "a")
+    const laneBLocks = locks.locks.filter((l) => l.lane === "b")
+    assert.equal(laneALocks.length, 0, "Lane A should have no locks")
+    assert.ok(laneBLocks.length > 0, "Lane B should still have locks")
+  })
+
+  it("locks release-lane clears all locks for a lane", async () => {
+    const { stdout } = await runBtrain(
+      ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("Released"), stdout)
+
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    assert.equal(locks.locks.length, 0, "All locks should be released")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: lock conflict detection
+// ──────────────────────────────────────────────
+
+describe("multi-lane lock conflicts", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("claiming overlapping files on different lanes fails", async () => {
+    // Claim lane A with src/shared/
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Task A", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/shared/"],
+      tmpDir,
+    )
+
+    // Claiming lane B with overlapping path should fail
+    const { stderr, code } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Task B", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/shared/utils.mjs"],
+      tmpDir,
+    )
+
+    assert.ok(code !== 0 || stderr.includes("lock conflict"), `Expected lock conflict error: ${stderr}`)
+  })
+
+  it("claiming non-overlapping files on different lanes succeeds", async () => {
+    // Clean up lane A first
+    await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "done", "--actor", "Gemini"],
+      tmpDir,
+    )
+
+    // Claim lane A with src/auth/
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Auth", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/auth/"],
+      tmpDir,
+    )
+
+    // Claim lane B with src/scoring/ — should succeed
+    const { code } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Scoring", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/scoring/"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, "Non-overlapping file claims should succeed")
+  })
+})
+

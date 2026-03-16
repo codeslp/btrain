@@ -2,17 +2,21 @@
 
 import path from "node:path"
 import {
+  acquireLocks,
   checkHandoff,
   claimHandoff,
   doctor,
+  forceReleaseLock,
   getBrainTrainHome,
   getReviewStatus,
   getStatus,
   initRepo,
   installPreCommitHook,
+  listLocks,
   listRepos,
   patchHandoff,
   registerRepo,
+  releaseLocks,
   resolveHandoff,
   resolveRepoRoot,
   runReview,
@@ -32,12 +36,19 @@ Usage:
   btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
+  btrain locks [--repo <path>]                                                   List all active file locks
+  btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
+  btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
   btrain register <repo-path>                                                    Register an existing repo without bootstrapping it
   btrain sync-templates [--repo <path>] [--dry-run]                              Sync managed AGENTS/CLAUDE blocks from templates
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>]                                                  Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the pre-commit guard hook
   btrain repos                                                                   List registered repos
+
+Handoff/Lane Options:
+  --lane <id>       Target a specific lane (a, b). Auto-selects if omitted.
+  --files <list>    Comma-separated list of files/dirs to lock for this lane.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
@@ -49,6 +60,7 @@ Notes:
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
   - \`review run\` automates \`parallel\` and \`hybrid\` modes. \`manual\` mode reports a no-op.
   - \`sync-templates\` only updates the managed blocks in \`AGENTS.md\` and \`CLAUDE.md\`.
+  - When \`[lanes]\` is configured in project.toml, agents can work concurrently on separate lanes.
 `)
 }
 
@@ -81,19 +93,32 @@ function formatRepoStatus(status) {
     ? `${status.current.lastUpdated || "(unknown)"} ${status.staleness.label}`
     : `${status.current.lastUpdated || "(unknown)"}`
 
-  return [
+  const lines = [
     `- ${status.name}`,
     `  path: ${status.path}`,
-    `  task: ${status.current.task || "(none)"}`,
-    `  owner: ${status.current.owner || "(unassigned)"}`,
-    `  reviewer: ${status.current.reviewer || "(unassigned)"}`,
-    `  review mode: ${status.current.reviewMode || "manual"}`,
-    `  status: ${status.current.status || "(unknown)"}`,
-    `  next: ${status.current.nextAction || "(none)"}`,
-    `  updated: ${updatedLine}`,
-    `  handoffs: ${status.previousHandoffs ?? 0}`,
-    `  drift: ${status.templateDrift ? (status.templateDrift.any ? "yes" : "no") : "unknown"}`,
-  ].join("\n")
+  ]
+
+  if (status.lanes) {
+    for (const lane of status.lanes) {
+      lines.push(`  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}`)
+    }
+    if (status.locks && status.locks.length > 0) {
+      lines.push(`  locks: ${status.locks.map((l) => `${l.lane}:${l.path}`).join(", ")}`)
+    }
+  } else {
+    lines.push(`  task: ${status.current.task || "(none)"}`)
+    lines.push(`  owner: ${status.current.owner || "(unassigned)"}`)
+    lines.push(`  reviewer: ${status.current.reviewer || "(unassigned)"}`)
+    lines.push(`  review mode: ${status.current.reviewMode || "manual"}`)
+    lines.push(`  status: ${status.current.status || "(unknown)"}`)
+    lines.push(`  next: ${status.current.nextAction || "(none)"}`)
+  }
+
+  lines.push(`  updated: ${updatedLine}`)
+  lines.push(`  handoffs: ${status.previousHandoffs ?? 0}`)
+  lines.push(`  drift: ${status.templateDrift ? (status.templateDrift.any ? "yes" : "no") : "unknown"}`)
+
+  return lines.join("\n")
 }
 
 function formatDoctorResult(result) {
@@ -227,12 +252,36 @@ function formatLoopResult(result) {
 
 function printHandoffState(result) {
   console.log(`repo: ${result.repoName}`)
-  console.log(`task: ${result.current.task || "(none)"}`)
-  console.log(`status: ${result.current.status}`)
-  console.log(`owner: ${result.current.owner || "(unassigned)"}`)
-  console.log(`reviewer: ${result.current.reviewer || "(unassigned)"}`)
-  console.log(`mode: ${result.current.reviewMode || "manual"}`)
-  console.log(`next: ${result.current.nextAction || "(none)"}`)
+
+  if (result.lanes) {
+    // Multi-lane output
+    for (const lane of result.lanes) {
+      console.log("")
+      console.log(`--- lane ${lane._laneId} ---`)
+      console.log(`task: ${lane.task || "(none)"}`)
+      console.log(`status: ${lane.status}`)
+      console.log(`owner: ${lane.owner || "(unassigned)"}`)
+      console.log(`reviewer: ${lane.reviewer || "(unassigned)"}`)
+      console.log(`mode: ${lane.reviewMode || "manual"}`)
+      console.log(`next: ${lane.nextAction || "(none)"}`)
+    }
+    if (result.locks && result.locks.length > 0) {
+      console.log("")
+      console.log("active locks:")
+      for (const lock of result.locks) {
+        console.log(`  lane ${lock.lane}: ${lock.path} (${lock.owner})`)
+      }
+    }
+  } else {
+    // Single-lane output
+    console.log(`task: ${result.current.task || "(none)"}`)
+    console.log(`status: ${result.current.status}`)
+    console.log(`owner: ${result.current.owner || "(unassigned)"}`)
+    console.log(`reviewer: ${result.current.reviewer || "(unassigned)"}`)
+    console.log(`mode: ${result.current.reviewMode || "manual"}`)
+    console.log(`next: ${result.current.nextAction || "(none)"}`)
+  }
+
   console.log("")
   console.log(result.guidance)
   console.log("")
@@ -449,6 +498,46 @@ async function run() {
 
     for (const repo of repos) {
       console.log(`- ${repo.name}: ${repo.path}`)
+    }
+    return
+  }
+
+  if (command === "locks") {
+    const subcommand = ["release", "release-lane"].includes(rest[0]) ? rest[0] : null
+    const options = parseOptions(subcommand ? rest.slice(1) : rest)
+    const repoRoot = await resolveRepoRoot(options.repo)
+
+    if (subcommand === "release") {
+      if (!options.path) {
+        throw new Error("`btrain locks release` requires --path.")
+      }
+      const removed = await forceReleaseLock(repoRoot, options.path)
+      console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
+      return
+    }
+
+    if (subcommand === "release-lane") {
+      if (!options.lane) {
+        throw new Error("`btrain locks release-lane` requires --lane.")
+      }
+      const released = await releaseLocks(repoRoot, options.lane)
+      console.log(`Released ${released.length} lock(s) for lane ${options.lane}`)
+      for (const lock of released) {
+        console.log(`  ${lock.path} (${lock.owner})`)
+      }
+      return
+    }
+
+    // Default: list locks
+    const locks = await listLocks(repoRoot)
+    if (locks.length === 0) {
+      console.log("No active locks.")
+      return
+    }
+
+    console.log(`Active locks (${locks.length}):`)
+    for (const lock of locks) {
+      console.log(`  lane ${lock.lane}: ${lock.path} (${lock.owner}, ${lock.acquired_at})`)
     }
     return
   }
