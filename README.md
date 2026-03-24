@@ -78,7 +78,10 @@ Both agents work simultaneously on separate lanes with file-level locking. When 
 1. It runs `btrain handoff` to read the current state
 2. If it's the **owner** and status is `in-progress` → it does the work
 3. If it's the **reviewer** and status is `needs-review` → it reviews the code
-4. When done, it runs `btrain handoff update` or `btrain handoff resolve` to transition the state
+4. It only transitions to `needs-review` after real completed work exists, reviewer context is filled in, and the handoff is ready for review
+5. When done, it runs `btrain handoff update` or `btrain handoff resolve` to transition the state
+
+Empty handoffs are protocol violations. Do not flip a lane to `needs-review` with placeholder context, no concrete work, or no verification notes.
 
 The human just types `bth` in each agent window. The agents handle the rest.
 
@@ -101,7 +104,7 @@ btrain handoff claim --task "Implement auth middleware" \
 # Check state (or type bth in an agent chat)
 btrain handoff
 
-# Owner finishes → hand to reviewer
+# Owner finishes real work → hand to reviewer
 btrain handoff update --status needs-review --actor "Claude"
 
 # Reviewer resolves
@@ -226,7 +229,7 @@ With lanes: `--lane <id>` targets a specific lane, `--files <paths>` acquires fi
 
 ### `btrain handoff update [--status <status>] [--actor <name>] [...]`
 
-Patch any subset of handoff fields. Use `--actor` to stamp `Last Updated`.
+Patch any subset of handoff fields. Use `--actor` to stamp `Last Updated`. Do not use `update --status needs-review` for empty handoffs; only hand off when real work and reviewer context are ready.
 
 With lanes: `--lane <id>` targets a specific lane.
 
@@ -416,7 +419,7 @@ $BRAIN_TRAIN_HOME/                  # Default: ~/.btrain
 2. The CLI prints the current state and plain-English guidance
 3. The agent follows the guidance:
    - `idle` / `resolved` → claim a task (with `--lane` and `--files` if lanes are enabled)
-   - `in-progress` (owner) → do the work, then `btrain handoff update --status needs-review`
+   - `in-progress` (owner) → do the work, fill in reviewer context, and only then run `btrain handoff update --status needs-review`
    - `needs-review` (reviewer) → review, then `btrain handoff resolve --summary "..."`
    - Not your turn → work on your other lane, or wait
 4. The human types `bth` in each agent window to trigger the relay

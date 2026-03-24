@@ -12,7 +12,7 @@ Before starting any work, run `btrain handoff` from the repo root to check the c
   ```
   btrain handoff resolve --summary "..." --actor "<your name>"
   ```
-- If `status: in-progress` and you are the **owner**, continue the task. When done, run:
+- If `status: in-progress` and you are the **owner**, continue the task. Only mark `needs-review` after real completed work exists and the reviewer context is filled in. Then run:
   ```
   btrain handoff update --status needs-review --actor "<your name>"
   ```
@@ -24,8 +24,10 @@ Before starting any work, run `btrain handoff` from the repo root to check the c
 
 ### Chat Shorthand
 
-If the user sends a bare `bth` message, run `btrain handoff` from the repo root and immediately follow the printed guidance — do the review, continue working, or claim the next task.
+If the user sends a bare `bth` message, run `btrain handoff` from the repo root and immediately follow the printed guidance — do the review, continue working, or claim the next task. Do not stop after printing status.
 
 ### One Writes, One Reviews
 
 One model writes, the other reviews. Never edit a file the other model is actively working on. The `Locked Files` field in `HANDOFF.md` lists files currently under edit.
+
+Do not create empty handoffs. Placeholder reviewer context, no code changes, or no verification notes are not valid reasons to move a task to `needs-review`.

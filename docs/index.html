@@ -123,7 +123,7 @@
         <div class="flow-step">
           <div class="flow-number">3</div>
           <h3>Review</h3>
-          <p>Owner runs <code>btrain handoff update</code>. Status → <strong>needs-review</strong>. Reviewer acts.</p>
+          <p>Owner runs <code>btrain handoff update</code> only after real work and reviewer context are ready. Status → <strong>needs-review</strong>. Reviewer acts.</p>
         </div>
         <div class="flow-arrow">→</div>
         <div class="flow-step">
@@ -187,7 +187,7 @@ cd btrain && npm link</code></pre>
         <div class="code-step">
           <div class="code-step-label">Type <code>bth</code> in each agent chat</div>
           <div class="code-block">
-            <pre><code># Claude sees: "in-progress, you're the owner → do the work"
+            <pre><code># Claude sees: "in-progress, you're the owner → do the work, then hand off when it's actually reviewable"
 # Codex sees: "needs-review, you're the reviewer → review it"
 # That's it. They follow the protocol.</code></pre>
           </div>

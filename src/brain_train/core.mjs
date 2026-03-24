@@ -540,6 +540,8 @@ const MANAGED_BLOCK_TEMPLATE = [
   "This repo uses the `btrain` collaboration workflow.",
   "",
   "- **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF.md` directly.",
+  "- `bth` means run `btrain handoff` and then immediately do the work it directs. Do not stop after printing status.",
+  "- Only move a task to `needs-review` after real completed work exists, reviewer context is filled in, and the handoff is ready for review.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
   "- Repo config lives at `.btrain/project.toml`.",
   "",
@@ -1237,7 +1239,7 @@ function buildLaneGuidance(laneId, current) {
       const owner = current.owner || "the owner"
       return [
         `${prefix}${owner} is working on this.`,
-        `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
+        `When done: fill in reviewer context and only then run \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
       ].join("\n")
     }
     case "resolved":
@@ -1305,7 +1307,7 @@ async function checkHandoff(repoRoot) {
       const reviewer = current.reviewer || "the reviewer"
       guidance = [
         `${owner} is working on this.`,
-        `If you are ${owner}: continue the task. When done, fill in the Context for Reviewer section and run \`btrain handoff update --status needs-review --actor "${owner}"\`.`,
+        `If you are ${owner}: continue the task. Do not stop at status. When real work is done, fill in the Context for Reviewer section and only then run \`btrain handoff update --status needs-review --actor "${owner}"\`.`,
         `If you are ${reviewer}: it's not your turn yet.`,
       ].join("\n")
       break
