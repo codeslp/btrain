@@ -21,7 +21,7 @@ It works with Claude Code, Codex, Antigravity, or any mix of agents that can rea
 - Structured review context instead of vague "please review this"
 - Reviewer selection that can pick `any-other` configured peer automatically
 - A bundled, project-agnostic `.claude/skills/` pack on `init`
-- Optional dashboard, history cleanup, and automated review helpers
+- Optional history cleanup and automated review helpers
 
 ## Quick Start
 
@@ -202,7 +202,6 @@ btrain handoff resolve --lane <id> --summary <text> --actor <name>
 btrain locks [--repo <path>]
 btrain status [--repo <path>]
 btrain doctor [--repo <path>]
-btrain dashboard [--port <number>]
 btrain hcleanup [--repo <path>] [--keep <n>]
 ```
 
@@ -264,9 +263,8 @@ That means a repo can use short collaborator labels. For example:
 
 In that setup, `btrain handoff` can report `agent check: GPT (runtime hints (codex))`.
 
-## Dashboard and Loop
+## Loop and Cleanup
 
-- `btrain dashboard` opens a live lane monitor in the browser.
 - `btrain loop` can relay `bth` between configured runners, but real-world support still depends on what each agent CLI allows.
 - `btrain hcleanup` trims old `## Previous Handoffs` entries into `~/agent_collab_history/<repo>_agents_collab/<repo>.md`.
 
