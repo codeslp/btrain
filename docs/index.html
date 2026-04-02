@@ -62,8 +62,8 @@
 <span class="t-dim">repo:</span> <span class="t-value">my-app</span>
 <span class="t-dim">task:</span> <span class="t-value">Implement auth middleware</span>
 <span class="t-dim">status:</span> <span class="t-status">needs-review</span>
-<span class="t-dim">owner:</span> <span class="t-value">Claude</span>
-<span class="t-dim">reviewer:</span> <span class="t-value">GPT-5 Codex</span>
+<span class="t-dim">active agent:</span> <span class="t-value">Claude</span>
+<span class="t-dim">peer reviewer:</span> <span class="t-value">GPT-5 Codex</span>
 
 <span class="t-guidance">Waiting on GPT-5 Codex to review.</span>
 <span class="t-guidance">If you are GPT-5 Codex: do the review, then run</span>
@@ -133,13 +133,13 @@
         </div>
       </div>
       <div class="flow-detail">
-        <p>The entire state lives in <code>.claude/collab/HANDOFF.md</code> — a git-tracked markdown file. No database. No external service. Every transition is a CLI command.</p>
+        <p>The entire state lives in <code>.claude/collab/HANDOFF_A.md</code> plus any additional lane files — all git-tracked markdown. No database. No external service. Every transition is a CLI command.</p>
       </div>
 
       <div class="section-label" style="margin-top:3rem">Concurrent Lanes</div>
       <h2>Both agents work at once</h2>
       <div class="flow-detail">
-        <p>Enable <code>[lanes]</code> in <code>project.toml</code> to give each agent its own lane (<code>HANDOFF_A.md</code> + <code>HANDOFF_B.md</code>). File locks in <code>.btrain/locks.json</code> prevent collisions. The pre-commit hook enforces boundaries.</p>
+        <p>Lane count comes from <code>[agents].active</code> and <code>[lanes].per_agent</code>. Each lane gets its own <code>HANDOFF_&lt;LANE&gt;.md</code> file, and file locks in <code>.btrain/locks.json</code> prevent collisions.</p>
       </div>
       <div class="code-block" style="margin-top:1.5rem">
         <pre><code><span class="t-prompt">$</span> btrain handoff claim --lane a --task "Auth" \
@@ -172,7 +172,9 @@ cd btrain && npm link</code></pre>
         <div class="code-step">
           <div class="code-step-label">Bootstrap a repo</div>
           <div class="code-block">
-            <pre><code>btrain init /path/to/your/repo --hooks</code></pre>
+            <pre><code>btrain init /path/to/your/repo --hooks \
+  --agent "Claude" \
+  --agent "GPT-5 Codex"</code></pre>
           </div>
         </div>
         <div class="code-step">
@@ -187,7 +189,7 @@ cd btrain && npm link</code></pre>
         <div class="code-step">
           <div class="code-step-label">Type <code>bth</code> in each agent chat</div>
           <div class="code-block">
-            <pre><code># Claude sees: "in-progress, you're the owner → do the work, then hand off when it's actually reviewable"
+            <pre><code># Claude sees: "in-progress, you're the active agent → do the work"
 # Codex sees: "needs-review, you're the reviewer → review it"
 # That's it. They follow the protocol.</code></pre>
           </div>
@@ -195,8 +197,11 @@ cd btrain && npm link</code></pre>
         <div class="code-step">
           <div class="code-step-label">Enable concurrent lanes <span style="opacity:0.5">(optional)</span></div>
           <div class="code-block">
-            <pre><code># Add [lanes] to .btrain/project.toml, then:
-btrain init .
+            <pre><code># Increase lane count per collaborator
+btrain agents set --repo . \
+  --agent "Claude" \
+  --agent "GPT-5 Codex" \
+  --lanes-per-agent 3
 
 # Both agents claim separate lanes with file locks
 btrain handoff claim --lane a --task "Auth" \
@@ -258,7 +263,7 @@ btrain handoff claim --lane b --task "Scoring" \
         </div>
         <div class="security-item">
           <h3>🚧 Pre-Commit Guard</h3>
-          <p>Run <code>btrain init . --hooks</code> to install a git hook that blocks commits when handoffs show <code>needs-review</code>. In multi-lane mode, it also blocks commits touching files locked by another lane.</p>
+          <p>Run <code>btrain init . --hooks</code> to install a git hook that blocks commits when any tracked handoff shows <code>needs-review</code>. In multi-lane mode, it also blocks commits touching files locked by another lane.</p>
         </div>
       </div>
     </div>
@@ -380,7 +385,7 @@ btrain handoff claim --lane b --task "Scoring" \
       <div class="section-label">Transparency</div>
       <h2>What we tried: btrain loop</h2>
       <div class="loop-content">
-        <p>We built <code>btrain loop</code> to automate the <code>bth</code> relay — watch <code>HANDOFF.md</code>, dispatch the right agent CLI, repeat until resolved. <strong>The implementation works.</strong> 29 tests pass, including streaming progress, dry-run, max-rounds guards, and notify-mode fallback.</p>
+        <p>We built <code>btrain loop</code> to automate the <code>bth</code> relay — watch the active handoff file, dispatch the right agent CLI, repeat until resolved. <strong>The implementation works.</strong> The remaining limitation is what each agent CLI allows in practice.</p>
         <h3>Why it doesn't fully work in practice</h3>
         <p>Both Claude Code and Codex CLI have sandbox models that block the nested subprocess calls that <code>btrain loop</code> needs:</p>
         <div class="loop-issues">

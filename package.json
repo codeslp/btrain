@@ -8,7 +8,9 @@
   },
   "scripts": {
     "test": "node --test 'test/**/*.test.mjs'",
+    "test:e2e": "node --test test/e2e.test.mjs",
     "btrain": "node src/brain_train/cli.mjs",
+    "collab:append-handoff-history": "node scripts/handoff-history-watcher.mjs --once",
     "collab:watch-handoff-history": "node scripts/handoff-history-watcher.mjs",
     "collab:register-handoff-watch": "bash scripts/register-handoff-watch-path.sh",
     "collab:install-handoff-history-agent": "bash scripts/install-handoff-history-launch-agent.sh"

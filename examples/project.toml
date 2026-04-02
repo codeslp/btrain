@@ -1,11 +1,12 @@
 # btrain project config
 name = "your-repo"
 repo_path = "/absolute/path/to/your-repo"
-handoff_path = ".claude/collab/HANDOFF.md"
+handoff_path = ".claude/collab/HANDOFF_A.md"
 default_review_mode = "manual"
 created_at = ""
 
 [agents]
+active = []
 writer_default = ""
 reviewer_default = ""
 
@@ -19,6 +20,22 @@ parallel_enabled = true
 sequential_enabled = false
 sequential_triggers = []
 parallel_script = ""
+
+[lanes]
+enabled = true
+per_agent = 2
+
+[lanes.a]
+handoff_path = ".claude/collab/HANDOFF_A.md"
+
+[lanes.b]
+handoff_path = ".claude/collab/HANDOFF_B.md"
+
+[lanes.c]
+handoff_path = ".claude/collab/HANDOFF_C.md"
+
+[lanes.d]
+handoff_path = ".claude/collab/HANDOFF_D.md"
 
 [instructions]
 project_notes = ""

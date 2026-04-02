@@ -24,12 +24,14 @@ const DEFAULT_CURRENT = {
 const execFileAsync = promisify(execFile)
 const CORE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.resolve(CORE_DIR, "..", "..", "scripts", "option_a_review.py")
+const BUNDLED_SKILLS_DIR = path.resolve(CORE_DIR, "..", "..", ".claude", "skills")
+const EXCLUDED_BUNDLED_SKILLS = new Set(["create-multi-speaker-static-recordings-using-tts"])
 const SUPPORTED_REVIEW_MODES = new Set(["manual", "parallel", "hybrid"])
-const DEFAULT_HANDOFF_RELATIVE_PATH = ".claude/collab/HANDOFF.md"
-const DEFAULT_LANE_A_HANDOFF_PATH = ".claude/collab/HANDOFF_A.md"
-const DEFAULT_LANE_B_HANDOFF_PATH = ".claude/collab/HANDOFF_B.md"
+const DEFAULT_HANDOFF_RELATIVE_PATH = ".claude/collab/HANDOFF_A.md"
 const LOCKS_FILENAME = "locks.json"
-const DEFAULT_LANE_COUNT = 2
+const DEFAULT_COLLABORATION_AGENT_COUNT = 2
+const DEFAULT_LANES_PER_AGENT = 2
+const ACTIVE_LANE_STATUSES = new Set(["in-progress", "needs-review"])
 const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
@@ -90,6 +92,32 @@ async function writeText(targetPath, content) {
   await fs.writeFile(targetPath, content, "utf8")
 }
 
+async function resolveGitHooksDir(repoRoot) {
+  const gitEntryPath = path.join(repoRoot, ".git")
+  if (!(await pathExists(gitEntryPath))) {
+    return null
+  }
+
+  const gitEntryStats = await fs.stat(gitEntryPath)
+  if (gitEntryStats.isDirectory()) {
+    return path.join(gitEntryPath, "hooks")
+  }
+
+  const gitPointer = await readText(gitEntryPath)
+  const gitDirMatch = /^gitdir:\s*(.+)$/m.exec(gitPointer)
+  if (!gitDirMatch) {
+    throw new Error(`Could not parse gitdir from ${gitEntryPath}`)
+  }
+
+  const gitDir = path.resolve(repoRoot, gitDirMatch[1].trim())
+  const commonDirPath = path.join(gitDir, "commondir")
+  const commonDir = (await pathExists(commonDirPath))
+    ? path.resolve(gitDir, (await readText(commonDirPath)).trim())
+    : gitDir
+
+  return path.join(commonDir, "hooks")
+}
+
 function parseCsvList(value) {
   if (!value) {
     return []
@@ -98,6 +126,13 @@ function parseCsvList(value) {
   return value
     .split(",")
     .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function normalizeStringList(value) {
+  const values = Array.isArray(value) ? value : value === undefined ? [] : [value]
+  return values
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
     .filter(Boolean)
 }
 
@@ -183,55 +218,11 @@ function renderPreCommitHook() {
   return [
     "#!/bin/sh",
     HOOK_MARKER,
-    "# Blocks commits that touch files locked by another lane.",
-    "# Also blocks when any HANDOFF is in 'needs-review' and non-handoff files are staged.",
+    "# Blocks commits when any HANDOFF is in 'needs-review' and non-handoff files are staged.",
     "# Installed by: btrain init --hooks",
     "# Bypass with: git commit --no-verify",
     "",
-    'BTRAIN_DIR=".btrain"',
-    'LOCKS_FILE="$BTRAIN_DIR/locks.json"',
-    "",
-    "# Check lock registry for cross-lane conflicts",
-    'if [ -f "$LOCKS_FILE" ]; then',
-    '  STAGED=$(git diff --cached --name-only)',
-    '  if [ -n "$STAGED" ]; then',
-    '    # Use node to check locks if available',
-    '    if command -v node >/dev/null 2>&1; then',
-    '      LOCK_SCRIPT=$(mktemp)',
-    '      cat > "$LOCK_SCRIPT" << \'BTRAIN_EOF\'',
-    "const fs = require('node:fs');",
-    "const locks = JSON.parse(fs.readFileSync(process.env.LOCKS_FILE, 'utf8'));",
-    "const staged = process.argv.slice(1);",
-    "const conflicts = [];",
-    "for (const lock of locks.locks || []) {",
-    "  for (const file of staged) {",
-    "    const lp = lock.path.endsWith('/') ? lock.path : lock.path + '/';",
-    "    if (file === lock.path || file.startsWith(lp)) {",
-    "      conflicts.push(lock.lane + ':' + lock.path + ' (owner: ' + lock.owner + ')');",
-    "    }",
-    "  }",
-    "}",
-    "if (conflicts.length) { console.log(conflicts.join('\\\\n')); process.exit(1); }",
-    "BTRAIN_EOF",
-    '      CONFLICTS=$(LOCKS_FILE="$LOCKS_FILE" node "$LOCK_SCRIPT" $STAGED 2>/dev/null)',
-    '      LOCK_EXIT=$?',
-    '      rm -f "$LOCK_SCRIPT"',
-    '      if [ $LOCK_EXIT -ne 0 ]; then',
-    '        echo ""',
-    '        echo "btrain: blocked — staged files are locked by another lane."',
-    '        echo ""',
-    '        echo "Conflicting locks:"',
-    '        echo "$CONFLICTS" | sed \'s/^/  /\'',
-    '        echo ""',
-    '        echo "To bypass: git commit --no-verify"',
-    '        exit 1',
-    '      fi',
-    '    fi',
-    '  fi',
-    "fi",
-    "",
-    "# Legacy single-handoff guard",
-    'for HANDOFF in .claude/collab/HANDOFF.md .claude/collab/HANDOFF_A.md .claude/collab/HANDOFF_B.md; do',
+    'for HANDOFF in .claude/collab/HANDOFF*.md; do',
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    if [ "$STATUS" = "needs-review" ]; then',
@@ -240,7 +231,7 @@ function renderPreCommitHook() {
     '      if [ -n "$NON_HANDOFF" ]; then',
     '        echo ""',
     "        echo \"btrain: blocked — $HANDOFF status is 'needs-review'.\"",
-    '        echo "Only the reviewer should be committing right now."',
+    '        echo "Only the peer reviewer should be committing right now."',
     '        echo ""',
     '        echo "Staged non-handoff files:"',
     '        echo "$NON_HANDOFF" | sed \'s/^/  /\'',
@@ -261,18 +252,100 @@ function renderPreCommitHook() {
 // Lane configuration
 // ---------------------------------------------------------------------------
 
+function laneIdToSequenceIndex(laneId) {
+  const normalized = String(laneId || "").trim().toLowerCase()
+  if (!/^[a-z]+$/.test(normalized)) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  let index = 0
+  for (const character of normalized) {
+    index = index * 26 + (character.charCodeAt(0) - 96)
+  }
+
+  return index - 1
+}
+
+function compareLaneIds(left, right) {
+  const leftIndex = laneIdToSequenceIndex(left)
+  const rightIndex = laneIdToSequenceIndex(right)
+  if (leftIndex !== rightIndex) {
+    return leftIndex - rightIndex
+  }
+  return String(left).localeCompare(String(right))
+}
+
+function buildLaneId(index) {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error(`Invalid lane index: ${index}`)
+  }
+
+  let remaining = index
+  let laneId = ""
+  do {
+    laneId = String.fromCharCode(97 + (remaining % 26)) + laneId
+    remaining = Math.floor(remaining / 26) - 1
+  } while (remaining >= 0)
+
+  return laneId
+}
+
+function buildLaneIds(count) {
+  return Array.from({ length: count }, (_, index) => buildLaneId(index))
+}
+
+function getCollaborationAgentNames(config) {
+  const explicitAgents = normalizeStringList(config?.agents?.active)
+  if (explicitAgents.length > 0) {
+    return [...new Set(explicitAgents)]
+  }
+
+  const defaults = []
+  for (const agentName of [config?.agents?.writer_default, config?.agents?.reviewer_default]) {
+    const normalized = normalizeAgentName(agentName)
+    if (
+      normalized
+      && !isAnyOtherReviewerValue(normalized)
+      && !defaults.some((value) => value.toLowerCase() === normalized.toLowerCase())
+    ) {
+      defaults.push(normalized)
+    }
+  }
+
+  return defaults
+}
+
+function getLanesPerAgent(config, defaultValue = DEFAULT_LANES_PER_AGENT) {
+  return normalizePositiveInteger(config?.lanes?.per_agent, defaultValue, "[lanes].per_agent")
+}
+
+function getDerivedLaneIds(config) {
+  const configuredCollaboratorCount = getCollaborationAgentNames(config).length
+  const collaboratorCount = configuredCollaboratorCount > 0
+    ? configuredCollaboratorCount
+    : DEFAULT_COLLABORATION_AGENT_COUNT
+  return buildLaneIds(collaboratorCount * getLanesPerAgent(config))
+}
+
 function getLaneConfigs(config) {
   const lanes = config?.lanes
   if (!lanes || lanes.enabled === false) {
     return null
   }
 
-  const laneConfigs = []
-  const laneIds = ["a", "b"]
+  // Discover lane IDs dynamically from config keys (excluding reserved keys)
+  const reservedKeys = new Set(["enabled", "per_agent"])
+  const configuredIds = Object.keys(lanes)
+    .filter((key) => !reservedKeys.has(key))
+    .sort(compareLaneIds)
 
+  // Fall back to the configured collaborator count and lanes-per-agent setting.
+  const laneIds = configuredIds.length > 0 ? configuredIds : getDerivedLaneIds(config)
+
+  const laneConfigs = []
   for (const id of laneIds) {
     const laneSection = lanes[id]
-    const handoffPath = laneSection?.handoff_path || (id === "a" ? DEFAULT_LANE_A_HANDOFF_PATH : DEFAULT_LANE_B_HANDOFF_PATH)
+    const handoffPath = laneSection?.handoff_path || `.claude/collab/HANDOFF_${id.toUpperCase()}.md`
     laneConfigs.push({ id, handoffPath })
   }
 
@@ -330,6 +403,23 @@ function findAvailableLane(laneStates) {
   if (resolved) return resolved._laneId
 
   return null
+}
+
+function isLaneActiveStatus(status) {
+  return ACTIVE_LANE_STATUSES.has(status)
+}
+
+function normalizePathList(paths) {
+  return [...new Set((Array.isArray(paths) ? paths : []).filter(Boolean))].sort()
+}
+
+function samePathList(left, right) {
+  const normalizedLeft = normalizePathList(left)
+  const normalizedRight = normalizePathList(right)
+  return (
+    normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((value, index) => value === normalizedRight[index])
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -429,14 +519,63 @@ async function forceReleaseLock(repoRoot, lockPath) {
   return before - registry.locks.length
 }
 
-async function installPreCommitHook(repoRoot) {
-  const gitHooksDir = path.join(repoRoot, ".git", "hooks")
-  const hookPath = path.join(gitHooksDir, "pre-commit")
+function getLaneLocks(locks, laneId) {
+  return (locks || []).filter((lock) => lock.lane === laneId)
+}
 
-  if (!(await pathExists(path.join(repoRoot, ".git")))) {
+function formatLockedPaths(paths) {
+  const normalized = normalizePathList(paths)
+  return normalized.length > 0 ? normalized.join(", ") : "(none)"
+}
+
+function buildLaneLockState(current, laneLocks) {
+  const handoffPaths = normalizePathList(current.lockedFiles)
+  const registryPaths = normalizePathList(laneLocks.map((lock) => lock.path))
+
+  if (registryPaths.length === 0 && handoffPaths.length === 0) {
+    return {
+      lockState: isLaneActiveStatus(current.status) ? "missing" : "clear",
+      lockCount: 0,
+      lockPaths: [],
+      handoffPaths,
+    }
+  }
+
+  if (!samePathList(handoffPaths, registryPaths)) {
+    return {
+      lockState: "mismatch",
+      lockCount: registryPaths.length,
+      lockPaths: registryPaths,
+      handoffPaths,
+    }
+  }
+
+  return {
+    lockState: isLaneActiveStatus(current.status) ? "active" : "stale",
+    lockCount: registryPaths.length,
+    lockPaths: registryPaths,
+    handoffPaths,
+  }
+}
+
+function decorateLaneState(current, laneLocks) {
+  return {
+    ...current,
+    ...buildLaneLockState(current, laneLocks),
+  }
+}
+
+function decorateLaneStates(laneStates, locks) {
+  return (laneStates || []).map((laneState) => decorateLaneState(laneState, getLaneLocks(locks, laneState._laneId)))
+}
+
+async function installPreCommitHook(repoRoot) {
+  const gitHooksDir = await resolveGitHooksDir(repoRoot)
+  if (!gitHooksDir) {
     return { installed: false, reason: "not-a-git-repo" }
   }
 
+  const hookPath = path.join(gitHooksDir, "pre-commit")
   await ensureDir(gitHooksDir)
 
   if (await pathExists(hookPath)) {
@@ -479,6 +618,7 @@ function getRepoPaths(repoRoot) {
     handoffPath: path.resolve(repoRoot, DEFAULT_HANDOFF_RELATIVE_PATH),
     agentsPath: path.join(repoRoot, "AGENTS.md"),
     claudePath: path.join(repoRoot, "CLAUDE.md"),
+    skillsPath: path.join(repoRoot, ".claude", "skills"),
   }
 }
 
@@ -533,26 +673,58 @@ function renderTemplate(templateContent, variables) {
   )
 }
 
+function renderTomlArray(values) {
+  return `[${normalizeStringList(values).map((value) => `"${escapeTomlString(value)}"`).join(", ")}]`
+}
+
+function formatInlineCodeList(values) {
+  return values.map((value) => `\`${value}\``).join(", ")
+}
+
+function buildManagedBlockVariables(config) {
+  const collaborators = getCollaborationAgentNames(config)
+  const laneIds = (getLaneConfigs(config) || getDerivedLaneIds(config)).map((lane) => lane.id || lane)
+  const laneExamples = laneIds.slice(0, Math.min(laneIds.length, 6))
+  const lanesPerAgent = getLanesPerAgent(config)
+
+  return {
+    activeAgentsSummary:
+      collaborators.length > 0
+        ? formatInlineCodeList(collaborators)
+        : 'not configured yet. Add `active = ["Agent A", "Agent B"]` under `[agents]`.',
+    laneSummary: `${laneIds.length} lane(s) (${lanesPerAgent} per collaborating agent): ${formatInlineCodeList(laneIds)}`,
+    laneExamples: formatInlineCodeList(laneExamples),
+  }
+}
+
 const MANAGED_BLOCK_TEMPLATE = [
   MANAGED_START,
   "## Brain Train Workflow",
   "",
   "This repo uses the `btrain` collaboration workflow.",
   "",
-  "- **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF.md` directly.",
-  "- `bth` means run `btrain handoff` and then immediately do the work it directs. Do not stop after printing status.",
-  "- Only move a task to `needs-review` after real completed work exists, reviewer context is filled in, and the handoff is ready for review.",
+  "- **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF_*.md` files directly.",
+  "- When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.",
+  "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
+  "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
+  "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
   "- Repo config lives at `.btrain/project.toml`.",
+  "",
+  "### Collaboration Setup",
+  "",
+  "- Active collaborating agents: {{activeAgentsSummary}}",
+  "- Current lane target: {{laneSummary}}",
+  "- Change `[agents].active` or `[lanes].per_agent`, then run `btrain init`, `btrain agents set`, or `btrain agents add` to scaffold missing lanes and refresh docs.",
   "",
   "### Multi-Lane Workflow",
   "",
   "When `[lanes]` is enabled in `project.toml`, agents work concurrently on separate lanes:",
   "",
-  "- Use `--lane a` or `--lane b` with `handoff claim|update|resolve`.",
+  "- Use `--lane <id>` (e.g. {{laneExamples}}) with `handoff claim|update|resolve`.",
   "- Lock files with `--files \"path/\"` when claiming to prevent cross-lane collisions.",
   "- Run `btrain locks` to see active file locks.",
-  "- When your lane is done, the other agent reviews it while continuing their own work.",
+  "- When your lane is done, hand it to a peer reviewer while you continue on other work.",
   "",
   MANAGED_END,
 ].join("\n")
@@ -574,17 +746,22 @@ const TEMPLATE_DEFAULTS = {
   "handoff.md": [
     "## Current",
     "",
+    "Lane: {{laneId}}",
     "Task: ",
-    "Owner: ",
-    "Reviewer: ",
+    "Active Agent: ",
+    "Peer Reviewer: ",
     "Status: idle",
     "Review Mode: manual",
     "Locked Files: ",
-    "Next Action: Claim the next task for {{repoName}}.",
+    "Next Action: Claim the next task for {{repoName}}. Use `btrain handoff claim --lane {{laneId}} --task \"...\" --owner \"...\" --reviewer \"...\" --files \"...\"`.",
     "Base: ",
     "Last Updated: btrain {{timestamp}}",
     "",
-    "## Context for Reviewer",
+    "## Context for Peer Review",
+    "",
+    "Pre-flight review:",
+    "",
+    "- [ ] Checked locked files, nearby diff, and likely risk areas before editing",
     "",
     "Files changed:",
     "",
@@ -612,13 +789,14 @@ const TEMPLATE_DEFAULTS = {
     "# btrain project config",
     'name = "{{repoName}}"',
     'repo_path = "{{repoPath}}"',
-    'handoff_path = ".claude/collab/HANDOFF.md"',
+    'handoff_path = ".claude/collab/HANDOFF_A.md"',
     'default_review_mode = "manual"',
     'created_at = "{{timestamp}}"',
     "",
     "[agents]",
-    'writer_default = ""',
-    'reviewer_default = ""',
+    "active = {{activeAgentsToml}}",
+    'writer_default = "{{writerDefault}}"',
+    'reviewer_default = "{{reviewerDefault}}"',
     "",
     "[agents.runners]",
     '# "Opus 4.6" = "notify"',
@@ -631,6 +809,12 @@ const TEMPLATE_DEFAULTS = {
     "",
     "[instructions]",
     'project_notes = ""',
+    "",
+    "[lanes]",
+    "enabled = true",
+    "per_agent = {{lanesPerAgent}}",
+    "",
+    "{{laneSections}}",
     "",
   ].join("\n"),
 
@@ -654,6 +838,13 @@ async function ensureTemplates() {
       if (updated !== existing) {
         await writeText(filePath, updated)
       }
+    } else if (filename === "project.toml") {
+      // The default project scaffold needs to stay in sync with runtime lane/
+      // agent expectations so new repos don't keep generating stale config.
+      const existing = await readText(filePath)
+      if (existing !== defaultContent) {
+        await writeText(filePath, defaultContent)
+      }
     }
   }
 
@@ -663,6 +854,229 @@ async function ensureTemplates() {
 async function loadTemplate(filename) {
   const templatesDir = await ensureTemplates()
   return readText(path.join(templatesDir, filename))
+}
+
+async function copyMissingTree(sourcePath, targetPath) {
+  const sourceStats = await fs.lstat(sourcePath)
+  if (sourceStats.isSymbolicLink()) {
+    return copyMissingTree(await fs.realpath(sourcePath), targetPath)
+  }
+
+  if (sourceStats.isDirectory()) {
+    await ensureDir(targetPath)
+    const entries = await fs.readdir(sourcePath)
+    for (const entry of entries.sort((left, right) => left.localeCompare(right))) {
+      await copyMissingTree(path.join(sourcePath, entry), path.join(targetPath, entry))
+    }
+    return
+  }
+
+  if (await pathExists(targetPath)) {
+    return
+  }
+
+  await ensureDir(path.dirname(targetPath))
+  await fs.copyFile(sourcePath, targetPath)
+  await fs.chmod(targetPath, sourceStats.mode)
+}
+
+async function syncBundledSkills(targetSkillsPath) {
+  if (!(await pathExists(BUNDLED_SKILLS_DIR))) {
+    return {
+      copiedSkills: [],
+      skippedSkills: [],
+      skippedReason: "bundle-missing",
+    }
+  }
+
+  if (path.resolve(BUNDLED_SKILLS_DIR) === path.resolve(targetSkillsPath)) {
+    return {
+      copiedSkills: [],
+      skippedSkills: [],
+      skippedReason: "self",
+    }
+  }
+
+  await ensureDir(targetSkillsPath)
+
+  const copiedSkills = []
+  const skippedSkills = []
+  const sourceEntries = await fs.readdir(BUNDLED_SKILLS_DIR, { withFileTypes: true })
+
+  for (const entry of sourceEntries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (entry.name.startsWith(".")) {
+      continue
+    }
+
+    if (EXCLUDED_BUNDLED_SKILLS.has(entry.name)) {
+      skippedSkills.push(entry.name)
+      continue
+    }
+
+    const sourcePath = path.join(BUNDLED_SKILLS_DIR, entry.name)
+    const targetPath = path.join(targetSkillsPath, entry.name)
+    const targetExisted = await pathExists(targetPath)
+    await copyMissingTree(sourcePath, targetPath)
+    if (!targetExisted) {
+      copiedSkills.push(entry.name)
+    }
+  }
+
+  return {
+    copiedSkills,
+    skippedSkills,
+    skippedReason: "",
+  }
+}
+
+function buildLaneSections(laneIds) {
+  return laneIds.flatMap((id) => [
+    `[lanes.${id}]`,
+    `handoff_path = ".claude/collab/HANDOFF_${id.toUpperCase()}.md"`,
+    "",
+  ]).join("\n").trimEnd()
+}
+
+function buildProjectTemplateVariables(repoRoot, agentNames = [], timestamp = formatIsoTimestamp(), options = {}) {
+  const collaborators = normalizeStringList(agentNames)
+  const lanesPerAgent = normalizePositiveInteger(
+    options.lanesPerAgent,
+    DEFAULT_LANES_PER_AGENT,
+    "--lanes-per-agent",
+  )
+  const configSeed = {
+    lanes: { per_agent: lanesPerAgent },
+    ...(collaborators.length > 0 ? { agents: { active: collaborators } } : {}),
+  }
+
+  return {
+    repoName: normalizeRepoName(repoRoot),
+    repoPath: repoRoot,
+    timestamp,
+    activeAgentsToml: renderTomlArray(collaborators),
+    writerDefault: collaborators[0] || "",
+    reviewerDefault: collaborators[1] || "",
+    lanesPerAgent,
+    laneSections: buildLaneSections(getDerivedLaneIds(configSeed)),
+  }
+}
+
+function findTomlSectionBounds(content, sectionName) {
+  const lines = content.split("\n")
+  const header = `[${sectionName}]`
+  let start = -1
+  let end = lines.length
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() === header) {
+      start = index
+      break
+    }
+  }
+
+  if (start === -1) {
+    return null
+  }
+
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\[.+\]$/.test(lines[index].trim())) {
+      end = index
+      break
+    }
+  }
+
+  return { lines, start, end }
+}
+
+function upsertTomlEntryInSection(content, sectionName, key, valueLine, { createSectionLines = [] } = {}) {
+  const bounds = findTomlSectionBounds(content, sectionName)
+  if (!bounds) {
+    const appendix = createSectionLines.length > 0 ? createSectionLines : [`[${sectionName}]`, valueLine]
+    return `${content.trimEnd()}\n\n${appendix.join("\n")}\n`
+  }
+
+  const lines = [...bounds.lines]
+  const entryIndex = lines
+    .slice(bounds.start + 1, bounds.end)
+    .findIndex((line) => new RegExp(`^${key}\\s*=`).test(line.trim()))
+
+  if (entryIndex >= 0) {
+    lines[bounds.start + 1 + entryIndex] = valueLine
+  } else {
+    lines.splice(bounds.start + 1, 0, valueLine)
+  }
+
+  return lines.join("\n")
+}
+
+function syncAgentsSectionInToml(content, agentNames) {
+  const collaborators = normalizeStringList(agentNames)
+  const createSectionLines = [
+    "[agents]",
+    `active = ${renderTomlArray(collaborators)}`,
+    `writer_default = "${escapeTomlString(collaborators[0] || "")}"`,
+    `reviewer_default = "${escapeTomlString(collaborators[1] || "")}"`,
+  ]
+
+  let nextContent = upsertTomlEntryInSection(
+    content,
+    "agents",
+    "active",
+    `active = ${renderTomlArray(collaborators)}`,
+    { createSectionLines },
+  )
+  nextContent = upsertTomlEntryInSection(
+    nextContent,
+    "agents",
+    "writer_default",
+    `writer_default = "${escapeTomlString(collaborators[0] || "")}"`,
+  )
+  nextContent = upsertTomlEntryInSection(
+    nextContent,
+    "agents",
+    "reviewer_default",
+    `reviewer_default = "${escapeTomlString(collaborators[1] || "")}"`,
+  )
+
+  return nextContent
+}
+
+function syncLaneConfigInToml(content, laneIds, options = {}) {
+  const perAgent = normalizePositiveInteger(
+    options.perAgent,
+    DEFAULT_LANES_PER_AGENT,
+    "[lanes].per_agent",
+  )
+  let nextContent = content
+  const laneSectionBounds = findTomlSectionBounds(nextContent, "lanes")
+
+  if (!laneSectionBounds) {
+    const lanesBlock = [
+      "[lanes]",
+      "enabled = true",
+      `per_agent = ${perAgent}`,
+      "",
+      buildLaneSections(laneIds),
+    ].join("\n")
+    return `${nextContent.trimEnd()}\n\n${lanesBlock}\n`
+  }
+
+  const laneSectionLines = laneSectionBounds.lines
+    .slice(laneSectionBounds.start + 1, laneSectionBounds.end)
+    .map((line) => line.trim())
+  if (!laneSectionLines.some((line) => /^enabled\s*=/.test(line))) {
+    nextContent = upsertTomlEntryInSection(nextContent, "lanes", "enabled", "enabled = true")
+  }
+  nextContent = upsertTomlEntryInSection(nextContent, "lanes", "per_agent", `per_agent = ${perAgent}`)
+
+  for (const laneId of laneIds) {
+    if (findTomlSectionBounds(nextContent, `lanes.${laneId}`)) {
+      continue
+    }
+    nextContent = `${nextContent.trimEnd()}\n\n${buildLaneSections([laneId])}\n`
+  }
+
+  return nextContent
 }
 
 function extractManagedBlock(content) {
@@ -748,15 +1162,57 @@ async function initRepo(repoPathInput, options = {}) {
   await ensureDir(path.dirname(repoPaths.handoffPath))
 
   const now = formatIsoTimestamp()
-  const templateVars = { repoName, repoPath: repoRoot, timestamp: now }
+  const requestedAgents = normalizeStringList(options.agent)
+  const shouldScaffoldBundledSkills = options.scaffoldBundledSkills === true
+  const requestedLanesPerAgent = normalizePositiveInteger(
+    options.lanesPerAgent,
+    undefined,
+    "--lanes-per-agent",
+  )
+  const templateVars = buildProjectTemplateVariables(repoRoot, requestedAgents, now, {
+    lanesPerAgent: requestedLanesPerAgent,
+  })
   const instructionTemplate = await loadTemplate("instruction-stub.md")
 
   if (!(await pathExists(repoPaths.projectTomlPath))) {
     const tomlTemplate = await loadTemplate("project.toml")
     await writeText(repoPaths.projectTomlPath, renderTemplate(tomlTemplate, templateVars))
+  } else {
+    let existingToml = await readText(repoPaths.projectTomlPath)
+    const originalToml = existingToml
+    const existingConfig = parseProjectToml(existingToml)
+
+    if (requestedAgents.length > 0 || existingConfig?.agents?.active !== undefined) {
+      const nextAgents = requestedAgents.length > 0
+        ? requestedAgents
+        : getCollaborationAgentNames(existingConfig)
+      existingToml = syncAgentsSectionInToml(existingToml, nextAgents)
+    }
+
+    const nextConfig = parseProjectToml(existingToml)
+    const nextLanesPerAgent = requestedLanesPerAgent ?? getLanesPerAgent(nextConfig)
+    const desiredLaneIds = getDerivedLaneIds({
+      ...nextConfig,
+      lanes: {
+        ...(nextConfig.lanes || {}),
+        per_agent: nextLanesPerAgent,
+      },
+    })
+    const syncedToml = syncLaneConfigInToml(existingToml, desiredLaneIds, {
+      perAgent: nextLanesPerAgent,
+    })
+
+    if (syncedToml !== originalToml) {
+      await writeText(repoPaths.projectTomlPath, syncedToml)
+    }
   }
 
-  const managedBlock = await getManagedBlockTemplate()
+  const config = await readProjectConfig(repoRoot)
+  const managedBlock = await getManagedBlockTemplate(repoRoot)
+  const instructionTemplateVars = {
+    roleLabel: "agent",
+    ...buildManagedBlockVariables(config),
+  }
 
   const agentsExists = await pathExists(repoPaths.agentsPath)
   const agentsContent = agentsExists ? await readText(repoPaths.agentsPath) : ""
@@ -764,7 +1220,7 @@ async function initRepo(repoPathInput, options = {}) {
     repoPaths.agentsPath,
     agentsExists
       ? replaceManagedBlock(agentsContent, managedBlock)
-      : renderTemplate(instructionTemplate, { roleLabel: "agent" }),
+      : renderTemplate(instructionTemplate, instructionTemplateVars),
   )
 
   const claudeExists = await pathExists(repoPaths.claudePath)
@@ -773,17 +1229,20 @@ async function initRepo(repoPathInput, options = {}) {
     repoPaths.claudePath,
     claudeExists
       ? replaceManagedBlock(claudeContent, managedBlock)
-      : renderTemplate(instructionTemplate, { roleLabel: "Claude" }),
+      : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config) }),
   )
 
-  if (!(await pathExists(repoPaths.handoffPath))) {
-    const handoffTemplate = await loadTemplate("handoff.md")
-    await writeText(repoPaths.handoffPath, renderTemplate(handoffTemplate, templateVars))
+  // Only create the single-file handoff if lanes are NOT enabled.
+  // When lanes are enabled, per-lane handoff files are created below instead.
+  const laneConfigs = getLaneConfigs(config)
+  if (!laneConfigs) {
+    if (!(await pathExists(repoPaths.handoffPath))) {
+      const handoffTemplate = await loadTemplate("handoff.md")
+      await writeText(repoPaths.handoffPath, renderTemplate(handoffTemplate, { ...templateVars, laneId: "a" }))
+    }
   }
 
   // Initialize lane handoff files if lanes are configured
-  const config = await readProjectConfig(repoRoot)
-  const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
     for (const lane of laneConfigs) {
       const laneHandoffPath = path.isAbsolute(lane.handoffPath)
@@ -792,7 +1251,7 @@ async function initRepo(repoPathInput, options = {}) {
       await ensureDir(path.dirname(laneHandoffPath))
       if (!(await pathExists(laneHandoffPath))) {
         const handoffTemplate = await loadTemplate("handoff.md")
-        await writeText(laneHandoffPath, renderTemplate(handoffTemplate, { ...templateVars, repoName: `${repoName} (lane ${lane.id})` }))
+        await writeText(laneHandoffPath, renderTemplate(handoffTemplate, { ...templateVars, laneId: lane.id, repoName: `${repoName} (lane ${lane.id})` }))
       }
     }
     // Initialize empty lock registry
@@ -800,6 +1259,10 @@ async function initRepo(repoPathInput, options = {}) {
       await writeLockRegistry(repoRoot, { version: 1, locks: [] })
     }
   }
+
+  const bundledSkillsResult = shouldScaffoldBundledSkills
+    ? await syncBundledSkills(repoPaths.skillsPath)
+    : null
 
   upsertRepoEntry(registry, {
     name: repoName,
@@ -823,7 +1286,36 @@ async function initRepo(repoPathInput, options = {}) {
     registryPath,
     repoPaths,
     hookResult,
+    bundledSkillsResult,
   }
+}
+
+async function syncActiveAgents(repoRoot, options = {}) {
+  const config = await readProjectConfig(repoRoot)
+  if (!config) {
+    throw new Error("`btrain agents` requires an initialized repo. Run `btrain init <repo-path>` first.")
+  }
+
+  const requestedAgents = normalizeStringList(options.agent)
+  if (requestedAgents.length === 0) {
+    throw new Error("`btrain agents` requires at least one `--agent <name>`.")
+  }
+
+  const currentAgents = getCollaborationAgentNames(config)
+  const nextAgents = options.mode === "add"
+    ? [
+      ...currentAgents,
+      ...requestedAgents.filter(
+        (candidate) => !currentAgents.some((existing) => existing.toLowerCase() === candidate.toLowerCase()),
+      ),
+    ]
+    : requestedAgents
+
+  return initRepo(repoRoot, {
+    agent: nextAgents,
+    lanesPerAgent: options.lanesPerAgent,
+    scaffoldBundledSkills: false,
+  })
 }
 
 async function findRepoRoot(startPath = process.cwd()) {
@@ -870,8 +1362,8 @@ function buildCurrentSection(current) {
     "## Current",
     "",
     `Task: ${merged.task || ""}`,
-    `Owner: ${merged.owner || ""}`,
-    `Reviewer: ${merged.reviewer || ""}`,
+    `Active Agent: ${merged.owner || ""}`,
+    `Peer Reviewer: ${merged.reviewer || ""}`,
     `Status: ${merged.status || ""}`,
     `Review Mode: ${merged.reviewMode || ""}`,
     `Locked Files: ${lockedFiles}`,
@@ -888,22 +1380,45 @@ function buildCurrentSection(current) {
 }
 
 function buildContextForReviewerSection(options = {}) {
-  const whyLine = options.bootstrap ? "- Bootstrap created by `btrain init`." : "- Fill this in before handoff"
+  const whyLines = normalizeParagraphLines(
+    options.whyLines,
+    options.bootstrap ? ["- Bootstrap created by `btrain init`."] : ["- Fill this in before handoff"],
+  )
+  const preflightLines = normalizeBulletLines(
+    options.preflightLines,
+    ["- [ ] Checked locked files, nearby diff, and likely risk areas before editing"],
+  )
+  const changedLines = normalizeBulletLines(options.changedLines, ["- None yet"])
+  const verificationLines = normalizeBulletLines(options.verificationLines, ["- [ ] Fill this in before handoff"])
+  const gapLines = normalizeBulletLines(options.gapLines, ["- [ ] Fill this in before handoff"])
+  const reviewAskLines = normalizeBulletLines(options.reviewAskLines, ["- [ ] Fill this in before handoff"])
 
   return [
-    "## Context for Reviewer",
+    "## Context for Peer Review",
+    "",
+    "Pre-flight review:",
+    "",
+    ...preflightLines,
     "",
     "Files changed:",
     "",
-    "- None yet",
+    ...changedLines,
+    "",
+    "Verification run:",
+    "",
+    ...verificationLines,
+    "",
+    "Remaining gaps:",
+    "",
+    ...gapLines,
     "",
     "Why this was done:",
     "",
-    whyLine,
+    ...whyLines,
     "",
     "Specific review asks:",
     "",
-    "- [ ] Fill this in before handoff",
+    ...reviewAskLines,
   ].join("\n")
 }
 
@@ -913,6 +1428,120 @@ function buildPendingReviewResponseSection() {
     "",
     "Pending.",
   ].join("\n")
+}
+
+function normalizeOptionArray(value) {
+  if (value === undefined) {
+    return undefined
+  }
+  return Array.isArray(value) ? value : [value]
+}
+
+function normalizeBulletLines(value, fallbackLines) {
+  const lines = normalizeOptionArray(value)
+    ?.flatMap((item) => String(item).split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => (line.startsWith("- ") ? line : `- ${line}`))
+
+  return lines && lines.length > 0 ? lines : fallbackLines
+}
+
+function normalizeParagraphLines(value, fallbackLines) {
+  const lines = normalizeOptionArray(value)
+    ?.flatMap((item) => String(item).split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  return lines && lines.length > 0 ? lines : fallbackLines
+}
+
+function parseContextForReviewerSection(content) {
+  const bounds = findSectionBounds(content, /^## Context for (Reviewer|Peer Review).*$/)
+  if (!bounds) {
+    return {
+      preflightLines: [],
+      changedLines: [],
+      verificationLines: [],
+      gapLines: [],
+      whyLines: [],
+      reviewAskLines: [],
+    }
+  }
+
+  const result = {
+    preflightLines: [],
+    changedLines: [],
+    verificationLines: [],
+    gapLines: [],
+    whyLines: [],
+    reviewAskLines: [],
+  }
+
+  let activeKey = null
+  const keyByHeading = {
+    "pre-flight review:": "preflightLines",
+    "files changed:": "changedLines",
+    "verification run:": "verificationLines",
+    "remaining gaps:": "gapLines",
+    "why this was done:": "whyLines",
+    "specific review asks:": "reviewAskLines",
+  }
+
+  for (const rawLine of bounds.text.split("\n").slice(1)) {
+    const trimmed = rawLine.trim()
+    if (!trimmed) {
+      continue
+    }
+
+    const nextKey = keyByHeading[trimmed.toLowerCase()]
+    if (nextKey) {
+      activeKey = nextKey
+      continue
+    }
+
+    if (!activeKey) {
+      continue
+    }
+
+    result[activeKey].push(trimmed)
+  }
+
+  return result
+}
+
+function mergeContextForReviewerSection(existingContent, options = {}) {
+  const existing = parseContextForReviewerSection(existingContent)
+  const explicitPreflight = options.preflight === true
+    ? ["- [x] Checked locked files, nearby diff, and likely risk areas before editing"]
+    : options.preflight
+  const nextPreflightLines = explicitPreflight !== undefined
+    ? normalizeBulletLines(explicitPreflight, ["- [x] Checked locked files, nearby diff, and likely risk areas before editing"])
+    : existing.preflightLines
+  const nextChangedLines = options.changed !== undefined
+    ? normalizeBulletLines(options.changed, ["- None yet"])
+    : existing.changedLines
+  const nextVerificationLines = options.verification !== undefined
+    ? normalizeBulletLines(options.verification, ["- [ ] Fill this in before handoff"])
+    : existing.verificationLines
+  const nextGapLines = options.gap !== undefined
+    ? normalizeBulletLines(options.gap, ["- [ ] Fill this in before handoff"])
+    : existing.gapLines
+  const nextWhyLines = options.why !== undefined
+    ? normalizeParagraphLines(options.why, ["- Fill this in before handoff"])
+    : existing.whyLines
+  const nextReviewAskLines = options["review-ask"] !== undefined
+    ? normalizeBulletLines(options["review-ask"], ["- [ ] Fill this in before handoff"])
+    : existing.reviewAskLines
+
+  return buildContextForReviewerSection({
+    preflightLines: nextPreflightLines,
+    changedLines: nextChangedLines,
+    verificationLines: nextVerificationLines,
+    gapLines: nextGapLines,
+    whyLines: nextWhyLines,
+    reviewAskLines: nextReviewAskLines,
+  })
 }
 
 function parseCurrentSection(content) {
@@ -925,7 +1554,9 @@ function parseCurrentSection(content) {
   const keyMap = {
     task: "task",
     owner: "owner",
+    "active agent": "owner",
     reviewer: "reviewer",
+    "peer reviewer": "reviewer",
     status: "status",
     "review mode": "reviewMode",
     "locked files": "lockedFiles",
@@ -1039,7 +1670,7 @@ async function updateHandoff(repoRoot, updates, options = {}) {
   if (options.contextSectionText) {
     nextContent = replaceOrPrependSection(
       nextContent,
-      /^## Context for Reviewer.*$/,
+      /^## Context for (Reviewer|Peer Review).*$/,
       options.contextSectionText,
     )
   }
@@ -1063,11 +1694,16 @@ async function updateHandoff(repoRoot, updates, options = {}) {
 }
 
 async function claimHandoff(repoRoot, options) {
-  if (!options.task || !options.owner || !options.reviewer) {
-    throw new Error("`btrain handoff claim` requires --task, --owner, and --reviewer.")
+  if (!options.reviewer) {
+    options.reviewer = "any-other"
+  }
+
+  if (!options.task || !options.owner) {
+    throw new Error("`btrain handoff claim` requires --task and --owner.")
   }
 
   const config = await readProjectConfig(repoRoot)
+  const configuredAgents = getConfiguredAgentNames(config)
   const laneConfigs = getLaneConfigs(config)
   let laneId = options.lane || null
 
@@ -1082,18 +1718,43 @@ async function claimHandoff(repoRoot, options) {
 
   // Acquire file locks if lanes enabled and files specified
   const files = options.files ? parseCsvList(options.files) : []
-  if (laneConfigs && laneId && files.length > 0) {
+  if (laneConfigs && laneId) {
+    const existingLane = await readLaneState(repoRoot, config, laneId)
+    if (!["idle", "resolved"].includes(existingLane.status)) {
+      throw new Error(
+        `Lane ${laneId} is already ${existingLane.status}. Use \`btrain handoff update --lane ${laneId}\` or \`btrain handoff resolve --lane ${laneId}\`.`,
+      )
+    }
+    if (files.length === 0) {
+      throw new Error(`Lane ${laneId} claims require --files so in-progress work maps cleanly to file locks.`)
+    }
     await acquireLocks(repoRoot, laneId, options.owner, files)
+  }
+
+  const resolvedReviewer = inferPeerReviewer({
+    actor: options.owner,
+    reviewer: options.reviewer,
+    currentReviewer: "",
+    owner: options.owner,
+    currentOwner: "",
+    configuredAgents,
+  })
+
+  if (!resolvedReviewer) {
+    throw new Error(
+      `Could not infer a reviewer different from "${options.owner}". Pass --reviewer <other-agent> or configure additional agents in .btrain/project.toml.`,
+    )
   }
 
   const updates = {
     task: options.task,
     owner: options.owner,
-    reviewer: options.reviewer,
+    reviewer: resolvedReviewer,
     status: "in-progress",
     reviewMode: options.mode || "manual",
     lockedFiles: files,
-    nextAction: options.next || "Continue implementation and prepare reviewer context.",
+    nextAction:
+      options.next || "Work within the locked files, keep the lane in-progress, and hand off for review when ready.",
     base: options.base || "",
     lastUpdated: `${options.owner} ${formatIsoTimestamp()}`,
   }
@@ -1129,6 +1790,15 @@ async function claimHandoff(repoRoot, options) {
 }
 
 async function patchHandoff(repoRoot, options) {
+  const config = await readProjectConfig(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+  if (laneConfigs && !options.lane) {
+    throw new Error("`btrain handoff update` requires --lane when [lanes] is enabled.")
+  }
+
+  const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
+  const configuredAgents = getConfiguredAgentNames(config)
+
   const updates = {}
   if (options.task !== undefined) {
     updates.task = options.task
@@ -1155,30 +1825,138 @@ async function patchHandoff(repoRoot, options) {
     updates.base = options.base
   }
 
-  updates.lastUpdated = `${options.actor || "btrain"} ${formatIsoTimestamp()}`
+  updates.lastUpdated = `${resolvedActor || "btrain"} ${formatIsoTimestamp()}`
 
   // Lane-aware patch
   const laneId = options.lane
   if (laneId) {
-    const config = await readProjectConfig(repoRoot)
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
     if (handoffPath) {
-      return updateHandoff(repoRoot, updates, { config, overrideHandoffPath: handoffPath })
+      const existingCurrent = await readLaneState(repoRoot, config, laneId)
+      const existingContent = await readText(handoffPath)
+      const locks = await listLocks(repoRoot)
+      const currentLane = decorateLaneState(existingCurrent, getLaneLocks(locks, laneId))
+      const nextStatus = updates.status ?? existingCurrent.status
+      const effectiveOwner = updates.owner ?? existingCurrent.owner ?? resolvedActor ?? "btrain"
+
+      if (options.status === "needs-review") {
+        const inferredReviewer = inferPeerReviewer({
+          actor: resolvedActor,
+          reviewer: updates.reviewer,
+          currentReviewer: existingCurrent.reviewer,
+          owner: updates.owner,
+          currentOwner: existingCurrent.owner,
+          configuredAgents,
+        })
+
+        if (!inferredReviewer) {
+          throw new Error(
+            `Could not infer a reviewer different from "${resolvedActor || "the actor"}". Pass --reviewer <other-agent> or configure additional agents in .btrain/project.toml.`,
+          )
+        }
+
+        updates.reviewer = inferredReviewer
+      }
+
+      if (nextStatus === "resolved") {
+        throw new Error(`Use \`btrain handoff resolve --lane ${laneId}\` so btrain can clear the lane locks.`)
+      }
+
+      if (isLaneActiveStatus(nextStatus) && currentLane.lockState === "mismatch" && options.files === undefined) {
+        throw new Error(
+          `Lane ${laneId} lock state is out of sync. Re-run \`btrain handoff update --lane ${laneId} --files "..." --actor "${resolvedActor || effectiveOwner}"\` to resync it.`,
+        )
+      }
+
+      const effectiveFiles = normalizePathList(
+        options.files !== undefined
+          ? parseCsvList(options.files)
+          : currentLane.handoffPaths.length > 0
+            ? currentLane.handoffPaths
+            : currentLane.lockPaths,
+      )
+
+      if (isLaneActiveStatus(nextStatus)) {
+        if (effectiveFiles.length === 0) {
+          throw new Error(
+            `Lane ${laneId} cannot be ${nextStatus} without locked files. Pass --files to declare the working set.`,
+          )
+        }
+        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles)
+        updates.lockedFiles = effectiveFiles
+      } else if (currentLane.lockCount > 0 || currentLane.handoffPaths.length > 0 || options.files !== undefined) {
+        await releaseLocks(repoRoot, laneId)
+        updates.lockedFiles = []
+      }
+
+      const contextSectionText =
+        options.preflight !== undefined
+        || options.changed !== undefined
+        || options.verification !== undefined
+        || options.gap !== undefined
+        || options.why !== undefined
+        || options["review-ask"] !== undefined
+          ? mergeContextForReviewerSection(existingContent, options)
+          : undefined
+
+      return updateHandoff(repoRoot, updates, {
+        config,
+        overrideHandoffPath: handoffPath,
+        contextSectionText,
+      })
     }
   }
 
-  return updateHandoff(repoRoot, updates)
+  const existingCurrent = await readCurrentState(repoRoot)
+  const { handoffPath } = getConfiguredRepoPaths(repoRoot, config)
+  const existingContent = (await pathExists(handoffPath)) ? await readText(handoffPath) : renderHandoffTemplate(normalizeRepoName(repoRoot))
+
+  if (options.status === "needs-review") {
+    const inferredReviewer = inferPeerReviewer({
+      actor: resolvedActor,
+      reviewer: updates.reviewer,
+      currentReviewer: existingCurrent.reviewer,
+      owner: updates.owner,
+      currentOwner: existingCurrent.owner,
+      configuredAgents,
+    })
+
+    if (!inferredReviewer) {
+      throw new Error(
+        `Could not infer a reviewer different from "${resolvedActor || "the actor"}". Pass --reviewer <other-agent> or configure additional agents in .btrain/project.toml.`,
+      )
+    }
+
+    updates.reviewer = inferredReviewer
+  }
+
+  const contextSectionText =
+    options.preflight !== undefined
+    || options.changed !== undefined
+    || options.verification !== undefined
+    || options.gap !== undefined
+    || options.why !== undefined
+    || options["review-ask"] !== undefined
+      ? mergeContextForReviewerSection(existingContent, options)
+      : undefined
+
+  return updateHandoff(repoRoot, updates, { contextSectionText })
 }
 
 async function resolveHandoff(repoRoot, options) {
-  const actorLabel = options.actor || options.owner || "btrain"
+  const config = await readProjectConfig(repoRoot)
+  const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
+  const actorLabel = resolvedActor || options.owner || "btrain"
+  const laneConfigs = getLaneConfigs(config)
   const laneId = options.lane
   let overrideHandoffPath = null
-  let config = null
 
   // Lane-aware resolve: read state from lane-specific file
+  if (laneConfigs && !laneId) {
+    throw new Error("`btrain handoff resolve` requires --lane when [lanes] is enabled.")
+  }
+
   if (laneId) {
-    config = await readProjectConfig(repoRoot)
     overrideHandoffPath = getLaneHandoffPath(repoRoot, config, laneId)
   }
 
@@ -1204,6 +1982,7 @@ async function resolveHandoff(repoRoot, options) {
     repoRoot,
     {
       status: "resolved",
+      lockedFiles: laneId ? [] : existingCurrent.lockedFiles,
       nextAction: options.next || options.summary || "Await the next task.",
       lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
     },
@@ -1219,35 +1998,52 @@ async function resolveHandoff(repoRoot, options) {
 
 function buildLaneGuidance(laneId, current) {
   const prefix = `[Lane ${laneId}] `
+  const lockLine =
+    current.lockState === "missing"
+      ? `Lock state: missing. Re-run \`btrain handoff update --lane ${laneId} --status in-progress --files "..." --actor "${current.owner || "owner"}"\`.`
+      : current.lockState === "mismatch"
+        ? `Lock state: mismatch between the handoff and \`.btrain/locks.json\`. Re-run \`btrain handoff update --lane ${laneId} --files "..." --actor "${current.owner || "owner"}"\`.`
+        : current.lockCount > 0
+          ? `Locked files: ${formatLockedPaths(current.lockPaths)}.`
+          : "Locked files: (none)."
 
   switch (current.status) {
     case "needs-review": {
-      const reviewer = current.reviewer || "the reviewer"
-      const owner = current.owner || "the owner"
+      const reviewer = current.reviewer || "the peer reviewer"
+      const owner = current.owner || "the active agent"
       const reviewMode = normalizeReviewMode(current.reviewMode) || "manual"
       const reviewerInstruction =
         reviewMode === "parallel" || reviewMode === "hybrid"
           ? `${reviewer}: run \`btrain review run\`, then \`btrain handoff resolve --lane ${laneId} --summary "..."\`.`
           : `${reviewer}: review, then \`btrain handoff resolve --lane ${laneId} --summary "..."\`.`
       return [
-        `${prefix}Waiting on ${reviewer} to review.`,
+        `${prefix}Waiting on peer review from ${reviewer}.`,
+        lockLine,
         reviewerInstruction,
         `${owner}: work on your other lane while waiting.`,
       ].join("\n")
     }
     case "in-progress": {
-      const owner = current.owner || "the owner"
+      const owner = current.owner || "the active agent"
       return [
-        `${prefix}${owner} is working on this.`,
-        `When done: fill in reviewer context and only then run \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
+        `${prefix}Active agent: ${owner}.`,
+        lockLine,
+        `${owner}: start with a short pre-flight review of the locked files, nearby diff, and likely risk areas before editing.`,
+        `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
       ].join("\n")
     }
     case "resolved":
-      return `${prefix}Resolved. Ready for a new task: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`
+      return [
+        `${prefix}Resolved. Ready for a new task: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
+        lockLine,
+      ].join("\n")
     case "idle":
-      return `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`
+      return [
+        `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
+        lockLine,
+      ].join("\n")
     default:
-      return `${prefix}Status: ${current.status}`
+      return `${prefix}Status: ${current.status}\n${lockLine}`
   }
 }
 
@@ -1256,11 +2052,12 @@ async function checkHandoff(repoRoot) {
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const repoName = config?.name || normalizeRepoName(repoRoot)
   const laneConfigs = getLaneConfigs(config)
+  const agentCheck = detectCurrentAgent(config)
 
   // Multi-lane mode
   if (laneConfigs) {
-    const laneStates = await readAllLaneStates(repoRoot, config)
     const locks = await listLocks(repoRoot)
+    const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), locks)
     const laneGuidances = laneStates.map((state) => buildLaneGuidance(state._laneId, state))
 
     let guidance = laneGuidances.join("\n\n")
@@ -1277,6 +2074,7 @@ async function checkHandoff(repoRoot) {
       current: laneStates[0] || { ...DEFAULT_CURRENT },
       lanes: laneStates,
       locks,
+      agentCheck,
       guidance,
     }
   }
@@ -1288,26 +2086,26 @@ async function checkHandoff(repoRoot) {
 
   switch (current.status) {
     case "needs-review": {
-      const reviewer = current.reviewer || "the reviewer"
-      const owner = current.owner || "the owner"
+      const reviewer = current.reviewer || "the peer reviewer"
+      const owner = current.owner || "the active agent"
       const reviewMode = normalizeReviewMode(current.reviewMode) || "manual"
       const reviewerInstruction =
         reviewMode === "parallel" || reviewMode === "hybrid"
           ? `If you are ${reviewer}: run \`btrain review run\` to generate the automated report, inspect \`.btrain/reviews/\`, then run \`btrain handoff resolve --summary "..."\`.`
           : `If you are ${reviewer}: do the review, then run \`btrain handoff resolve --summary "..."\`.`
       guidance = [
-        `Waiting on ${reviewer} to review.`,
+        `Waiting on peer review from ${reviewer}.`,
         reviewerInstruction,
         `If you are ${owner}: it's not your turn. Wait for the review.`,
       ].join("\n")
       break
     }
     case "in-progress": {
-      const owner = current.owner || "the owner"
-      const reviewer = current.reviewer || "the reviewer"
+      const owner = current.owner || "the active agent"
+      const reviewer = current.reviewer || "the peer reviewer"
       guidance = [
-        `${owner} is working on this.`,
-        `If you are ${owner}: continue the task. Do not stop at status. When real work is done, fill in the Context for Reviewer section and only then run \`btrain handoff update --status needs-review --actor "${owner}"\`.`,
+        `Active agent: ${owner}.`,
+        `If you are ${owner}: start with a short pre-flight review of the locked files, nearby diff, and likely risk areas, then continue the task. When done, fill in the Context for Peer Review section and run \`btrain handoff update --status needs-review --actor "${owner}"\`.`,
         `If you are ${reviewer}: it's not your turn yet.`,
       ].join("\n")
       break
@@ -1341,6 +2139,7 @@ async function checkHandoff(repoRoot) {
     repoRoot,
     handoffPath: repoPaths.handoffPath,
     current,
+    agentCheck,
     guidance,
   }
 }
@@ -1495,6 +2294,249 @@ function getAgentRunnerMap(config) {
   return Object.fromEntries(
     Object.entries(runners).filter(([, value]) => typeof value === "string" && value.trim()),
   )
+}
+
+function normalizeAgentName(value) {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function isAnyOtherReviewerValue(value) {
+  const normalized = normalizeAgentName(value)
+    .toLowerCase()
+    .replaceAll(/[\s_]+/g, "-")
+  return normalized === "any-other"
+}
+
+function getConfiguredAgentNames(config) {
+  const agentNames = []
+  const seen = new Set()
+
+  const addAgent = (value) => {
+    const agentName = normalizeAgentName(value)
+    if (!agentName || isAnyOtherReviewerValue(agentName)) {
+      return
+    }
+
+    const key = agentName.toLowerCase()
+    if (seen.has(key)) {
+      return
+    }
+
+    seen.add(key)
+    agentNames.push(agentName)
+  }
+
+  for (const agentName of getCollaborationAgentNames(config)) {
+    addAgent(agentName)
+  }
+
+  addAgent(config?.agents?.writer_default)
+  addAgent(config?.agents?.reviewer_default)
+
+  for (const agentName of Object.keys(getAgentRunnerMap(config))) {
+    addAgent(agentName)
+  }
+
+  return agentNames
+}
+
+function canonicalizeAgentName(agentNames, value) {
+  const requestedName = normalizeAgentName(value)
+  if (!requestedName) {
+    return ""
+  }
+
+  return agentNames.find((agentName) => agentName.toLowerCase() === requestedName.toLowerCase()) || requestedName
+}
+
+function tokenizeAgentIdentity(value) {
+  return Array.from(
+    new Set(
+      normalizeAgentName(value)
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((token) => token.length >= 3)
+        .filter((token) => !["agent", "manual", "mode", "notify", "permission", "review"].includes(token)),
+    ),
+  )
+}
+
+function collectRuntimeAgentHints(env = process.env) {
+  const hints = new Set()
+
+  const addHintsFromText = (value) => {
+    const text = String(value || "").toLowerCase()
+    if (!text) {
+      return
+    }
+
+    if (text.includes("codex")) {
+      hints.add("codex")
+    }
+    if (text.includes("claude")) {
+      hints.add("claude")
+    }
+    if (text.includes("gemini")) {
+      hints.add("gemini")
+    }
+    if (text.includes("opus")) {
+      hints.add("opus")
+    }
+  }
+
+  for (const [key, value] of Object.entries(env || {})) {
+    addHintsFromText(key)
+    addHintsFromText(value)
+  }
+
+  return [...hints]
+}
+
+function detectCurrentAgent(config, env = process.env) {
+  const configuredAgents = getConfiguredAgentNames(config)
+  if (configuredAgents.length === 0) {
+    return {
+      status: "unconfigured",
+      agentName: "",
+      candidates: [],
+      configuredAgents,
+      sourceLabel: "no agents configured",
+    }
+  }
+
+  const explicitAgent = normalizeAgentName(env.BTRAIN_AGENT || env.BRAIN_TRAIN_AGENT)
+  if (explicitAgent) {
+    const matchedAgent = configuredAgents.find((agentName) => agentName.toLowerCase() === explicitAgent.toLowerCase())
+    if (matchedAgent) {
+      return {
+        status: "verified",
+        agentName: matchedAgent,
+        candidates: [matchedAgent],
+        configuredAgents,
+        sourceLabel: `env override (${explicitAgent})`,
+      }
+    }
+
+    return {
+      status: "unknown",
+      agentName: "",
+      candidates: [],
+      configuredAgents,
+      sourceLabel: `env override (${explicitAgent})`,
+    }
+  }
+
+  const runnerMap = getAgentRunnerMap(config)
+  const runtimeHints = collectRuntimeAgentHints(env)
+
+  if (runtimeHints.length === 0) {
+    return {
+      status: "unknown",
+      agentName: "",
+      candidates: [],
+      configuredAgents,
+      sourceLabel: "no runtime hints",
+    }
+  }
+
+  const matches = configuredAgents.filter((agentName) => {
+    const identityTokens = new Set([
+      ...tokenizeAgentIdentity(agentName),
+      ...tokenizeAgentIdentity(runnerMap[agentName] || ""),
+    ])
+    return runtimeHints.some((hint) => identityTokens.has(hint))
+  })
+
+  if (matches.length === 1) {
+    return {
+      status: "verified",
+      agentName: matches[0],
+      candidates: matches,
+      configuredAgents,
+      sourceLabel: `runtime hints (${runtimeHints.join(", ")})`,
+    }
+  }
+
+  if (matches.length > 1) {
+    return {
+      status: "ambiguous",
+      agentName: "",
+      candidates: matches,
+      configuredAgents,
+      sourceLabel: `runtime hints (${runtimeHints.join(", ")})`,
+    }
+  }
+
+  return {
+    status: "unknown",
+    agentName: "",
+    candidates: [],
+    configuredAgents,
+    sourceLabel: `runtime hints (${runtimeHints.join(", ")})`,
+  }
+}
+
+function resolveVerifiedActor(config, actor, env = process.env) {
+  const configuredAgents = getConfiguredAgentNames(config)
+  const requestedActor = canonicalizeAgentName(configuredAgents, actor)
+  const agentCheck = detectCurrentAgent(config, env)
+
+  if (agentCheck.status === "verified") {
+    if (requestedActor && requestedActor.toLowerCase() !== agentCheck.agentName.toLowerCase()) {
+      throw new Error(
+        `Actor "${requestedActor}" does not match the detected agent "${agentCheck.agentName}". Update --actor or set BTRAIN_AGENT if the runtime check is wrong.`,
+      )
+    }
+
+    return {
+      actor: agentCheck.agentName,
+      agentCheck,
+    }
+  }
+
+  return {
+    actor: requestedActor,
+    agentCheck,
+  }
+}
+
+function inferPeerReviewer({ actor, reviewer, currentReviewer, owner, currentOwner, configuredAgents }) {
+  const actorKey = normalizeAgentName(actor).toLowerCase()
+  const candidates = []
+  const seen = new Set()
+  const prefersAnyOther = isAnyOtherReviewerValue(reviewer)
+
+  const addCandidate = (value) => {
+    if (isAnyOtherReviewerValue(value)) {
+      return
+    }
+
+    const candidate = canonicalizeAgentName(configuredAgents, value)
+    if (!candidate) {
+      return
+    }
+
+    const key = candidate.toLowerCase()
+    if (key === actorKey || seen.has(key)) {
+      return
+    }
+
+    seen.add(key)
+    candidates.push(candidate)
+  }
+
+  if (!prefersAnyOther) {
+    addCandidate(reviewer)
+  }
+  addCandidate(currentReviewer)
+  addCandidate(owner)
+  addCandidate(currentOwner)
+
+  for (const agentName of configuredAgents) {
+    addCandidate(agentName)
+  }
+
+  return candidates[0] || ""
 }
 
 function resolveReviewMode({ config, handoffMode, overrideMode } = {}) {
@@ -1992,7 +3034,7 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
   }
 }
 
-function resolveLoopRunner(agentName, config, repoRoot) {
+function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT } = {}) {
   const runnerMap = getAgentRunnerMap(config)
   const configuredValue = runnerMap[agentName]
 
@@ -2016,7 +3058,7 @@ function resolveLoopRunner(agentName, config, repoRoot) {
 
   const cliRunner = normalizeLoopCliRunner(configuredValue, {
     repoRoot,
-    prompt: LOOP_PROMPT,
+    prompt,
     agentName,
   })
 
@@ -2581,10 +3623,10 @@ function emitLoopOutput(onEvent, label, text) {
 
 function describeLoopAgentReason(current) {
   if (current.status === "in-progress") {
-    return "handoff status is in-progress, so the owner acts next"
+    return "handoff status is in-progress, so the active agent acts next"
   }
   if (current.status === "needs-review") {
-    return "handoff status is needs-review, so the reviewer acts next"
+    return "handoff status is needs-review, so the peer reviewer acts next"
   }
   return `handoff status is ${current.status}`
 }
@@ -2593,6 +3635,79 @@ function emitLoopTransition(onEvent, before, after) {
   onEvent("handoff transition:")
   onEvent(`  before: ${formatLoopState(before)}`)
   onEvent(`  after:  ${formatLoopState(after)}`)
+}
+
+/**
+ * One-shot push to an agent.
+ * - If the agent has a CLI runner configured: executes it directly (injects into
+ *   the running app via its IPC, e.g. `antigravity chat --reuse-window bth`).
+ * - If the runner is "notify" or unset: falls back to inbox file + macOS notification.
+ */
+async function runPush(agentName, { repoRoot, prompt = LOOP_PROMPT, onEvent = () => {} } = {}) {
+  if (repoRoot) {
+    const config = await readProjectConfig(repoRoot)
+    if (config) {
+      const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt })
+      if (runner.type === "cli") {
+        onEvent(`push: dispatching ${agentName} via CLI runner: ${runner.displayCommand}`)
+        const result = await executeLoopCliRunner(agentName, runner, {
+          repoRoot,
+          timeoutMs: 15 * 1000, // short timeout for a one-shot push
+          onEvent,
+        })
+        // Forward agent stdout so callers (and tests) can see it
+        if (result.stdout) {
+          for (const line of result.stdout.split("\n")) {
+            if (line.trim()) onEvent(line)
+          }
+        }
+        return result
+      }
+    }
+  }
+  // Fallback: inbox file + notification
+  const pushResult = await pushAgentPrompt(agentName, { prompt })
+  return { type: "notify", ...pushResult }
+}
+
+function sanitizeAgentNameForFile(agentName) {
+  return (
+    String(agentName || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "unknown-agent"
+  )
+}
+
+/**
+ * Write a pending prompt to ~/.btrain/pending/<agent>.md and send a macOS
+ * notification so the user knows to open the vendor harness for that agent.
+ * Silent no-op on non-macOS or when osascript is unavailable.
+ */
+async function pushAgentPrompt(agentName, { repoName = "", taskDescription = "", prompt = LOOP_PROMPT } = {}) {
+  const pendingDir = path.join(getBrainTrainHome(), "pending")
+  await ensureDir(pendingDir)
+
+  const sanitized = sanitizeAgentNameForFile(agentName)
+  const inboxPath = path.join(pendingDir, `${sanitized}.md`)
+  await writeText(inboxPath, prompt)
+
+  // macOS notification — best-effort, silent failure everywhere else
+  let notified = false
+  try {
+    const title = "btrain: your turn"
+    const subtitle = repoName || ""
+    const body = taskDescription ? `Task: ${taskDescription}` : `Pending prompt ready for ${agentName}`
+    const script = subtitle
+      ? `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(subtitle)}`
+      : `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`
+    await execFileAsync("osascript", ["-e", script], { timeout: 3000 })
+    notified = true
+  } catch {
+    // Notifications not available — not a critical error
+  }
+
+  return { inboxPath, notified }
 }
 
 async function runLoop({
@@ -2672,7 +3787,7 @@ async function runLoop({
 
     const before = current
     const beforeFingerprint = serializeCurrentState(before)
-    const runner = resolveLoopRunner(agentName, config, repoRoot)
+    const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt: LOOP_PROMPT })
     const roundStartedAt = Date.now()
     emitLoopBlock(onEvent, "selected agent:", [
       `${agentName}`,
@@ -2722,6 +3837,16 @@ async function runLoop({
         `[${startedAt}] waiting for ${agentName} (${runner.fallback ? "fallback notify" : "notify"} mode)...`,
       )
       onEvent(`waiting budget: ${formatLoopSeconds(timeoutMs)}`)
+      if (!dryRun) {
+        const pushResult = await pushAgentPrompt(agentName, {
+          repoName,
+          taskDescription: current.task || "",
+          prompt: LOOP_PROMPT,
+        })
+        onEvent(
+          `inbox: wrote pending prompt → ${pushResult.inboxPath}${pushResult.notified ? " (notification sent)" : ""}`,
+        )
+      }
       const waitResult = await waitForHandoffChange(repoRoot, beforeFingerprint, {
         timeoutMs,
         pollIntervalMs,
@@ -2963,9 +4088,11 @@ function countPreviousHandoffs(content) {
   return bounds.text.split("\n").filter((line) => /^-\s+\d{4}-\d{2}-\d{2}\b/.test(line.trim())).length
 }
 
-async function getManagedBlockTemplate() {
+async function getManagedBlockTemplate(repoRoot = null) {
   const templateContent = await loadTemplate("managed-block.md")
-  return extractManagedBlock(templateContent) || templateContent.trim()
+  const config = repoRoot ? await readProjectConfig(repoRoot) : null
+  const rendered = renderTemplate(templateContent, buildManagedBlockVariables(config))
+  return extractManagedBlock(rendered) || rendered.trim()
 }
 
 function hasTemplateDrift(content, managedTemplate) {
@@ -2979,7 +4106,7 @@ function hasTemplateDrift(content, managedTemplate) {
 
 async function detectTemplateDrift(repoRoot) {
   const repoPaths = getRepoPaths(repoRoot)
-  const managedTemplate = await getManagedBlockTemplate()
+  const managedTemplate = await getManagedBlockTemplate(repoRoot)
   const drift = {
     agents: false,
     claude: false,
@@ -3017,7 +4144,7 @@ async function registerRepo(repoPathInput) {
   const hasHandoff = await pathExists(configuredRepoPaths.handoffPath)
 
   if (!hasProjectToml && !hasHandoff) {
-    throw new Error("Repo is not bootstrapped enough to register. Create `.btrain/project.toml` or `.claude/collab/HANDOFF.md`, or run `btrain init` instead.")
+    throw new Error("Repo is not bootstrapped enough to register. Create `.btrain/project.toml` or `.claude/collab/HANDOFF_A.md`, or run `btrain init` instead.")
   }
 
   const repoName = config?.name || normalizeRepoName(repoRoot)
@@ -3077,7 +4204,6 @@ async function syncManagedFile(filePath, managedTemplate, { dryRun }) {
 }
 
 async function syncTemplates({ repoRoot, dryRun = false } = {}) {
-  const managedTemplate = await getManagedBlockTemplate()
   const targetRepos = []
 
   if (repoRoot) {
@@ -3101,6 +4227,7 @@ async function syncTemplates({ repoRoot, dryRun = false } = {}) {
     }
 
     const repoPaths = getRepoPaths(absoluteRepoRoot)
+    const managedTemplate = await getManagedBlockTemplate(absoluteRepoRoot)
     const fileResults = []
     for (const filePath of [repoPaths.agentsPath, repoPaths.claudePath]) {
       fileResults.push(await syncManagedFile(filePath, managedTemplate, { dryRun }))
@@ -3152,8 +4279,8 @@ async function getRepoStatus(repoRoot) {
   // Add lane info if enabled
   const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
-    status.lanes = await readAllLaneStates(repoRoot, config)
     status.locks = await listLocks(repoRoot)
+    status.lanes = decorateLaneStates(await readAllLaneStates(repoRoot, config), status.locks)
   }
 
   return status
@@ -3192,7 +4319,7 @@ async function getStatus({ repoRoot } = {}) {
 async function doctorRepo(repoRoot) {
   const issues = []
   const warnings = []
-  const managedTemplate = await getManagedBlockTemplate()
+  const managedTemplate = await getManagedBlockTemplate(repoRoot)
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
 
@@ -3244,7 +4371,7 @@ async function doctorRepo(repoRoot) {
   if (await pathExists(repoPaths.handoffPath)) {
     const handoffContent = await readText(repoPaths.handoffPath)
     if (!findSectionBounds(handoffContent, "Current")) {
-      warnings.push("`HANDOFF.md` is missing a `## Current` section.")
+      warnings.push("`" + path.basename(repoPaths.handoffPath) + "` is missing a `## Current` section.")
     }
   }
 
@@ -3275,13 +4402,23 @@ async function doctorRepo(repoRoot) {
         if (!Array.isArray(registry.locks)) {
           issues.push("`locks.json` is malformed: `locks` is not an array.")
         } else {
-          // Check for stale locks (locks on resolved/idle lanes)
-          const laneStates = await readAllLaneStates(repoRoot, config)
-          for (const lock of registry.locks) {
-            const laneState = laneStates?.find((s) => s._laneId === lock.lane)
-            if (laneState && (laneState.status === "resolved" || laneState.status === "idle")) {
+          const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
+          for (const laneState of laneStates) {
+            if (laneState.lockState === "missing") {
               warnings.push(
-                `Stale lock: lane ${lock.lane} has lock on \`${lock.path}\` but status is \`${laneState.status}\`. Run \`btrain locks release-lane --lane ${lock.lane}\`.`,
+                `Lane ${laneState._laneId} is \`${laneState.status}\` but has no active locks. Run \`btrain handoff update --lane ${laneState._laneId} --files "..." --actor "${laneState.owner || "owner"}"\`.`,
+              )
+            }
+
+            if (laneState.lockState === "mismatch") {
+              warnings.push(
+                `Lane ${laneState._laneId} handoff files (\`${formatLockedPaths(laneState.handoffPaths)}\`) do not match locks.json (\`${formatLockedPaths(laneState.lockPaths)}\`). Run \`btrain handoff update --lane ${laneState._laneId} --files "..." --actor "${laneState.owner || "owner"}"\`.`,
+              )
+            }
+
+            if (laneState.lockState === "stale") {
+              warnings.push(
+                `Stale lock: lane ${laneState._laneId} has \`${formatLockedPaths(laneState.lockPaths)}\` locked while status is \`${laneState.status}\`. Run \`btrain locks release-lane --lane ${laneState._laneId}\` or claim the lane again.`,
               )
             }
           }
@@ -3347,6 +4484,7 @@ async function doctor({ repoRoot } = {}) {
 export {
   acquireLocks,
   checkHandoff,
+  pushAgentPrompt,
   checkLockConflicts,
   claimHandoff,
   doctor,
@@ -3366,12 +4504,15 @@ export {
   parseCsvList,
   readAllLaneStates,
   readLockRegistry,
+  readProjectConfig,
   registerRepo,
   releaseLocks,
+  runPush,
   patchHandoff,
   resolveHandoff,
   resolveRepoRoot,
   runReview,
   runLoop,
+  syncActiveAgents,
   syncTemplates,
 }

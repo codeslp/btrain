@@ -2,4 +2,14 @@ node_modules/
 .DS_Store
 *.log
 .btrain/reviews/
-.claude/collab/
+.claude/settings.local.json
+
+.claude/collab/HANDOFF*.md
+.claude/collab/.handoff-history-state.json
+.claude/collab/handoff-history-agent.env
+.claude/collab/*.log
+.claude/collab/*.err.log
+
+.codex/*
+!.codex/prompts/
+!.codex/prompts/**

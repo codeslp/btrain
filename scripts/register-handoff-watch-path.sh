@@ -4,9 +4,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CODEX_BASE="${CODEX_HOME:-$HOME/.codex}"
-REPO_SLUG="ai_sales_brain_train"
-DEFAULT_LABEL="com.codeslp.handoff-history.ai-sales-brain-train"
-CONFIG_DIR="${HANDOFF_AGENT_CONFIG_DIR_OVERRIDE:-$CODEX_BASE/collab/$REPO_SLUG}"
+SERVICE_SLUG="${HANDOFF_HISTORY_AGENT_SLUG_OVERRIDE:-btrain-handoff-history}"
+DEFAULT_LABEL="${HANDOFF_HISTORY_AGENT_LABEL_DEFAULT_OVERRIDE:-com.codeslp.handoff-history}"
+CONFIG_DIR="${HANDOFF_AGENT_CONFIG_DIR_OVERRIDE:-$CODEX_BASE/collab/$SERVICE_SLUG}"
 WATCH_LIST_PATH="$CONFIG_DIR/handoff-watch-paths.txt"
 TARGET_INPUT="${1:-${WATCH_REPO_PATH_OVERRIDE:-$ROOT_DIR}}"
 LABEL="${HANDOFF_HISTORY_AGENT_LABEL_OVERRIDE:-$DEFAULT_LABEL}"

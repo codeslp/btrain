@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
 import path from "node:path"
+import fs from "node:fs"
+import os from "node:os"
 import {
-  acquireLocks,
   checkHandoff,
   claimHandoff,
   doctor,
   forceReleaseLock,
   getBrainTrainHome,
+  getLaneConfigs,
   getReviewStatus,
   getStatus,
   initRepo,
@@ -15,12 +17,14 @@ import {
   listLocks,
   listRepos,
   patchHandoff,
+  readProjectConfig,
   registerRepo,
   releaseLocks,
   resolveHandoff,
   resolveRepoRoot,
   runReview,
   runLoop,
+  syncActiveAgents,
   syncTemplates,
 } from "./core.mjs"
 
@@ -28,9 +32,13 @@ function printHelp() {
   console.log(`btrain
 
 Usage:
-  btrain init <repo-path> [--hooks]                                              Bootstrap a repo (--hooks installs pre-commit guard)
+  btrain init <repo-path> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
+                                                                              Bootstrap a repo (--hooks installs pre-commit guard)
+  btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
+  btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>]                                                 Check whose turn it is and what to do
-  btrain handoff claim --task <text> --owner <name> --reviewer <name> [options] Claim a new task
+  btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [options]
+                                                                              Claim a new task
   btrain handoff update [options]                                                Update the current handoff state
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
   btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
@@ -44,19 +52,40 @@ Usage:
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>]                                                  Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the pre-commit guard hook
-  btrain dashboard [--port <number>]                                              Open a live lane monitor in your browser
+  btrain dashboard [--port <number>]                                             Open a live lane monitor in your browser
   btrain repos                                                                   List registered repos
+  btrain hcleanup [--repo <path>] [--keep <n>]                                   Trim handoff history, archive old entries
 
 Handoff/Lane Options:
-  --lane <id>       Target a specific lane (a, b). Auto-selects if omitted.
+  --lane <id>       Target a specific lane (e.g. a, b, c, d). Auto-selects if omitted.
   --files <list>    Comma-separated list of files/dirs to lock for this lane.
+                    Required when a lane is active or claimed.
+                    \`handoff update\` and \`handoff resolve\` require --lane when [lanes] is enabled.
+  --reviewer <name|any-other>
+                    Optional peer reviewer for \`handoff claim\`. Defaults to \`any-other\` (any configured agent except the owner).
+  --agent <name>    Repeatable for \`init\`, \`agents set\`, and \`agents add\`. Updates \`[agents].active\`.
+  --lanes-per-agent <n>
+                    Sets \`[lanes].per_agent\` when used with \`init\`, \`agents set\`, or \`agents add\`.
+  --core-only       Init only the btrain core files/docs. Skips bundled project skills.
+  --base <ref>      Branch or commit for the work under review.
+  --preflight [text]
+                    Mark or describe the pre-flight review that was completed.
+  --changed <text>  Repeatable. One changed-file bullet for Context for Peer Review.
+  --verification <text>
+                    Repeatable. One verification bullet for Context for Peer Review.
+  --gap <text>      Repeatable. One remaining gap / unverified path bullet.
+  --why <text>      Why the change was made.
+  --review-ask <text>
+                    Repeatable. One specific review ask for the reviewer.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
+  BTRAIN_AGENT or BRAIN_TRAIN_AGENT can pin the current agent identity for handoff verification.
 
 Notes:
-  - \`init\` is safe to re-run. It only updates the managed btrain blocks.
-  - \`handoff claim\` resets the reviewer context and review response sections for a new task.
+  - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
+  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack unless you pass \`--core-only\`.
+  - \`handoff claim\` resets the peer-review context and review response sections for a new task.
   - Use \`handoff claim|update|resolve\` to keep handoff headers consistent.
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
   - \`review run\` automates \`parallel\` and \`hybrid\` modes. \`manual\` mode reports a no-op.
@@ -78,11 +107,23 @@ function parseOptions(args) {
     const key = token.slice(2)
     const nextToken = args[index + 1]
     if (!nextToken || nextToken.startsWith("--")) {
-      options[key] = true
+      if (options[key] === undefined) {
+        options[key] = true
+      } else if (Array.isArray(options[key])) {
+        options[key].push(true)
+      } else {
+        options[key] = [options[key], true]
+      }
       continue
     }
 
-    options[key] = nextToken
+    if (options[key] === undefined) {
+      options[key] = nextToken
+    } else if (Array.isArray(options[key])) {
+      options[key].push(nextToken)
+    } else {
+      options[key] = [options[key], nextToken]
+    }
     index += 1
   }
 
@@ -101,15 +142,23 @@ function formatRepoStatus(status) {
 
   if (status.lanes) {
     for (const lane of status.lanes) {
-      lines.push(`  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}`)
+      const lockSuffix =
+        lane.lockState === "active"
+          ? ` [${lane.lockCount} lock${lane.lockCount === 1 ? "" : "s"}]`
+          : lane.lockState && lane.lockState !== "clear"
+            ? ` [${lane.lockState}]`
+            : ""
+      lines.push(
+        `  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}${lockSuffix}`,
+      )
     }
     if (status.locks && status.locks.length > 0) {
       lines.push(`  locks: ${status.locks.map((l) => `${l.lane}:${l.path}`).join(", ")}`)
     }
   } else {
     lines.push(`  task: ${status.current.task || "(none)"}`)
-    lines.push(`  owner: ${status.current.owner || "(unassigned)"}`)
-    lines.push(`  reviewer: ${status.current.reviewer || "(unassigned)"}`)
+    lines.push(`  active agent: ${status.current.owner || "(unassigned)"}`)
+    lines.push(`  peer reviewer: ${status.current.reviewer || "(unassigned)"}`)
     lines.push(`  review mode: ${status.current.reviewMode || "manual"}`)
     lines.push(`  status: ${status.current.status || "(unknown)"}`)
     lines.push(`  next: ${status.current.nextAction || "(none)"}`)
@@ -251,8 +300,31 @@ function formatLoopResult(result) {
   ].join("\n")
 }
 
+function formatAgentCheck(agentCheck) {
+  if (!agentCheck) {
+    return ""
+  }
+
+  switch (agentCheck.status) {
+    case "verified":
+      return `agent check: ${agentCheck.agentName} (${agentCheck.sourceLabel})`
+    case "ambiguous":
+      return `agent check: ambiguous (${agentCheck.candidates.join(", ")}; ${agentCheck.sourceLabel}; set BTRAIN_AGENT to pin it)`
+    case "unknown":
+      return `agent check: unknown (${agentCheck.sourceLabel}; set BTRAIN_AGENT to pin it if needed)`
+    case "unconfigured":
+      return "agent check: unconfigured (add agent names to .btrain/project.toml to enable verification)"
+    default:
+      return ""
+  }
+}
+
 function printHandoffState(result) {
   console.log(`repo: ${result.repoName}`)
+  const agentCheckLine = formatAgentCheck(result.agentCheck)
+  if (agentCheckLine) {
+    console.log(agentCheckLine)
+  }
 
   if (result.lanes) {
     // Multi-lane output
@@ -261,9 +333,11 @@ function printHandoffState(result) {
       console.log(`--- lane ${lane._laneId} ---`)
       console.log(`task: ${lane.task || "(none)"}`)
       console.log(`status: ${lane.status}`)
-      console.log(`owner: ${lane.owner || "(unassigned)"}`)
-      console.log(`reviewer: ${lane.reviewer || "(unassigned)"}`)
+      console.log(`active agent: ${lane.owner || "(unassigned)"}`)
+      console.log(`peer reviewer: ${lane.reviewer || "(unassigned)"}`)
       console.log(`mode: ${lane.reviewMode || "manual"}`)
+      console.log(`locked files: ${lane.lockPaths?.length ? lane.lockPaths.join(", ") : "(none)"}`)
+      console.log(`lock state: ${lane.lockState || "clear"}`)
       console.log(`next: ${lane.nextAction || "(none)"}`)
     }
     if (result.locks && result.locks.length > 0) {
@@ -277,8 +351,8 @@ function printHandoffState(result) {
     // Single-lane output
     console.log(`task: ${result.current.task || "(none)"}`)
     console.log(`status: ${result.current.status}`)
-    console.log(`owner: ${result.current.owner || "(unassigned)"}`)
-    console.log(`reviewer: ${result.current.reviewer || "(unassigned)"}`)
+    console.log(`active agent: ${result.current.owner || "(unassigned)"}`)
+    console.log(`peer reviewer: ${result.current.reviewer || "(unassigned)"}`)
     console.log(`mode: ${result.current.reviewMode || "manual"}`)
     console.log(`next: ${result.current.nextAction || "(none)"}`)
   }
@@ -287,6 +361,87 @@ function printHandoffState(result) {
   console.log(result.guidance)
   console.log("")
   console.log(`handoff file: ${result.handoffPath}`)
+}
+
+async function runHcleanup(repoRoot, keep) {
+  const config = await readProjectConfig(repoRoot)
+  const repoName = config?.name || path.basename(repoRoot)
+
+  const archiveDir = path.join(os.homedir(), "agent_collab_history", `${repoName}_agents_collab`)
+  const archiveFile = path.join(archiveDir, `${repoName}.md`)
+  fs.mkdirSync(archiveDir, { recursive: true })
+
+  const laneConfigs = getLaneConfigs(config) || []
+  let totalArchived = 0
+  let totalKept = 0
+
+  for (const lane of laneConfigs) {
+    const laneId = lane.id
+    const handoffPath = path.isAbsolute(lane.handoffPath)
+      ? lane.handoffPath
+      : path.resolve(repoRoot, lane.handoffPath)
+    if (!fs.existsSync(handoffPath)) continue
+
+    const content = fs.readFileSync(handoffPath, "utf-8")
+    const headerMatch = content.match(/^## Previous Handoffs\s*$/m)
+    if (!headerMatch) {
+      console.log(`lane ${laneId}: no Previous Handoffs section, skipping`)
+      continue
+    }
+
+    const headerIndex = headerMatch.index
+    const afterHeader = content.slice(headerIndex + headerMatch[0].length)
+
+    // Parse entries: each starts with "- " at start of line
+    const entries = []
+    const lines = afterHeader.split("\n")
+    let currentEntry = null
+    let trailingLines = []
+    let hitNextSection = false
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (/^## /.test(line)) {
+        hitNextSection = true
+        trailingLines = lines.slice(i)
+        break
+      }
+      if (line.startsWith("- ")) {
+        if (currentEntry !== null) entries.push(currentEntry)
+        currentEntry = line
+      } else if (currentEntry !== null && (line.startsWith("  ") || line.trim() === "")) {
+        currentEntry += "\n" + line
+      } else if (line.trim() === "") {
+        continue
+      }
+    }
+    if (currentEntry !== null) entries.push(currentEntry)
+
+    if (entries.length <= keep) {
+      console.log(`lane ${laneId}: ${entries.length} entries, nothing to trim (keep=${keep})`)
+      totalKept += entries.length
+      continue
+    }
+
+    const toKeep = entries.slice(-keep)
+    const toArchive = entries.slice(0, -keep)
+
+    const archiveBlock = `\n## Lane ${laneId.toUpperCase()} — Archived ${new Date().toISOString().slice(0, 10)}\n\n${toArchive.join("\n")}\n`
+    fs.appendFileSync(archiveFile, archiveBlock)
+
+    const beforeSection = content.slice(0, headerIndex)
+    const rest = hitNextSection ? "\n" + trailingLines.join("\n") : "\n"
+    const newContent = beforeSection + "## Previous Handoffs\n\n" + toKeep.join("\n") + "\n" + rest
+    fs.writeFileSync(handoffPath, newContent)
+
+    console.log(`lane ${laneId}: archived ${toArchive.length} entries, kept ${toKeep.length}`)
+    totalArchived += toArchive.length
+    totalKept += toKeep.length
+  }
+
+  console.log("")
+  console.log(`archived: ${totalArchived} entries → ${archiveFile}`)
+  console.log(`kept: ${totalKept} entries across all lanes`)
 }
 
 async function run() {
@@ -304,11 +459,28 @@ async function run() {
       throw new Error("`btrain init` requires a repo path.")
     }
 
-    const result = await initRepo(targetPath, { hooks: !!options.hooks })
+    const result = await initRepo(targetPath, {
+      hooks: !!options.hooks,
+      agent: options.agent,
+      lanesPerAgent: options["lanes-per-agent"],
+      scaffoldBundledSkills: !options["core-only"],
+    })
     console.log(`Initialized ${result.repoName}`)
     console.log(`repo: ${result.repoRoot}`)
     console.log(`home: ${result.homeDir}`)
     console.log(`handoff: ${result.repoPaths.handoffPath}`)
+    if (options["core-only"]) {
+      console.log("bundled skills: skipped (--core-only)")
+    } else if (result.bundledSkillsResult?.skippedReason === "self") {
+      console.log("bundled skills: source bundle already present in this repo")
+    } else if (result.bundledSkillsResult) {
+      const copiedCount = result.bundledSkillsResult.copiedSkills.length
+      console.log(
+        copiedCount > 0
+          ? `bundled skills: copied ${copiedCount} skill${copiedCount === 1 ? "" : "s"}`
+          : "bundled skills: no missing bundled skills",
+      )
+    }
 
     if (result.hookResult) {
       if (result.hookResult.installed) {
@@ -319,6 +491,26 @@ async function run() {
         console.log("pre-commit hook: skipped (not a git repo)")
       }
     }
+    return
+  }
+
+  if (command === "agents") {
+    const subcommand = ["set", "add"].includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new Error("`btrain agents` requires a subcommand: set or add.")
+    }
+
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const result = await syncActiveAgents(repoRoot, {
+      mode: subcommand,
+      agent: options.agent,
+      lanesPerAgent: options["lanes-per-agent"],
+    })
+
+    console.log(`Updated active agents for ${result.repoName}`)
+    console.log(`repo: ${result.repoRoot}`)
+    console.log(`handoff: ${result.repoPaths.handoffPath}`)
     return
   }
 
@@ -543,6 +735,14 @@ async function run() {
     return
   }
 
+  if (command === "hcleanup") {
+    const options = parseOptions(rest)
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const keep = options.keep ? Number(options.keep) : 3
+    await runHcleanup(repoRoot, keep)
+    return
+  }
+
   if (command === "dashboard") {
     const options = parseOptions(rest)
     const port = options.port ? Number(options.port) : 3456
@@ -551,6 +751,10 @@ async function run() {
     console.log(`btrain dashboard running at ${url}`)
     console.log("Press Ctrl+C to stop.")
     return new Promise(() => {}) // keep alive
+  }
+
+  if (command === "push") {
+    throw new Error("`btrain push` has been removed. Use `btrain handoff` plus `handoff claim|update|resolve` only.")
   }
 
   throw new Error(`Unknown command: ${command}`)

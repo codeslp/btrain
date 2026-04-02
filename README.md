@@ -1,344 +1,238 @@
 # btrain
 
-**A file-backed handoff protocol for multi-agent AI coding.**
+**A file-backed handoff workflow for human-guided multi-agent coding.**
 
-btrain coordinates task handoffs between AI coding agents — one writes, one reviews — using structured markdown files in your repo. Supports concurrent work lanes so both agents stay productive. No database. No cloud service. No lock-in.
+btrain gives agents one shared protocol for:
 
-Built for teams using Claude Code, OpenAI Codex, Antigravity, or any combination of AI coding assistants on the same codebase.
+- who is working right now
+- who reviews next
+- which files are locked
+- what changed, why it changed, and what the reviewer should check
+
+It works with Claude Code, Codex, Antigravity, or any mix of agents that can read files and run shell commands.
 
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org) [![Zero Dependencies](https://img.shields.io/badge/Dependencies-0-blue)](#) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
----
+## What btrain gives you
 
-## The Problem
-
-When you use two or more AI coding agents on the same repo, things break fast:
-
-- **Context desync** — Agent A edits files that Agent B already has cached in context
-- **Review confusion** — No clear protocol for who reviews what, or when
-- **Status ambiguity** — Both agents think they're the one working
-- **File conflicts** — Two agents edit the same file simultaneously
-- **No audit trail** — You can't see what happened three handoffs ago
-
-These problems get worse the more capable the agents get. GPT-5 and Claude Opus 4 can each do excellent work in isolation, but pointing both at the same codebase without coordination produces chaos.
-
-### What Exists Today
-
-| Tool | Approach | Limitation |
-|---|---|---|
-| **Claude Squad** | tmux multiplexer + git worktrees | Parallel isolation, not sequential handoff |
-| **Manual relay** | Copy-paste between agent chats | No audit trail, doesn't scale |
-| **CrewAI / AutoGen** | Python frameworks for agent pipelines | Built for LLM API chains, not coding IDE agents |
-
-None of these solve the core problem: **structured, auditable, sequential handoffs between IDE-embedded coding agents sharing one repo.**
-
----
-
-## How btrain Works
-
-### Single-Lane Mode (Default)
-
-```
-┌──────────────┐     HANDOFF.md      ┌──────────────┐
-│  Claude Code │ ◄──────────────────► │   Codex CLI  │
-│  (writes)    │    1 file, git-     │  (reviews)   │
-│              │    tracked, human-  │              │
-└──────────────┘    readable         └──────────────┘
-                         │
-                    ┌────┴────┐
-                    │  Human  │
-                    │ (types  │
-                    │  bth)   │
-                    └─────────┘
-```
-
-### Multi-Lane Mode (Concurrent)
-
-```
-┌──────────────┐  HANDOFF_A.md  ┌──────────────┐  HANDOFF_B.md  ┌──────────────┐
-│  Claude Code │ ◄────────────► │    Human     │ ◄────────────► │   Codex CLI  │
-│  owns lane A │  locks.json    │  (types bth) │  locks.json    │  owns lane B │
-│  reviews B   │                │              │                │  reviews A   │
-└──────────────┘                └──────────────┘                └──────────────┘
-```
-
-Both agents work simultaneously on separate lanes with file-level locking. When one finishes, the other reviews — nobody idles.
-
-1. **Structured files** — `HANDOFF.md` (single) or `HANDOFF_A.md` + `HANDOFF_B.md` (lanes)
-2. **CLI-driven** — `btrain handoff claim|update|resolve` manages transitions
-3. **Agent-agnostic** — Works with Claude, Codex, Antigravity, or any tool that can read files and run shell commands
-4. **Git-native** — The handoff file is tracked in git, giving you full history
-5. **Human-in-the-loop** — You type `bth` in each agent's chat to relay the handoff
-6. **File locking** — `--files` flag + pre-commit hook prevent cross-lane collisions
-
-### The bth Command
-
-`bth` is shorthand for "run `btrain handoff` and immediately act on what it says." When an agent sees `bth`:
-
-1. It runs `btrain handoff` to read the current state
-2. If it's the **owner** and status is `in-progress` → it does the work
-3. If it's the **reviewer** and status is `needs-review` → it reviews the code
-4. It only transitions to `needs-review` after real completed work exists, reviewer context is filled in, and the handoff is ready for review
-5. When done, it runs `btrain handoff update` or `btrain handoff resolve` to transition the state
-
-Empty handoffs are protocol violations. Do not flip a lane to `needs-review` with placeholder context, no concrete work, or no verification notes.
-
-The human just types `bth` in each agent window. The agents handle the rest.
-
----
+- A git-tracked handoff file per lane in `.claude/collab/`
+- Plain CLI commands for claim, update, resolve, locks, review, and status
+- Lane scaffolding derived from active collaborators and `lanes.per_agent`
+- Structured review context instead of vague "please review this"
+- Reviewer selection that can pick `any-other` configured peer automatically
+- A bundled, project-agnostic `.claude/skills/` pack on `init`
+- Optional dashboard, history cleanup, and automated review helpers
 
 ## Quick Start
 
 ```bash
-# Install
+# install locally
 git clone https://github.com/codeslp/btrain.git
-cd btrain && npm link
+cd btrain
+npm link
 
-# Bootstrap a repo
-btrain init /path/to/your/repo
+# bootstrap a repo with two collaborators
+btrain init /path/to/your/repo \
+  --agent "Claude" \
+  --agent "GPT-5 Codex"
 
-# Claim a task (single-lane)
-btrain handoff claim --task "Implement auth middleware" \
-  --owner "Claude" --reviewer "GPT-5 Codex"
+# skip bundled skills if you only want the core btrain files
+btrain init /path/to/your/repo --core-only
 
-# Check state (or type bth in an agent chat)
-btrain handoff
+# claim a lane
+btrain handoff claim \
+  --repo /path/to/your/repo \
+  --lane a \
+  --task "Implement auth middleware" \
+  --owner "Claude" \
+  --reviewer any-other \
+  --files "src/auth/"
 
-# Owner finishes real work → hand to reviewer
-btrain handoff update --status needs-review --actor "Claude"
+# check guidance
+btrain handoff --repo /path/to/your/repo
 
-# Reviewer resolves
-btrain handoff resolve --summary "Approved. Clean implementation." --actor "GPT-5 Codex"
+# hand work to review with real reviewer context
+btrain handoff update \
+  --repo /path/to/your/repo \
+  --lane a \
+  --status needs-review \
+  --actor "Claude" \
+  --base feat/auth-middleware \
+  --preflight \
+  --changed "src/auth/index.ts - tighten token validation" \
+  --verification "npm test" \
+  --gap "Did not re-run the full browser auth flow" \
+  --why "Auth logic and docs had drifted" \
+  --review-ask "Check unauthenticated flows for regressions"
+
+# reviewer resolves
+btrain handoff resolve \
+  --repo /path/to/your/repo \
+  --lane a \
+  --summary "Approved. Clean implementation." \
+  --actor "GPT-5 Codex"
 ```
 
-### Multi-Lane Quick Start
+## Core Workflow
+
+1. The human types `bth` in an agent chat.
+2. The agent runs `btrain handoff`.
+3. btrain prints the current state plus plain-English guidance.
+4. The agent follows the guidance:
+   - `idle` or `resolved`: claim a task
+   - `in-progress`: continue the task if you are the active agent
+   - `needs-review`: review if you are the peer reviewer
+   - otherwise: wait
+5. The agent updates state with `claim`, `update`, or `resolve`.
+
+The source of truth is `.claude/collab/HANDOFF_A.md` plus any additional lane files such as `HANDOFF_B.md`, `HANDOFF_C.md`, and so on. Do not edit those files directly. Always use the CLI.
+
+## Lanes, Agents, and Reviewers
+
+Lane count is derived from:
+
+- `[agents].active`
+- `[lanes].per_agent`
+
+Defaults:
+
+- If no collaborators are configured yet, btrain scaffolds for 2 collaborators
+- Default `per_agent` is `2`
+- That means a fresh repo gets lanes `a` through `d`
+
+Examples:
+
+- 1 agent, `per_agent = 3` -> lanes `a` through `c`
+- 2 agents, `per_agent = 3` -> lanes `a` through `f`
+- 3 agents, `per_agent = 2` -> lanes `a` through `f`
+
+You can change the active collaborators later:
 
 ```bash
-# Add [lanes] to .btrain/project.toml, then re-init
-btrain init .
+# replace the active list
+btrain agents set --repo /path/to/repo \
+  --agent "Claude" \
+  --agent "GPT-5 Codex" \
+  --lanes-per-agent 3
 
-# Both agents claim separate lanes with file locks
-btrain handoff claim --lane a --task "Auth module" \
-  --owner "Claude" --reviewer "Codex" --files "src/auth/"
-
-btrain handoff claim --lane b --task "Scoring engine" \
-  --owner "Codex" --reviewer "Claude" --files "src/scoring/"
-
-# Each works on their lane, then swaps for review
-btrain handoff update --lane a --status needs-review --actor "Claude"
-btrain handoff resolve --lane a --summary "Approved" --actor "Codex"
-
-# Check locks
-btrain locks
+# append more collaborators
+btrain agents add --repo /path/to/repo --agent "Gemini 3.1"
 ```
 
----
+Reviewer selection rules:
 
-## Recommended Pairing: Spec Kit
+- `--reviewer any-other` means "pick any configured agent except the owner"
+- if the requested reviewer matches the owner and another peer exists, btrain snaps to a peer automatically
+- if there is no alternate reviewer, btrain errors instead of creating a self-review
 
-btrain was built and spec'd using [Spec Kit](https://github.com/the-spec-kit/spec-kit), a spec-driven planning tool for AI coding projects. We recommend using them together:
+## What `btrain init` Writes
 
-- **Spec Kit** handles planning — constitution, specs, plans, tasks
-- **btrain** handles execution — who works on what, when, and how the handoff flows
+`btrain init` creates or refreshes:
 
-The workflow: `/speckit.specify` → `/speckit.plan` → `/speckit.tasks` → `btrain handoff claim` → `bth` relay
+- `AGENTS.md`
+- `CLAUDE.md`
+- `.btrain/project.toml`
+- `.btrain/reviews/`
+- `.claude/collab/HANDOFF_A.md` plus any additional lane files required by config
+- `.claude/skills/` unless `--core-only` is passed
 
-**Planned integration**: `btrain handoff claim --from-spec specs/001-feature/tasks.md` — auto-create a handoff from the next unchecked task in a Spec Kit tasks file.
+The bundled skill pack is portable and repo-agnostic. It includes helpers such as:
 
----
+- `pre-handoff`
+- `code-simplifier`
+- `test-writer`
+- `secure-by-default`
+- Speckit skills
+- `tessl__webapp-testing`
+- `tessl__yeet`
 
-## Requirements
+The excluded `create-multi-speaker-static-recordings-using-tts` skill is never copied.
 
-- **Node.js 18+** — ESM, built-in modules only
-- **Zero npm dependencies** — no external packages
-- **Python 3 + `anthropic` + `openai`** — only needed for automated review modes (`parallel` / `hybrid`)
-- **macOS** — only needed for the optional persistent launchd history watcher
+Re-running `init`, `agents set`, or `agents add` is safe. Missing lane files and missing bundled skill files are scaffolded. Existing skill content is not overwritten.
 
----
+## Review-Ready Handoffs
 
-## ⚠️ Security Configuration
+Every `needs-review` handoff should include:
 
-btrain coordinates agents that have access to your filesystem. Understand these trust boundaries:
+- `Base`
+- `Pre-flight review`
+- `Files changed`
+- `Verification run`
+- `Remaining gaps`
+- `Why this was done`
+- `Specific review asks`
 
-### Agent Permission Models
+That is why `btrain handoff update` supports:
 
-Each agent CLI has its own permission/sandbox model. btrain does **not** bypass these.
+- `--base`
+- `--preflight`
+- `--changed`
+- `--verification`
+- `--gap`
+- `--why`
+- `--review-ask`
 
-| Agent | Permission Model | Recommended Setting |
-|---|---|---|
-| **Claude Code** | Tool allowlist via `.claude/settings.json` | Use default or custom allowlist; avoid `--permission-mode bypassPermissions` in production |
-| **Codex CLI** | Sandbox mode (`--full-auto` vs default) | Default sandbox blocks network; `--full-auto` is more permissive — use with caution |
-| **Antigravity** | IDE-embedded, inherits VS Code permissions | Standard VS Code file access rules apply |
+The active handoff template uses the current labels:
 
-> [!CAUTION]
-> Running agents with `--permission-mode bypassPermissions` (Claude) or `--full-auto` (Codex) gives them unrestricted filesystem and network access. Only use these modes in isolated environments or when you fully trust the task.
+```md
+## Current
 
-### Locked Files
+Lane: a
+Task: Implement auth middleware
+Active Agent: Claude
+Peer Reviewer: GPT-5 Codex
+Status: in-progress
+Review Mode: manual
+Locked Files: src/auth/
+Next Action: Continue implementation and prepare reviewer context.
+Base: feat/auth-middleware
+Last Updated: Claude 2026-04-02T12:00:00.000Z
+```
 
-When claiming a task, specify `--files` to declare which files the owner is editing. In multi-lane mode, `--files` also acquires locks in `.btrain/locks.json` — other lanes are blocked from claiming overlapping files.
-
-### Pre-Commit Hook
+## Key Commands
 
 ```bash
-btrain init . --hooks
+btrain init <repo> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
+btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]
+btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]
+btrain handoff [--repo <path>]
+btrain handoff claim --lane <id> --task <text> --owner <name> [--reviewer <name|any-other>] --files <paths>
+btrain handoff update --lane <id> [--status <status>] [review-context flags...]
+btrain handoff resolve --lane <id> --summary <text> --actor <name>
+btrain locks [--repo <path>]
+btrain status [--repo <path>]
+btrain doctor [--repo <path>]
+btrain dashboard [--port <number>]
+btrain hcleanup [--repo <path>] [--keep <n>]
 ```
 
-Installs a git pre-commit hook that:
-- Blocks commits when any `HANDOFF` file shows `needs-review` and non-handoff files are staged
-- In multi-lane mode, blocks commits touching files locked by another lane
-
-Bypass with `git commit --no-verify` when needed.
-
-### Review Mode Trust
-
-| Mode | What Happens | Trust Level |
-|---|---|---|
-| `manual` | Human reviews in agent chat | Full human oversight |
-| `parallel` | 3 LLM reviewers run independently | Automated — review the report before merging |
-| `hybrid` | Parallel + sequential chain for sensitive paths | Automated with routing — still review before merging |
-
-> [!IMPORTANT]
-> Automated review modes (`parallel`, `hybrid`) are decision-support tools, not replacements for human judgment. Always read the generated report in `.btrain/reviews/` before acting on automated review results.
-
----
-
-## Commands
-
-All commands accept `--repo <path>` to target a specific repo. Without it, `btrain` walks up from the current working directory looking for `.btrain/project.toml`.
-
-### `btrain init <repo-path> [--hooks]`
-
-Bootstrap a repo for agent collaboration.
-
-- Creates `.btrain/project.toml`, `.btrain/reviews/`, `.claude/collab/HANDOFF.md`
-- Writes a managed `## Brain Train Workflow` block into `AGENTS.md` and `CLAUDE.md`
-- Registers the repo in the global registry
-- `--hooks`: installs a pre-commit guard (see Security)
-
-Safe to re-run — only the managed block is updated.
-
-### `btrain handoff [--repo <path>]`
-
-Read the current state and print guidance for the calling agent.
-
-### `btrain handoff claim --task <text> --owner <name> --reviewer <name>`
-
-Claim a new task. Sets status to `in-progress`, resets reviewer context and review response.
-
-With lanes: `--lane <id>` targets a specific lane, `--files <paths>` acquires file locks.
-
-### `btrain handoff update [--status <status>] [--actor <name>] [...]`
-
-Patch any subset of handoff fields. Use `--actor` to stamp `Last Updated`. Do not use `update --status needs-review` for empty handoffs; only hand off when real work and reviewer context are ready.
-
-With lanes: `--lane <id>` targets a specific lane.
-
-### `btrain handoff resolve --summary <text> [--next <text>] --actor <name>`
-
-Resolve the current handoff. Updates status, writes review response, appends to history. In multi-lane mode, auto-releases file locks for the resolved lane.
-
-With lanes: `--lane <id>` targets a specific lane.
-
-### `btrain locks [--repo <path>]`
-
-List all active file locks across lanes.
-
-### `btrain locks release --path <path>`
-
-Force-release a specific file lock.
-
-### `btrain locks release-lane --lane <id>`
-
-Release all locks for a lane.
-
-### `btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]`
-
-Relay handoffs automatically between configured agent runners.
-
-- Reads `[agents.runners]` from `.btrain/project.toml`
-- Supports `notify` (wait for manual action) and CLI dispatch (`claude -p`, `codex`)
-- `--dry-run` shows what would happen without executing
-- Streams live progress from Claude and Codex CLIs
-
-> [!NOTE]
-> **Current limitation**: Agent CLI sandboxes (Codex's `sandbox-exec`, Claude's permission model) often block the nested subprocess calls that `btrain loop` needs. The loop logic works correctly — dispatching, polling, timeouts, and dry-run are all tested and functional — but real-world use requires agents to have sufficient permissions to run `btrain` commands as subprocesses. For now, the manual `bth` relay is more reliable. See [Loop Status](#loop-status) below.
-
-### `btrain review run [--mode <manual|parallel|hybrid>]`
-
-Run automated review. `parallel` runs 3 independent reviewers. `hybrid` adds a sequential chain for sensitive paths/patterns.
-
-### `btrain review status`
-
-Show review mode, config flags, and latest review artifact.
-
-### `btrain status [--repo <path>]`
-
-Show handoff state across all registered repos. In multi-lane mode, shows per-lane status.
-
-### `btrain doctor [--repo <path>]`
-
-Check registry and repo health. Reports missing files, stale entries, managed block drift. In multi-lane mode, also checks lane handoff files, `locks.json` validity, and stale/overlapping locks.
-
-### `btrain sync-templates [--repo <path>]`
-
-Re-sync the managed btrain block in `AGENTS.md` and `CLAUDE.md`.
-
-### `btrain hooks [--repo <path>]`
-
-Install the pre-commit guard on an already-initialized repo.
-
-### `btrain repos`
-
-List all registered repos.
-
----
-
-## Loop Status
-
-`btrain loop` was built to automate the `bth` relay — watch `HANDOFF.md`, dispatch the right agent CLI, repeat until resolved. The implementation is complete and tested (29/29 tests pass, including streaming, dry-run, max-rounds guards, and notify-mode fallback).
-
-**Why it doesn't fully work in practice:**
-
-Both Claude Code and Codex CLI have sandbox/permission models that block nested subprocess calls:
-
-- **Codex** (`--full-auto`): Its sandbox uses `sandbox-exec` which blocks child processes from running `btrain` commands. Error: `sandbox_apply: Operation not permitted`
-- **Claude Code** (`-p`): Requires explicit permission flags (`--permission-mode bypassPermissions`) which is not safe for production use
-- **Antigravity**: IDE-embedded, no CLI to dispatch at all — uses `notify` mode (loop waits for manual action)
-
-**Current recommendation**: Use `bth` manually in each agent's chat window. The loop infrastructure exists and will become practical as agent CLI tools improve their headless/orchestration support.
-
-**What still works from the loop feature:**
-- `btrain loop --dry-run` — shows what would happen
-- `[agents.runners]` config in `project.toml` — documents your agent setup
-- Streaming progress parsing for Claude and Codex JSON output
-- The full test suite validates the dispatch/poll/timeout logic
-
----
-
-## Project Config (`.btrain/project.toml`)
+## Example Config
 
 ```toml
 name = "your-repo"
 repo_path = "/absolute/path/to/your-repo"
-handoff_path = ".claude/collab/HANDOFF.md"
+handoff_path = ".claude/collab/HANDOFF_A.md"
 default_review_mode = "manual"
 
 [agents]
-writer_default = ""
-reviewer_default = ""
+active = ["Claude", "GPT-5 Codex"]
+writer_default = "Claude"
+reviewer_default = "GPT-5 Codex"
 
 [agents.runners]
-"Claude" = "claude -p"     # CLI dispatch
-"Opus 4.6" = "notify"      # IDE-only (Antigravity)
-"GPT-5 Codex" = "codex"    # CLI dispatch
+"Claude" = "claude -p"
+"GPT-5 Codex" = "codex"
+"Antigravity" = "notify"
 
 [reviews]
 parallel_enabled = true
-hybrid_path_triggers = ["routes", "auth", "middleware"]
-hybrid_content_triggers = ["(password|secret|token)"]
+sequential_enabled = false
+sequential_triggers = []
+parallel_script = ""
 
-[lanes]                      # Optional: enable concurrent work
+[lanes]
 enabled = true
+per_agent = 2
 
 [lanes.a]
 handoff_path = ".claude/collab/HANDOFF_A.md"
@@ -346,87 +240,46 @@ handoff_path = ".claude/collab/HANDOFF_A.md"
 [lanes.b]
 handoff_path = ".claude/collab/HANDOFF_B.md"
 
-[instructions]
-project_notes = ""
+[lanes.c]
+handoff_path = ".claude/collab/HANDOFF_C.md"
+
+[lanes.d]
+handoff_path = ".claude/collab/HANDOFF_D.md"
 ```
 
----
+## Agent Identity Verification
 
-## HANDOFF.md Format
+btrain can verify which agent is speaking.
 
-`.claude/collab/HANDOFF.md` (or `HANDOFF_A.md`/`HANDOFF_B.md` in lane mode) is the source of truth. Always use `btrain handoff claim|update|resolve` — never edit directly.
+- It uses `BTRAIN_AGENT` or `BRAIN_TRAIN_AGENT` if set.
+- Otherwise it looks at runtime hints and `[agents.runners]`.
+- `btrain handoff` prints an `agent check:` line so the agent can confirm its identity before acting.
 
-```markdown
-## Current
+That means a repo can use short collaborator labels. For example:
 
-Task: <short description>
-Owner: <agent doing the work>
-Reviewer: <agent reviewing>
-Status: idle | in-progress | needs-review | resolved
-Review Mode: manual | parallel | hybrid
-Lane: a | b                          # Only in multi-lane mode
-Locked Files: <comma-separated, or empty>
-Next Action: <what happens next>
-Last Updated: <agent name + ISO timestamp>
-
-## Context for Reviewer
-<owner fills this before handing to reviewer>
-
-## Review Response
-<reviewer writes their response>
-
-## Previous Handoffs
-- YYYY-MM-DD — <task> (<agent>): <outcome>
+```toml
+[agents.runners]
+"GPT" = "codex"
 ```
 
----
+In that setup, `btrain handoff` can report `agent check: GPT (runtime hints (codex))`.
 
-## File Layout
+## Dashboard and Loop
 
-```
-your-repo/
-  AGENTS.md                         # Managed btrain block + custom instructions
-  CLAUDE.md                         # Same — auto-loaded by Claude Code
-  .btrain/
-    project.toml                    # Repo config
-    reviews/                        # Review reports from automated runs
-    locks.json                      # File lock registry (multi-lane only)
-  .claude/
-    collab/
-      HANDOFF.md                    # Collaboration state (single-lane)
-      HANDOFF_A.md                  # Lane A state (multi-lane)
-      HANDOFF_B.md                  # Lane B state (multi-lane)
-
-$BRAIN_TRAIN_HOME/                  # Default: ~/.btrain
-  repos.json                        # Registry of all bootstrapped repos
-  templates/                        # Seed templates (auto-updated)
-```
-
----
+- `btrain dashboard` opens a live lane monitor in the browser.
+- `btrain loop` can relay `bth` between configured runners, but real-world support still depends on what each agent CLI allows.
+- `btrain hcleanup` trims old `## Previous Handoffs` entries into `~/agent_collab_history/<repo>_agents_collab/<repo>.md`.
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `BRAIN_TRAIN_HOME` | No | `~/.btrain` | Override global config directory |
-| `HANDOFF_HISTORY_PATH` | Watcher only | — | Path to the history log file |
-
----
-
-## How Agents Use btrain
-
-1. At session start, the agent runs `btrain handoff`
-2. The CLI prints the current state and plain-English guidance
-3. The agent follows the guidance:
-   - `idle` / `resolved` → claim a task (with `--lane` and `--files` if lanes are enabled)
-   - `in-progress` (owner) → do the work, fill in reviewer context, and only then run `btrain handoff update --status needs-review`
-   - `needs-review` (reviewer) → review, then `btrain handoff resolve --summary "..."`
-   - Not your turn → work on your other lane, or wait
-4. The human types `bth` in each agent window to trigger the relay
-
-Always use CLI subcommands. Never edit handoff files directly.
-
----
+| Variable | Description |
+| --- | --- |
+| `BRAIN_TRAIN_HOME` | Override the global btrain home directory |
+| `BTRAIN_AGENT` | Pin the current agent identity |
+| `BRAIN_TRAIN_AGENT` | Alias for `BTRAIN_AGENT` |
+| `ANTHROPIC_API_KEY` | Required for automated review modes that call Anthropic |
+| `OPENAI_API_KEY` | Required for automated review modes that call OpenAI |
+| `HANDOFF_HISTORY_PATH` | Output file used by the handoff history watcher |
 
 ## License
 
