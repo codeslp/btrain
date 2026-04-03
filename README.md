@@ -22,6 +22,14 @@ It works with Claude Code, Codex, Antigravity, or any mix of agents that can rea
 - Reviewer selection that can pick `any-other` configured peer automatically
 - A bundled, project-agnostic `.claude/skills/` pack on `init`
 - Optional history cleanup and automated review helpers
+- A modernized dashboard with immersive visual telemetry and bug-tracking
+
+## BTrain Dashboard
+
+The btrain workflow includes a modernized, local dashboard UI (`src/brain_train/dashboard.mjs`) featuring:
+- **Emotional Design**: An immersive, canvas-based experience to track lane states and agent activities.
+- **Bug-Tracking Telemetry**: High-visibility "sickly green" bug-flagging system with dynamic sprouting animations that persist in the UI.
+- **Immersive Animations**: Continuous orbital and heartbeat animations in the `ClosrLoader`, and a high-fidelity, physics-driven firework particle engine for rank-up overlays.
 
 ## Quick Start
 
