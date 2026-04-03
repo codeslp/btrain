@@ -446,7 +446,7 @@ const server = http.createServer((req, res) => {
 </head>
 <body>
   <div class="header-container">
-    <h1><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg> BTrain Console <span class="auto-refresh" id="last-updated">INIT...</span></h1>
+    <h1><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg> ${path.basename(process.cwd())} <span style="font-size: 12px; color: var(--text-muted); letter-spacing: 1px; text-transform: lowercase; margin-left: auto;">btrain console</span> <span class="auto-refresh" id="last-updated">INIT...</span></h1>
     <div class="agents-container" id="agents-container"></div>
   </div>
 
