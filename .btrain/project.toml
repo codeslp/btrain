@@ -2,4 +2,18 @@
 name = "btrain"
 
 [lanes]
+per_agent = 2
+enabled = true
 ids = ["a", "b"]
+
+[lanes.a]
+handoff_path = ".claude/collab/HANDOFF_A.md"
+
+[lanes.b]
+handoff_path = ".claude/collab/HANDOFF_B.md"
+
+[lanes.c]
+handoff_path = ".claude/collab/HANDOFF_C.md"
+
+[lanes.d]
+handoff_path = ".claude/collab/HANDOFF_D.md"

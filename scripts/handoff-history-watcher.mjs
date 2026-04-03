@@ -3,7 +3,6 @@ import {
   access,
   appendFile,
   mkdir,
-  readdir,
   readFile,
   stat,
   watch,
@@ -41,8 +40,8 @@ function extractField(content, label) {
 function parseHandoff(content) {
   return {
     task: extractField(content, 'Task'),
-    owner: extractField(content, 'Active Agent') || extractField(content, 'Owner'),
-    reviewer: extractField(content, 'Peer Reviewer') || extractField(content, 'Reviewer'),
+    owner: extractField(content, 'Owner'),
+    reviewer: extractField(content, 'Reviewer'),
     status: extractField(content, 'Status').toLowerCase(),
     nextAction: extractField(content, 'Next Action').toLowerCase(),
     base: extractField(content, 'Base'),
@@ -80,49 +79,25 @@ async function readWatchConfig() {
   }
 }
 
-const HANDOFF_FILENAME_RE = /^HANDOFF(?:_[A-Z]+)?\.md$/;
+const HANDOFF_FILENAMES = new Set(['HANDOFF.md', 'HANDOFF_A.md', 'HANDOFF_B.md']);
 
-function buildWatchTarget(handoffPath, repoRoot) {
-  return {
-    handoffPath,
-    repoRoot,
-    repoName: path.basename(repoRoot),
-  };
-}
-
-async function resolveConfiguredEntries(entry) {
+function resolveConfiguredEntry(entry) {
   const absolutePath = path.resolve(entry);
 
-  if (HANDOFF_FILENAME_RE.test(path.basename(absolutePath))) {
+  if (HANDOFF_FILENAMES.has(path.basename(absolutePath))) {
     const repoRoot = path.resolve(path.dirname(absolutePath), '..', '..');
-    return [buildWatchTarget(absolutePath, repoRoot)];
+    return {
+      handoffPath: absolutePath,
+      repoRoot,
+      repoName: path.basename(repoRoot),
+    };
   }
 
-  const repoRoot = absolutePath;
-  const collabDir = path.join(repoRoot, '.claude', 'collab');
-  const discovered = [];
-
-  try {
-    const entries = await readdir(collabDir, { withFileTypes: true });
-    for (const dirent of entries) {
-      if (dirent.isFile() && HANDOFF_FILENAME_RE.test(dirent.name)) {
-        discovered.push(path.join(collabDir, dirent.name));
-      }
-    }
-  } catch (error) {
-    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
-      throw error;
-    }
-  }
-
-  if (discovered.length === 0) {
-    discovered.push(path.join(collabDir, 'HANDOFF_A.md'));
-    discovered.push(path.join(collabDir, 'HANDOFF.md'));
-  }
-
-  return discovered
-    .sort((left, right) => left.localeCompare(right))
-    .map((handoffPath) => buildWatchTarget(handoffPath, repoRoot));
+  return {
+    handoffPath: path.join(absolutePath, '.claude', 'collab', 'HANDOFF_A.md'),
+    repoRoot: absolutePath,
+    repoName: path.basename(absolutePath),
+  };
 }
 
 async function collectWatchTargets() {
@@ -143,24 +118,22 @@ async function collectWatchTargets() {
   const seenHandoffPaths = new Set();
 
   for (const entry of uniqueEntries) {
-    const resolvedTargets = await resolveConfiguredEntries(entry);
-    for (const target of resolvedTargets) {
-      if (seenHandoffPaths.has(target.handoffPath)) {
+    const target = resolveConfiguredEntry(entry);
+    if (seenHandoffPaths.has(target.handoffPath)) {
+      continue;
+    }
+
+    try {
+      await access(target.handoffPath);
+      targets.push(target);
+      seenHandoffPaths.add(target.handoffPath);
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+        console.warn(`Skipping missing handoff file: ${target.handoffPath}`);
         continue;
       }
 
-      try {
-        await access(target.handoffPath);
-        targets.push(target);
-        seenHandoffPaths.add(target.handoffPath);
-      } catch (error) {
-        if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-          console.warn(`Skipping missing handoff file: ${target.handoffPath}`);
-          continue;
-        }
-
-        throw error;
-      }
+      throw error;
     }
   }
 
@@ -213,8 +186,8 @@ function formatEntry({ content, handoff, target, timestamp, trigger }) {
     `- Repo Root: ${target.repoRoot}`,
     `- Handoff: ${target.handoffPath}`,
     `- Task: ${handoff.task || 'Unknown task'}`,
-    `- Active Agent: ${handoff.owner || 'Unknown active agent'}`,
-    `- Peer Reviewer: ${handoff.reviewer || 'Unknown peer reviewer'}`,
+    `- Owner: ${handoff.owner || 'Unknown owner'}`,
+    `- Reviewer: ${handoff.reviewer || 'Unknown reviewer'}`,
     `- Status: ${handoff.status || 'unknown'}`,
     `- Next Action: ${handoff.nextAction || 'unknown'}`,
     `- Base: ${handoff.base || 'unknown'}`,
