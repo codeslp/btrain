@@ -3,7 +3,23 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = 3333;
+const PORT = Number(process.env.PORT) || 3333;
+
+const HOT_SEAT_RESOLVERS = {
+  'in-progress': ({ writer }) => writer,
+  'needs-review': ({ reviewer }) => reviewer,
+  'changes-requested': ({ writer }) => writer,
+  'repair-needed': ({ repairOwner, writer }) => repairOwner || writer
+};
+
+const STATUS_CLASS_NAMES = {
+  idle: 'status-idle',
+  'in-progress': 'status-in-progress',
+  'needs-review': 'status-needs-review',
+  'changes-requested': 'status-changes-requested',
+  'repair-needed': 'status-repair-needed',
+  resolved: 'status-resolved'
+};
 
 function getActiveAgents() {
   try {
@@ -25,20 +41,20 @@ function getActiveAgents() {
 function getBtrainStatus() {
   try {
     const raw = execSync('btrain status --repo .').toString();
-    const lanes = [];
     const lines = raw.split('\n');
 
     let currentLanes = [];
 
     for (const line of lines) {
       if (line.includes('lane ')) {
-        const match = line.match(/lane (\w): ([-a-zA-Z]+) — (.*?)\((.*?)\)(?: \[(.*?)\])?/);
+        const match = line.match(/lane (\w+): ([-a-zA-Z]+) — (.*?)\((.*?)\)(?: \[(.*?)\])?/);
         if (match) {
           const laneId = match[1];
           const status = match[2];
           let desc = match[3].trim();
           let writer = match[4];
           let reviewer = 'any-other';
+          let repairOwner = '';
           let bodyText = '';
           
           try {
@@ -48,8 +64,10 @@ function getBtrainStatus() {
               bodyText = fileContent;
               const aaMatch = fileContent.match(/Active Agent:\s*(.+)/);
               const prMatch = fileContent.match(/Peer Reviewer:\s*(.+)/);
+              const roMatch = fileContent.match(/Repair Owner:\s*(.+)/);
               if (aaMatch) writer = aaMatch[1].trim();
               if (prMatch) reviewer = prMatch[1].trim();
+              if (roMatch) repairOwner = roMatch[1].trim();
             }
           } catch(e) { }
 
@@ -57,8 +75,10 @@ function getBtrainStatus() {
           const isBugCandidate = desc.toLowerCase().includes('bug') || desc.toLowerCase().includes('issue') || bodyText.toLowerCase().includes('bug') || bodyText.toLowerCase().includes('issue');
           const isBug = isBugCandidate && status !== 'resolved';
 
-          if (status === 'in-progress') hotSeat = writer;
-          else if (status === 'needs-review') hotSeat = reviewer;
+          const resolveHotSeat = HOT_SEAT_RESOLVERS[status];
+          if (resolveHotSeat) {
+            hotSeat = resolveHotSeat({ writer, reviewer, repairOwner }) || 'Unassigned';
+          }
 
           currentLanes.push({
             id: laneId,
@@ -66,13 +86,14 @@ function getBtrainStatus() {
             desc: desc,
             writer: writer,
             reviewer: reviewer,
+            repairOwner: repairOwner,
             hotSeat: hotSeat,
             locks: match[5] || '',
             fullText: bodyText,
             isBug: isBug
           });
         } else {
-          const idleMatch = line.match(/lane (\w): (idle) — \(no task\)/);
+          const idleMatch = line.match(/lane (\w+): (idle) — \(no task\)/);
           if (idleMatch) {
             currentLanes.push({
               id: idleMatch[1],
@@ -80,6 +101,7 @@ function getBtrainStatus() {
               desc: '(no task)',
               writer: '',
               reviewer: '',
+              repairOwner: '',
               hotSeat: 'Unassigned',
               locks: '',
               fullText: 'Lane is currently idle.'
@@ -123,8 +145,18 @@ const server = http.createServer((req, res) => {
       --idle-glow: rgba(72, 79, 88, 0.3);
       --in-progress: #ff8c00;
       --in-progress-glow: rgba(255, 140, 0, 0.2);
-      --needs-review: #ff2a2a;
-      --needs-review-glow: rgba(255, 42, 42, 0.2);
+      --needs-review: #aa0000;
+      --needs-review-glow: rgba(170, 0, 0, 0.2);
+      --changes-requested: #ff00ff;
+      --changes-requested-glow: rgba(255, 0, 255, 0.2);
+      --repair-needed: #ffd000;
+      --repair-needed-glow: rgba(255, 208, 0, 0.22);
+      --repair-needed-stripe-dark: #111;
+      --repair-needed-tape: repeating-linear-gradient(
+        -45deg,
+        var(--repair-needed-stripe-dark) 0 12px,
+        var(--repair-needed) 12px 24px
+      );
       --resolved: #00e65c;
       --resolved-glow: rgba(0, 230, 92, 0.2);
       
@@ -231,6 +263,14 @@ const server = http.createServer((req, res) => {
     .indicator-pill.status-needs-review {
       animation: hop 1.5s cubic-bezier(0.28, 0.84, 0.42, 1) infinite;
     }
+    .indicator-pill.status-changes-requested {
+      animation: hop 2.0s cubic-bezier(0.28, 0.84, 0.42, 1) infinite;
+    }
+    .indicator-pill.status-repair-needed {
+      animation: hop 1.8s cubic-bezier(0.28, 0.84, 0.42, 1) infinite;
+      border-color: rgba(255, 208, 0, 0.55);
+      box-shadow: 0 0 14px var(--repair-needed-glow);
+    }
     .indicator-pill.status-in-progress {
       animation: chug 1.5s ease-in-out infinite;
     }
@@ -284,6 +324,16 @@ const server = http.createServer((req, res) => {
     .lane-box.idle { background-color: var(--idle); }
     .lane-box.in-progress { background-color: var(--in-progress); box-shadow: 0 0 12px var(--in-progress-glow); }
     .lane-box.needs-review { background-color: var(--needs-review); box-shadow: 0 0 12px var(--needs-review-glow); }
+    .lane-box.changes-requested { background-color: var(--changes-requested); box-shadow: 0 0 12px var(--changes-requested-glow); }
+    .lane-box.repair-needed {
+      background: var(--repair-needed-tape);
+      box-shadow: 0 0 12px var(--repair-needed-glow);
+      color: #111;
+      border-bottom-color: rgba(0, 0, 0, 0.35);
+      -webkit-text-stroke: 0.6px #fff;
+      paint-order: stroke fill;
+      text-shadow: 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;
+    }
     .lane-box.resolved { background-color: var(--resolved); box-shadow: 0 0 12px var(--resolved-glow); }
 
     /* Lanes Grid */
@@ -316,6 +366,22 @@ const server = http.createServer((req, res) => {
     .lane-card[data-status="idle"] { border-top-color: var(--idle); }
     .lane-card[data-status="in-progress"] { border-top-color: var(--in-progress); }
     .lane-card[data-status="needs-review"] { border-top-color: var(--needs-review); }
+    .lane-card[data-status="changes-requested"] { border-top-color: var(--changes-requested); }
+    .lane-card[data-status="repair-needed"] {
+      border-top-color: var(--repair-needed);
+      overflow: hidden;
+    }
+    .lane-card[data-status="repair-needed"]::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 12px;
+      background: var(--repair-needed-tape);
+      box-shadow: 0 0 14px var(--repair-needed-glow);
+      pointer-events: none;
+    }
     .lane-card[data-status="resolved"] { border-top-color: var(--resolved); }
 
     /* Hot Seat Badge */
@@ -361,7 +427,19 @@ const server = http.createServer((req, res) => {
     .status-idle { color: var(--idle); }
     .status-in-progress { color: var(--in-progress); }
     .status-needs-review { color: var(--needs-review); }
+    .status-changes-requested { color: var(--changes-requested); }
+    .status-repair-needed { color: var(--repair-needed); }
     .status-resolved { color: var(--resolved); }
+
+    .lane-card[data-status="repair-needed"] .lane-status {
+      background: var(--repair-needed-tape);
+      color: #111;
+      border: 1px solid rgba(0, 0, 0, 0.35);
+      box-shadow: 0 0 12px rgba(255, 208, 0, 0.12);
+      -webkit-text-stroke: 0.6px #fff;
+      paint-order: stroke fill;
+      text-shadow: 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;
+    }
 
     .lane-agents-meta {
       display: flex;
@@ -379,6 +457,20 @@ const server = http.createServer((req, res) => {
       display: flex;
       align-items: center;
       gap: 8px;
+    }
+
+    .lane-owner.repair-owner {
+      display: inline-flex;
+      width: fit-content;
+      padding: 4px 10px;
+      background: var(--repair-needed-tape);
+      color: #111;
+      border: 1px solid rgba(0, 0, 0, 0.35);
+      box-shadow: 0 0 12px rgba(255, 208, 0, 0.12);
+    }
+
+    .lane-owner.repair-owner strong {
+      color: #111;
     }
 
     .lane-desc {
@@ -437,7 +529,7 @@ const server = http.createServer((req, res) => {
       top: -24px;
       left: 50%;
       transform: translateX(-50%);
-      font-size: 20px;
+      color: var(--bug);
       animation: hop 2s infinite;
       z-index: 10;
       filter: drop-shadow(0 0 8px var(--bug));
@@ -461,13 +553,15 @@ const server = http.createServer((req, res) => {
   <script>
     // State to persist open cards across fetch polls
     const openCardIds = new Set();
+    const statusClassNames = ${JSON.stringify(STATUS_CLASS_NAMES)};
 
-    // Agent Color Identity definitions
     const getAgentIdentity = (name) => {
       if (!name || name === 'Unassigned') return { short: '---', color: '#666' };
-      if (name.includes('Codex')) return { short: 'GPT', color: '#00f0ff' }; // Neon Cyan
-      if (name.includes('Opus')) return { short: 'OPUS', color: '#ff00ff' }; // Neon Magenta
-      if (name.includes('Antigravity') || name.includes('Anti')) return { short: 'ANTI', color: '#b366ff' }; // Neon Violet
+      const n = name.toLowerCase();
+      if (n.includes('codex') || n.includes('gpt')) return { short: 'GPT', color: '#00f0ff' }; // Neon Cyan
+      if (n.includes('opus') || n.includes('claude')) return { short: 'CLD', color: '#ff00ff' }; // Neon Magenta
+      if (n.includes('gemini')) return { short: 'GEM', color: '#ffb300' }; // Amber
+      if (n.includes('antigravity') || n.includes('anti')) return { short: 'ANTI', color: '#b366ff' }; // Neon Violet
       return { short: name.substring(0,4).toUpperCase(), color: '#e6edf3' }; // Fallback White
     };
 
@@ -492,11 +586,7 @@ const server = http.createServer((req, res) => {
     };
 
     function renderStatusClass(status) {
-      if (status === 'idle') return 'status-idle';
-      if (status === 'in-progress') return 'status-in-progress';
-      if (status === 'needs-review') return 'status-needs-review';
-      if (status === 'resolved') return 'status-resolved';
-      return '';
+      return statusClassNames[status] || '';
     }
 
     const escapeHtml = (unsafe) => {
@@ -542,7 +632,7 @@ const server = http.createServer((req, res) => {
 
           return \`
             <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" style="position:relative; \${bugStyle}" onclick="scrollToCard('\${lane.id}', event)" title="\${lane.status.toUpperCase()}">
-              \${lane.isBug ? '<div class="bug-sprout">🐞</div>' : ''}
+              \${lane.isBug ? '<div class="bug-sprout"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3 3.96 0 0 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M17.47 9c1.93-.2 3.53-1.9 3.53-3.9"/><path d="M6 13H2"/><path d="M22 13h-4"/><path d="M6.5 17C4.6 17.2 3 18.9 3 21"/><path d="M17.5 17c1.9.2 3.5 1.9 3.5 3.9"/></svg></div>' : ''}
               <div class="lane-box \${lane.status}">\${lane.id}</div>
               \${hasHotSeat ? \`
                 <div class="indicator-agent" style="color: \${identity.color};">\${identity.short}</div>
@@ -555,8 +645,6 @@ const server = http.createServer((req, res) => {
         updateDOMIfChanged('lane-indicators-container', indicatorsHtml);
 
         // Lane Cards
-        const container = document.getElementById('lanes-container');
-        
         const lanesHtml = data.lanes.map(lane => {
           const isExpanded = openCardIds.has(lane.id) ? 'expanded' : '';
           const hasHotSeat = lane.hotSeat && lane.hotSeat !== 'Unassigned' && (lane.status !== 'resolved' || lane.isBug);
@@ -567,7 +655,7 @@ const server = http.createServer((req, res) => {
           
           return \`
           <div id="card-\${lane.id}" class="lane-card \${isExpanded}" style="position:relative; \${bugCardStyle}" data-status="\${lane.status}" onclick="toggleCard('\${lane.id}')">
-            \${lane.isBug ? '<div class="bug-sprout" style="font-size:32px; top:-28px;">🐞</div>' : ''}
+            \${lane.isBug ? '<div class="bug-sprout" style="top:-34px;"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3 3.96 0 0 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M17.47 9c1.93-.2 3.53-1.9 3.53-3.9"/><path d="M6 13H2"/><path d="M22 13h-4"/><path d="M6.5 17C4.6 17.2 3 18.9 3 21"/><path d="M17.5 17c1.9.2 3.5 1.9 3.5 3.9"/></svg></div>' : ''}
             \${hasHotSeat ? \`
               <div class="lane-hot-seat" style="color: \${hsIdentity.color}; border-color: \${hsIdentity.color}; box-shadow: 0 0 12px \${hsIdentity.color}40;">
                 HOTSEAT // \${hsIdentity.short}
@@ -579,13 +667,16 @@ const server = http.createServer((req, res) => {
               <div class="lane-status \${renderStatusClass(lane.status)}">[\${lane.status}]</div>
             </div>
 
-            \${lane.writer || lane.reviewer ? \`
+            \${lane.writer || lane.reviewer || lane.repairOwner ? \`
               <div class="lane-agents-meta">
                 \${lane.writer && lane.writer !== '(none)' && lane.writer !== '(unassigned)' ? \`
                   <div class="lane-owner">W // <strong style="color:\${wIdentity.color}">\${lane.writer}</strong></div>
                 \` : ''}
                 \${lane.reviewer && lane.reviewer !== '(none)' && lane.reviewer !== '(unassigned)' ? \`
                   <div class="lane-owner">R // <strong style="color:\${rIdentity.color}">\${lane.reviewer}</strong></div>
+                \` : ''}
+                \${lane.status === 'repair-needed' && lane.repairOwner ? \`
+                  <div class="lane-owner repair-owner">FIX // <strong>\${lane.repairOwner}</strong></div>
                 \` : ''}
               </div>
             \` : ''}

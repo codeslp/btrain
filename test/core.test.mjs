@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import {
-  installPreCommitHook,
+  installGitHooks,
   parseCsvList,
   checkLockConflicts,
   findAvailableLane,
@@ -31,6 +31,56 @@ async function runBtrain(args, cwd, envOverrides = {}) {
     const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
       cwd,
       env: { ...process.env, BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"), ...envOverrides },
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
+  } catch (error) {
+    return {
+      stdout: error.stdout?.trim() || "",
+      stderr: error.stderr?.trim() || "",
+      code:
+        typeof error.code === "number"
+          ? error.code
+          : typeof error.status === "number"
+            ? error.status
+            : 1,
+    }
+  }
+}
+
+async function runGit(args, cwd, envOverrides = {}) {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const exec = promisify(execFile)
+  try {
+    const result = await exec("git", args, {
+      cwd,
+      env: { ...process.env, ...envOverrides },
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
+  } catch (error) {
+    return {
+      stdout: error.stdout?.trim() || "",
+      stderr: error.stderr?.trim() || "",
+      code:
+        typeof error.code === "number"
+          ? error.code
+          : typeof error.status === "number"
+            ? error.status
+            : 1,
+    }
+  }
+}
+
+async function runShellScript(scriptPath, args, cwd, envOverrides = {}) {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const exec = promisify(execFile)
+  try {
+    const result = await exec("bash", [path.resolve(scriptPath), ...args], {
+      cwd,
+      env: { ...process.env, ...envOverrides },
       maxBuffer: 5 * 1024 * 1024,
     })
     return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
@@ -88,6 +138,120 @@ async function disableLanes(tmpDir) {
   const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
   const toml = await fs.readFile(tomlPath, "utf8")
   await fs.writeFile(tomlPath, toml.replace(/\n\[lanes\][\s\S]*$/, "\n"), "utf8")
+}
+
+async function configureGitIdentity(tmpDir) {
+  await runGit(["config", "user.name", "Test Bot"], tmpDir)
+  await runGit(["config", "user.email", "test@example.com"], tmpDir)
+}
+
+async function readJsonLines(filePath) {
+  const content = await fs.readFile(filePath, "utf8")
+  return content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
+function replaceCurrentSection(content, sectionText) {
+  return content.replace(/## Current[\s\S]*?(?=\n## |\s*$)/, sectionText)
+}
+
+function buildNeedsReviewArgs(tmpDir, {
+  actor,
+  reviewer,
+  base = "feat/test-review",
+  changed = ["src/feature.ts - implement the requested change"],
+  verification = ["node --test test/core.test.mjs"],
+  gap = ["Did not rerun manual smoke validation"],
+  why = ["The lane is ready for targeted review."],
+  reviewAsk = ["Check the targeted behavior and any regressions."],
+} = {}) {
+  const args = ["handoff", "update", "--repo", tmpDir, "--status", "needs-review"]
+  if (actor) {
+    args.push("--actor", actor)
+  }
+  if (reviewer) {
+    args.push("--reviewer", reviewer)
+  }
+  if (base) {
+    args.push("--base", base)
+  }
+  args.push("--preflight")
+  for (const item of changed) {
+    args.push("--changed", item)
+  }
+  for (const item of verification) {
+    args.push("--verification", item)
+  }
+  for (const item of gap) {
+    args.push("--gap", item)
+  }
+  for (const item of why) {
+    args.push("--why", item)
+  }
+  for (const item of reviewAsk) {
+    args.push("--review-ask", item)
+  }
+  return args
+}
+
+function buildRepairNeededArgs(tmpDir, {
+  actor,
+  lane,
+  reasonCode = "invalid-handoff",
+  reasonTags = [],
+} = {}) {
+  const args = ["handoff", "update", "--repo", tmpDir, "--status", "repair-needed", "--reason-code", reasonCode]
+  if (lane) {
+    args.push("--lane", lane)
+  }
+  for (const tag of reasonTags) {
+    args.push("--reason-tag", tag)
+  }
+  if (actor) {
+    args.push("--actor", actor)
+  }
+  return args
+}
+
+async function setupFakeLaunchctl(baseDir) {
+  const binDir = path.join(baseDir, "fake-bin")
+  const launchctlPath = path.join(binDir, "launchctl")
+  await fs.mkdir(binDir, { recursive: true })
+  await writeExecutable(
+    launchctlPath,
+    `#!/bin/bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
+if [ "\${1:-}" = "print" ]; then
+  IFS=',' read -r -a labels <<< "\${FAKE_LAUNCHCTL_ACTIVE_LABELS:-}"
+  for label in "\${labels[@]}"; do
+    if [ -n "$label" ] && [[ "\${2:-}" == */"$label" ]]; then
+      exit 0
+    fi
+  done
+  exit 1
+fi
+exit 0
+`,
+  )
+  return binDir
+}
+
+async function setupBtrainShim(baseDir) {
+  const binDir = path.join(baseDir, "btrain-bin")
+  const shimPath = path.join(binDir, "btrain")
+  await fs.mkdir(binDir, { recursive: true })
+  await writeExecutable(
+    shimPath,
+    `#!/bin/bash
+set -euo pipefail
+node "${path.resolve("src/brain_train/cli.mjs")}" "$@"
+`,
+  )
+  return binDir
 }
 
 // ──────────────────────────────────────────────
@@ -488,12 +652,18 @@ describe("installPreCommitHook", () => {
     await fs.writeFile(path.join(tmpDir, ".git"), `gitdir: ${worktreeGitDir}\n`, "utf8")
     await fs.writeFile(path.join(worktreeGitDir, "commondir"), "../common\n", "utf8")
 
-    const result = await installPreCommitHook(tmpDir)
-    const hookPath = path.join(commonGitDir, "hooks", "pre-commit")
-    const hookContent = await fs.readFile(hookPath, "utf8")
+    const result = await installGitHooks(tmpDir)
+    const preCommitPath = path.join(commonGitDir, "hooks", "pre-commit")
+    const prePushPath = path.join(commonGitDir, "hooks", "pre-push")
+    const preCommitContent = await fs.readFile(preCommitPath, "utf8")
+    const prePushContent = await fs.readFile(prePushPath, "utf8")
 
-    assert.deepStrictEqual(result, { installed: true, reason: "created" })
-    assert.ok(hookContent.includes("# btrain:pre-commit-hook"), "Expected btrain hook marker")
+    assert.deepStrictEqual(result, {
+      preCommit: { installed: true, reason: "created" },
+      prePush: { installed: true, reason: "created" },
+    })
+    assert.ok(preCommitContent.includes("# btrain:pre-commit-hook"), "Expected btrain pre-commit hook marker")
+    assert.ok(prePushContent.includes("# btrain:pre-push-hook"), "Expected btrain pre-push hook marker")
   })
 })
 
@@ -532,11 +702,23 @@ describe("btrain handoff lifecycle", () => {
     assert.ok(stdout.includes("task: Test task"), `Expected task name: ${stdout}`)
   })
 
-  it("update transitions to needs-review", async () => {
-    const { stdout } = await runBtrain(
+  it("rejects needs-review while reviewer context is still placeholder-only", async () => {
+    const { code, stderr } = await runBtrain(
       ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--actor", "TestBot"],
       tmpDir,
     )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /Cannot enter `needs-review` until reviewer context is complete/)
+  })
+
+  it("update transitions to needs-review when reviewer context is complete", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "TestBot" }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
     assert.ok(stdout.includes("status: needs-review"), `Expected needs-review: ${stdout}`)
     assert.ok(stdout.includes("peer reviewer: ReviewBot"), `Expected peer reviewer to stay on the peer: ${stdout}`)
   })
@@ -596,6 +778,74 @@ describe("btrain handoff lifecycle", () => {
     assert.ok(!content.includes("Fill this in before handoff"), content)
   })
 
+  it("request-changes transitions to changes-requested and records reason metadata", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "request-changes",
+        "--repo",
+        tmpDir,
+        "--summary",
+        "Need one more verification pass before approval.",
+        "--reason-code",
+        "missing-verification",
+        "--reason-tag",
+        "smoke-check",
+        "--reason-tag",
+        "tests",
+        "--actor",
+        "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: changes-requested"), stdout)
+    assert.ok(stdout.includes("Changes requested by ReviewBot."), stdout)
+    assert.ok(stdout.includes("reason code: missing-verification"), stdout)
+    assert.ok(stdout.includes("reason tags: smoke-check, tests"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Status: changes-requested"), content)
+    assert.ok(content.includes("Primary Reason Code: missing-verification"), content)
+    assert.ok(content.includes("Reason Tags: smoke-check, tests"), content)
+    assert.ok(content.includes("Need one more verification pass before approval."), content)
+  })
+
+  it("writer can re-handoff after changes-requested", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "TestBot" }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: needs-review"), stdout)
+    assert.ok(stdout.includes("Waiting on peer review from ReviewBot."), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(!content.includes("Primary Reason Code:"), content)
+    assert.ok(!content.includes("Reason Tags:"), content)
+  })
+
+  it("request-changes requires a reason code", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "request-changes",
+        "--repo",
+        tmpDir,
+        "--summary",
+        "Need one more verification pass before approval.",
+        "--actor",
+        "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /requires --reason-code/)
+  })
+
   it("resolve transitions to resolved", async () => {
     const { stdout } = await runBtrain(
       ["handoff", "resolve", "--repo", tmpDir, "--summary", "All good", "--actor", "ReviewBot"],
@@ -607,6 +857,449 @@ describe("btrain handoff lifecycle", () => {
   it("handoff guidance no longer mentions editing HANDOFF.md directly", async () => {
     const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
     assert.ok(!stdout.includes("edit HANDOFF.md directly"), `Guidance should not contain 'edit HANDOFF.md directly': ${stdout}`)
+  })
+})
+
+describe("btrain workflow history", () => {
+  it("writes structured workflow events for lane transitions", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Track workflow events",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/feature-a.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "feature-a.ts"), "export const featureA = true\n", "utf8")
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--status",
+          "needs-review",
+          "--actor",
+          "WriterBot",
+          "--base",
+          "HEAD",
+          "--preflight",
+          "--changed",
+          "src/feature-a.ts - add workflow event coverage",
+          "--verification",
+          "npx tsx --test test/core.test.mjs",
+          "--gap",
+          "Did not rerun manual smoke validation",
+          "--why",
+          "Need a reviewable diff for workflow event coverage.",
+          "--review-ask",
+          "Confirm lane events are written in order.",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "request-changes",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--summary",
+          "Need a clearer verification trail.",
+          "--reason-code",
+          "missing-verification",
+          "--actor",
+          "ReviewerBot",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--status",
+          "in-progress",
+          "--actor",
+          "WriterBot",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "feature-a.ts"), "export const featureA = 'updated'\n", "utf8")
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--status",
+          "needs-review",
+          "--actor",
+          "WriterBot",
+          "--base",
+          "HEAD",
+          "--preflight",
+          "--changed",
+          "src/feature-a.ts - clarify verification trail",
+          "--verification",
+          "npx tsx --test test/core.test.mjs",
+          "--gap",
+          "Did not rerun manual smoke validation",
+          "--why",
+          "Need reviewer approval after the follow-up pass.",
+          "--review-ask",
+          "Confirm the request-changes loop is preserved in history.",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Approved", "--actor", "ReviewerBot"],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["claim", "update", "request-changes", "update", "update", "resolve"],
+      )
+      assert.ok(events.every((event) => event.laneId === "a"))
+      assert.equal(events[0].actor, "WriterBot")
+      assert.equal(events[2].actor, "ReviewerBot")
+      assert.equal(events.at(-1)?.after?.status, "resolved")
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("keeps only the newest warm handoffs and archives the rest under .btrain", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+
+      for (let index = 1; index <= 5; index += 1) {
+        const claimResult = await runBtrain(
+          [
+            "handoff",
+            "claim",
+            "--repo",
+            tmpDir,
+            "--lane",
+            "a",
+            "--task",
+            `History ${index}`,
+            "--owner",
+            "WriterBot",
+            "--reviewer",
+            "ReviewerBot",
+            "--files",
+            "src/history-a.ts",
+          ],
+          tmpDir,
+        )
+        assert.equal(claimResult.code, 0, claimResult.stderr)
+
+        await fs.writeFile(path.join(tmpDir, "src", "history-a.ts"), `export const historyValue = ${index}\n`, "utf8")
+
+        const resolveResult = await runBtrain(
+          [
+            "handoff",
+            "resolve",
+            "--repo",
+            tmpDir,
+            "--lane",
+            "a",
+            "--summary",
+            `Resolved ${index}`,
+            "--actor",
+            "ReviewerBot",
+          ],
+          tmpDir,
+        )
+        assert.equal(resolveResult.code, 0, resolveResult.stderr)
+      }
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const archivePath = path.join(tmpDir, ".btrain", "history", "lane-a.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const warmEntries = [...handoffContent.matchAll(/^- \d{4}-\d{2}-\d{2}\b/gm)]
+
+      assert.equal(warmEntries.length, 3)
+      assert.ok(handoffContent.includes("History 5"), handoffContent)
+      assert.ok(handoffContent.includes("History 4"), handoffContent)
+      assert.ok(handoffContent.includes("History 3"), handoffContent)
+      assert.ok(!handoffContent.includes("History 2"), handoffContent)
+
+      const archiveContent = await fs.readFile(archivePath, "utf8")
+      assert.ok(archiveContent.includes("History 1"), archiveContent)
+      assert.ok(archiveContent.includes("History 2"), archiveContent)
+
+      let events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(events.some((event) => event.type === "history-compact"), events.map((event) => event.type).join(", "))
+
+      const cleanupResult = await runBtrain(["hcleanup", "--repo", tmpDir, "--keep", "1"], tmpDir)
+      assert.equal(cleanupResult.code, 0, cleanupResult.stderr)
+      assert.ok(cleanupResult.stdout.includes("archived:"), cleanupResult.stdout)
+
+      const compactedContent = await fs.readFile(handoffPath, "utf8")
+      const compactedWarmEntries = [...compactedContent.matchAll(/^- \d{4}-\d{2}-\d{2}\b/gm)]
+      assert.equal(compactedWarmEntries.length, 1)
+      assert.ok(compactedContent.includes("History 5"), compactedContent)
+
+      const expandedArchive = await fs.readFile(archivePath, "utf8")
+      assert.ok(expandedArchive.includes("History 3"), expandedArchive)
+      assert.ok(expandedArchive.includes("History 4"), expandedArchive)
+
+      events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(
+        events.some((event) => event.type === "history-compact" && event.actor === "btrain hcleanup"),
+        events.map((event) => `${event.type}:${event.actor}`).join(", "),
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("prefers the newest lane state snapshot from workflow events when the handoff file is stale", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Fresh workflow state",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/fresh.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "fresh.ts"), "export const fresh = true\n", "utf8")
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "resolve",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--summary",
+          "Fresh workflow summary",
+          "--actor",
+          "ReviewerBot",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const staleCurrentSection = [
+        "## Current",
+        "",
+        "Task: Stale branch copy",
+        "Owner: WriterBot",
+        "Reviewer: ReviewerBot",
+        "Status: resolved",
+        "Review Mode: manual",
+        "Locked Files: (none)",
+        "Next Action: Stale branch summary",
+        "Base:",
+        "Last Updated: WriterBot 2025-01-01T00:00:00.000Z",
+        "Lane: a",
+        "",
+      ].join("\n")
+      await fs.writeFile(handoffPath, replaceCurrentSection(handoffContent, staleCurrentSection), "utf8")
+
+      const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+      assert.equal(handoffResult.code, 0, handoffResult.stderr)
+      assert.ok(handoffResult.stdout.includes("task: Fresh workflow state"), handoffResult.stdout)
+      assert.ok(handoffResult.stdout.includes("Fresh workflow summary"), handoffResult.stdout)
+      assert.ok(!handoffResult.stdout.includes("Stale branch summary"), handoffResult.stdout)
+
+      const statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+      assert.equal(statusResult.code, 0, statusResult.stderr)
+      assert.ok(statusResult.stdout.includes("lane a: resolved — Fresh workflow state"), statusResult.stdout)
+      assert.ok(!statusResult.stdout.includes("2025-01-01T00:00:00.000Z"), statusResult.stdout)
+      assert.ok(!statusResult.stdout.includes("Stale branch summary"), statusResult.stdout)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+describe("audited overrides", () => {
+  it("allows a human-confirmed needs-review override to bypass the reviewable-diff guard once", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Override review guard",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/override-a.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            actor: "WriterBot",
+            base: "HEAD",
+            changed: ["src/override-a.ts - no diff present yet"],
+            verification: ["npx tsx --test test/core.test.mjs"],
+            gap: ["No file diff exists; this is an override path."],
+            why: ["Need an emergency reviewer checkpoint despite the empty diff."],
+            reviewAsk: ["Confirm the override is recorded and the lane still moves to review."],
+          }),
+          "--lane",
+          "a",
+        ],
+        tmpDir,
+      )
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /reviewable diff in locked files/)
+
+      const grantResult = await runBtrain(
+        [
+          "override",
+          "grant",
+          "--repo",
+          tmpDir,
+          "--action",
+          "needs-review",
+          "--lane",
+          "a",
+          "--requested-by",
+          "WriterBot",
+          "--confirmed-by",
+          "HumanOperator",
+          "--reason",
+          "Emergency review checkpoint before any file diff exists.",
+        ],
+        tmpDir,
+      )
+      assert.equal(grantResult.code, 0, grantResult.stderr)
+      const overrideIdMatch = grantResult.stdout.match(/override granted: (\S+)/)
+      assert.ok(overrideIdMatch, grantResult.stdout)
+      const overrideId = overrideIdMatch[1]
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            actor: "WriterBot",
+            base: "HEAD",
+            changed: ["src/override-a.ts - no diff present yet"],
+            verification: ["npx tsx --test test/core.test.mjs"],
+            gap: ["No file diff exists; this is an override path."],
+            why: ["Need an emergency reviewer checkpoint despite the empty diff."],
+            reviewAsk: ["Confirm the override is recorded and the lane still moves to review."],
+          }),
+          "--lane",
+          "a",
+          "--override-id",
+          overrideId,
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+      assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+
+      const overrideList = await runBtrain(["override", "list", "--repo", tmpDir], tmpDir)
+      assert.equal(overrideList.code, 0, overrideList.stderr)
+      assert.ok(overrideList.stdout.includes("No active overrides."), overrideList.stdout)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(events.some((event) => event.type === "override-granted"), events.map((event) => event.type).join(", "))
+      assert.ok(events.some((event) => event.type === "override-consumed"), events.map((event) => event.type).join(", "))
+    } finally {
+      await rmDir(tmpDir)
+    }
   })
 })
 
@@ -637,7 +1330,7 @@ describe("btrain handoff reviewer intelligence", () => {
     )
 
     const { stdout, code, stderr } = await runBtrain(
-      ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--reviewer", "OwnerBot", "--actor", "OwnerBot"],
+      buildNeedsReviewArgs(tmpDir, { actor: "OwnerBot", reviewer: "OwnerBot" }),
       tmpDir,
     )
 
@@ -673,7 +1366,7 @@ describe("btrain handoff reviewer intelligence", () => {
     )
 
     const { stdout, code, stderr } = await runBtrain(
-      ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--reviewer", "any-other", "--actor", "OwnerBot"],
+      buildNeedsReviewArgs(tmpDir, { actor: "OwnerBot", reviewer: "any-other" }),
       tmpDir,
     )
 
@@ -745,7 +1438,7 @@ describe("btrain handoff agent verification", () => {
 
   it("auto-detects the actor and rejects mismatched --actor values", async () => {
     let result = await runBtrain(
-      ["handoff", "update", "--repo", tmpDir, "--status", "needs-review"],
+      buildNeedsReviewArgs(tmpDir),
       tmpDir,
       { BTRAIN_AGENT: "GPT-5 Codex" },
     )
@@ -761,6 +1454,165 @@ describe("btrain handoff agent verification", () => {
 
     assert.notEqual(result.code, 0)
     assert.ok(result.stderr.includes('does not match the detected agent "GPT-5 Codex"'), result.stderr)
+  })
+})
+
+describe("extended handoff statuses", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Repair flow", "--owner", "WriterBot", "--reviewer", "ReviewerBot"],
+      tmpDir,
+    )
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("repair-needed requires a reason code on transition", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--status",
+        "repair-needed",
+        "--actor",
+        "WriterBot",
+      ],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /requires --reason-code/)
+  })
+
+  it("supports repair-needed guidance", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--status",
+        "repair-needed",
+        "--reason-code",
+        "invalid-handoff",
+        "--reason-tag",
+        "placeholder-context",
+        "--actor",
+        "WriterBot",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: repair-needed"), stdout)
+    assert.ok(stdout.includes("Workflow repair needed before normal work can resume."), stdout)
+    assert.ok(stdout.includes("reason code: invalid-handoff"), stdout)
+    assert.ok(stdout.includes("reason tags: placeholder-context"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Primary Reason Code: invalid-handoff"), content)
+    assert.ok(content.includes("Reason Tags: placeholder-context"), content)
+  })
+})
+
+describe("repair-needed routing", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Repair routing", "--owner", "WriterBot", "--reviewer", "ReviewerBot"],
+      tmpDir,
+    )
+    const handoffResult = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "WriterBot" }), tmpDir)
+    assert.equal(handoffResult.code, 0, handoffResult.stderr)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("routes repair-needed back to the last canonical workflow actor and escalates after one retry", async () => {
+    let result = await runBtrain(
+      buildRepairNeededArgs(tmpDir, {
+        actor: "ReviewerBot",
+        reasonCode: "invalid-handoff",
+        reasonTags: ["placeholder-context"],
+      }),
+      tmpDir,
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.includes("status: repair-needed"), result.stdout)
+    assert.ok(result.stdout.includes("repair owner: WriterBot"), result.stdout)
+    assert.ok(result.stdout.includes("repair attempts: 1"), result.stdout)
+    assert.ok(!result.stdout.includes("repair escalation:"), result.stdout)
+
+    let statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repair owner: WriterBot"), statusResult.stdout)
+    assert.ok(statusResult.stdout.includes("repair attempts: 1"), statusResult.stdout)
+
+    let doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("assigned to WriterBot"), doctorResult.stdout)
+
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    let handoffContent = await fs.readFile(handoffPath, "utf8")
+    assert.ok(handoffContent.includes("Repair Owner: WriterBot"), handoffContent)
+    assert.ok(handoffContent.includes("Repair Attempts: 1"), handoffContent)
+    assert.ok(!handoffContent.includes("Repair Escalation:"), handoffContent)
+
+    result = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--status", "in-progress", "--actor", "WriterBot"],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(!result.stdout.includes("repair owner:"), result.stdout)
+
+    handoffContent = await fs.readFile(handoffPath, "utf8")
+    assert.ok(!handoffContent.includes("Repair Owner:"), handoffContent)
+    assert.ok(!handoffContent.includes("Repair Escalation:"), handoffContent)
+    assert.ok(!handoffContent.includes("Repair Attempts:"), handoffContent)
+
+    result = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "WriterBot" }), tmpDir)
+    assert.equal(result.code, 0, result.stderr)
+
+    result = await runBtrain(
+      buildRepairNeededArgs(tmpDir, {
+        actor: "ReviewerBot",
+        reasonCode: "invalid-handoff",
+      }),
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.includes("repair owner: WriterBot"), result.stdout)
+    assert.ok(result.stdout.includes("repair attempts: 2"), result.stdout)
+    assert.ok(result.stdout.includes("repair escalation: human"), result.stdout)
+    assert.ok(result.stdout.includes("Human escalation required"), result.stdout)
+
+    statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repair escalation: human"), statusResult.stdout)
+
+    doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("requires human escalation"), doctorResult.stdout)
   })
 })
 
@@ -788,6 +1640,135 @@ describe("btrain doctor", () => {
   it("reports healthy for a freshly initialized repo", async () => {
     const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
     assert.ok(stdout.includes("healthy: yes"), `Expected healthy repo: ${stdout}`)
+  })
+
+  it("surfaces stale resolved handoffs as repurpose-ready", async () => {
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    const content = await fs.readFile(handoffPath, "utf8")
+    const updated = content
+      .replace("Status: idle", "Status: resolved")
+      .replace(/^Last Updated: .*$/m, "Last Updated: GPT 2000-01-01T00:00:00.000Z")
+    await fs.writeFile(handoffPath, updated, "utf8")
+
+    const statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repurpose-ready"), statusResult.stdout)
+
+    const doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("repurpose-ready"), doctorResult.stdout)
+  })
+})
+
+describe("btrain doctor --repair", () => {
+  it("releases stale lane locks as a safe mechanical repair", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await enableLanes(tmpDir)
+      await runBtrain(["init", tmpDir], tmpDir)
+      await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Stale lock repair",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/stale-lock.ts",
+        ],
+        tmpDir,
+      )
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const staleContent = handoffContent
+        .replace("Status: in-progress", "Status: resolved")
+        .replace(
+          /^Next Action: .*$/m,
+          "Next Action: Manual edit left the lane resolved while locks stayed behind.",
+        )
+      await fs.writeFile(handoffPath, staleContent, "utf8")
+
+      const beforeDoctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+      assert.ok(beforeDoctor.stdout.includes("Stale lock: lane a"), beforeDoctor.stdout)
+
+      const repairDoctor = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+      assert.equal(repairDoctor.code, 0, repairDoctor.stderr)
+      assert.ok(repairDoctor.stdout.includes("repairs: lane a: released 1 stale lock"), repairDoctor.stdout)
+      assert.ok(!repairDoctor.stdout.includes("Stale lock: lane a"), repairDoctor.stdout)
+
+      const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+      assert.equal(locks.locks.filter((lock) => lock.lane === "a").length, 0)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(
+        events.some((event) => event.type === "watchdog-repair" && event.details?.repairType === "release-stale-locks"),
+        events.map((event) => `${event.type}:${event.details?.repairType || ""}`).join(", "),
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("runs history compaction as a backstop repair", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await disableLanes(tmpDir)
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const overflowEntries = [
+        "- 2026-04-01 WriterBot: History 5",
+        "- 2026-03-31 WriterBot: History 4",
+        "- 2026-03-30 WriterBot: History 3",
+        "- 2026-03-29 WriterBot: History 2",
+        "- 2026-03-28 WriterBot: History 1",
+      ].join("\n")
+      const overflowContent = handoffContent.replace(/## Previous Handoffs[\s\S]*$/, `## Previous Handoffs\n\n${overflowEntries}\n`)
+      await fs.writeFile(handoffPath, overflowContent, "utf8")
+
+      const repairDoctor = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+      assert.equal(repairDoctor.code, 0, repairDoctor.stderr)
+      assert.ok(repairDoctor.stdout.includes("repairs: current handoff: archived 2, kept 3"), repairDoctor.stdout)
+
+      const compactedContent = await fs.readFile(handoffPath, "utf8")
+      const warmEntries = [...compactedContent.matchAll(/^- \d{4}-\d{2}-\d{2}\b/gm)]
+      assert.equal(warmEntries.length, 3)
+      assert.ok(compactedContent.includes("History 5"), compactedContent)
+      assert.ok(compactedContent.includes("History 4"), compactedContent)
+      assert.ok(compactedContent.includes("History 3"), compactedContent)
+      assert.ok(!compactedContent.includes("History 2"), compactedContent)
+
+      const archivePath = path.join(tmpDir, ".btrain", "history", "repo.md")
+      const archiveContent = await fs.readFile(archivePath, "utf8")
+      assert.ok(archiveContent.includes("History 1"), archiveContent)
+      assert.ok(archiveContent.includes("History 2"), archiveContent)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "repo.jsonl"))
+      assert.ok(
+        events.some((event) => event.type === "history-compact" && event.actor === "btrain doctor"),
+        events.map((event) => `${event.type}:${event.actor}`).join(", "),
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
   })
 })
 
@@ -1111,7 +2092,7 @@ emit({
       tmpDir,
     )
     await runBtrain(
-      ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--actor", "OwnerBot"],
+      buildNeedsReviewArgs(tmpDir, { actor: "OwnerBot" }),
       tmpDir,
     )
 
@@ -1321,6 +2302,101 @@ describe("btrain push", () => {
   })
 })
 
+describe("managed pre-push hook", () => {
+  let tmpDir
+  let remoteDir
+  let btrainBinDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    remoteDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await exec("git", ["init", "--bare", remoteDir])
+    await configureGitIdentity(tmpDir)
+    btrainBinDir = await setupBtrainShim(tmpDir)
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+    await disableLanes(tmpDir)
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "Initial commit"], tmpDir)
+    await runGit(["remote", "add", "origin", remoteDir], tmpDir)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Guarded push", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    await fs.appendFile(path.join(tmpDir, "README.md"), "\nPush guard work\n", "utf8")
+    await runGit(["add", "README.md"], tmpDir)
+    await runGit(["commit", "-m", "Guarded change"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+    await rmDir(remoteDir)
+  })
+
+  it("blocks pushes while unresolved handoff state is active", async () => {
+    const { stdout, stderr, code } = await runGit(["push", "origin", "HEAD:main"], tmpDir)
+    const output = `${stdout}\n${stderr}`
+
+    assert.notEqual(code, 0, output)
+    assert.match(output, /blocked push/i)
+    assert.match(output, /HANDOFF_A\.md: in-progress/)
+  })
+
+  it("allows a single push after a human-confirmed audited override", async () => {
+    const grantResult = await runBtrain(
+      [
+        "override",
+        "grant",
+        "--repo",
+        tmpDir,
+        "--action",
+        "push",
+        "--requested-by",
+        "OwnerBot",
+        "--confirmed-by",
+        "HumanOperator",
+        "--reason",
+        "Emergency push while the handoff is still unresolved.",
+      ],
+      tmpDir,
+    )
+    assert.equal(grantResult.code, 0, grantResult.stderr)
+
+    let pushResult = await runGit(
+      ["push", "origin", "HEAD:main"],
+      tmpDir,
+      { PATH: `${btrainBinDir}:${process.env.PATH || ""}` },
+    )
+    let output = `${pushResult.stdout}\n${pushResult.stderr}`
+    assert.equal(pushResult.code, 0, output)
+    assert.match(output, /allowing one push due to a human-confirmed audited override/i)
+
+    await fs.appendFile(path.join(tmpDir, "README.md"), "\nSecond guarded push\n", "utf8")
+    await runGit(["add", "README.md"], tmpDir)
+    await runGit(["commit", "-m", "Second guarded change"], tmpDir)
+
+    pushResult = await runGit(
+      ["push", "origin", "HEAD:main"],
+      tmpDir,
+      { PATH: `${btrainBinDir}:${process.env.PATH || ""}` },
+    )
+    output = `${pushResult.stdout}\n${pushResult.stderr}`
+    assert.notEqual(pushResult.code, 0, output)
+    assert.match(output, /blocked push/i)
+
+    const overrides = await runBtrain(["override", "list", "--repo", tmpDir], tmpDir)
+    assert.equal(overrides.code, 0, overrides.stderr)
+    assert.ok(overrides.stdout.includes("No active overrides."), overrides.stdout)
+
+    const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "repo.jsonl"))
+    assert.ok(events.some((event) => event.type === "override-granted"), events.map((event) => event.type).join(", "))
+    assert.ok(events.some((event) => event.type === "override-consumed"), events.map((event) => event.type).join(", "))
+  })
+})
+
 describe("custom handoff_path", () => {
   let tmpDir
 
@@ -1394,6 +2470,16 @@ async function enableLanes(tmpDir) {
   ].join("\n")
 
   await fs.writeFile(tomlPath, toml + lanesSection, "utf8")
+}
+
+async function setLaneIdsMetadata(tmpDir, laneIds) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const updated = toml.replace(/^\[lanes\]\n([\s\S]*?)(?=\n\[lanes\.|\s*$)/m, (match) => {
+    const withoutIds = match.replace(/^ids\s*=.*\n?/m, "")
+    return `${withoutIds.trimEnd()}\nids = [${laneIds.map((id) => `"${id}"`).join(", ")}]\n`
+  })
+  await fs.writeFile(tomlPath, updated, "utf8")
 }
 
 // ──────────────────────────────────────────────
@@ -1551,6 +2637,19 @@ describe("getLaneConfigs", () => {
     assert.equal(configs[1].handoffPath, "custom/B.md")
   })
 
+  it("treats lanes.ids as metadata instead of a real lane", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        ids: ["a", "b", "i"],
+        a: { handoff_path: ".claude/collab/HANDOFF_A.md" },
+        b: { handoff_path: ".claude/collab/HANDOFF_B.md" },
+        i: { handoff_path: ".claude/collab/HANDOFF_I.md" },
+      },
+    })
+    assert.deepStrictEqual(configs.map((config) => config.id), ["a", "b", "i"])
+  })
+
   it("dynamically discovers lanes c and d from config", () => {
     const configs = getLaneConfigs({
       lanes: {
@@ -1658,6 +2757,33 @@ describe("lane upgrade migration", () => {
   })
 })
 
+describe("lane ids metadata compatibility", () => {
+  it("does not scaffold a bogus ids lane when [lanes].ids is present", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await enableLanes(tmpDir)
+      await setLaneIdsMetadata(tmpDir, ["a", "b"])
+      await runBtrain(["init", tmpDir], tmpDir)
+
+      await assert.doesNotReject(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")))
+      await assert.doesNotReject(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")))
+      await assert.rejects(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_IDS.md")))
+
+      const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+      assert.equal(handoffResult.code, 0, handoffResult.stderr)
+      assert.ok(!handoffResult.stdout.includes("--- lane ids ---"), handoffResult.stdout)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
 // ──────────────────────────────────────────────
 // Integration tests: multi-lane handoff lifecycle
 // ──────────────────────────────────────────────
@@ -1739,11 +2865,50 @@ describe("multi-lane handoff lifecycle", () => {
     assert.ok(stdout.includes("lane b"), `Expected lane b lock: ${stdout}`)
   })
 
-  it("update lane a to needs-review", async () => {
-    const { stdout } = await runBtrain(
-      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "Claude"],
+  it("rejects lane review handoffs when the locked files have no reviewable diff", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "feat/auth-work",
+          changed: ["src/auth/guard.ts - supposed auth lane work"],
+          verification: ["node --test test/core.test.mjs"],
+          gap: ["Did not run a browser login smoke test"],
+          why: ["Auth lane is supposedly ready for review."],
+          reviewAsk: ["Check the auth lane changes."],
+        }),
+        "--lane",
+        "a",
+      ],
       tmpDir,
     )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /reviewable diff in locked files/)
+  })
+
+  it("update lane a to needs-review", async () => {
+    await fs.mkdir(path.join(tmpDir, "src", "auth"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+
+    const { stdout, code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "feat/auth-work",
+          changed: ["src/auth/guard.ts - add the auth guard implementation"],
+          verification: ["node --test test/core.test.mjs"],
+          gap: ["Did not run a browser login smoke test"],
+          why: ["Auth lane is ready for peer review."],
+          reviewAsk: ["Check the auth lock scope and review context rendering."],
+        }),
+        "--lane",
+        "a",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
     assert.ok(stdout.includes("lane a"), stdout)
 
     const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
@@ -1753,6 +2918,36 @@ describe("multi-lane handoff lifecycle", () => {
     // Lane B should still be in-progress
     const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
     assert.ok(contentB.includes("Status: in-progress"), "Lane B should still be in-progress")
+  })
+
+  it("routes lane repair-needed back to the last canonical lane actor", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      buildRepairNeededArgs(tmpDir, {
+        lane: "a",
+        actor: "Gemini",
+        reasonCode: "invalid-handoff",
+        reasonTags: ["review-context"],
+      }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("lane a"), stdout)
+    assert.ok(stdout.includes("reason code: invalid-handoff"), stdout)
+    assert.ok(stdout.includes("repair owner: Claude"), stdout)
+    assert.ok(stdout.includes("repair attempts: 1"), stdout)
+
+    const statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repair owner: Claude"), statusResult.stdout)
+
+    const doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("Lane a is `repair-needed` and assigned to Claude."), doctorResult.stdout)
+
+    const resetResult = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "Claude"],
+      tmpDir,
+    )
+    assert.equal(resetResult.code, 0, resetResult.stderr)
   })
 
   it("resolve lane a releases its locks", async () => {
@@ -1939,5 +3134,108 @@ describe("multi-lane lock conflicts", () => {
     )
 
     assert.equal(code, 0, "Non-overlapping file claims should succeed")
+  })
+})
+
+describe("handoff history launch-agent rename compatibility", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("register-handoff-watch keeps legacy installs updated while writing the new watch list", async () => {
+    const codexHome = path.join(tmpDir, "codex-home-register")
+    const fakeHome = path.join(tmpDir, "home-register")
+    const legacyDir = path.join(codexHome, "collab", "ai_sales_brain_train")
+    const legacyWatchListPath = path.join(legacyDir, "handoff-watch-paths.txt")
+    const newWatchListPath = path.join(codexHome, "collab", "btrain", "handoff-watch-paths.txt")
+    const launchctlLog = path.join(tmpDir, "launchctl-register.log")
+    const targetRepo = path.join(tmpDir, "watched-repo")
+    const fakeBinDir = await setupFakeLaunchctl(tmpDir)
+
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(legacyDir, { recursive: true })
+    await fs.mkdir(targetRepo, { recursive: true })
+    await fs.writeFile(legacyWatchListPath, "", "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+
+    const result = await runShellScript(
+      "scripts/register-handoff-watch-path.sh",
+      [targetRepo],
+      process.cwd(),
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        FAKE_LAUNCHCTL_ACTIVE_LABELS: "com.codeslp.handoff-history.ai-sales-brain-train",
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok((await fs.readFile(newWatchListPath, "utf8")).includes(targetRepo))
+    assert.ok((await fs.readFile(legacyWatchListPath, "utf8")).includes(targetRepo))
+
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+    assert.match(launchctlCalls, /print gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
+    assert.match(launchctlCalls, /kickstart -k gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
+  })
+
+  it("install-handoff-history-agent reuses legacy config and migrates watched repos", async () => {
+    const codexHome = path.join(tmpDir, "codex-home-install")
+    const fakeHome = path.join(tmpDir, "home-install")
+    const legacyDir = path.join(codexHome, "collab", "ai_sales_brain_train")
+    const legacyConfigPath = path.join(legacyDir, "handoff-history-agent.env")
+    const legacyWatchListPath = path.join(legacyDir, "handoff-watch-paths.txt")
+    const newConfigPath = path.join(codexHome, "collab", "btrain", "handoff-history-agent.env")
+    const newWatchListPath = path.join(codexHome, "collab", "btrain", "handoff-watch-paths.txt")
+    const launchctlLog = path.join(tmpDir, "launchctl-install.log")
+    const fakeBinDir = await setupFakeLaunchctl(path.join(tmpDir, "install-bin"))
+    const historyPath = path.join(tmpDir, "history.md")
+    const existingWatchedRepo = path.join(tmpDir, "existing-watched-repo")
+    const currentWatchedRepo = path.join(tmpDir, "current-watched-repo")
+
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(legacyDir, { recursive: true })
+    await fs.mkdir(existingWatchedRepo, { recursive: true })
+    await fs.mkdir(currentWatchedRepo, { recursive: true })
+    await fs.writeFile(historyPath, "# history\n", "utf8")
+    await fs.writeFile(
+      legacyConfigPath,
+      `HANDOFF_HISTORY_PATH=${historyPath}\nHANDOFF_WATCH_CONFIG_PATH=${legacyWatchListPath}\n`,
+      "utf8",
+    )
+    await fs.writeFile(legacyWatchListPath, `${existingWatchedRepo}\n`, "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+
+    const result = await runShellScript(
+      "scripts/install-handoff-history-launch-agent.sh",
+      [],
+      process.cwd(),
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        WATCH_REPO_PATH_OVERRIDE: currentWatchedRepo,
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+
+    const newConfig = await fs.readFile(newConfigPath, "utf8")
+    const newWatchList = await fs.readFile(newWatchListPath, "utf8")
+    assert.ok(newConfig.includes(`HANDOFF_HISTORY_PATH=${historyPath}`), newConfig)
+    assert.ok(newWatchList.includes(existingWatchedRepo), newWatchList)
+    assert.ok(newWatchList.includes(currentWatchedRepo), newWatchList)
+
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+    assert.match(launchctlCalls, /bootout gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
+    assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.btrain\.plist/)
   })
 })

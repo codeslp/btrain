@@ -14,6 +14,11 @@ const DEFAULT_CURRENT = {
   owner: "",
   reviewer: "",
   status: "idle",
+  reasonCode: "",
+  reasonTags: [],
+  repairOwner: "",
+  repairEscalation: "",
+  repairAttempts: 0,
   reviewMode: "manual",
   lockedFiles: [],
   nextAction: "",
@@ -31,7 +36,41 @@ const DEFAULT_HANDOFF_RELATIVE_PATH = ".claude/collab/HANDOFF_A.md"
 const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
-const ACTIVE_LANE_STATUSES = new Set(["in-progress", "needs-review"])
+const DEFAULT_HISTORY_KEEP = 3
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push"])
+const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
+const ACTIVE_LANE_STATUSES = new Set(["in-progress", "needs-review", "changes-requested", "repair-needed"])
+const VALID_HANDOFF_STATUSES = new Set([
+  "idle",
+  "in-progress",
+  "needs-review",
+  "changes-requested",
+  "repair-needed",
+  "resolved",
+])
+const REASON_CODES_BY_STATUS = {
+  "changes-requested": new Set([
+    "spec-mismatch",
+    "regression-risk",
+    "missing-verification",
+    "security-risk",
+    "integration-breakage",
+  ]),
+  "repair-needed": new Set([
+    "invalid-handoff",
+    "unreviewed-push",
+    "lock-mismatch",
+    "ownership-conflict",
+    "state-conflict",
+  ]),
+}
+const REASON_TAG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const REVIEW_CONTEXT_PLACEHOLDER_PATTERNS = [
+  "fill this in before handoff",
+  "none yet",
+  "pending.",
+  "pending",
+]
 const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
@@ -90,6 +129,11 @@ async function readText(targetPath) {
 async function writeText(targetPath, content) {
   await ensureDir(path.dirname(targetPath))
   await fs.writeFile(targetPath, content, "utf8")
+}
+
+async function appendText(targetPath, content) {
+  await ensureDir(path.dirname(targetPath))
+  await fs.appendFile(targetPath, content, "utf8")
 }
 
 async function resolveGitHooksDir(repoRoot) {
@@ -212,12 +256,13 @@ function replaceManagedBlock(existingContent, managedBlock) {
   return `${managedBlock}\n\n${existingContent.trimStart()}`.trimEnd() + "\n"
 }
 
-const HOOK_MARKER = "# btrain:pre-commit-hook"
+const PRE_COMMIT_HOOK_MARKER = "# btrain:pre-commit-hook"
+const PRE_PUSH_HOOK_MARKER = "# btrain:pre-push-hook"
 
 function renderPreCommitHook() {
   return [
     "#!/bin/sh",
-    HOOK_MARKER,
+    PRE_COMMIT_HOOK_MARKER,
     "# Blocks commits when any HANDOFF is in 'needs-review' and non-handoff files are staged.",
     "# Installed by: btrain init --hooks",
     "# Bypass with: git commit --no-verify",
@@ -242,6 +287,47 @@ function renderPreCommitHook() {
     '    fi',
     '  fi',
     "done",
+    "",
+    "exit 0",
+    "",
+  ].join("\n")
+}
+
+function renderPrePushHook() {
+  return [
+    "#!/bin/sh",
+    PRE_PUSH_HOOK_MARKER,
+    "# Blocks pushes while any HANDOFF remains unresolved.",
+    "# Installed by: btrain init --hooks",
+    "# Override path: btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason \"...\"",
+    "",
+    'ACTIVE_HANDOFFS=""',
+    'for HANDOFF in .claude/collab/HANDOFF*.md; do',
+    '  if [ -f "$HANDOFF" ]; then',
+    '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
+    '    case "$STATUS" in',
+    '      in-progress|needs-review|changes-requested|repair-needed)',
+    '        ACTIVE_HANDOFFS="${ACTIVE_HANDOFFS}${HANDOFF}: ${STATUS}\n"',
+    '        ;;',
+    '    esac',
+    '  fi',
+    "done",
+    "",
+    'if [ -n "$ACTIVE_HANDOFFS" ]; then',
+    '  if command -v btrain >/dev/null 2>&1 && btrain override consume --repo . --action push --actor "pre-push hook" >/dev/null 2>&1; then',
+    '    echo ""',
+    '    echo "btrain: allowing one push due to a human-confirmed audited override."',
+    '    exit 0',
+    '  fi',
+    '  ',
+    '  echo ""',
+    '  echo "btrain: blocked push — unresolved handoff state is still active."',
+    '  echo "Resolve, review, or explicitly return the active lane before pushing."',
+    '  echo ""',
+    '  echo "Active handoffs:"',
+    '  printf "%b" "$ACTIVE_HANDOFFS" | sed \'s/^/  /\'',
+    '  exit 1',
+    "fi",
     "",
     "exit 0",
     "",
@@ -327,20 +413,32 @@ function getDerivedLaneIds(config) {
   return buildLaneIds(collaboratorCount * getLanesPerAgent(config))
 }
 
+function getConfiguredLaneSectionIds(lanes) {
+  return Object.entries(lanes || {})
+    .filter(([key, value]) => !RESERVED_LANE_METADATA_KEYS.has(key) && value && typeof value === "object" && !Array.isArray(value))
+    .map(([key]) => key)
+    .sort(compareLaneIds)
+}
+
+function getExplicitLaneIds(lanes) {
+  return normalizeStringList(lanes?.ids)
+    .map((value) => value.toLowerCase())
+    .sort(compareLaneIds)
+}
+
 function getLaneConfigs(config) {
   const lanes = config?.lanes
   if (!lanes || lanes.enabled === false) {
     return null
   }
 
-  // Discover lane IDs dynamically from config keys (excluding reserved keys)
-  const reservedKeys = new Set(["enabled", "per_agent"])
-  const configuredIds = Object.keys(lanes)
-    .filter((key) => !reservedKeys.has(key))
-    .sort(compareLaneIds)
-
-  // Fall back to the configured collaborator count and lanes-per-agent setting.
-  const laneIds = configuredIds.length > 0 ? configuredIds : getDerivedLaneIds(config)
+  const configuredIds = getConfiguredLaneSectionIds(lanes)
+  const explicitIds = getExplicitLaneIds(lanes)
+  const laneIds = explicitIds.length > 0
+    ? [...new Set([...explicitIds, ...configuredIds])].sort(compareLaneIds)
+    : configuredIds.length > 0
+      ? configuredIds
+      : getDerivedLaneIds(config)
 
   const laneConfigs = []
   for (const id of laneIds) {
@@ -373,12 +471,10 @@ function getLaneHandoffPath(repoRoot, config, laneId) {
 
 async function readLaneState(repoRoot, config, laneId) {
   const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
-  if (!handoffPath || !(await pathExists(handoffPath))) {
-    return { ...DEFAULT_CURRENT, _laneId: laneId }
-  }
-
-  const content = await readText(handoffPath)
-  return { ...parseCurrentSection(content), _laneId: laneId }
+  const current = handoffPath
+    ? await readCurrentState(repoRoot, { config, handoffPath, laneId })
+    : { ...DEFAULT_CURRENT }
+  return { ...current, _laneId: laneId }
 }
 
 async function readAllLaneStates(repoRoot, config) {
@@ -399,6 +495,9 @@ function findAvailableLane(laneStates) {
   const idle = laneStates.find((s) => s.status === "idle")
   if (idle) return idle._laneId
 
+  const repurposeReady = laneStates.find((state) => classifyRepurposeReady(state).ready)
+  if (repurposeReady) return repurposeReady._laneId
+
   const resolved = laneStates.find((s) => s.status === "resolved")
   if (resolved) return resolved._laneId
 
@@ -407,6 +506,119 @@ function findAvailableLane(laneStates) {
 
 function isLaneActiveStatus(status) {
   return ACTIVE_LANE_STATUSES.has(status)
+}
+
+function validateHandoffStatus(status, label = "--status") {
+  if (status === undefined) {
+    return
+  }
+
+  if (!VALID_HANDOFF_STATUSES.has(status)) {
+    throw new Error(
+      `${label} must be one of: ${[...VALID_HANDOFF_STATUSES].join(", ")}.`,
+    )
+  }
+}
+
+function defaultNextActionForStatus(status, { owner = "", reviewer = "" } = {}) {
+  switch (status) {
+    case "in-progress":
+      return "Work within the locked files, keep the lane in-progress, and hand off for review when ready."
+    case "needs-review":
+      return reviewer
+        ? `Waiting on ${reviewer} to review the lane.`
+        : "Waiting on peer review."
+    case "changes-requested":
+      return reviewer
+        ? `Address ${reviewer}'s review findings in the same lane and re-handoff for review.`
+        : "Address the review findings in the same lane and re-handoff for review."
+    case "repair-needed":
+      return owner
+        ? `Workflow repair needed before normal work resumes. ${owner} should inspect the lane state and repair it manually.`
+        : "Workflow repair needed before normal work resumes."
+    case "resolved":
+      return "Await the next task."
+    case "idle":
+      return "Claim the next task."
+    default:
+      return ""
+  }
+}
+
+function normalizeReasonTags(value) {
+  const tags = normalizeOptionArray(value)
+    ?.flatMap((item) => String(item).split(","))
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+
+  return tags && tags.length > 0 ? [...new Set(tags)] : []
+}
+
+function validateReasonCodeForStatus(status, reasonCode, label = "--reason-code") {
+  const validCodes = REASON_CODES_BY_STATUS[status]
+  if (!validCodes || !reasonCode) {
+    return
+  }
+
+  if (!validCodes.has(reasonCode)) {
+    throw new Error(
+      `${label} for ${status} must be one of: ${[...validCodes].join(", ")}.`,
+    )
+  }
+}
+
+function validateReasonTags(reasonTags, label = "--reason-tag") {
+  for (const tag of reasonTags) {
+    if (!REASON_TAG_PATTERN.test(tag)) {
+      throw new Error(
+        `${label} values must be lowercase slug tokens like "smoke-check" or "locks". Received "${tag}".`,
+      )
+    }
+  }
+}
+
+function resolveReasonMetadata(existingCurrent, nextStatus, options = {}, { requireReasonOnTransition = false } = {}) {
+  const validCodes = REASON_CODES_BY_STATUS[nextStatus]
+  const reasonCodeProvided = options["reason-code"] !== undefined
+  const reasonTagsProvided = options["reason-tag"] !== undefined
+
+  if (!validCodes) {
+    if (reasonCodeProvided || reasonTagsProvided) {
+      throw new Error(
+        "`--reason-code` and `--reason-tag` are only supported for `changes-requested` and `repair-needed` handoffs.",
+      )
+    }
+    return { reasonCode: "", reasonTags: [] }
+  }
+
+  const nextReasonCode = reasonCodeProvided
+    ? String(options["reason-code"]).trim()
+    : nextStatus === existingCurrent.status
+      ? String(existingCurrent.reasonCode || "").trim()
+      : ""
+  const nextReasonTags = reasonTagsProvided
+    ? normalizeReasonTags(options["reason-tag"])
+    : nextStatus === existingCurrent.status
+      ? normalizeReasonTags(existingCurrent.reasonTags)
+      : []
+
+  if (requireReasonOnTransition && nextStatus !== existingCurrent.status && !nextReasonCode) {
+    throw new Error(
+      `Entering \`${nextStatus}\` requires --reason-code. Valid codes: ${[...validCodes].join(", ")}.`,
+    )
+  }
+
+  if (!nextReasonCode && nextReasonTags.length > 0) {
+    throw new Error("`--reason-tag` requires `--reason-code`.")
+  }
+
+  validateReasonCodeForStatus(nextStatus, nextReasonCode)
+  validateReasonTags(nextReasonTags)
+
+  return {
+    reasonCode: nextReasonCode,
+    reasonTags: nextReasonTags,
+  }
 }
 
 function normalizePathList(paths) {
@@ -558,10 +770,27 @@ function buildLaneLockState(current, laneLocks) {
   }
 }
 
+function classifyRepurposeReady(current, laneLocks = []) {
+  const staleness = parseStaleness(current.lastUpdated)
+  const hasLocks = Array.isArray(laneLocks) && laneLocks.length > 0
+  const ready = current.status === "resolved" && !hasLocks && Boolean(staleness?.stale)
+  const reason = ready ? `resolved and stale (${staleness.ageDays}d)` : ""
+
+  return {
+    ready,
+    reason,
+    staleness,
+  }
+}
+
 function decorateLaneState(current, laneLocks) {
+  const repurpose = classifyRepurposeReady(current, laneLocks)
   return {
     ...current,
     ...buildLaneLockState(current, laneLocks),
+    staleness: repurpose.staleness,
+    repurposeReady: repurpose.ready,
+    repurposeReason: repurpose.reason,
   }
 }
 
@@ -570,27 +799,50 @@ function decorateLaneStates(laneStates, locks) {
 }
 
 async function installPreCommitHook(repoRoot) {
+  return installManagedHook(repoRoot, {
+    filename: "pre-commit",
+    marker: PRE_COMMIT_HOOK_MARKER,
+    content: renderPreCommitHook(),
+  })
+}
+
+async function installPrePushHook(repoRoot) {
+  return installManagedHook(repoRoot, {
+    filename: "pre-push",
+    marker: PRE_PUSH_HOOK_MARKER,
+    content: renderPrePushHook(),
+  })
+}
+
+async function installManagedHook(repoRoot, { filename, marker, content }) {
   const gitHooksDir = await resolveGitHooksDir(repoRoot)
   if (!gitHooksDir) {
     return { installed: false, reason: "not-a-git-repo" }
   }
 
-  const hookPath = path.join(gitHooksDir, "pre-commit")
+  const hookPath = path.join(gitHooksDir, filename)
   await ensureDir(gitHooksDir)
 
   if (await pathExists(hookPath)) {
     const existing = await readText(hookPath)
-    if (existing.includes(HOOK_MARKER)) {
-      await writeText(hookPath, renderPreCommitHook())
+    if (existing.includes(marker)) {
+      await writeText(hookPath, content)
       await fs.chmod(hookPath, 0o755)
       return { installed: true, reason: "updated" }
     }
     return { installed: false, reason: "existing-hook" }
   }
 
-  await writeText(hookPath, renderPreCommitHook())
+  await writeText(hookPath, content)
   await fs.chmod(hookPath, 0o755)
   return { installed: true, reason: "created" }
+}
+
+async function installGitHooks(repoRoot) {
+  return {
+    preCommit: await installPreCommitHook(repoRoot),
+    prePush: await installPrePushHook(repoRoot),
+  }
 }
 
 function renderHandoffTemplate(repoName) {
@@ -612,6 +864,9 @@ function getRepoPaths(repoRoot) {
   return {
     repoRoot,
     brainTrainDir: path.join(repoRoot, ".btrain"),
+    eventsDir: path.join(repoRoot, ".btrain", "events"),
+    historyDir: path.join(repoRoot, ".btrain", "history"),
+    overridesDir: path.join(repoRoot, ".btrain", "overrides"),
     projectTomlPath: path.join(repoRoot, ".btrain", "project.toml"),
     reviewsDir: path.join(repoRoot, ".btrain", "reviews"),
     locksPath: path.join(repoRoot, ".btrain", LOCKS_FILENAME),
@@ -636,6 +891,18 @@ function getConfiguredRepoPaths(repoRoot, config) {
     ...getRepoPaths(repoRoot),
     handoffPath: getConfiguredHandoffPath(repoRoot, config),
   }
+}
+
+function getWorkflowEventLogPath(repoRoot, config, laneId = "") {
+  const repoPaths = getConfiguredRepoPaths(repoRoot, config)
+  const filename = laneId ? `lane-${laneId}.jsonl` : "repo.jsonl"
+  return path.join(repoPaths.eventsDir, filename)
+}
+
+function getHandoffArchivePath(repoRoot, config, laneId = "") {
+  const repoPaths = getConfiguredRepoPaths(repoRoot, config)
+  const filename = laneId ? `lane-${laneId}.md` : "repo.md"
+  return path.join(repoPaths.historyDir, filename)
 }
 
 async function ensureGlobalLayout() {
@@ -819,6 +1086,7 @@ const TEMPLATE_DEFAULTS = {
   ].join("\n"),
 
   "pre-commit-hook.sh": renderPreCommitHook(),
+  "pre-push-hook.sh": renderPrePushHook(),
 }
 
 async function ensureTemplates() {
@@ -1055,6 +1323,7 @@ function syncLaneConfigInToml(content, laneIds, options = {}) {
       "[lanes]",
       "enabled = true",
       `per_agent = ${perAgent}`,
+      `ids = ${renderTomlArray(laneIds)}`,
       "",
       buildLaneSections(laneIds),
     ].join("\n")
@@ -1068,6 +1337,7 @@ function syncLaneConfigInToml(content, laneIds, options = {}) {
     nextContent = upsertTomlEntryInSection(nextContent, "lanes", "enabled", "enabled = true")
   }
   nextContent = upsertTomlEntryInSection(nextContent, "lanes", "per_agent", `per_agent = ${perAgent}`)
+  nextContent = upsertTomlEntryInSection(nextContent, "lanes", "ids", `ids = ${renderTomlArray(laneIds)}`)
 
   for (const laneId of laneIds) {
     if (findTomlSectionBounds(nextContent, `lanes.${laneId}`)) {
@@ -1103,6 +1373,198 @@ async function readJson(targetPath, fallbackValue) {
 
 async function writeJson(targetPath, value) {
   await writeText(targetPath, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+function normalizeOverrideAction(action) {
+  return typeof action === "string" ? action.trim().toLowerCase() : ""
+}
+
+function validateOverrideAction(action) {
+  const normalized = normalizeOverrideAction(action)
+  if (!VALID_OVERRIDE_ACTIONS.has(normalized)) {
+    throw new Error(`--action must be one of: ${[...VALID_OVERRIDE_ACTIONS].join(", ")}.`)
+  }
+  return normalized
+}
+
+function buildOverrideId(action) {
+  const entropy = Math.random().toString(36).slice(2, 8)
+  return `ovr_${normalizeOverrideAction(action).replaceAll(/[^a-z0-9]+/g, "-")}_${Date.now().toString(36)}_${entropy}`
+}
+
+function getOverridePath(repoRoot, overrideId) {
+  return path.join(getRepoPaths(repoRoot).overridesDir, `${overrideId}.json`)
+}
+
+async function readOverrideRecord(overridePath) {
+  const record = await readJson(overridePath, null)
+  if (!record || typeof record !== "object") {
+    return null
+  }
+  return record
+}
+
+async function listActiveOverrides(repoRoot) {
+  const { overridesDir } = getRepoPaths(repoRoot)
+  if (!(await pathExists(overridesDir))) {
+    return []
+  }
+
+  const entries = await fs.readdir(overridesDir, { withFileTypes: true })
+  const overrides = []
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) {
+      continue
+    }
+
+    const overridePath = path.join(overridesDir, entry.name)
+    const record = await readOverrideRecord(overridePath)
+    if (!record) {
+      continue
+    }
+    overrides.push({
+      ...record,
+      path: overridePath,
+    })
+  }
+
+  return overrides.sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
+}
+
+function formatOverrideSummary(record) {
+  const scope = record.scope === "lane" && record.laneId ? `lane ${record.laneId}` : "repo"
+  const requestedBy = record.requestedBy || "unknown"
+  const confirmedBy = record.confirmedBy || "unknown"
+  return `${record.action} (${scope}, requested by ${requestedBy}, confirmed by ${confirmedBy})`
+}
+
+function getLaneOverrides(overrides, laneId) {
+  return (overrides || []).filter((record) => (record.laneId || "") === (laneId || ""))
+}
+
+async function grantOverride(repoRoot, options = {}) {
+  const config = options.config || (await readProjectConfig(repoRoot))
+  const laneConfigs = getLaneConfigs(config)
+  const action = validateOverrideAction(options.action)
+  const requestedBy = normalizeAgentName(options.requestedBy || options["requested-by"])
+  const confirmedBy = normalizeAgentName(options.confirmedBy || options["confirmed-by"])
+  const reason = typeof options.reason === "string" ? options.reason.trim() : ""
+  const laneId = typeof options.lane === "string" ? options.lane.trim() : ""
+
+  if (!requestedBy) {
+    throw new Error("`btrain override grant` requires --requested-by.")
+  }
+  if (!confirmedBy) {
+    throw new Error("`btrain override grant` requires --confirmed-by.")
+  }
+  if (!reason) {
+    throw new Error("`btrain override grant` requires --reason.")
+  }
+
+  if (action === "needs-review" && laneConfigs && !laneId) {
+    throw new Error("`btrain override grant --action needs-review` requires --lane when [lanes] is enabled.")
+  }
+  if (action === "push" && laneId) {
+    throw new Error("`btrain override grant --action push` is repo-scoped and does not accept --lane.")
+  }
+  if (laneId && laneConfigs) {
+    getLaneHandoffPath(repoRoot, config, laneId)
+  }
+
+  const scope = laneId ? "lane" : "repo"
+  const overrides = await listActiveOverrides(repoRoot)
+  const duplicate = overrides.find((record) => record.action === action && (record.laneId || "") === laneId)
+  if (duplicate) {
+    throw new Error(
+      `An active override already exists for ${action} ${laneId ? `on lane ${laneId}` : "at repo scope"} (${duplicate.id}).`,
+    )
+  }
+
+  const id = buildOverrideId(action)
+  const record = {
+    version: 1,
+    id,
+    action,
+    scope,
+    laneId,
+    requestedBy,
+    confirmedBy,
+    reason,
+    createdAt: formatIsoTimestamp(),
+  }
+
+  await writeJson(getOverridePath(repoRoot, id), record)
+  await appendWorkflowEvent(repoRoot, config, {
+    type: "override-granted",
+    actor: requestedBy,
+    laneId,
+    details: {
+      overrideId: id,
+      action,
+      scope,
+      confirmedBy,
+      reason,
+    },
+  })
+
+  return record
+}
+
+async function consumeOverride(repoRoot, options = {}) {
+  const config = options.config || (await readProjectConfig(repoRoot))
+  const action = validateOverrideAction(options.action)
+  const laneId = typeof options.laneId === "string"
+    ? options.laneId.trim()
+    : typeof options.lane === "string"
+      ? options.lane.trim()
+      : ""
+  const overrideId = typeof options.overrideId === "string"
+    ? options.overrideId.trim()
+    : typeof options.id === "string"
+      ? options.id.trim()
+      : ""
+  const actorLabel = options.actorLabel || options.actor || "btrain"
+  const overrides = await listActiveOverrides(repoRoot)
+
+  let record = null
+  if (overrideId) {
+    record = overrides.find((candidate) => candidate.id === overrideId) || null
+    if (!record) {
+      throw new Error(`No active override found for id ${overrideId}.`)
+    }
+  } else {
+    record = overrides.find((candidate) => candidate.action === action && (candidate.laneId || "") === laneId) || null
+    if (!record) {
+      throw new Error(
+        `No active override found for ${action} ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
+      )
+    }
+  }
+
+  if (record.action !== action) {
+    throw new Error(`Override ${record.id} is for ${record.action}, not ${action}.`)
+  }
+  if (laneId && (record.laneId || "") !== laneId) {
+    throw new Error(`Override ${record.id} is scoped to lane ${record.laneId || "(repo)"}, not lane ${laneId}.`)
+  }
+
+  await fs.rm(record.path, { force: true })
+  await appendWorkflowEvent(repoRoot, config, {
+    type: "override-consumed",
+    actor: actorLabel,
+    laneId: record.laneId || "",
+    details: {
+      overrideId: record.id,
+      action: record.action,
+      scope: record.scope,
+      requestedBy: record.requestedBy,
+      confirmedBy: record.confirmedBy,
+      reason: record.reason,
+    },
+  })
+
+  return record
 }
 
 async function loadRegistry() {
@@ -1276,7 +1738,7 @@ async function initRepo(repoPathInput, options = {}) {
 
   let hookResult = null
   if (options.hooks) {
-    hookResult = await installPreCommitHook(repoRoot)
+    hookResult = await installGitHooks(repoRoot)
   }
 
   return {
@@ -1365,12 +1827,31 @@ function buildCurrentSection(current) {
     `Active Agent: ${merged.owner || ""}`,
     `Peer Reviewer: ${merged.reviewer || ""}`,
     `Status: ${merged.status || ""}`,
+  ]
+
+  if (merged.reasonCode) {
+    lines.push(`Primary Reason Code: ${merged.reasonCode}`)
+  }
+  if (Array.isArray(merged.reasonTags) && merged.reasonTags.length > 0) {
+    lines.push(`Reason Tags: ${merged.reasonTags.join(", ")}`)
+  }
+  if (merged.repairOwner) {
+    lines.push(`Repair Owner: ${merged.repairOwner}`)
+  }
+  if (merged.repairEscalation) {
+    lines.push(`Repair Escalation: ${merged.repairEscalation}`)
+  }
+  if (Number.isFinite(Number(merged.repairAttempts)) && Number(merged.repairAttempts) > 0) {
+    lines.push(`Repair Attempts: ${Number(merged.repairAttempts)}`)
+  }
+
+  lines.push(
     `Review Mode: ${merged.reviewMode || ""}`,
     `Locked Files: ${lockedFiles}`,
     `Next Action: ${merged.nextAction || ""}`,
     `Base: ${merged.base || ""}`,
     `Last Updated: ${merged.lastUpdated || ""}`,
-  ]
+  )
 
   if (laneId) {
     lines.splice(2, 0, `Lane: ${laneId}`)
@@ -1544,6 +2025,136 @@ function mergeContextForReviewerSection(existingContent, options = {}) {
   })
 }
 
+function normalizeReviewContextLine(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^-+\s*/, "")
+    .replace(/^\[[ xX]\]\s*/, "")
+    .trim()
+    .toLowerCase()
+}
+
+function isPlaceholderReviewContextLine(line) {
+  const normalized = normalizeReviewContextLine(line)
+  return REVIEW_CONTEXT_PLACEHOLDER_PATTERNS.some((pattern) => normalized.includes(pattern))
+}
+
+function collectNeedsReviewContextIssues({ base, contextSectionText }) {
+  const issues = []
+  const context = parseContextForReviewerSection(contextSectionText || "")
+
+  if (!String(base || "").trim()) {
+    issues.push("Base")
+  }
+
+  const requiredSections = [
+    ["Pre-flight review", context.preflightLines],
+    ["Files changed", context.changedLines],
+    ["Verification run", context.verificationLines],
+    ["Remaining gaps", context.gapLines],
+    ["Why this was done", context.whyLines],
+    ["Specific review asks", context.reviewAskLines],
+  ]
+
+  for (const [label, lines] of requiredSections) {
+    if (!Array.isArray(lines) || lines.length === 0) {
+      issues.push(label)
+      continue
+    }
+
+    if (lines.some(isPlaceholderReviewContextLine)) {
+      issues.push(label)
+    }
+  }
+
+  return issues
+}
+
+function parseGitStatusPath(line) {
+  const payload = line.slice(3).trim()
+  if (!payload) {
+    return ""
+  }
+  if (payload.includes(" -> ")) {
+    return payload.split(" -> ").pop()?.trim() || ""
+  }
+  return payload
+}
+
+async function listGitStatusPaths(repoRoot, pathspecs = []) {
+  const args = ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"]
+  if (pathspecs.length > 0) {
+    args.push("--", ...pathspecs)
+  }
+
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      cwd: repoRoot,
+      maxBuffer: 1024 * 1024,
+    })
+
+    return stdout
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter(Boolean)
+      .map(parseGitStatusPath)
+      .filter((filePath) => filePath && !filePath.startsWith(".claude/collab/HANDOFF") && !filePath.startsWith(".btrain/"))
+  } catch {
+    return []
+  }
+}
+
+async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
+  const resolvedBase = String(base || "").trim()
+  if (!resolvedBase) {
+    return []
+  }
+
+  const headRef = await resolveGitRevision(repoRoot, "HEAD")
+  const baseRef = await resolveGitRevision(repoRoot, resolvedBase)
+  if (!headRef || !baseRef) {
+    return []
+  }
+
+  const args = ["-C", repoRoot, "diff", "--name-only", `${resolvedBase}...HEAD`]
+  if (pathspecs.length > 0) {
+    args.push("--", ...pathspecs)
+  }
+
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      cwd: repoRoot,
+      maxBuffer: 1024 * 1024,
+    })
+
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((filePath) => !filePath.startsWith(".claude/collab/HANDOFF") && !filePath.startsWith(".btrain/"))
+  } catch {
+    return []
+  }
+}
+
+async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [] } = {}) {
+  const issues = collectNeedsReviewContextIssues({ base, contextSectionText })
+
+  if (pathspecs.length > 0) {
+    const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
+    const baseDiffPaths = changedPaths.length === 0 ? await listDiffPathsFromBase(repoRoot, base, pathspecs) : []
+    if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
+      issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new Error(
+      `Cannot enter \`needs-review\` until reviewer context is complete. Missing or placeholder fields: ${issues.join(", ")}.`,
+    )
+  }
+}
+
 function parseCurrentSection(content) {
   const bounds = findSectionBounds(content, "Current")
   if (!bounds) {
@@ -1558,6 +2169,11 @@ function parseCurrentSection(content) {
     reviewer: "reviewer",
     "peer reviewer": "reviewer",
     status: "status",
+    "primary reason code": "reasonCode",
+    "reason tags": "reasonTags",
+    "repair owner": "repairOwner",
+    "repair escalation": "repairEscalation",
+    "repair attempts": "repairAttempts",
     "review mode": "reviewMode",
     "locked files": "lockedFiles",
     "next action": "nextAction",
@@ -1579,21 +2195,31 @@ function parseCurrentSection(content) {
       continue
     }
 
-    current[mappedKey] = mappedKey === "lockedFiles" ? parseCsvList(value) : value
+    if (["lockedFiles", "reasonTags"].includes(mappedKey)) {
+      current[mappedKey] = parseCsvList(value)
+    } else if (mappedKey === "repairAttempts") {
+      current[mappedKey] = Number.parseInt(value, 10) || 0
+    } else {
+      current[mappedKey] = value
+    }
   }
 
   return current
 }
 
-async function readCurrentState(repoRoot) {
-  const config = await readProjectConfig(repoRoot)
-  const { handoffPath } = getConfiguredRepoPaths(repoRoot, config)
-  if (!(await pathExists(handoffPath))) {
-    return { ...DEFAULT_CURRENT }
+async function readCurrentState(repoRoot, options = {}) {
+  const config = options.config || await readProjectConfig(repoRoot)
+  const handoffPath = options.handoffPath || getConfiguredRepoPaths(repoRoot, config).handoffPath
+  const laneId = typeof options.laneId === "string" ? options.laneId : ""
+  let current = { ...DEFAULT_CURRENT }
+
+  if (await pathExists(handoffPath)) {
+    const content = await readText(handoffPath)
+    current = parseCurrentSection(content)
   }
 
-  const content = await readText(handoffPath)
-  return parseCurrentSection(content)
+  const events = await readWorkflowEvents(repoRoot, config, laneId)
+  return resolveCurrentStateFromWorkflowEvents(current, events)
 }
 
 function buildReviewResponseNote(summary, actorLabel) {
@@ -1613,24 +2239,309 @@ function buildPreviousHandoffEntry(current, summary, actorLabel) {
   return `- ${formatShortDate()} — ${taskLabel} (${actorLabel}): ${outcome}`
 }
 
-function appendPreviousHandoffEntry(content, entry) {
-  const headingMatcher = /^## Previous Handoffs.*$/
-  const bounds = findSectionBounds(content, headingMatcher)
-
+function extractPreviousHandoffEntries(content) {
+  const bounds = findSectionBounds(content, /^## Previous Handoffs.*$/)
   if (!bounds) {
-    return `${content.trimEnd()}\n\n## Previous Handoffs\n\n${entry}\n`
+    return []
   }
 
-  const lines = bounds.text.split("\n")
-  const headingLine = lines[0] || "## Previous Handoffs"
-  const existingEntries = lines
-    .slice(1)
+  const lines = bounds.text.split("\n").slice(1)
+  const entries = []
+  let currentEntry = null
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      if (currentEntry !== null) {
+        currentEntry += "\n"
+      }
+      continue
+    }
+
+    if (trimmed === "- None yet") {
+      continue
+    }
+
+    if (line.startsWith("- ")) {
+      if (currentEntry !== null) {
+        entries.push(currentEntry.trimEnd())
+      }
+      currentEntry = line.trimEnd()
+      continue
+    }
+
+    if (currentEntry !== null) {
+      currentEntry += `\n${line.trimEnd()}`
+    }
+  }
+
+  if (currentEntry !== null) {
+    entries.push(currentEntry.trimEnd())
+  }
+
+  return entries
+}
+
+function buildPreviousHandoffsSection(entries) {
+  const normalizedEntries = (entries || []).map((entry) => entry.trimEnd()).filter(Boolean)
+  return [
+    "## Previous Handoffs",
+    "",
+    ...(normalizedEntries.length > 0 ? normalizedEntries : ["- None yet"]),
+  ].join("\n")
+}
+
+function replacePreviousHandoffsSection(content, entries) {
+  return replaceOrPrependSection(content, /^## Previous Handoffs.*$/, buildPreviousHandoffsSection(entries))
+}
+
+function appendPreviousHandoffEntry(content, entry) {
+  return replacePreviousHandoffsSection(content, [entry, ...extractPreviousHandoffEntries(content)])
+}
+
+function serializeWorkflowEvent(event) {
+  return `${JSON.stringify({
+    version: 1,
+    recordedAt: formatIsoTimestamp(),
+    ...event,
+  })}\n`
+}
+
+async function readWorkflowEvents(repoRoot, config, laneId = "") {
+  const targetPath = getWorkflowEventLogPath(repoRoot, config, laneId)
+  if (!(await pathExists(targetPath))) {
+    return []
+  }
+
+  const content = await readText(targetPath)
+  return content
+    .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
-    .filter((line) => line !== "- None yet")
+    .map((line) => {
+      try {
+        return JSON.parse(line)
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+}
 
-  const nextSection = [headingLine, "", entry, ...existingEntries].join("\n")
-  return replaceOrPrependSection(content, headingMatcher, nextSection)
+async function appendWorkflowEvent(repoRoot, config, event) {
+  const targetPath = getWorkflowEventLogPath(repoRoot, config, event.laneId || "")
+  await appendText(targetPath, serializeWorkflowEvent(event))
+  return targetPath
+}
+
+function getLatestStateSnapshotEvent(events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    return null
+  }
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.after && typeof event.after === "object") {
+      return event
+    }
+  }
+
+  return null
+}
+
+function parseIsoDate(value) {
+  if (!value) {
+    return null
+  }
+
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function getStateUpdatedDate(current, fallbackValue = "") {
+  return parseLastUpdatedDate(current?.lastUpdated) || parseIsoDate(fallbackValue)
+}
+
+function resolveCurrentStateFromWorkflowEvents(current, events) {
+  const latestEvent = getLatestStateSnapshotEvent(events)
+  if (!latestEvent) {
+    return current
+  }
+
+  const eventDate = getStateUpdatedDate(latestEvent.after, latestEvent.recordedAt)
+  const currentDate = getStateUpdatedDate(current)
+
+  if (!eventDate) {
+    return current
+  }
+  if (currentDate && eventDate.getTime() <= currentDate.getTime()) {
+    return current
+  }
+
+  return {
+    ...DEFAULT_CURRENT,
+    ...latestEvent.after,
+  }
+}
+
+function getCanonicalWorkflowActor(events) {
+  const workflowEvents = (events || []).filter((event) =>
+    ["claim", "update", "request-changes", "resolve"].includes(event.type),
+  )
+  const lastEvent = workflowEvents.at(-1)
+  return normalizeAgentName(lastEvent?.actor)
+}
+
+function countRepairEntries(events, reasonCode) {
+  return (events || []).filter((event) => {
+    if (event.type !== "update") {
+      return false
+    }
+    return event.after?.status === "repair-needed" && event.after?.reasonCode === reasonCode
+  }).length
+}
+
+async function resolveRepairAssignment(repoRoot, config, {
+  laneId = "",
+  existingCurrent,
+  reasonCode,
+  actorLabel = "btrain",
+} = {}) {
+  const events = await readWorkflowEvents(repoRoot, config, laneId)
+  const repairOwner = getCanonicalWorkflowActor(events) || existingCurrent.owner || actorLabel
+  const priorAttempts = countRepairEntries(events, reasonCode)
+  const repairAttempts = priorAttempts + 1
+  const repairEscalation = priorAttempts >= 1 ? "human" : ""
+
+  return {
+    repairOwner,
+    repairAttempts,
+    repairEscalation,
+    priorAttempts,
+  }
+}
+
+function buildRepairNextAction({ repairOwner = "", repairAttempts = 0, repairEscalation = "", reasonCode = "" } = {}) {
+  const normalizedOwner = repairOwner || "the responsible actor"
+  const reasonSuffix = reasonCode ? ` for \`${reasonCode}\`` : ""
+
+  if (repairEscalation === "human") {
+    return `Human escalation required after ${repairAttempts} repair-needed entries${reasonSuffix}. Last responsible actor: ${normalizedOwner}.`
+  }
+
+  return `${normalizedOwner} should repair the lane before normal work resumes${reasonSuffix}.`
+}
+
+async function appendHandoffArchive(repoRoot, config, laneId, entries) {
+  const normalizedEntries = normalizeStringList(entries)
+  if (normalizedEntries.length === 0) {
+    return null
+  }
+
+  const archivePath = getHandoffArchivePath(repoRoot, config, laneId)
+  const archiveHeading = laneId ? `# Lane ${laneId}` : "# Repo"
+  let nextContent = ""
+
+  if (!(await pathExists(archivePath))) {
+    nextContent += `${archiveHeading} Archived Handoff History\n`
+  }
+
+  nextContent += `\n## Archived ${formatIsoTimestamp()}\n\n${normalizedEntries.join("\n")}\n`
+  await appendText(archivePath, nextContent)
+  return archivePath
+}
+
+async function compactLaneHandoffHistory(repoRoot, {
+  config,
+  laneId = "",
+  handoffPath,
+  keep = DEFAULT_HISTORY_KEEP,
+  actorLabel = "btrain",
+} = {}) {
+  const safeKeep = Number.isFinite(Number(keep)) ? Math.max(0, Number(keep)) : DEFAULT_HISTORY_KEEP
+  if (!(await pathExists(handoffPath))) {
+    return {
+      laneId,
+      handoffPath,
+      archivePath: getHandoffArchivePath(repoRoot, config, laneId),
+      archivedCount: 0,
+      keptCount: 0,
+      keep: safeKeep,
+    }
+  }
+
+  const content = await readText(handoffPath)
+  const entries = extractPreviousHandoffEntries(content)
+  const keptEntries = entries.slice(0, safeKeep)
+  const archivedEntries = entries.slice(safeKeep)
+  let archivePath = getHandoffArchivePath(repoRoot, config, laneId)
+
+  if (archivedEntries.length > 0) {
+    archivePath = await appendHandoffArchive(repoRoot, config, laneId, [...archivedEntries].reverse())
+    await writeText(handoffPath, replacePreviousHandoffsSection(content, keptEntries))
+    await appendWorkflowEvent(repoRoot, config, {
+      type: "history-compact",
+      actor: actorLabel,
+      laneId,
+      details: {
+        keep: safeKeep,
+        archivedCount: archivedEntries.length,
+        keptCount: keptEntries.length,
+        archivePath,
+        handoffPath,
+      },
+    })
+  }
+
+  return {
+    laneId,
+    handoffPath,
+    archivePath,
+    archivedCount: archivedEntries.length,
+    keptCount: keptEntries.length,
+    keep: safeKeep,
+  }
+}
+
+async function compactHandoffHistory(repoRoot, { config: providedConfig, laneId = "", keep = DEFAULT_HISTORY_KEEP, actorLabel = "btrain" } = {}) {
+  const config = providedConfig || (await readProjectConfig(repoRoot))
+  const laneConfigs = getLaneConfigs(config)
+
+  if (laneConfigs) {
+    if (laneId) {
+      return [
+        await compactLaneHandoffHistory(repoRoot, {
+          config,
+          laneId,
+          handoffPath: getLaneHandoffPath(repoRoot, config, laneId),
+          keep,
+          actorLabel,
+        }),
+      ]
+    }
+
+    const results = []
+    for (const lane of laneConfigs) {
+      results.push(await compactLaneHandoffHistory(repoRoot, {
+        config,
+        laneId: lane.id,
+        handoffPath: getLaneHandoffPath(repoRoot, config, lane.id),
+        keep,
+        actorLabel,
+      }))
+    }
+    return results
+  }
+
+  return [
+    await compactLaneHandoffHistory(repoRoot, {
+      config,
+      laneId: "",
+      handoffPath: getConfiguredRepoPaths(repoRoot, config).handoffPath,
+      keep,
+      actorLabel,
+    }),
+  ]
 }
 
 async function updateHandoff(repoRoot, updates, options = {}) {
@@ -1690,6 +2601,19 @@ async function updateHandoff(repoRoot, updates, options = {}) {
   }
 
   await writeText(handoffPath, nextContent)
+
+  if (options.eventType) {
+    await appendWorkflowEvent(repoRoot, config, {
+      type: options.eventType,
+      actor: options.actorLabel || "btrain",
+      laneId: options.laneId || nextCurrent._laneId || "",
+      handoffPath,
+      before: existingCurrent,
+      after: nextCurrent,
+      details: options.eventDetails || {},
+    })
+  }
+
   return nextCurrent
 }
 
@@ -1767,26 +2691,43 @@ async function claimHandoff(repoRoot, options) {
   // If lanes enabled, write to lane-specific handoff file
   if (laneConfigs && laneId) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
-    return updateHandoff(
+    const result = await updateHandoff(
       repoRoot,
       updates,
       {
+        actorLabel: options.owner,
         contextSectionText: buildContextForReviewerSection(),
         reviewResponseText: buildPendingReviewResponseSection(),
         config,
+        eventType: "claim",
+        laneId,
+        eventDetails: {
+          task: options.task,
+          lockedFiles: files,
+        },
         overrideHandoffPath: handoffPath,
       },
     )
+    await compactHandoffHistory(repoRoot, { config, laneId, actorLabel: options.owner })
+    return result
   }
 
-  return updateHandoff(
+  const result = await updateHandoff(
     repoRoot,
     updates,
     {
+      actorLabel: options.owner,
       contextSectionText: buildContextForReviewerSection(),
       reviewResponseText: buildPendingReviewResponseSection(),
+      eventType: "claim",
+      eventDetails: {
+        task: options.task,
+        lockedFiles: files,
+      },
     },
   )
+  await compactHandoffHistory(repoRoot, { config, actorLabel: options.owner })
+  return result
 }
 
 async function patchHandoff(repoRoot, options) {
@@ -1795,6 +2736,8 @@ async function patchHandoff(repoRoot, options) {
   if (laneConfigs && !options.lane) {
     throw new Error("`btrain handoff update` requires --lane when [lanes] is enabled.")
   }
+
+  validateHandoffStatus(options.status)
 
   const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
   const configuredAgents = getConfiguredAgentNames(config)
@@ -1838,6 +2781,9 @@ async function patchHandoff(repoRoot, options) {
       const currentLane = decorateLaneState(existingCurrent, getLaneLocks(locks, laneId))
       const nextStatus = updates.status ?? existingCurrent.status
       const effectiveOwner = updates.owner ?? existingCurrent.owner ?? resolvedActor ?? "btrain"
+      const reasonMetadata = resolveReasonMetadata(existingCurrent, nextStatus, options, {
+        requireReasonOnTransition: options.status !== undefined,
+      })
 
       if (options.status === "needs-review") {
         const inferredReviewer = inferPeerReviewer({
@@ -1858,6 +2804,52 @@ async function patchHandoff(repoRoot, options) {
         updates.reviewer = inferredReviewer
       }
 
+      if (options.status !== undefined && options.next === undefined) {
+        updates.nextAction = defaultNextActionForStatus(nextStatus, {
+          owner: updates.owner ?? existingCurrent.owner,
+          reviewer: updates.reviewer ?? existingCurrent.reviewer,
+        })
+      }
+      updates.reasonCode = reasonMetadata.reasonCode
+      updates.reasonTags = reasonMetadata.reasonTags
+      let repairMetadata = {
+        repairOwner: existingCurrent.repairOwner || "",
+        repairEscalation: existingCurrent.repairEscalation || "",
+        repairAttempts: Number(existingCurrent.repairAttempts) || 0,
+      }
+
+      if (nextStatus === "repair-needed") {
+        if (existingCurrent.status === "repair-needed") {
+          repairMetadata = {
+            repairOwner: existingCurrent.repairOwner || effectiveOwner,
+            repairEscalation: existingCurrent.repairEscalation || "",
+            repairAttempts: Number(existingCurrent.repairAttempts) || 1,
+          }
+        } else {
+          repairMetadata = await resolveRepairAssignment(repoRoot, config, {
+            laneId,
+            existingCurrent,
+            reasonCode: reasonMetadata.reasonCode,
+            actorLabel: resolvedActor || effectiveOwner,
+          })
+        }
+      } else {
+        repairMetadata = {
+          repairOwner: "",
+          repairEscalation: "",
+          repairAttempts: 0,
+        }
+      }
+      updates.repairOwner = repairMetadata.repairOwner
+      updates.repairEscalation = repairMetadata.repairEscalation
+      updates.repairAttempts = repairMetadata.repairAttempts
+      if (nextStatus === "repair-needed" && options.next === undefined) {
+        updates.nextAction = buildRepairNextAction({
+          ...repairMetadata,
+          reasonCode: reasonMetadata.reasonCode,
+        })
+      }
+
       if (nextStatus === "resolved") {
         throw new Error(`Use \`btrain handoff resolve --lane ${laneId}\` so btrain can clear the lane locks.`)
       }
@@ -1875,6 +2867,29 @@ async function patchHandoff(repoRoot, options) {
             ? currentLane.handoffPaths
             : currentLane.lockPaths,
       )
+      const baseForReview = options.base !== undefined ? options.base : existingCurrent.base
+      const nextContextSectionText = mergeContextForReviewerSection(existingContent, options)
+      const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
+      let overrideRecord = null
+
+      if (nextStatus === "needs-review") {
+        if (overrideId) {
+          overrideRecord = await consumeOverride(repoRoot, {
+            config,
+            action: "needs-review",
+            laneId,
+            overrideId,
+            actorLabel: resolvedActor || effectiveOwner,
+          })
+        } else {
+          await validateNeedsReviewTransition(repoRoot, {
+            laneId,
+            base: baseForReview,
+            contextSectionText: nextContextSectionText,
+            pathspecs: effectiveFiles,
+          })
+        }
+      }
 
       if (isLaneActiveStatus(nextStatus)) {
         if (effectiveFiles.length === 0) {
@@ -1896,13 +2911,24 @@ async function patchHandoff(repoRoot, options) {
         || options.gap !== undefined
         || options.why !== undefined
         || options["review-ask"] !== undefined
-          ? mergeContextForReviewerSection(existingContent, options)
+          ? nextContextSectionText
           : undefined
 
       return updateHandoff(repoRoot, updates, {
+        actorLabel: resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
         contextSectionText,
+        eventType: "update",
+        laneId,
+        eventDetails: {
+          requestedStatus: options.status,
+          files: updates.lockedFiles,
+          overrideId: overrideRecord?.id || "",
+          repairOwner: updates.repairOwner || "",
+          repairEscalation: updates.repairEscalation || "",
+          repairAttempts: updates.repairAttempts || 0,
+        },
       })
     }
   }
@@ -1930,6 +2956,74 @@ async function patchHandoff(repoRoot, options) {
     updates.reviewer = inferredReviewer
   }
 
+  if (options.status !== undefined && options.next === undefined) {
+    updates.nextAction = defaultNextActionForStatus(options.status, {
+      owner: updates.owner ?? existingCurrent.owner,
+      reviewer: updates.reviewer ?? existingCurrent.reviewer,
+    })
+  }
+  const nextStatus = updates.status ?? existingCurrent.status
+  const reasonMetadata = resolveReasonMetadata(existingCurrent, nextStatus, options, {
+    requireReasonOnTransition: options.status !== undefined,
+  })
+  updates.reasonCode = reasonMetadata.reasonCode
+  updates.reasonTags = reasonMetadata.reasonTags
+  let repairMetadata = {
+    repairOwner: existingCurrent.repairOwner || "",
+    repairEscalation: existingCurrent.repairEscalation || "",
+    repairAttempts: Number(existingCurrent.repairAttempts) || 0,
+  }
+
+  if (nextStatus === "repair-needed") {
+    if (existingCurrent.status === "repair-needed") {
+      repairMetadata = {
+        repairOwner: existingCurrent.repairOwner || updates.owner || existingCurrent.owner || resolvedActor || "btrain",
+        repairEscalation: existingCurrent.repairEscalation || "",
+        repairAttempts: Number(existingCurrent.repairAttempts) || 1,
+      }
+    } else {
+      repairMetadata = await resolveRepairAssignment(repoRoot, config, {
+        existingCurrent,
+        reasonCode: reasonMetadata.reasonCode,
+        actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
+      })
+    }
+  } else {
+    repairMetadata = {
+      repairOwner: "",
+      repairEscalation: "",
+      repairAttempts: 0,
+    }
+  }
+  updates.repairOwner = repairMetadata.repairOwner
+  updates.repairEscalation = repairMetadata.repairEscalation
+  updates.repairAttempts = repairMetadata.repairAttempts
+  if (nextStatus === "repair-needed" && options.next === undefined) {
+    updates.nextAction = buildRepairNextAction({
+      ...repairMetadata,
+      reasonCode: reasonMetadata.reasonCode,
+    })
+  }
+  const nextContextSectionText = mergeContextForReviewerSection(existingContent, options)
+  const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
+  let overrideRecord = null
+
+  if (nextStatus === "needs-review") {
+    if (overrideId) {
+      overrideRecord = await consumeOverride(repoRoot, {
+        config,
+        action: "needs-review",
+        overrideId,
+        actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
+      })
+    } else {
+      await validateNeedsReviewTransition(repoRoot, {
+        base: options.base !== undefined ? options.base : existingCurrent.base,
+        contextSectionText: nextContextSectionText,
+      })
+    }
+  }
+
   const contextSectionText =
     options.preflight !== undefined
     || options.changed !== undefined
@@ -1937,10 +3031,104 @@ async function patchHandoff(repoRoot, options) {
     || options.gap !== undefined
     || options.why !== undefined
     || options["review-ask"] !== undefined
-      ? mergeContextForReviewerSection(existingContent, options)
+      ? nextContextSectionText
       : undefined
 
-  return updateHandoff(repoRoot, updates, { contextSectionText })
+  return updateHandoff(repoRoot, updates, {
+    actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
+    contextSectionText,
+    config,
+    eventType: "update",
+    eventDetails: {
+      requestedStatus: options.status,
+      files: updates.lockedFiles,
+      overrideId: overrideRecord?.id || "",
+      repairOwner: updates.repairOwner || "",
+      repairEscalation: updates.repairEscalation || "",
+      repairAttempts: updates.repairAttempts || 0,
+    },
+  })
+}
+
+async function requestChangesHandoff(repoRoot, options) {
+  const config = await readProjectConfig(repoRoot)
+  const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
+  const actorLabel = resolvedActor || options.actor || "btrain"
+  const laneConfigs = getLaneConfigs(config)
+  const laneId = options.lane
+
+  if (!options.summary) {
+    throw new Error("`btrain handoff request-changes` requires --summary.")
+  }
+
+  if (laneConfigs && !laneId) {
+    throw new Error("`btrain handoff request-changes` requires --lane when [lanes] is enabled.")
+  }
+
+  const overrideHandoffPath = laneId ? getLaneHandoffPath(repoRoot, config, laneId) : null
+  const existingCurrent =
+    overrideHandoffPath && (await pathExists(overrideHandoffPath))
+      ? parseCurrentSection(await readText(overrideHandoffPath))
+      : await readCurrentState(repoRoot)
+
+  if (existingCurrent.status !== "needs-review") {
+    throw new Error(
+      `\`btrain handoff request-changes\` requires the current status to be \`needs-review\`, found \`${existingCurrent.status || "unknown"}\`.`,
+    )
+  }
+
+  if (existingCurrent.reviewer && resolvedActor && existingCurrent.reviewer !== resolvedActor) {
+    throw new Error(
+      `Only the peer reviewer "${existingCurrent.reviewer}" can request changes for this handoff.`,
+    )
+  }
+  const reasonMetadata = resolveReasonMetadata(existingCurrent, "changes-requested", options, {
+    requireReasonOnTransition: true,
+  })
+
+  if (laneId) {
+    const locks = await listLocks(repoRoot)
+    const currentLane = decorateLaneState(existingCurrent, getLaneLocks(locks, laneId))
+    const effectiveFiles =
+      currentLane.handoffPaths.length > 0 ? currentLane.handoffPaths : currentLane.lockPaths
+
+    if (effectiveFiles.length === 0) {
+      throw new Error(
+        `Lane ${laneId} cannot move to \`changes-requested\` without locked files. Repair the lane locks first.`,
+      )
+    }
+
+    if (currentLane.lockState !== "active") {
+      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, effectiveFiles)
+    }
+  }
+
+  return updateHandoff(
+    repoRoot,
+    {
+      status: "changes-requested",
+      reasonCode: reasonMetadata.reasonCode,
+      reasonTags: reasonMetadata.reasonTags,
+      nextAction:
+        options.next
+        || defaultNextActionForStatus("changes-requested", {
+          owner: existingCurrent.owner,
+          reviewer: existingCurrent.reviewer,
+        }),
+      lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
+    },
+    {
+      actorLabel,
+      reviewResponseSummary: options.summary,
+      config,
+      eventType: "request-changes",
+      laneId,
+      eventDetails: {
+        summary: options.summary,
+      },
+      overrideHandoffPath,
+    },
+  )
 }
 
 async function resolveHandoff(repoRoot, options) {
@@ -1978,22 +3166,31 @@ async function resolveHandoff(repoRoot, options) {
     await releaseLocks(repoRoot, laneId)
   }
 
-  return updateHandoff(
+  const result = await updateHandoff(
     repoRoot,
     {
       status: "resolved",
       lockedFiles: laneId ? [] : existingCurrent.lockedFiles,
-      nextAction: options.next || options.summary || "Await the next task.",
+      nextAction: options.next || options.summary || defaultNextActionForStatus("resolved"),
       lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
+      reasonCode: "",
+      reasonTags: [],
     },
     {
       actorLabel,
       previousHandoffEntry,
       reviewResponseSummary: options.summary,
       config,
+      eventType: "resolve",
+      laneId,
+      eventDetails: {
+        summary: options.summary || "",
+      },
       overrideHandoffPath,
     },
   )
+  await compactHandoffHistory(repoRoot, { config, laneId, actorLabel })
+  return result
 }
 
 function buildLaneGuidance(laneId, current) {
@@ -2023,6 +3220,37 @@ function buildLaneGuidance(laneId, current) {
         `${owner}: work on your other lane while waiting.`,
       ].join("\n")
     }
+    case "changes-requested": {
+      const reviewer = current.reviewer || "the peer reviewer"
+      const owner = current.owner || "the active agent"
+      return [
+        `${prefix}Changes requested by ${reviewer}.`,
+        lockLine,
+        current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
+        current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
+        `${owner}: address the reviewer findings in the same lane, then \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
+        `${reviewer}: wait for the writer to re-handoff the lane.`,
+      ].join("\n")
+    }
+    case "repair-needed": {
+      const owner = current.owner || "the active agent"
+      const repairOwner = current.repairOwner || current.owner || "the responsible actor"
+      const escalationLine =
+        current.repairEscalation === "human"
+          ? `Escalation: human intervention required after ${Number(current.repairAttempts) || 1} repair attempt${Number(current.repairAttempts) === 1 ? "" : "s"}.`
+          : Number(current.repairAttempts) > 0
+            ? `Repair attempts: ${Number(current.repairAttempts)}.`
+            : ""
+      return [
+        `${prefix}Workflow repair needed before normal work can resume.`,
+        lockLine,
+        current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
+        current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
+        `Repair owner: ${repairOwner}.`,
+        escalationLine,
+        current.nextAction || `${owner}: inspect the handoff, lock state, and \`btrain doctor\` output before making more transitions.`,
+      ].join("\n")
+    }
     case "in-progress": {
       const owner = current.owner || "the active agent"
       return [
@@ -2036,6 +3264,7 @@ function buildLaneGuidance(laneId, current) {
       return [
         `${prefix}Resolved. Ready for a new task: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
         lockLine,
+        current.repurposeReady ? `Repurpose ready: ${current.repurposeReason}.` : "",
       ].join("\n")
     case "idle":
       return [
@@ -2058,6 +3287,7 @@ async function checkHandoff(repoRoot) {
   if (laneConfigs) {
     const locks = await listLocks(repoRoot)
     const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), locks)
+    const overrides = await listActiveOverrides(repoRoot)
     const laneGuidances = laneStates.map((state) => buildLaneGuidance(state._laneId, state))
 
     let guidance = laneGuidances.join("\n\n")
@@ -2067,6 +3297,10 @@ async function checkHandoff(repoRoot) {
       guidance += `\n\nActive locks:\n${lockLines.join("\n")}`
     }
 
+    if (overrides.length > 0) {
+      guidance += `\n\nActive overrides:\n${overrides.map((record) => `  ${record.id}: ${formatOverrideSummary(record)}`).join("\n")}`
+    }
+
     return {
       repoName,
       repoRoot,
@@ -2074,6 +3308,7 @@ async function checkHandoff(repoRoot) {
       current: laneStates[0] || { ...DEFAULT_CURRENT },
       lanes: laneStates,
       locks,
+      overrides,
       agentCheck,
       guidance,
     }
@@ -2081,6 +3316,7 @@ async function checkHandoff(repoRoot) {
 
   // Single-lane mode (backward compatible)
   const current = await readCurrentState(repoRoot)
+  const overrides = await listActiveOverrides(repoRoot)
 
   let guidance
 
@@ -2100,6 +3336,36 @@ async function checkHandoff(repoRoot) {
       ].join("\n")
       break
     }
+    case "changes-requested": {
+      const owner = current.owner || "the active agent"
+      const reviewer = current.reviewer || "the peer reviewer"
+      guidance = [
+        `Changes requested by ${reviewer}.`,
+        current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
+        current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
+        `If you are ${owner}: address the reviewer findings, then run \`btrain handoff update --status needs-review --actor "${owner}"\`.`,
+        `If you are ${reviewer}: wait for the writer to re-handoff the task.`,
+      ].join("\n")
+      break
+    }
+    case "repair-needed": {
+      const repairOwner = current.repairOwner || current.owner || "the responsible actor"
+      const escalationLine =
+        current.repairEscalation === "human"
+          ? `Human escalation required after ${Number(current.repairAttempts) || 1} repair attempt${Number(current.repairAttempts) === 1 ? "" : "s"}.`
+          : Number(current.repairAttempts) > 0
+            ? `Repair attempts: ${Number(current.repairAttempts)}.`
+            : ""
+      guidance = [
+        "Workflow repair needed before normal work can resume.",
+        current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
+        current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
+        `Repair owner: ${repairOwner}.`,
+        escalationLine,
+        current.nextAction || `${repairOwner} should inspect the handoff state, lock state, and \`btrain doctor\` output before making more transitions.`,
+      ].join("\n")
+      break
+    }
     case "in-progress": {
       const owner = current.owner || "the active agent"
       const reviewer = current.reviewer || "the peer reviewer"
@@ -2111,9 +3377,11 @@ async function checkHandoff(repoRoot) {
       break
     }
     case "resolved": {
+      const repurpose = classifyRepurposeReady(current)
       guidance = [
         "No active task. The previous handoff is resolved.",
         current.nextAction ? `Next action: ${current.nextAction}` : "Ready for someone to claim the next task.",
+        repurpose.ready ? `Repurpose ready: ${repurpose.reason}.` : "",
         'To start: run `btrain handoff claim --task "..." --owner "..." --reviewer "..."`.',
       ].join("\n")
       break
@@ -2139,6 +3407,7 @@ async function checkHandoff(repoRoot) {
     repoRoot,
     handoffPath: repoPaths.handoffPath,
     current,
+    overrides,
     agentCheck,
     guidance,
   }
@@ -2799,6 +4068,9 @@ async function getReviewStatus(repoRoot) {
 
 function getLoopActorForState(current) {
   if (current.status === "in-progress") {
+    return current.owner || ""
+  }
+  if (current.status === "changes-requested") {
     return current.owner || ""
   }
   if (current.status === "needs-review") {
@@ -3625,6 +4897,9 @@ function describeLoopAgentReason(current) {
   if (current.status === "in-progress") {
     return "handoff status is in-progress, so the active agent acts next"
   }
+  if (current.status === "changes-requested") {
+    return "handoff status is changes-requested, so the writer acts next"
+  }
   if (current.status === "needs-review") {
     return "handoff status is needs-review, so the peer reviewer acts next"
   }
@@ -4088,6 +5363,131 @@ function countPreviousHandoffs(content) {
   return bounds.text.split("\n").filter((line) => /^-\s+\d{4}-\d{2}-\d{2}\b/.test(line.trim())).length
 }
 
+function getMostRecentlyUpdatedState(states, fallback = { ...DEFAULT_CURRENT }) {
+  let latestState = fallback
+  let latestDate = getStateUpdatedDate(fallback)
+
+  for (const state of states || []) {
+    const stateDate = getStateUpdatedDate(state)
+    if (!stateDate) {
+      continue
+    }
+    if (!latestDate || stateDate.getTime() > latestDate.getTime()) {
+      latestState = state
+      latestDate = stateDate
+    }
+  }
+
+  return latestState
+}
+
+function summarizeWatchdogRepair(repair) {
+  if (!repair) {
+    return ""
+  }
+
+  if (repair.type === "history-compact") {
+    const laneLabel = repair.laneId ? `lane ${repair.laneId}` : "current handoff"
+    return `${laneLabel}: archived ${repair.archivedCount}, kept ${repair.keptCount}`
+  }
+
+  if (repair.type === "release-stale-locks") {
+    return `lane ${repair.laneId}: released ${repair.releasedCount} stale lock${repair.releasedCount === 1 ? "" : "s"}`
+  }
+
+  return repair.summary || repair.type || "watchdog repair"
+}
+
+async function applyWatchdogRepairs(repoRoot, {
+  config: providedConfig,
+  keep = DEFAULT_HISTORY_KEEP,
+  actorLabel = "btrain doctor",
+} = {}) {
+  const config = providedConfig || (await readProjectConfig(repoRoot))
+  const repairs = []
+
+  const compactionResults = await compactHandoffHistory(repoRoot, {
+    config,
+    keep,
+    actorLabel,
+  })
+  for (const result of compactionResults) {
+    if (result.archivedCount <= 0) {
+      continue
+    }
+    repairs.push({
+      type: "history-compact",
+      laneId: result.laneId || "",
+      archivedCount: result.archivedCount,
+      keptCount: result.keptCount,
+      archivePath: result.archivePath,
+      handoffPath: result.handoffPath,
+      summary: summarizeWatchdogRepair({
+        type: "history-compact",
+        laneId: result.laneId || "",
+        archivedCount: result.archivedCount,
+        keptCount: result.keptCount,
+      }),
+    })
+  }
+
+  const laneConfigs = getLaneConfigs(config)
+  if (!laneConfigs) {
+    return repairs
+  }
+
+  const repoPaths = getConfiguredRepoPaths(repoRoot, config)
+  if (!(await pathExists(repoPaths.locksPath))) {
+    return repairs
+  }
+
+  let registry = null
+  try {
+    registry = await readLockRegistry(repoRoot)
+  } catch {
+    return repairs
+  }
+
+  if (!Array.isArray(registry?.locks)) {
+    return repairs
+  }
+
+  const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
+  for (const laneState of laneStates) {
+    if (laneState.lockState !== "stale" || laneState.lockPaths.length === 0) {
+      continue
+    }
+
+    const releasedPaths = [...laneState.lockPaths]
+    await releaseLocks(repoRoot, laneState._laneId)
+    await appendWorkflowEvent(repoRoot, config, {
+      type: "watchdog-repair",
+      actor: actorLabel,
+      laneId: laneState._laneId,
+      details: {
+        repairType: "release-stale-locks",
+        releasedCount: releasedPaths.length,
+        releasedPaths,
+        previousStatus: laneState.status,
+      },
+    })
+    repairs.push({
+      type: "release-stale-locks",
+      laneId: laneState._laneId,
+      releasedCount: releasedPaths.length,
+      releasedPaths,
+      previousStatus: laneState.status,
+      summary: summarizeWatchdogRepair({
+        type: "release-stale-locks",
+        laneId: laneState._laneId,
+        releasedCount: releasedPaths.length,
+      }),
+    })
+  }
+
+  return repairs
+}
+
 async function getManagedBlockTemplate(repoRoot = null) {
   const templateContent = await loadTemplate("managed-block.md")
   const config = repoRoot ? await readProjectConfig(repoRoot) : null
@@ -4266,6 +5666,7 @@ async function getRepoStatus(repoRoot) {
   const staleness = parseStaleness(current.lastUpdated)
   const previousHandoffs = countPreviousHandoffs(handoffContent)
   const templateDrift = await detectTemplateDrift(repoRoot)
+  const overrides = await listActiveOverrides(repoRoot)
 
   const status = {
     name: repoName,
@@ -4274,6 +5675,8 @@ async function getRepoStatus(repoRoot) {
     staleness,
     previousHandoffs,
     templateDrift,
+    repurposeReady: [],
+    overrides,
   }
 
   // Add lane info if enabled
@@ -4281,6 +5684,22 @@ async function getRepoStatus(repoRoot) {
   if (laneConfigs) {
     status.locks = await listLocks(repoRoot)
     status.lanes = decorateLaneStates(await readAllLaneStates(repoRoot, config), status.locks)
+    status.current = getMostRecentlyUpdatedState(status.lanes, status.current)
+    status.staleness = parseStaleness(status.current.lastUpdated)
+    status.repurposeReady = status.lanes
+      .filter((lane) => lane.repurposeReady)
+      .map((lane) => ({
+        laneId: lane._laneId,
+        reason: lane.repurposeReason,
+      }))
+  } else {
+    const repurpose = classifyRepurposeReady(current)
+    if (repurpose.ready) {
+      status.repurposeReady.push({
+        laneId: null,
+        reason: repurpose.reason,
+      })
+    }
   }
 
   return status
@@ -4316,12 +5735,15 @@ async function getStatus({ repoRoot } = {}) {
   return statuses
 }
 
-async function doctorRepo(repoRoot) {
+async function doctorRepo(repoRoot, { repair = false } = {}) {
   const issues = []
   const warnings = []
+  const repurposeReady = []
   const managedTemplate = await getManagedBlockTemplate(repoRoot)
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
+  const overrides = await listActiveOverrides(repoRoot)
+  const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
 
   if (!(await pathExists(repoRoot))) {
     issues.push(`Repo path is missing: ${repoRoot}`)
@@ -4375,6 +5797,10 @@ async function doctorRepo(repoRoot) {
     }
   }
 
+  if (overrides.length > 0) {
+    warnings.push(`Active audited overrides: ${overrides.map((record) => formatOverrideSummary(record)).join(", ")}`)
+  }
+
   // Lane-specific checks
   const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
@@ -4404,6 +5830,25 @@ async function doctorRepo(repoRoot) {
         } else {
           const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
           for (const laneState of laneStates) {
+            if (laneState.repurposeReady) {
+              repurposeReady.push({
+                laneId: laneState._laneId,
+                reason: laneState.repurposeReason,
+              })
+            }
+          }
+          for (const laneState of laneStates) {
+            if (laneState.status === "repair-needed") {
+              const repairOwner = laneState.repairOwner || laneState.owner || "the responsible actor"
+              if (laneState.repairEscalation === "human") {
+                warnings.push(
+                  `Lane ${laneState._laneId} is \`repair-needed\` and now requires human escalation after ${Number(laneState.repairAttempts) || 1} repair attempt${Number(laneState.repairAttempts) === 1 ? "" : "s"}. Last responsible actor: ${repairOwner}.`,
+                )
+              } else {
+                warnings.push(`Lane ${laneState._laneId} is \`repair-needed\` and assigned to ${repairOwner}.`)
+              }
+            }
+
             if (laneState.lockState === "missing") {
               warnings.push(
                 `Lane ${laneState._laneId} is \`${laneState.status}\` but has no active locks. Run \`btrain handoff update --lane ${laneState._laneId} --files "..." --actor "${laneState.owner || "owner"}"\`.`,
@@ -4446,6 +5891,26 @@ async function doctorRepo(repoRoot) {
         issues.push("`locks.json` is not valid JSON.")
       }
     }
+  } else {
+    const current = await readCurrentState(repoRoot)
+    if (current.status === "repair-needed") {
+      const repairOwner = current.repairOwner || current.owner || "the responsible actor"
+      if (current.repairEscalation === "human") {
+        warnings.push(
+          `Current handoff is \`repair-needed\` and now requires human escalation after ${Number(current.repairAttempts) || 1} repair attempt${Number(current.repairAttempts) === 1 ? "" : "s"}. Last responsible actor: ${repairOwner}.`,
+        )
+      } else {
+        warnings.push(`Current handoff is \`repair-needed\` and assigned to ${repairOwner}.`)
+      }
+    }
+
+    const repurpose = classifyRepurposeReady(current)
+    if (repurpose.ready) {
+      repurposeReady.push({
+        laneId: null,
+        reason: repurpose.reason,
+      })
+    }
   }
 
   return {
@@ -4453,12 +5918,15 @@ async function doctorRepo(repoRoot) {
     healthy: issues.length === 0,
     issues,
     warnings,
+    repurposeReady,
+    overrides,
+    repairs,
   }
 }
 
-async function doctor({ repoRoot } = {}) {
+async function doctor({ repoRoot, repair = false } = {}) {
   if (repoRoot) {
-    return [await doctorRepo(repoRoot)]
+    return [await doctorRepo(repoRoot, { repair })]
   }
 
   const repos = await getRegisteredRepos()
@@ -4475,7 +5943,7 @@ async function doctor({ repoRoot } = {}) {
       continue
     }
 
-    results.push(await doctorRepo(repo.path))
+    results.push(await doctorRepo(repo.path, { repair }))
   }
 
   return results
@@ -4487,6 +5955,8 @@ export {
   pushAgentPrompt,
   checkLockConflicts,
   claimHandoff,
+  compactHandoffHistory,
+  consumeOverride,
   doctor,
   findAvailableLane,
   findRepoRoot,
@@ -4496,9 +5966,13 @@ export {
   getRepoPaths,
   getReviewStatus,
   getStatus,
+  grantOverride,
   initRepo,
+  installGitHooks,
   installPreCommitHook,
+  installPrePushHook,
   isLanesEnabled,
+  listActiveOverrides,
   listLocks,
   listRepos,
   parseCsvList,
@@ -4507,6 +5981,7 @@ export {
   readProjectConfig,
   registerRepo,
   releaseLocks,
+  requestChangesHandoff,
   runPush,
   patchHandoff,
   resolveHandoff,

@@ -1,0 +1,37 @@
+# Runtime data
+data/
+uploads/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Secrets & local config
+.env
+config.local.toml
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Agent CLI state (written by wrappers at runtime)
+.gemini/
+.claude/
+
+# Build artifacts
+agentchattr-*.zip
+
+# Local-only files
+goals.py
+pr-reviews/
+agentchattr/.btrain/

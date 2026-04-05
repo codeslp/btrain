@@ -1,17 +1,4 @@
 {
   "version": 1,
-  "locks": [
-    {
-      "path": "src/brain_train/dashboard.mjs",
-      "lane": "a",
-      "owner": "Gemini",
-      "acquired_at": "2026-03-16T04:34:23.332Z"
-    },
-    {
-      "path": "research/implementation_plan.md",
-      "lane": "b",
-      "owner": "Antigravity",
-      "acquired_at": "2026-04-03T20:43:41.463Z"
-    }
-  ]
+  "locks": []
 }

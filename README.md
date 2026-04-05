@@ -99,6 +99,23 @@ btrain handoff resolve \
   --lane a \
   --summary "Approved. Clean implementation." \
   --actor "GPT-5 Codex"
+
+# reviewer requests changes instead of resolving
+btrain handoff request-changes \
+  --repo /path/to/your/repo \
+  --lane a \
+  --summary "Need one more verification pass before approval." \
+  --reason-code missing-verification \
+  --reason-tag smoke-check \
+  --actor "GPT-5 Codex"
+
+# human-confirmed override for a blocked push or review transition
+btrain override grant \
+  --repo /path/to/your/repo \
+  --action push \
+  --requested-by "GPT-5 Codex" \
+  --confirmed-by "Ben" \
+  --reason "Emergency push while unresolved handoff state is still active."
 ```
 
 ## Core Workflow
@@ -110,10 +127,29 @@ btrain handoff resolve \
    - `idle` or `resolved`: claim a task
    - `in-progress`: continue the task if you are the active agent
    - `needs-review`: review if you are the peer reviewer
+   - `changes-requested`: address findings and re-handoff if you are the active agent
+   - `repair-needed`: repair the workflow state before resuming normal work
    - otherwise: wait
-5. The agent updates state with `claim`, `update`, or `resolve`.
+5. The agent updates state with `claim`, `update`, `request-changes`, or `resolve`.
 
 The source of truth is `.claude/collab/HANDOFF_A.md` plus any additional lane files such as `HANDOFF_B.md`, `HANDOFF_C.md`, and so on. Do not edit those files directly. Always use the CLI.
+
+`changes-requested` and `repair-needed` also carry machine-readable reason metadata:
+
+- `--reason-code` is the primary workflow code
+- `--reason-tag` is repeatable and adds optional secondary tags
+
+First-version reason codes:
+
+- `changes-requested`: `spec-mismatch`, `regression-risk`, `missing-verification`, `security-risk`, `integration-breakage`
+- `repair-needed`: `invalid-handoff`, `unreviewed-push`, `lock-mismatch`, `ownership-conflict`, `state-conflict`
+
+`repair-needed` also carries recovery ownership:
+
+- on first entry, `btrain` assigns `Repair Owner` from the last canonical workflow actor already recorded in the lane or handoff history
+- leaving `repair-needed` clears the repair-owner metadata
+- re-entering `repair-needed` for the same reason code after one repair attempt escalates to human review
+- `btrain handoff`, `btrain status`, and `btrain doctor` surface the repair owner, attempt count, and any human escalation
 
 ## Lanes, Agents, and Reviewers
 
@@ -121,6 +157,7 @@ Lane count is derived from:
 
 - `[agents].active`
 - `[lanes].per_agent`
+- optional `[lanes].ids` metadata when you want to pin the exact reusable lane set
 
 Defaults:
 
@@ -133,6 +170,8 @@ Examples:
 - 1 agent, `per_agent = 3` -> lanes `a` through `c`
 - 2 agents, `per_agent = 3` -> lanes `a` through `f`
 - 3 agents, `per_agent = 2` -> lanes `a` through `f`
+
+`[lanes].ids` is reserved metadata. It is not a lane section and should never produce a lane named `ids`.
 
 You can change the active collaborators later:
 
@@ -190,6 +229,8 @@ Every `needs-review` handoff should include:
 - `Why this was done`
 - `Specific review asks`
 
+`btrain` now rejects `needs-review` transitions that still contain placeholder reviewer context. For lane-based handoffs, it also rejects review handoffs when the locked files do not contain a real reviewable diff.
+
 That is why `btrain handoff update` supports:
 
 - `--base`
@@ -221,17 +262,31 @@ Last Updated: Claude 2026-04-02T12:00:00.000Z
 
 ```bash
 btrain init <repo> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
+btrain hooks [--repo <path>]
 btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]
 btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]
 btrain handoff [--repo <path>]
 btrain handoff claim --lane <id> --task <text> --owner <name> [--reviewer <name|any-other>] --files <paths>
-btrain handoff update --lane <id> [--status <status>] [review-context flags...]
+btrain handoff update --lane <id> [--status <status>] [review-context flags...] [--reason-code <code>] [--reason-tag <tag>]...
+btrain handoff request-changes --lane <id> --summary <text> --reason-code <code> [--reason-tag <tag>]... [--next <text>] [--actor <name>]
 btrain handoff resolve --lane <id> --summary <text> --actor <name>
+btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
 btrain locks [--repo <path>]
 btrain status [--repo <path>]
-btrain doctor [--repo <path>]
+btrain doctor [--repo <path>] [--repair]
 btrain hcleanup [--repo <path>] [--keep <n>]
 ```
+
+`btrain init --hooks` and `btrain hooks` install both managed git guards:
+
+- `pre-commit` blocks code commits while a lane is waiting on review
+- `pre-push` blocks pushes while unresolved handoff state is still active
+- `btrain override grant --action push ...` creates a single-use human-confirmed override that the managed `pre-push` hook consumes automatically
+
+`btrain doctor --repair` stays conservative. It only applies safe mechanical fixes such as:
+
+- releasing stale locks left behind on non-active lanes
+- running the same warm-history compaction path that backs `btrain hcleanup`
 
 ## Example Config
 
@@ -294,7 +349,9 @@ In that setup, `btrain handoff` can report `agent check: GPT (runtime hints (cod
 ## Loop and Cleanup
 
 - `btrain loop` can relay `bth` between configured runners, but real-world support still depends on what each agent CLI allows.
-- `btrain hcleanup` trims old `## Previous Handoffs` entries into `~/agent_collab_history/<repo>_agents_collab/<repo>.md`.
+- `btrain` keeps workflow events under `.btrain/events/` and archives trimmed handoff history under `.btrain/history/`.
+- `btrain handoff claim` and `btrain handoff resolve` compact warm history automatically, keeping the newest 3 previous handoffs in the lane by default.
+- `btrain hcleanup` runs the same core compaction manually when you want a backstop sweep or a different `--keep` value.
 
 ## Environment Variables
 

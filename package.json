@@ -1,5 +1,5 @@
 {
-  "name": "ai-sales-brain-train",
+  "name": "btrain",
   "version": "0.1.0",
   "private": true,
   "bin": {

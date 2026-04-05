@@ -1,10 +1,15 @@
 [project]
 name = "btrain"
 
+[agents]
+reviewer_default = "GPT"
+writer_default = "Claude"
+active = ["Claude", "GPT", "Gemini"]
+
 [lanes]
-per_agent = 2
+per_agent = 3
 enabled = true
-ids = ["a", "b"]
+ids = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
 
 [lanes.a]
 handoff_path = ".claude/collab/HANDOFF_A.md"
@@ -17,3 +22,18 @@ handoff_path = ".claude/collab/HANDOFF_C.md"
 
 [lanes.d]
 handoff_path = ".claude/collab/HANDOFF_D.md"
+
+[lanes.e]
+handoff_path = ".claude/collab/HANDOFF_E.md"
+
+[lanes.f]
+handoff_path = ".claude/collab/HANDOFF_F.md"
+
+[lanes.g]
+handoff_path = ".claude/collab/HANDOFF_G.md"
+
+[lanes.h]
+handoff_path = ".claude/collab/HANDOFF_H.md"
+
+[lanes.i]
+handoff_path = ".claude/collab/HANDOFF_I.md"

@@ -4,8 +4,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CODEX_BASE="${CODEX_HOME:-$HOME/.codex}"
-REPO_SLUG="ai_sales_brain_train"
-DEFAULT_LABEL="com.codeslp.handoff-history.ai-sales-brain-train"
+REPO_SLUG="btrain"
+DEFAULT_LABEL="com.codeslp.handoff-history.btrain"
+LEGACY_REPO_SLUG="ai_sales_brain_train"
+LEGACY_DEFAULT_LABEL="com.codeslp.handoff-history.ai-sales-brain-train"
 CONFIG_DIR="${HANDOFF_AGENT_CONFIG_DIR_OVERRIDE:-$CODEX_BASE/collab/$REPO_SLUG}"
 CONFIG_PATH="$CONFIG_DIR/handoff-history-agent.env"
 WATCH_LIST_PATH="$CONFIG_DIR/handoff-watch-paths.txt"
@@ -16,13 +18,20 @@ STDOUT_LOG="$LOG_DIR/handoff-history-agent.log"
 STDERR_LOG="$LOG_DIR/handoff-history-agent.err.log"
 LABEL="${HANDOFF_HISTORY_AGENT_LABEL_OVERRIDE:-$DEFAULT_LABEL}"
 PLIST_PATH="${HANDOFF_HISTORY_AGENT_PLIST_PATH_OVERRIDE:-$HOME/Library/LaunchAgents/$LABEL.plist}"
-LEGACY_LABEL="${HANDOFF_HISTORY_AGENT_LEGACY_LABEL_OVERRIDE:-}"
+LEGACY_LABEL="${HANDOFF_HISTORY_AGENT_LEGACY_LABEL_OVERRIDE:-$LEGACY_DEFAULT_LABEL}"
+LEGACY_CONFIG_DIR="$CODEX_BASE/collab/$LEGACY_REPO_SLUG"
+LEGACY_CONFIG_PATH="$LEGACY_CONFIG_DIR/handoff-history-agent.env"
+LEGACY_WATCH_LIST_PATH="$LEGACY_CONFIG_DIR/handoff-watch-paths.txt"
 
 mkdir -p "$LOG_DIR"
+mkdir -p "$(dirname "$PLIST_PATH")"
 
 if [ -f "$CONFIG_PATH" ]; then
   # shellcheck disable=SC1090
   source "$CONFIG_PATH"
+elif [ -f "$LEGACY_CONFIG_PATH" ]; then
+  # shellcheck disable=SC1090
+  source "$LEGACY_CONFIG_PATH"
 fi
 
 HISTORY_PATH="${HANDOFF_HISTORY_PATH_OVERRIDE:-${HANDOFF_HISTORY_PATH:-}}"
@@ -34,6 +43,15 @@ if [ -z "$HISTORY_PATH" ]; then
 fi
 
 bash "$ROOT_DIR/scripts/register-handoff-watch-path.sh" "$WATCH_REPO_PATH"
+
+if [ -f "$LEGACY_WATCH_LIST_PATH" ] && [ "$LEGACY_WATCH_LIST_PATH" != "$WATCH_LIST_PATH" ]; then
+  # Preserve previously registered repos when migrating the shared launchd agent.
+  while IFS= read -r repo_path || [ -n "$repo_path" ]; do
+    if [ -n "$repo_path" ] && ! grep -Fxq "$repo_path" "$WATCH_LIST_PATH"; then
+      printf '%s\n' "$repo_path" >>"$WATCH_LIST_PATH"
+    fi
+  done <"$LEGACY_WATCH_LIST_PATH"
+fi
 
 cat >"$CONFIG_PATH" <<ENVFILE
 HANDOFF_HISTORY_PATH=$HISTORY_PATH

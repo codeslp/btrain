@@ -1,25 +1,28 @@
 #!/usr/bin/env node
 
 import path from "node:path"
-import fs from "node:fs"
-import os from "node:os"
 import {
   checkHandoff,
   claimHandoff,
+  compactHandoffHistory,
+  consumeOverride,
   doctor,
   forceReleaseLock,
   getBrainTrainHome,
   getLaneConfigs,
   getReviewStatus,
   getStatus,
+  grantOverride,
   initRepo,
-  installPreCommitHook,
+  installGitHooks,
+  listActiveOverrides,
   listLocks,
   listRepos,
   patchHandoff,
   readProjectConfig,
   registerRepo,
   releaseLocks,
+  requestChangesHandoff,
   resolveHandoff,
   resolveRepoRoot,
   runReview,
@@ -33,13 +36,15 @@ function printHelp() {
 
 Usage:
   btrain init <repo-path> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
-                                                                              Bootstrap a repo (--hooks installs pre-commit guard)
+                                                                              Bootstrap a repo (--hooks installs managed git guards)
   btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>]                                                 Check whose turn it is and what to do
   btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [options]
                                                                               Claim a new task
   btrain handoff update [options]                                                Update the current handoff state
+  btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
+                                                                              Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
   btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
@@ -50,8 +55,10 @@ Usage:
   btrain register <repo-path>                                                    Register an existing repo without bootstrapping it
   btrain sync-templates [--repo <path>] [--dry-run]                              Sync managed AGENTS/CLAUDE blocks from templates
   btrain status [--repo <path>]                                                  Show handoff state across repos
-  btrain doctor [--repo <path>]                                                  Check registry and repo health
-  btrain hooks [--repo <path>]                                                   Install the pre-commit guard hook
+  btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
+  btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
+  btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
+                                                                              Create a human-confirmed audited override
   btrain repos                                                                   List registered repos
   btrain hcleanup [--repo <path>] [--keep <n>]                                   Trim handoff history, archive old entries
 
@@ -76,6 +83,17 @@ Handoff/Lane Options:
   --why <text>      Why the change was made.
   --review-ask <text>
                     Repeatable. One specific review ask for the reviewer.
+  --reason-code <code>
+                    Required when entering \`changes-requested\` or \`repair-needed\`.
+  --reason-tag <tag>
+                    Repeatable. Optional secondary tags for reason-code metadata.
+  --override-id <id>
+                    Consume a previously granted audited override when re-running a blocked action.
+  --requested-by <agent>
+                    Agent or guardian requesting an audited override.
+  --confirmed-by <human>
+                    Human confirming the audited override.
+  --reason <text>   Required audit reason for \`override grant\`.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
@@ -85,11 +103,13 @@ Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
   - \`init\` also scaffolds the bundled \`.claude/skills/\` pack unless you pass \`--core-only\`.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
-  - Use \`handoff claim|update|resolve\` to keep handoff headers consistent.
+  - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
   - \`review run\` automates \`parallel\` and \`hybrid\` modes. \`manual\` mode reports a no-op.
   - \`sync-templates\` only updates the managed blocks in \`AGENTS.md\` and \`CLAUDE.md\`.
   - When \`[lanes]\` is configured in project.toml, agents can work concurrently on separate lanes.
+  - \`override grant\` writes a pending audited override under \`.btrain/overrides/\`; push overrides are consumed automatically by the managed pre-push hook.
+  - \`doctor --repair\` applies only safe mechanical fixes such as stale-lock release and backstop handoff-history compaction.
 `)
 }
 
@@ -147,9 +167,20 @@ function formatRepoStatus(status) {
           : lane.lockState && lane.lockState !== "clear"
             ? ` [${lane.lockState}]`
             : ""
+      const repurposeSuffix = lane.repurposeReady ? ` [repurpose-ready: ${lane.repurposeReason}]` : ""
+      const reasonSuffix = lane.reasonCode ? ` [reason: ${lane.reasonCode}]` : ""
       lines.push(
-        `  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}${lockSuffix}`,
+        `  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}${lockSuffix}${repurposeSuffix}${reasonSuffix}`,
       )
+      if (lane.repairOwner) {
+        lines.push(`    repair owner: ${lane.repairOwner}`)
+      }
+      if (lane.repairAttempts) {
+        lines.push(`    repair attempts: ${lane.repairAttempts}`)
+      }
+      if (lane.repairEscalation) {
+        lines.push(`    repair escalation: ${lane.repairEscalation}`)
+      }
     }
     if (status.locks && status.locks.length > 0) {
       lines.push(`  locks: ${status.locks.map((l) => `${l.lane}:${l.path}`).join(", ")}`)
@@ -161,11 +192,36 @@ function formatRepoStatus(status) {
     lines.push(`  review mode: ${status.current.reviewMode || "manual"}`)
     lines.push(`  status: ${status.current.status || "(unknown)"}`)
     lines.push(`  next: ${status.current.nextAction || "(none)"}`)
+    if (status.current.reasonCode) {
+      lines.push(`  reason code: ${status.current.reasonCode}`)
+    }
+    if (status.current.reasonTags?.length) {
+      lines.push(`  reason tags: ${status.current.reasonTags.join(", ")}`)
+    }
+    if (status.current.repairOwner) {
+      lines.push(`  repair owner: ${status.current.repairOwner}`)
+    }
+    if (status.current.repairAttempts) {
+      lines.push(`  repair attempts: ${status.current.repairAttempts}`)
+    }
+    if (status.current.repairEscalation) {
+      lines.push(`  repair escalation: ${status.current.repairEscalation}`)
+    }
   }
 
   lines.push(`  updated: ${updatedLine}`)
   lines.push(`  handoffs: ${status.previousHandoffs ?? 0}`)
   lines.push(`  drift: ${status.templateDrift ? (status.templateDrift.any ? "yes" : "no") : "unknown"}`)
+  if (status.repurposeReady && status.repurposeReady.length > 0) {
+    lines.push(
+      `  repurpose-ready: ${status.repurposeReady
+        .map((entry) => (entry.laneId ? `${entry.laneId} (${entry.reason})` : `current handoff (${entry.reason})`))
+        .join(", ")}`,
+    )
+  }
+  if (status.overrides && status.overrides.length > 0) {
+    lines.push(`  overrides: ${status.overrides.map((record) => record.id).join(", ")}`)
+  }
 
   return lines.join("\n")
 }
@@ -182,6 +238,20 @@ function formatDoctorResult(result) {
 
   if (result.warnings.length > 0) {
     lines.push(`  warnings: ${result.warnings.join(" | ")}`)
+  }
+
+  if (result.repurposeReady?.length > 0) {
+    lines.push(
+      `  repurpose-ready: ${result.repurposeReady
+        .map((entry) => (entry.laneId ? `${entry.laneId} (${entry.reason})` : `current handoff (${entry.reason})`))
+        .join(", ")}`,
+    )
+  }
+  if (result.overrides?.length > 0) {
+    lines.push(`  overrides: ${result.overrides.map((record) => record.id).join(", ")}`)
+  }
+  if (result.repairs?.length > 0) {
+    lines.push(`  repairs: ${result.repairs.map((repair) => repair.summary || repair.type).join(" | ")}`)
   }
 
   if (result.issues.length === 0 && result.warnings.length === 0) {
@@ -338,6 +408,21 @@ function printHandoffState(result) {
       console.log(`locked files: ${lane.lockPaths?.length ? lane.lockPaths.join(", ") : "(none)"}`)
       console.log(`lock state: ${lane.lockState || "clear"}`)
       console.log(`next: ${lane.nextAction || "(none)"}`)
+      if (lane.reasonCode) {
+        console.log(`reason code: ${lane.reasonCode}`)
+      }
+      if (lane.reasonTags?.length) {
+        console.log(`reason tags: ${lane.reasonTags.join(", ")}`)
+      }
+      if (lane.repairOwner) {
+        console.log(`repair owner: ${lane.repairOwner}`)
+      }
+      if (lane.repairAttempts) {
+        console.log(`repair attempts: ${lane.repairAttempts}`)
+      }
+      if (lane.repairEscalation) {
+        console.log(`repair escalation: ${lane.repairEscalation}`)
+      }
     }
     if (result.locks && result.locks.length > 0) {
       console.log("")
@@ -354,93 +439,76 @@ function printHandoffState(result) {
     console.log(`peer reviewer: ${result.current.reviewer || "(unassigned)"}`)
     console.log(`mode: ${result.current.reviewMode || "manual"}`)
     console.log(`next: ${result.current.nextAction || "(none)"}`)
+    if (result.current.reasonCode) {
+      console.log(`reason code: ${result.current.reasonCode}`)
+    }
+    if (result.current.reasonTags?.length) {
+      console.log(`reason tags: ${result.current.reasonTags.join(", ")}`)
+    }
+    if (result.current.repairOwner) {
+      console.log(`repair owner: ${result.current.repairOwner}`)
+    }
+    if (result.current.repairAttempts) {
+      console.log(`repair attempts: ${result.current.repairAttempts}`)
+    }
+    if (result.current.repairEscalation) {
+      console.log(`repair escalation: ${result.current.repairEscalation}`)
+    }
   }
 
   console.log("")
   console.log(result.guidance)
+  if (result.overrides?.length > 0) {
+    console.log("")
+    console.log("active overrides:")
+    for (const record of result.overrides) {
+      const scope = record.scope === "lane" && record.laneId ? `lane ${record.laneId}` : "repo"
+      console.log(`  ${record.id}: ${record.action} (${scope}; requested by ${record.requestedBy}; confirmed by ${record.confirmedBy})`)
+    }
+  }
   console.log("")
   console.log(`handoff file: ${result.handoffPath}`)
 }
 
+function printHookInstallResult(label, result) {
+  if (!result) {
+    return
+  }
+  if (result.installed) {
+    console.log(`${label}: ${result.reason}`)
+    return
+  }
+  if (result.reason === "existing-hook") {
+    console.log(`${label}: skipped (existing hook found — install or merge it manually)`)
+    return
+  }
+  if (result.reason === "not-a-git-repo") {
+    console.log(`${label}: skipped (not a git repo)`)
+  }
+}
+
 async function runHcleanup(repoRoot, keep) {
   const config = await readProjectConfig(repoRoot)
-  const repoName = config?.name || path.basename(repoRoot)
-
-  const archiveDir = path.join(os.homedir(), "agent_collab_history", `${repoName}_agents_collab`)
-  const archiveFile = path.join(archiveDir, `${repoName}.md`)
-  fs.mkdirSync(archiveDir, { recursive: true })
-
+  const results = await compactHandoffHistory(repoRoot, { config, keep, actorLabel: "btrain hcleanup" })
   const laneConfigs = getLaneConfigs(config) || []
   let totalArchived = 0
   let totalKept = 0
 
-  for (const lane of laneConfigs) {
-    const laneId = lane.id
-    const handoffPath = path.isAbsolute(lane.handoffPath)
-      ? lane.handoffPath
-      : path.resolve(repoRoot, lane.handoffPath)
-    if (!fs.existsSync(handoffPath)) continue
-
-    const content = fs.readFileSync(handoffPath, "utf-8")
-    const headerMatch = content.match(/^## Previous Handoffs\s*$/m)
-    if (!headerMatch) {
-      console.log(`lane ${laneId}: no Previous Handoffs section, skipping`)
-      continue
+  for (const result of results) {
+    const label = result.laneId || (laneConfigs.length > 0 ? "repo" : "default")
+    if (result.archivedCount > 0) {
+      console.log(`lane ${label}: archived ${result.archivedCount} entries, kept ${result.keptCount}`)
+      console.log(`  archive: ${path.relative(repoRoot, result.archivePath) || result.archivePath}`)
+    } else {
+      console.log(`lane ${label}: ${result.keptCount} entries, nothing to trim (keep=${result.keep})`)
     }
-
-    const headerIndex = headerMatch.index
-    const afterHeader = content.slice(headerIndex + headerMatch[0].length)
-
-    // Parse entries: each starts with "- " at start of line
-    const entries = []
-    const lines = afterHeader.split("\n")
-    let currentEntry = null
-    let trailingLines = []
-    let hitNextSection = false
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      if (/^## /.test(line)) {
-        hitNextSection = true
-        trailingLines = lines.slice(i)
-        break
-      }
-      if (line.startsWith("- ")) {
-        if (currentEntry !== null) entries.push(currentEntry)
-        currentEntry = line
-      } else if (currentEntry !== null && (line.startsWith("  ") || line.trim() === "")) {
-        currentEntry += "\n" + line
-      } else if (line.trim() === "") {
-        continue
-      }
-    }
-    if (currentEntry !== null) entries.push(currentEntry)
-
-    if (entries.length <= keep) {
-      console.log(`lane ${laneId}: ${entries.length} entries, nothing to trim (keep=${keep})`)
-      totalKept += entries.length
-      continue
-    }
-
-    const toKeep = entries.slice(-keep)
-    const toArchive = entries.slice(0, -keep)
-
-    const archiveBlock = `\n## Lane ${laneId.toUpperCase()} — Archived ${new Date().toISOString().slice(0, 10)}\n\n${toArchive.join("\n")}\n`
-    fs.appendFileSync(archiveFile, archiveBlock)
-
-    const beforeSection = content.slice(0, headerIndex)
-    const rest = hitNextSection ? "\n" + trailingLines.join("\n") : "\n"
-    const newContent = beforeSection + "## Previous Handoffs\n\n" + toKeep.join("\n") + "\n" + rest
-    fs.writeFileSync(handoffPath, newContent)
-
-    console.log(`lane ${laneId}: archived ${toArchive.length} entries, kept ${toKeep.length}`)
-    totalArchived += toArchive.length
-    totalKept += toKeep.length
+    totalArchived += result.archivedCount
+    totalKept += result.keptCount
   }
 
   console.log("")
-  console.log(`archived: ${totalArchived} entries → ${archiveFile}`)
-  console.log(`kept: ${totalKept} entries across all lanes`)
+  console.log(`archived: ${totalArchived} entries`)
+  console.log(`kept: ${totalKept} warm entries`)
 }
 
 async function run() {
@@ -482,13 +550,8 @@ async function run() {
     }
 
     if (result.hookResult) {
-      if (result.hookResult.installed) {
-        console.log(`pre-commit hook: ${result.hookResult.reason}`)
-      } else if (result.hookResult.reason === "existing-hook") {
-        console.log("pre-commit hook: skipped (existing hook found — use `btrain hooks` to install manually)")
-      } else if (result.hookResult.reason === "not-a-git-repo") {
-        console.log("pre-commit hook: skipped (not a git repo)")
-      }
+      printHookInstallResult("pre-commit hook", result.hookResult.preCommit)
+      printHookInstallResult("pre-push hook", result.hookResult.prePush)
     }
     return
   }
@@ -514,7 +577,7 @@ async function run() {
   }
 
   if (command === "handoff") {
-    const subcommand = ["claim", "update", "resolve"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["claim", "update", "request-changes", "resolve"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
 
     if (options.help || options.h) {
@@ -540,6 +603,13 @@ async function run() {
 
     if (subcommand === "resolve") {
       await resolveHandoff(repoRoot, options)
+      const result = await checkHandoff(repoRoot)
+      printHandoffState(result)
+      return
+    }
+
+    if (subcommand === "request-changes") {
+      await requestChangesHandoff(repoRoot, options)
       const result = await checkHandoff(repoRoot)
       printHandoffState(result)
       return
@@ -651,7 +721,7 @@ async function run() {
   if (command === "doctor") {
     const options = parseOptions(rest)
     const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const results = await doctor({ repoRoot })
+    const results = await doctor({ repoRoot, repair: !!options.repair })
     console.log(`btrain home: ${getBrainTrainHome()}`)
     console.log("")
     if (results.length === 0) {
@@ -668,15 +738,55 @@ async function run() {
   if (command === "hooks") {
     const options = parseOptions(rest)
     const repoRoot = await resolveRepoRoot(options.repo)
-    const result = await installPreCommitHook(repoRoot)
+    const result = await installGitHooks(repoRoot)
 
-    if (result.installed) {
-      console.log(`pre-commit hook ${result.reason}: ${repoRoot}`)
-    } else if (result.reason === "existing-hook") {
-      console.log("A pre-commit hook already exists and wasn't created by btrain.")
-      console.log("Remove it manually or add the btrain check to your existing hook.")
-    } else if (result.reason === "not-a-git-repo") {
+    if (result.preCommit.reason === "not-a-git-repo" && result.prePush.reason === "not-a-git-repo") {
       console.log("Not a git repo — nothing to install.")
+      return
+    }
+    printHookInstallResult(`pre-commit hook (${repoRoot})`, result.preCommit)
+    printHookInstallResult(`pre-push hook (${repoRoot})`, result.prePush)
+    return
+  }
+
+  if (command === "override") {
+    const subcommand = ["grant", "consume", "list"].includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new Error("`btrain override` requires a subcommand: grant, consume, or list.")
+    }
+
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+
+    if (subcommand === "grant") {
+      const record = await grantOverride(repoRoot, options)
+      const scope = record.scope === "lane" && record.laneId ? `lane ${record.laneId}` : "repo"
+      console.log(`override granted: ${record.id}`)
+      console.log(`action: ${record.action}`)
+      console.log(`scope: ${scope}`)
+      console.log(`requested by: ${record.requestedBy}`)
+      console.log(`confirmed by: ${record.confirmedBy}`)
+      console.log(`reason: ${record.reason}`)
+      return
+    }
+
+    if (subcommand === "consume") {
+      const record = await consumeOverride(repoRoot, {
+        ...options,
+        actorLabel: options.actor || "btrain override consume",
+      })
+      console.log(`override consumed: ${record.id}`)
+      return
+    }
+
+    const overrides = await listActiveOverrides(repoRoot)
+    if (overrides.length === 0) {
+      console.log("No active overrides.")
+      return
+    }
+    for (const record of overrides) {
+      const scope = record.scope === "lane" && record.laneId ? `lane ${record.laneId}` : "repo"
+      console.log(`${record.id}: ${record.action} (${scope}; requested by ${record.requestedBy}; confirmed by ${record.confirmedBy})`)
     }
     return
   }
