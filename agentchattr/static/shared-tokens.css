@@ -1,0 +1,147 @@
+/* ================================================================
+   shared-tokens.css — Unified design system for btrain + agentchattr
+   ================================================================
+   This file is the single source of truth for visual tokens shared
+   across both the btrain HUD dashboard and the agentchattr chat app.
+   Import this BEFORE any app-specific stylesheet.
+   ================================================================ */
+
+:root {
+  /* --- Surfaces --- */
+  --bg:             #0a0c12;
+  --bg-header:      #0e1119;
+  --surface:        #0e1119;
+  --surface-hover:  #141925;
+  --bg-input:       #141925;
+  --bg-msg:         #10141c;
+  --bg-msg-hover:   #161c28;
+  --bg-elevated:    #1a1430;
+  --bg-subtle:      rgba(255, 255, 255, 0.04);
+  --bg-overlay:     rgba(0, 0, 0, 0.5);
+
+  /* --- Borders --- */
+  --border:         #252d3a;
+  --border-strong:  #353d4e;
+  --border-subtle:  rgba(255, 255, 255, 0.06);
+
+  /* --- Text --- */
+  --text:           #d8e0ec;
+  --text-dim:       #6a7282;
+  --text-muted:     #7a8290;
+  --text-system:    #555570;
+  --text-on-accent: #fff;
+
+  /* --- Semantic: Status palette (btrain HUD) --- */
+  --idle:                    #484f58;
+  --idle-glow:               rgba(72, 79, 88, 0.3);
+  --in-progress:             #ff8c00;
+  --in-progress-glow:        rgba(255, 140, 0, 0.2);
+  --needs-review:            #aa0000;
+  --needs-review-glow:       rgba(170, 0, 0, 0.2);
+  --changes-requested:       #ff00ff;
+  --changes-requested-glow:  rgba(255, 0, 255, 0.2);
+  --repair-needed:           #ffd000;
+  --repair-needed-glow:      rgba(255, 208, 0, 0.22);
+  --repair-needed-stripe-dark: #111;
+  --repair-needed-tape: repeating-linear-gradient(
+    -45deg,
+    var(--repair-needed-stripe-dark) 0 12px,
+    var(--repair-needed) 12px 24px
+  );
+  --resolved:                #00e65c;
+  --resolved-glow:           rgba(0, 230, 92, 0.2);
+  --bug:                     #527a20;
+  --bug-glow:                rgba(82, 122, 32, 0.4);
+
+  /* --- Semantic: Chat accent --- */
+  --accent:         #7c3aed;
+  --accent-soft:    rgba(124, 58, 237, 0.15);
+  --accent-hover:   rgba(124, 58, 237, 0.2);
+  --user-color:     #a78bfa;
+
+  /* --- Semantic: Feedback --- */
+  --success:        #34d399;
+  --success-soft:   rgba(52, 211, 153, 0.2);
+  --online:         #4ade80;
+  --danger:         #ef4444;
+  --danger-soft:    rgba(239, 68, 68, 0.1);
+  --error-color:    #f87171;
+  --error-soft:     rgba(248, 113, 113, 0.15);
+  --warning:        #fbbf24;
+  --pending:        #da7756;
+  --info:           #60a5fa;
+
+  /* --- Neutral tints --- */
+  --white-02: rgba(255, 255, 255, 0.02);
+  --white-03: rgba(255, 255, 255, 0.03);
+  --white-06: rgba(255, 255, 255, 0.06);
+  --white-08: rgba(255, 255, 255, 0.08);
+  --white-10: rgba(255, 255, 255, 0.10);
+  --white-12: rgba(255, 255, 255, 0.12);
+  --white-15: rgba(255, 255, 255, 0.15);
+
+  /* --- Space --- */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+
+  /* --- Radius --- */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-full: 9999px;
+
+  /* --- Typography --- */
+  --font-heading: 'Chakra Petch', sans-serif;
+  --font-body:    'Exo 2', sans-serif;
+  --font-mono:    'IBM Plex Mono', monospace;
+  --font-chat:    'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 14px;
+  --fs-md:   13px;
+  --fw-normal:   400;
+  --fw-medium:   500;
+  --fw-semibold: 600;
+  --fw-bold:     700;
+  --lh-tight:    1.3;
+  --lh-normal:   1.35;
+  --lh-relaxed:  1.5;
+
+  /* --- Motion --- */
+  --duration-fast:   120ms;
+  --duration-normal: 200ms;
+  --duration-slow:   300ms;
+
+  /* --- Shadows --- */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* ================================================================
+   Shared Keyframe Animations — btrain HUD micro-motion library
+   ================================================================ */
+
+@keyframes hop {
+  0%, 93% { transform: translateY(0); }
+  95% { transform: translateY(-8px); }
+  97% { transform: translateY(0); }
+  98% { transform: translateY(-3px); }
+  100% { transform: translateY(0); }
+}
+
+@keyframes chug {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(3px); }
+}
+
+@keyframes squish {
+  0%, 96% { transform: scaleY(1) translateY(0); }
+  98% { transform: scaleY(0.85) translateY(4px); }
+  100% { transform: scaleY(1) translateY(0); }
+}

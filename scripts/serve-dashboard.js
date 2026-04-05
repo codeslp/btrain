@@ -133,12 +133,13 @@ const server = http.createServer((req, res) => {
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Exo+2:wght@400;500;600&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #050608;
-      --surface: #0a0d14;
-      --surface-hover: #10141e;
-      --text: #e6edf3;
-      --text-muted: #7d8590;
-      --border: #232b38;
+      /* Unified palette — mirrors shared-tokens.css */
+      --bg: #0a0c12;
+      --surface: #0e1119;
+      --surface-hover: #141925;
+      --text: #d8e0ec;
+      --text-muted: #7a8290;
+      --border: #252d3a;
       
       /* Status Colors */
       --idle: #484f58;
@@ -162,6 +163,11 @@ const server = http.createServer((req, res) => {
       
       --bug: #527a20;
       --bug-glow: rgba(82, 122, 32, 0.4);
+
+      /* Typography tokens */
+      --font-heading: 'Chakra Petch', sans-serif;
+      --font-body: 'Exo 2', sans-serif;
+      --font-mono: 'IBM Plex Mono', monospace;
     }
 
     * { box-sizing: border-box; }

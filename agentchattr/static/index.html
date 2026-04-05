@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>agentchattr</title>
-    <link rel="stylesheet" href="/static/style.css?v=249">
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Exo+2:wght@400;500;600&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/shared-tokens.css?v=1">
+    <link rel="stylesheet" href="/static/style.css?v=250">
     <link rel="stylesheet" href="/static/sessions.css?v=223">
     <link rel="stylesheet" href="/static/jobs.css?v=223">
     <link rel="icon" href="/static/favicon.ico">
@@ -132,6 +134,8 @@
 
         <div id="channel-bar">
             <div class="channel-bar-left-spacer" aria-hidden="true"></div>
+            <div id="lane-tabs" class="lane-tabs"></div>
+            <div id="lane-divider" class="channel-divider" style="display:none" aria-hidden="true"></div>
             <div class="channel-main">
                 <div id="channel-tabs"></div>
                 <button id="channel-add-btn" class="channel-add" onclick="showChannelCreateDialog()" title="Add channel">+</button>
@@ -156,6 +160,16 @@
 
         <div id="content-area">
             <main id="timeline">
+                <div id="lane-header" class="lane-header hidden">
+                    <div class="lane-header-toggle" onclick="toggleLaneHeader()">
+                        <span class="lane-header-title"></span>
+                        <span class="lane-header-chevron">&#9660;</span>
+                    </div>
+                    <div class="lane-header-body">
+                        <div class="lane-header-fields"></div>
+                        <div class="lane-header-links"></div>
+                    </div>
+                </div>
                 <div id="loading-indicator">
                     <div class="loading-spinner"></div>
                     <span>Loading messages...</span>
