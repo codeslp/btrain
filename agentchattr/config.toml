@@ -53,6 +53,12 @@ label = "MiniMax"
 api_key_env = "MINIMAX_API_KEY"
 temperature = 1.0
 
+[btrain]
+# Path to the btrain-managed repo (relative to agentchattr or absolute).
+repo_path = ".."
+# Seconds between btrain status polls.
+poll_interval = 15
+
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.
 default = "none"

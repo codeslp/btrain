@@ -9,6 +9,16 @@
 
 const _channelScrollMsg = {};  // channel name -> message ID at top of viewport
 
+// Lane status → animation class (mirrors dashboard indicator-pill)
+const _LANE_STATUS_ANIM = {
+    'in-progress':       'status-in-progress',
+    'needs-review':      'status-needs-review',
+    'changes-requested': 'status-changes-requested',
+    'repair-needed':     'status-repair-needed',
+    'resolved':          'status-resolved',
+    'idle':              'status-idle',
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -38,6 +48,81 @@ function renderChannelTabs() {
     const existingCreate = container.querySelector('.channel-inline-create');
     container.innerHTML = '';
 
+    // --- Lane tabs (system-managed, before user channels) ---
+    const laneContainer = document.getElementById('lane-tabs');
+    if (laneContainer) {
+        laneContainer.innerHTML = '';
+        const laneChannels = window.laneChannels || [];
+        const laneData = window.btrainLanes || {};
+        const lanes = laneData.lanes || [];
+        const laneMap = {};
+        for (const l of lanes) laneMap[l._laneId] = l;
+
+        if (laneChannels.length > 0) {
+            for (let idx = 0; idx < laneChannels.length; idx++) {
+                const lid = laneChannels[idx];
+                const lane = laneMap[lid] || {};
+                const status = lane.status || 'idle';
+                const isActive = lid === window.activeChannel;
+                const animClass = _LANE_STATUS_ANIM[status] || 'status-idle';
+
+                // Mini card pill (mirrors dashboard indicator-pill)
+                const pill = document.createElement('button');
+                pill.className = 'lane-pill ' + animClass + (isActive ? ' active' : '');
+                pill.dataset.channel = lid;
+                pill.style.animationDelay = (idx * 0.1) + 's';
+                pill.title = status.toUpperCase();
+
+                // Colored lane box with letter
+                const box = document.createElement('div');
+                box.className = 'lane-box ' + status.replace(/-/g, '-');
+                box.textContent = lid.toUpperCase();
+                pill.appendChild(box);
+
+                // Agent label below
+                const agentLabel = document.createElement('div');
+                agentLabel.className = 'lane-pill-agent';
+                if (lane.owner) {
+                    // Show first 3 chars of owner name
+                    agentLabel.textContent = lane.owner.slice(0, 3).toUpperCase();
+                }
+                pill.appendChild(agentLabel);
+
+                // Repurpose-ready badge
+                if (lane.repurposeReady) {
+                    const badge = document.createElement('span');
+                    badge.className = 'lane-repurpose-badge';
+                    badge.textContent = 'R';
+                    badge.title = 'Repurpose ready' + (lane.repurposeReason ? ': ' + lane.repurposeReason : '');
+                    pill.appendChild(badge);
+                }
+
+                // Unread count
+                const unread = window.channelUnread[lid] || 0;
+                if (unread > 0 && !isActive) {
+                    const badge = document.createElement('span');
+                    badge.className = 'lane-pill-unread';
+                    badge.textContent = unread > 99 ? '99+' : unread;
+                    pill.appendChild(badge);
+                }
+
+                pill.onclick = () => {
+                    document.querySelectorAll('.channel-tab.editing').forEach(t => t.classList.remove('editing'));
+                    switchChannel(lid);
+                };
+
+                laneContainer.appendChild(pill);
+            }
+            // Show divider
+            const divider = document.getElementById('lane-divider');
+            if (divider) divider.style.display = '';
+        } else {
+            const divider = document.getElementById('lane-divider');
+            if (divider) divider.style.display = 'none';
+        }
+    }
+
+    // --- User channel tabs ---
     for (const name of window.channelList) {
         const tab = document.createElement('button');
         tab.className = 'channel-tab' + (name === window.activeChannel ? ' active' : '');
@@ -119,6 +204,7 @@ function switchChannel(name) {
     localStorage.setItem('agentchattr-channel', name);
     filterMessagesByChannel();
     renderChannelTabs();
+    if (window.renderLaneHeader) window.renderLaneHeader();
     Store.set('activeChannel', name);
     // Restore: scroll to saved message, or bottom if none saved
     const savedId = _channelScrollMsg[name];

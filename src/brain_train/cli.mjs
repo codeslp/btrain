@@ -708,6 +708,10 @@ async function run() {
     const options = parseOptions(rest)
     const repoRoot = options.repo ? path.resolve(options.repo) : null
     const statuses = await getStatus({ repoRoot })
+    if (options.json) {
+      console.log(JSON.stringify(statuses, null, 2))
+      return
+    }
     console.log(`btrain home: ${getBrainTrainHome()}`)
     console.log("")
     if (statuses.length === 0) {

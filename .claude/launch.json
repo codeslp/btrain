@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8123", "--directory", "docs"],
       "port": 8123
+    },
+    {
+      "name": "agentchattr",
+      "runtimeExecutable": "agentchattr/.venv/bin/python3.12",
+      "runtimeArgs": ["agentchattr/run.py"],
+      "port": 8300
     }
   ]
 }

@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+import os
 import re as _re
+import subprocess
 import sys
 import threading
+import time as _time_mod
 import uuid
 import logging
 from pathlib import Path
@@ -60,6 +63,11 @@ room_settings: dict = {
 # Channel validation
 _CHANNEL_NAME_RE = _re.compile(r'^[a-z0-9][a-z0-9\-]{0,19}$')
 MAX_CHANNELS = 8
+
+# btrain lane state cache (populated by background poller)
+_btrain_lock = threading.Lock()
+_btrain_cache: dict = {}  # raw JSON from `btrain status --json`
+_btrain_prev_tasks: dict[str, str] = {}  # lane_id -> last known task (for change detection)
 
 # Agent hats (persisted to data/hats.json)
 agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
@@ -483,6 +491,128 @@ def configure(cfg: dict, session_token: str = ""):
 
     threading.Thread(target=_schedule_runner, daemon=True).start()
 
+    # --- btrain lane state poller ---
+    btrain_cfg = cfg.get("btrain", {})
+    btrain_repo = btrain_cfg.get("repo_path", "")
+    btrain_interval = int(btrain_cfg.get("poll_interval", 15))
+
+    if btrain_repo:
+        # Resolve repo_path relative to agentchattr dir (where config.toml lives)
+        _agentchattr_root = Path(__file__).parent
+        btrain_repo_abs = str((_agentchattr_root / btrain_repo).resolve())
+
+        # Resolve btrain binary — check PATH, npm global bin, and fallback to node + cli.mjs
+        import shutil as _shutil
+        _btrain_cmd = None
+        _extra_path = ":".join([
+            str(Path.home() / ".npm-global" / "bin"),
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+        ])
+        _env_with_npm = {**os.environ, "PATH": _extra_path + ":" + os.environ.get("PATH", "")}
+        _found = _shutil.which("btrain", path=_env_with_npm["PATH"])
+        if _found:
+            _btrain_cmd = [_found, "status", "--repo", btrain_repo_abs, "--json"]
+            log.info(f"btrain poller: using {_found}")
+        else:
+            # Fallback: run cli.mjs directly via node
+            _cli_mjs = Path(btrain_repo_abs) / "src" / "brain_train" / "cli.mjs"
+            _node = _shutil.which("node", path=_env_with_npm["PATH"])
+            if _node and _cli_mjs.exists():
+                _btrain_cmd = [_node, str(_cli_mjs), "status", "--repo", btrain_repo_abs, "--json"]
+                log.info(f"btrain poller: using node fallback ({_cli_mjs})")
+            else:
+                log.warning("btrain poller: btrain binary not found, lane features disabled")
+
+        def _refresh_btrain_state():
+            result = subprocess.run(
+                _btrain_cmd,
+                capture_output=True, text=True, timeout=10,
+                env=_env_with_npm,
+            )
+            if result.returncode != 0:
+                log.warning(f"btrain poller: exit code {result.returncode}, stderr: {result.stderr[:200]}")
+                return
+
+            parsed = json.loads(result.stdout)
+            if not parsed or not isinstance(parsed, list):
+                return
+
+            repo_status = parsed[0]
+            lanes = repo_status.get("lanes", [])
+            lane_ids = [lane.get("_laneId", "") for lane in lanes if lane.get("_laneId")]
+
+            with _btrain_lock:
+                old_cache = _btrain_cache.copy()
+                _btrain_cache.clear()
+                _btrain_cache.update(repo_status)
+
+            existing_lane_channels = room_settings.get("lane_channels")
+            if lane_ids and existing_lane_channels != lane_ids:
+                room_settings["lane_channels"] = lane_ids
+                _save_settings()
+                if _event_loop:
+                    asyncio.run_coroutine_threadsafe(broadcast_settings(), _event_loop)
+
+            # Detect task changes per lane → archive old messages
+            for lane in lanes:
+                lid = lane.get("_laneId", "")
+                new_task = lane.get("task", "")
+                old_task = _btrain_prev_tasks.get(lid, "")
+
+                if old_task and new_task and old_task != new_task and store:
+                    # Archive the lane channel's messages
+                    lane_msgs = store.get_recent(count=999_999_999, channel=lid)
+                    if lane_msgs:
+                        try:
+                            zip_bytes = _build_lane_archive(store, lid)
+                            archive_dir = Path(data_dir) / "lane_archives"
+                            archive_dir.mkdir(parents=True, exist_ok=True)
+                            ts = _time_mod.strftime("%Y%m%d-%H%M%S")
+                            archive_path = archive_dir / f"{lid}_{ts}.zip"
+                            archive_path.write_bytes(zip_bytes)
+                        except Exception:
+                            log.exception(f"Failed to archive lane {lid}")
+
+                    store.clear(channel=lid)
+                    store.add(
+                        "system",
+                        f"Lane {lid} task changed. Previous messages archived.",
+                        msg_type="system",
+                        channel=lid,
+                    )
+
+                _btrain_prev_tasks[lid] = new_task
+
+            # Broadcast lane state to WebSocket clients on any change
+            changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
+            if changed and _event_loop:
+                asyncio.run_coroutine_threadsafe(_broadcast_btrain_lanes(), _event_loop)
+
+        def _btrain_poller():
+            if not _btrain_cmd:
+                log.warning("btrain poller: no command, exiting thread")
+                return
+
+            log.info(f"btrain poller: started, interval={btrain_interval}s")
+            while True:
+                try:
+                    _refresh_btrain_state()
+                except subprocess.TimeoutExpired:
+                    log.warning("btrain status poll timed out")
+                except Exception:
+                    log.warning("btrain poller error", exc_info=True)
+                _time_mod.sleep(btrain_interval)
+
+        if _btrain_cmd:
+            try:
+                _refresh_btrain_state()
+            except subprocess.TimeoutExpired:
+                log.warning("btrain initial status poll timed out")
+            except Exception:
+                log.warning("btrain initial poller error", exc_info=True)
+        threading.Thread(target=_btrain_poller, daemon=True).start()
+
 
 # --- Store → WebSocket bridge ---
 
@@ -903,6 +1033,49 @@ async def broadcast_clear(channel: str | None = None):
     ws_clients.difference_update(dead)
 
 
+async def _broadcast_btrain_lanes():
+    with _btrain_lock:
+        lanes = _btrain_cache.get("lanes", [])
+        repurpose = _btrain_cache.get("repurposeReady", [])
+    data = json.dumps({"type": "btrain_lanes", "data": {"lanes": lanes, "repurposeReady": repurpose}})
+    dead = set()
+    for client in list(ws_clients):
+        try:
+            await client.send_text(data)
+        except Exception:
+            dead.add(client)
+    ws_clients.difference_update(dead)
+
+
+def _build_lane_archive(msg_store, lane_id: str) -> bytes:
+    """Build a zip archive containing only messages from a specific lane channel."""
+    import io
+    import zipfile
+
+    messages = msg_store.get_recent(count=999_999_999, channel=lane_id)
+    lines = []
+    for msg in messages:
+        exported = dict(msg)
+        exported.setdefault("uid", str(uuid.uuid4()))
+        lines.append(json.dumps(exported, ensure_ascii=False))
+
+    manifest = {
+        "schema_version": 1,
+        "archive_id": str(uuid.uuid4()),
+        "created_at": _time_mod.strftime("%Y-%m-%dT%H:%M:%SZ", _time_mod.gmtime()),
+        "product": "agentchattr",
+        "type": "lane_archive",
+        "lane_id": lane_id,
+        "counts": {"messages": len(lines)},
+    }
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        zf.writestr("messages.jsonl", "\n".join(lines) + "\n" if lines else "")
+    return buf.getvalue()
+
+
 async def broadcast_todo_update(msg_id: int, status: str | None):
     data = json.dumps({"type": "todo_update", "data": {"id": msg_id, "status": status}})
     dead = set()
@@ -1026,6 +1199,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Send settings
     await websocket.send_text(json.dumps({"type": "settings", "data": room_settings}))
+
+    # Send current btrain lane snapshot so fresh page loads don't wait for the next poll tick
+    with _btrain_lock:
+        await websocket.send_text(json.dumps({
+            "type": "btrain_lanes",
+            "data": {
+                "lanes": _btrain_cache.get("lanes", []),
+                "repurposeReady": _btrain_cache.get("repurposeReady", []),
+            },
+        }))
 
     # Send registered instances (used for pills/mentions)
     agent_cfg = registry.get_agent_config() if registry else {}
@@ -2107,6 +2290,44 @@ async def write_summary(request: Request):
     if result is None:
         return JSONResponse({"error": "failed to write summary"}, status_code=500)
     return JSONResponse({"ok": True, "channel": channel, "chars": len(text.strip())})
+
+
+# --- btrain lane state endpoints ---
+
+@app.get("/api/btrain/lanes")
+async def get_btrain_lanes():
+    """Return cached btrain lane states."""
+    with _btrain_lock:
+        lanes = _btrain_cache.get("lanes", [])
+        repurpose = _btrain_cache.get("repurposeReady", [])
+    return JSONResponse({"lanes": lanes, "repurposeReady": repurpose})
+
+
+@app.get("/api/btrain/lanes/{lane_id}")
+async def get_btrain_lane(lane_id: str):
+    """Return a single lane's cached state."""
+    with _btrain_lock:
+        lanes = _btrain_cache.get("lanes", [])
+    for lane in lanes:
+        if lane.get("_laneId") == lane_id:
+            return JSONResponse(lane)
+    return JSONResponse({"error": f"lane {lane_id} not found"}, status_code=404)
+
+
+@app.get("/api/btrain/lane_archives/{lane_id}")
+async def list_lane_archives(lane_id: str):
+    """List available archive files for a lane."""
+    if not _CHANNEL_NAME_RE.match(lane_id):
+        return JSONResponse({"error": "invalid lane id"}, status_code=400)
+    data_dir = config.get("server", {}).get("data_dir", "./data")
+    archive_dir = Path(data_dir) / "lane_archives"
+    if not archive_dir.exists():
+        return JSONResponse({"archives": []})
+    archives = sorted(
+        [f.name for f in archive_dir.glob(f"{lane_id}_*.zip")],
+        reverse=True,
+    )
+    return JSONResponse({"archives": archives})
 
 
 @app.post("/api/register")

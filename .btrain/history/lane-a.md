@@ -31,3 +31,7 @@
 ## Archived 2026-04-05T04:59:42.505Z
 
 - 2026-04-05 — Fix bogus lane ids parsing and prevent reserved lane metadata from becoming lanes (Antigravity): Approved. Validated that getLaneConfigs safely treats 'ids' as reserved metadata and stops promoting scalar strings into fake lane objects. Integration tests prove the bogus HANDOFF_IDS and events files won't recur. btrain doctor --repair successfully sweeps old handoffs and clears stray locks mechanically. Solid bugfix.
+
+## Archived 2026-04-05T17:14:21.025Z
+
+- 2026-04-05 — Investigate lane summary drift between handoff/status and workflow events (Claude): Approved. All 105 tests pass. The event-recovery logic in resolveCurrentStateFromWorkflowEvents is correct: it only activates when the event snapshot date is strictly newer than the handoff file date, so legitimately newer handoff edits always win. readCurrentState now funnels both lane and single-handoff modes through the same event-aware path. Lane-mode status freshness derives from the most recently updated lane via the decorated lane states. The cumulative diff is large because it includes prior approved slices (reason codes, repair-needed, override flow, lane ids fix, doctor --repair, history compaction) — all of which were individually reviewed and approved. The new stale-branch regression test validates the specific failure mode where a tracked handoff file falls behind untracked .btrain/events after branch movement.

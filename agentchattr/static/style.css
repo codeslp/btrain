@@ -4152,209 +4152,289 @@ footer {
 .help-pulse { animation: helpPulse 1s ease 3; }
 
 /* ---------------------------------------------------------------------------
-   Lane tabs & lane header (WS5)
+   Lane pills & lane header (WS5) — mirrors btrain dashboard
    --------------------------------------------------------------------------- */
 
-.lane-tabs,
-.lane-header {
-    --lane-label-outline:
-        -1px -1px 0 rgba(255,255,255,0.92),
-         0px -1px 0 rgba(255,255,255,0.92),
-         1px -1px 0 rgba(255,255,255,0.92),
-        -1px  0px 0 rgba(255,255,255,0.92),
-         1px  0px 0 rgba(255,255,255,0.92),
-        -1px  1px 0 rgba(255,255,255,0.92),
-         0px  1px 0 rgba(255,255,255,0.92),
-         1px  1px 0 rgba(255,255,255,0.92);
-}
+/* --- Lane pill tabs (indicator-pill from dashboard) --- */
 
 .lane-tabs {
     display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    flex-shrink: 0;
+    padding: 2px 0;
+}
+
+.lane-pill {
+    display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    overflow: visible;
+    width: 40px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    will-change: transform;
+    padding: 0;
+    outline: none;
 }
+.lane-pill:hover { border-color: #555; }
+.lane-pill.active { border-color: var(--accent); box-shadow: 0 0 8px var(--accent-soft); }
 
-.lane-tab {
+/* Status animations (from dashboard) */
+.lane-pill.status-needs-review      { animation: hop 1.5s cubic-bezier(0.28, 0.84, 0.42, 1) infinite; }
+.lane-pill.status-changes-requested { animation: hop 2.0s cubic-bezier(0.28, 0.84, 0.42, 1) infinite; }
+.lane-pill.status-repair-needed     { animation: hop 1.8s cubic-bezier(0.28, 0.84, 0.42, 1) infinite; border-color: rgba(255, 208, 0, 0.55); box-shadow: 0 0 14px var(--repair-needed-glow); }
+.lane-pill.status-in-progress       { animation: chug 1.5s ease-in-out infinite; }
+.lane-pill.status-resolved          { animation: squish 30s cubic-bezier(0.4, 0, 0.2, 1) infinite; transform-origin: bottom center; }
+
+/* Colored lane box with letter (from dashboard .lane-box) */
+.lane-pill .lane-box {
+    width: 100%;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-family: var(--font-heading);
-    font-size: 0.78rem;
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 3px 8px;
-    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    border-radius: 3px 3px 0 0;
 }
-
-.lane-tab .channel-tab-label {
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    -webkit-text-stroke: 0.4px rgba(255,255,255,0.92);
+.lane-pill .lane-box.idle              { background-color: var(--idle); }
+.lane-pill .lane-box.in-progress       { background-color: var(--in-progress); box-shadow: 0 0 8px var(--in-progress-glow); }
+.lane-pill .lane-box.needs-review      { background-color: var(--needs-review); box-shadow: 0 0 8px var(--needs-review-glow); }
+.lane-pill .lane-box.changes-requested { background-color: var(--changes-requested); box-shadow: 0 0 8px var(--changes-requested-glow); }
+.lane-pill .lane-box.repair-needed     {
+    background: var(--repair-needed-tape);
+    box-shadow: 0 0 8px var(--repair-needed-glow);
+    color: #111;
+    -webkit-text-stroke: 0.6px #fff;
     paint-order: stroke fill;
-    text-shadow: var(--lane-label-outline);
+    text-shadow: 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff;
+}
+.lane-pill .lane-box.resolved          { background-color: var(--resolved); box-shadow: 0 0 8px var(--resolved-glow); }
+
+/* Agent label below the box */
+.lane-pill-agent {
+    padding: 3px 0;
+    font-family: var(--font-heading);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    text-align: center;
+    width: 100%;
 }
 
-.lane-tab.lane-idle {
-    opacity: 0.68;
-}
-.lane-tab.lane-idle:hover {
-    opacity: 0.88;
-}
-
-.lane-status-dot {
-    display: inline-block;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
+.lane-pill-unread {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    min-width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
 }
 
 .lane-repurpose-badge {
+    position: absolute;
+    bottom: -4px;
+    right: -4px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 14px;
+    width: 13px;
+    height: 13px;
     border-radius: 3px;
-    background: var(--accent, #4a90d9);
-    color: #fff;
-    font-size: 0.6rem;
+    background: var(--resolved);
+    color: #000;
+    font-size: 8px;
     font-weight: 700;
-    line-height: 1;
-    flex-shrink: 0;
 }
 
 .channel-divider {
     width: 1px;
-    height: 18px;
-    background: var(--border, rgba(255,255,255,0.15));
+    height: 24px;
+    background: var(--border);
     flex-shrink: 0;
-    margin: 0 4px;
+    margin: 0 6px;
 }
 
-/* Lane header (above timeline) */
+/* --- Lane header card (mirrors dashboard lane-card) --- */
 
 .lane-header {
-    background: var(--bg-header);
-    border-bottom: 1px solid var(--border);
-    padding: 0;
-    flex-shrink: 0;
-    font-size: 0.82rem;
+    background: linear-gradient(145deg, var(--surface) 0%, #0d1017 100%);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--border);
+    padding: 16px;
     position: sticky;
     top: 0;
     z-index: 2;
     margin: -16px -16px 8px;
-    border-top: 3px solid var(--border);
     transition: border-top-color var(--duration-normal) ease;
 }
 .lane-header.hidden { display: none; }
 
-.lane-header-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 16px;
-    cursor: pointer;
-    user-select: none;
-}
-.lane-header-toggle:hover {
-    background: rgba(255,255,255,0.03);
-}
-
-.lane-header-title {
-    font-family: var(--font-heading);
-    font-size: 0.85rem;
-    color: var(--text);
-    letter-spacing: 0.04em;
-}
-
-.lane-header-title strong {
-    -webkit-text-stroke: 0.45px rgba(255,255,255,0.92);
-    paint-order: stroke fill;
-    text-shadow: var(--lane-label-outline);
-}
-
-.lane-header-chevron {
-    font-size: 0.65rem;
-    color: var(--text-secondary, #888);
-    transition: transform 0.15s;
-}
-
-.lane-header.collapsed .lane-header-body {
-    display: none;
-}
-
-.lane-header-body {
-    padding: 0 16px 8px;
-}
-
-.lane-header-fields {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 2px 12px;
-    margin-bottom: 6px;
-}
-
-.lane-header-field {
-    display: contents;
-}
-
-.lh-label {
-    color: var(--text-secondary, #888);
-    font-size: 0.78rem;
-    white-space: nowrap;
-}
-.lh-label::after { content: ':'; }
-
-.lh-value {
-    color: var(--text-primary, #e0e0e0);
-    font-size: 0.78rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.lane-header-links {
-    font-size: 0.75rem;
-    color: var(--text-secondary, #888);
-    padding-top: 4px;
-    border-top: 1px solid var(--border, rgba(255,255,255,0.06));
-}
-.lane-header-links code {
-    font-size: 0.73rem;
-    background: rgba(255,255,255,0.06);
-    padding: 1px 4px;
-    border-radius: 3px;
-}
-
-.lh-link-label {
-    margin-right: 4px;
-}
-
-/* Lane status badges in header */
-.lh-status {
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 0.78rem;
-    -webkit-text-stroke: 0.45px rgba(255,255,255,0.92);
-    paint-order: stroke fill;
-    text-shadow: var(--lane-label-outline);
-}
-.lh-status-progress { background: rgba(255, 140, 0, 0.15); color: var(--in-progress); }
-.lh-status-review   { background: rgba(170, 0, 0, 0.15);   color: var(--needs-review); }
-.lh-status-changes  { background: rgba(255, 0, 255, 0.15);  color: var(--changes-requested); }
-.lh-status-repair   {
-    background: var(--repair-needed-tape);
-    color: #111;
-    -webkit-text-stroke: 0.5px #fff;
-    text-shadow: 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff;
-    box-shadow: 0 0 8px var(--repair-needed-glow);
-}
-.lh-status-resolved { background: rgba(0, 230, 92, 0.15);  color: var(--resolved); }
-.lh-status-idle     { background: rgba(72, 79, 88, 0.15);   color: var(--idle); }
-
-/* Lane-header border-top glow by status */
+/* Border-top by status */
+.lane-header[data-status="idle"]              { border-top-color: var(--idle); }
 .lane-header[data-status="in-progress"]       { border-top-color: var(--in-progress); }
 .lane-header[data-status="needs-review"]      { border-top-color: var(--needs-review); }
 .lane-header[data-status="changes-requested"] { border-top-color: var(--changes-requested); }
-.lane-header[data-status="repair-needed"]     { border-top-color: var(--repair-needed); }
+.lane-header[data-status="repair-needed"]     { border-top-color: var(--repair-needed); overflow: hidden; }
+.lane-header[data-status="repair-needed"]::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 12px;
+    background: var(--repair-needed-tape);
+    box-shadow: 0 0 14px var(--repair-needed-glow);
+    pointer-events: none;
+}
 .lane-header[data-status="resolved"]          { border-top-color: var(--resolved); }
+
+/* Card header row: LANE A + [STATUS] */
+.lh-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.lh-lane-id {
+    font-family: var(--font-heading);
+    font-size: 20px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.lh-lane-status {
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 8px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 2px;
+}
+.lh-lane-status.status-idle              { color: var(--idle); }
+.lh-lane-status.status-in-progress       { color: var(--in-progress); }
+.lh-lane-status.status-needs-review      { color: var(--needs-review); }
+.lh-lane-status.status-changes-requested { color: var(--changes-requested); }
+.lh-lane-status.status-resolved          { color: var(--resolved); }
+.lh-lane-status.status-repair-needed     { color: var(--repair-needed); }
+.lh-lane-status.lh-repair-tape {
+    background: var(--repair-needed-tape);
+    color: #111;
+    border: 1px solid rgba(0, 0, 0, 0.35);
+    box-shadow: 0 0 12px rgba(255, 208, 0, 0.12);
+    -webkit-text-stroke: 0.6px #fff;
+    paint-order: stroke fill;
+    text-shadow: 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff;
+}
+
+/* Agent meta (W // Owner, R // Reviewer) */
+.lh-agents-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px dashed var(--border);
+}
+
+.lh-owner {
+    font-family: var(--font-heading);
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.lh-owner strong { color: var(--text); }
+
+.lh-repair-owner {
+    display: inline-flex;
+    width: fit-content;
+    padding: 3px 8px;
+    background: var(--repair-needed-tape);
+    color: #111;
+    border: 1px solid rgba(0, 0, 0, 0.35);
+    box-shadow: 0 0 12px rgba(255, 208, 0, 0.12);
+}
+.lh-repair-owner strong { color: #111; }
+
+/* Task description */
+.lh-desc {
+    font-size: 15px;
+    color: #fff;
+    line-height: 1.4;
+    font-weight: 500;
+    margin-bottom: 8px;
+}
+
+/* Lock files tag */
+.lh-locks {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--in-progress);
+    background: rgba(255, 140, 0, 0.08);
+    padding: 2px 8px;
+    border-radius: 3px;
+    margin-bottom: 8px;
+    word-break: break-all;
+}
+
+/* Expandable details */
+.lh-details-wrapper {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.lh-details-wrapper.expanded { grid-template-rows: 1fr; }
+
+.lh-details-inner {
+    overflow: hidden;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.lh-detail-row {
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 2px 0;
+    line-height: 1.4;
+}
+
+.lh-detail-label {
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-right: 8px;
+}
+
+.lh-source code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 4px;
+    border-radius: 3px;
+}
