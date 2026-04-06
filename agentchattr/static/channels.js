@@ -44,6 +44,77 @@ function _getAgentIdentity(name) {
 window._resolveHotSeat = _resolveHotSeat;
 window._getAgentIdentity = _getAgentIdentity;
 
+function renderLaneHeader() {
+    const container = document.getElementById('lane-header');
+    if (!container) return;
+
+    const lid = window.activeChannel;
+    const laneData = window.btrainLanes || {};
+    const lanes = laneData.lanes || [];
+    const lane = lanes.find(l => l._laneId === lid);
+
+    if (!lane || lid === 'general') {
+        container.classList.add('hidden');
+        return;
+    }
+
+    const status = lane.status || 'idle';
+    const ownerId = _getAgentIdentity(lane.owner);
+    const reviewerId = _getAgentIdentity(lane.reviewer);
+    
+    // Status colors (mirrors shared-tokens.css classes)
+    const statusClass = _LANE_STATUS_ANIM[status] || 'status-idle';
+    
+    container.innerHTML = `
+        <div class="lh-top-row">
+            <div class="lh-title-group">
+                <div class="lh-lane-id">${lid.toUpperCase()}</div>
+                <div class="lh-task" title="${escapeHtml(lane.task || '(no task)')}">${escapeHtml(lane.task || '(no task)')}</div>
+            </div>
+            <div class="lh-status-pill ${statusClass}">${status.replace(/-/g, ' ')}</div>
+        </div>
+        
+        <div class="lh-meta-grid">
+            <div class="lh-meta-item">
+                <span class="lh-meta-label">Active Agent</span>
+                <span class="lh-meta-value agent-name" style="color: ${ownerId.color}">
+                    ${ownerId.short}
+                </span>
+            </div>
+            <div class="lh-meta-item">
+                <span class="lh-meta-label">Peer Reviewer</span>
+                <span class="lh-meta-value agent-name" style="color: ${reviewerId.color}">
+                    ${reviewerId.short}
+                </span>
+            </div>
+            <div class="lh-meta-item" style="grid-column: span 2">
+                <span class="lh-meta-label">Locked Files</span>
+                <div class="lh-locks">
+                    ${(lane.lockedFiles || []).length > 0 
+                        ? lane.lockedFiles.map(f => `<span class="lh-lock-tag">${escapeHtml(f)}</span>`).join('')
+                        : '<span class="lh-meta-value" style="color: var(--text-dim)">none</span>'}
+                </div>
+            </div>
+        </div>
+
+        <div class="lh-next-action">
+            <span class="lh-next-label">Next Action</span>
+            ${escapeHtml(lane.nextAction || 'Run btrain handoff for guidance.')}
+        </div>
+
+        <div class="lh-footer">
+            <a href="#" class="lh-link" onclick="openPath('${escapeHtml(lane.handoffPath)}'); return false;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                handoff.md
+            </a>
+        </div>
+    `;
+
+    container.classList.remove('hidden');
+}
+
+window.renderLaneHeader = renderLaneHeader;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

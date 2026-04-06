@@ -352,8 +352,8 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                         old_jid = m["metadata"].get("job_id")
                         if old_jid in _job_id_remap:
                             m["metadata"]["job_id"] = _job_id_remap[old_jid]
-                store._save()
-    report["sections"]["jobs"] = job_report
+                store._rewrite_jsonl()
+        report["sections"]["jobs"] = job_report
 
     # --- Import rules ---
     rule_report = {"created": 0, "duplicates": 0, "conflicts": 0}

@@ -4227,30 +4227,6 @@ window.toggleLaneCard = function(laneId) {
     }
 };
 
-// Keep renderLaneHeader as alias for backward compat (called from switchChannel)
-function renderLaneHeader() {
-    renderLanesPanel();
-}
-
-function _esc(s) {
-    return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function _truncate(s, max) {
-    return s.length > max ? s.slice(0, max) + '...' : s;
-}
-
-function toggleLanesPanel() {
-    const panel = document.getElementById('lanes-panel');
-    if (!panel) return;
-    panel.classList.toggle('collapsed');
-    localStorage.setItem('lanes-panel-collapsed', panel.classList.contains('collapsed') ? '1' : '');
-}
-
-window.renderLaneHeader = renderLaneHeader;
-window.renderLanesPanel = renderLanesPanel;
-window.toggleLanesPanel = toggleLanesPanel;
-
 // --- Start ---
 
 document.addEventListener('DOMContentLoaded', function() { init(); initHelpTour(); });

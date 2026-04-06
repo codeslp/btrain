@@ -585,6 +585,180 @@ header h1 {
     overflow: hidden;
 }
 
+/* --- Lane Header (Operational Metadata) --- */
+
+.lane-header {
+    background: var(--bg-header);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.lane-header.hidden { display: none; }
+
+.lh-top-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.lh-title-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.lh-lane-id {
+    background: var(--bg-subtle);
+    color: var(--text);
+    font-family: var(--font-heading);
+    font-size: 14px;
+    font-weight: 700;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+}
+
+.lh-task {
+    font-family: var(--font-heading);
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lh-status-pill {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 10px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
+/* Hazard tape for repair-needed */
+.lh-status-pill.repair-needed {
+    background: repeating-linear-gradient(
+        -45deg,
+        #facc15,
+        #facc15 10px,
+        #000 10px,
+        #000 20px
+    );
+    color: #fff;
+    text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000;
+    border: 1px solid #000;
+}
+
+.lh-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.lh-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.lh-meta-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.lh-meta-value {
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.lh-meta-value.agent-name {
+    font-weight: 600;
+}
+
+.lh-locks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+}
+
+.lh-lock-tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    background: var(--white-06);
+    color: var(--text-muted);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--white-08);
+}
+
+.lh-next-action {
+    background: var(--bg-subtle);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    border-left: 3px solid var(--accent);
+}
+
+.lh-next-label {
+    display: block;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 2px;
+    font-size: 10px;
+    text-transform: uppercase;
+}
+
+.lh-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding-top: 8px;
+}
+
+.lh-link {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.lh-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
 /* --- Timeline --- */
 
 main#timeline {
