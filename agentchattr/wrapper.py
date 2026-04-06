@@ -76,11 +76,40 @@ def _fetch_recent_messages(server_port: int, channel: str, token: str, limit: in
         return ""
 
 
-def _fetch_btrain_context(repo_root: str, agent_name: str, timeout: float = 3.0) -> str:
-    """Shell out to btrain handoff and return formatted lane context for this agent.
+def _fetch_btrain_context(server_port: int, agent_name: str, repo_root: str, timeout: float = 3.0) -> str:
+    """Fetch formatted lane context for this agent via REST API with CLI fallback.
 
-    Returns empty string on any failure (missing binary, timeout, parse error).
+    Returns empty string on any failure.
     """
+    # Priority 1: REST API (fast, uses cached poller state)
+    try:
+        import urllib.request
+        url = f"http://127.0.0.1:{server_port}/api/btrain/lanes"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            lane_data = json.loads(resp.read())
+            lanes = lane_data.get("lanes", [])
+            
+            agent_lower = agent_name.lower()
+            active_statuses = {"in-progress", "changes-requested", "repair-needed"}
+
+            # Priority 1a: agent is owner of an active lane
+            for lane in lanes:
+                if lane.get("owner", "").lower() == agent_lower and lane.get("status", "") in active_statuses:
+                    return _format_lane_context_from_json(lane, "writer")
+
+            # Priority 1b: agent is reviewer of a needs-review lane
+            for lane in lanes:
+                if lane.get("reviewer", "").lower() == agent_lower and lane.get("status", "") == "needs-review":
+                    return _format_lane_context_from_json(lane, "reviewer")
+
+            # Priority 1c: agent is owner of a needs-review lane (waiting)
+            for lane in lanes:
+                if lane.get("owner", "").lower() == agent_lower and lane.get("status", "") == "needs-review":
+                    return _format_lane_context_from_json(lane, "writer-waiting")
+    except Exception:
+        pass
+
+    # Priority 2: CLI fallback (shell out to btrain handoff)
     btrain_bin = shutil.which("btrain")
     if not btrain_bin:
         return ""
@@ -94,6 +123,30 @@ def _fetch_btrain_context(repo_root: str, agent_name: str, timeout: float = 3.0)
         return _parse_btrain_output(result.stdout, agent_name)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return ""
+
+
+def _format_lane_context_from_json(lane: dict, role: str = "writer") -> str:
+    """Format a compact btrain lane context block from JSON state."""
+    lane_id = lane.get("_laneId", "?")
+    task = lane.get("task", "(none)")
+    status = lane.get("status", "unknown")
+    owner = lane.get("owner", "(unassigned)")
+    reviewer = lane.get("reviewer", "(unassigned)")
+    locked = ", ".join(lane.get("lockedFiles", [])) or "(none)"
+
+    if role == "reviewer":
+        role_note = f"Reviewer. btrain handoff resolve --lane {lane_id} --summary '...' --actor '{reviewer}'"
+    elif role == "writer-waiting":
+        role_note = f"Waiting on {reviewer} to review."
+    else:
+        role_note = f"Writer. When done: btrain handoff update --lane {lane_id} --status needs-review --actor '{owner}'"
+
+    parts = [
+        f"LANE {lane_id}: {status} | {task}",
+        f"W={owner} R={reviewer} lock={locked}",
+        role_note,
+    ]
+    return " ".join(parts)
 
 
 _LANE_HEADER_RE = re.compile(r"^--- lane (\S+) ---$")
@@ -398,7 +451,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     # btrain lane context injection (FR-5, FR-6)
                     repo_root = _resolve_repo_root(cwd)
                     if repo_root:
-                        btrain_ctx = _fetch_btrain_context(repo_root, current_name)
+                        btrain_ctx = _fetch_btrain_context(server_port, current_name, repo_root)
                         if btrain_ctx:
                             prompt += f"\n\n{btrain_ctx}"
 

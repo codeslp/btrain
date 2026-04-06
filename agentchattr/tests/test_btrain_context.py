@@ -196,35 +196,35 @@ class TestFetchBtrainContext(unittest.TestCase):
 
     @patch("wrapper.shutil.which", return_value=None)
     def test_returns_empty_when_btrain_not_installed(self, _mock_which):
-        result = _fetch_btrain_context("/some/repo", "Claude")
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
         self.assertEqual(result, "")
 
     @patch("wrapper.subprocess.run")
     @patch("wrapper.shutil.which", return_value="/usr/local/bin/btrain")
     def test_returns_empty_on_nonzero_exit(self, _mock_which, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
-        result = _fetch_btrain_context("/some/repo", "Claude")
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
         self.assertEqual(result, "")
 
     @patch("wrapper.subprocess.run")
     @patch("wrapper.shutil.which", return_value="/usr/local/bin/btrain")
     def test_returns_context_on_success(self, _mock_which, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout=SAMPLE_OUTPUT)
-        result = _fetch_btrain_context("/some/repo", "Claude")
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
         self.assertIn("LANE a", result)
         self.assertIn("Fix auth bug", result)
 
     @patch("wrapper.subprocess.run", side_effect=FileNotFoundError)
     @patch("wrapper.shutil.which", return_value="/usr/local/bin/btrain")
     def test_returns_empty_on_file_not_found(self, _mock_which, _mock_run):
-        result = _fetch_btrain_context("/some/repo", "Claude")
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
         self.assertEqual(result, "")
 
     @patch("wrapper.subprocess.run")
     @patch("wrapper.shutil.which", return_value="/usr/local/bin/btrain")
     def test_passes_correct_args(self, _mock_which, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="")
-        _fetch_btrain_context("/my/repo", "Claude", timeout=5.0)
+        _fetch_btrain_context(8300, "Claude", "/my/repo", timeout=5.0)
         mock_run.assert_called_once_with(
             ["/usr/local/bin/btrain", "handoff", "--repo", "/my/repo"],
             capture_output=True, text=True, timeout=5.0,

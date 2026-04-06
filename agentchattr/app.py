@@ -304,6 +304,11 @@ def configure(cfg: dict, session_token: str = ""):
     )
     agents = AgentTrigger(registry, data_dir=data_dir)
 
+    # btrain Conflict Detection
+    from rules import btrainValidator
+    global btrain_validator
+    btrain_validator = btrainValidator()
+
     # Sessions
     ROOT = Path(__file__).parent
     session_store = SessionStore(
@@ -900,6 +905,14 @@ async def _handle_new_message(msg: dict):
     # System messages never trigger routing - prevents infinite callback loops
     if sender == "system":
         return
+
+    # btrain Conflict Detection (Workstream 6)
+    if btrain_validator:
+        with _btrain_lock:
+            lanes = _btrain_cache.get("lanes", [])
+            warnings = btrain_validator.validate(sender, text, channel, lanes)
+            for w in warnings:
+                store.add("system", w, channel=channel)
 
     # Check for slash commands — use stripped text (sans @mentions)
     if stripped == "/continue":
