@@ -36,16 +36,30 @@ if [ -z "$CHANNEL" ]; then
 fi
 CHANNEL="${CHANNEL:-general}"
 
-# Parse --channel flag (overrides default)
+# Parse --channel flag (explicit override)
 if [ "$1" = "--channel" ] || [ "$1" = "-c" ]; then
     CHANNEL="$2"
     shift 2
+    CHANNEL_EXPLICIT=1
+else
+    CHANNEL_EXPLICIT=0
 fi
 
 MESSAGE="$*"
 if [ -z "$MESSAGE" ]; then
     echo "Usage: agentchattr-say [-c channel] 'message'"
     exit 1
+fi
+
+# Auto-route: if no explicit -c flag, detect from message content
+# @user or no @ at all → #general (human-facing)
+# @agent mention → #agents (agent-to-agent)
+if [ "$CHANNEL_EXPLICIT" = "0" ]; then
+    case "$MESSAGE" in
+        *@user*) CHANNEL="general" ;;
+        *@claude*|*@codex*|*@gemini*) CHANNEL="agents" ;;
+        *) CHANNEL="general" ;;
+    esac
 fi
 
 if [ -z "$TOKEN" ]; then

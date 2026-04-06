@@ -68,6 +68,7 @@ MAX_CHANNELS = 8
 _btrain_lock = threading.Lock()
 _btrain_cache: dict = {}  # raw JSON from `btrain status --json`
 _btrain_prev_tasks: dict[str, str] = {}  # lane_id -> last known task (for change detection)
+_btrain_prev_statuses: dict[str, str] = {}  # lane_id -> last known status (for handoff notifications)
 
 # Agent hats (persisted to data/hats.json)
 agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
@@ -146,6 +147,12 @@ def _load_settings():
         room_settings["channels"] = ["general"]
     elif "general" not in room_settings["channels"]:
         room_settings["channels"].insert(0, "general")
+    # Ensure "agents" channel exists for agent-to-agent chatter
+    if "agents" not in room_settings["channels"]:
+        room_settings["channels"].append("agents")
+        p = _settings_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(room_settings, indent=2), "utf-8")
 
 
 def _save_settings():
@@ -584,6 +591,46 @@ def configure(cfg: dict, session_token: str = ""):
 
                 _btrain_prev_tasks[lid] = new_task
 
+                # Auto-notify agents on handoff transitions
+                new_status = lane.get("status", "")
+                old_status = _btrain_prev_statuses.get(lid, "")
+                owner = lane.get("owner", "")
+                reviewer = lane.get("reviewer", "")
+
+                if new_status != old_status and store:
+                    if new_status == "needs-review" and reviewer:
+                        store.add(
+                            "btrain",
+                            f"@{reviewer} lane {lid} is ready for your review. Run: btrain handoff --lane {lid}",
+                            msg_type="system",
+                            channel="agents",
+                        )
+                    elif new_status == "changes-requested" and owner:
+                        reason = lane.get("reasonCode", "")
+                        store.add(
+                            "btrain",
+                            f"@{owner} lane {lid} has changes requested{' (' + reason + ')' if reason else ''}. Run: btrain handoff --lane {lid}",
+                            msg_type="system",
+                            channel="agents",
+                        )
+                    elif new_status == "repair-needed":
+                        repair_owner = lane.get("repairOwner", owner)
+                        store.add(
+                            "btrain",
+                            f"@{repair_owner} lane {lid} needs repair. Run: btrain doctor --repair",
+                            msg_type="system",
+                            channel="agents",
+                        )
+                    elif new_status == "resolved" and old_status == "needs-review" and owner:
+                        store.add(
+                            "btrain",
+                            f"@{owner} lane {lid} approved and resolved.",
+                            msg_type="system",
+                            channel="agents",
+                        )
+
+                _btrain_prev_statuses[lid] = new_status
+
             # Broadcast lane state to WebSocket clients on any change
             changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
             if changed and _event_loop:
@@ -612,6 +659,58 @@ def configure(cfg: dict, session_token: str = ""):
             except Exception:
                 log.warning("btrain initial poller error", exc_info=True)
         threading.Thread(target=_btrain_poller, daemon=True).start()
+
+    # --- Periodic cleanup: trim chat logs + run btrain doctor --repair ---
+    cleanup_interval = 300  # every 5 minutes
+
+    def _cleanup_runner():
+        import time as _t
+        _t.sleep(60)  # wait 1 min after startup before first run
+        while True:
+            try:
+                # Trim chat log: keep last 200 messages per channel
+                if store:
+                    channels = room_settings.get("channels", ["general"])
+                    lane_chs = room_settings.get("lane_channels", [])
+                    for ch in channels + lane_chs:
+                        msgs = store.get_recent(count=999_999_999, channel=ch)
+                        if len(msgs) > 100:
+                            # Keep last 200, clear the rest by rewriting
+                            trim_count = len(msgs) - 200
+                            log.info(f"cleanup: trimming {trim_count} old messages from #{ch}")
+                            ids_to_keep = {m["id"] for m in msgs[-100:]}
+                            with store._lock:
+                                store._messages = [m for m in store._messages
+                                                   if m.get("channel", "general") != ch
+                                                   or m["id"] in ids_to_keep]
+                                store._rewrite_jsonl()
+            except Exception:
+                log.debug("cleanup: chat trim error", exc_info=True)
+
+            try:
+                # Run btrain doctor --repair if btrain is available
+                if btrain_repo and _btrain_cmd:
+                    repair_cmd = list(_btrain_cmd)
+                    # Replace "status" with "doctor --repair"
+                    idx = repair_cmd.index("status") if "status" in repair_cmd else -1
+                    if idx >= 0:
+                        repair_cmd[idx] = "doctor"
+                        repair_cmd.insert(idx + 1, "--repair")
+                        # Remove --json if present
+                        repair_cmd = [c for c in repair_cmd if c != "--json"]
+                        result = subprocess.run(
+                            repair_cmd,
+                            capture_output=True, text=True, timeout=15,
+                            env=_env_with_npm,
+                        )
+                        if result.returncode == 0 and "repair" in result.stdout.lower():
+                            log.info(f"cleanup: btrain doctor repairs applied")
+            except Exception:
+                log.debug("cleanup: btrain doctor error", exc_info=True)
+
+            _t.sleep(cleanup_interval)
+
+    threading.Thread(target=_cleanup_runner, daemon=True).start()
 
 
 # --- Store → WebSocket bridge ---

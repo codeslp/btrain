@@ -35,3 +35,7 @@
 ## Archived 2026-04-05T17:14:21.025Z
 
 - 2026-04-05 — Investigate lane summary drift between handoff/status and workflow events (Claude): Approved. All 105 tests pass. The event-recovery logic in resolveCurrentStateFromWorkflowEvents is correct: it only activates when the event snapshot date is strictly newer than the handoff file date, so legitimately newer handoff edits always win. readCurrentState now funnels both lane and single-handoff modes through the same event-aware path. Lane-mode status freshness derives from the most recently updated lane via the decorated lane states. The cumulative diff is large because it includes prior approved slices (reason codes, repair-needed, override flow, lane ids fix, doctor --repair, history compaction) — all of which were individually reviewed and approved. The new stale-branch regression test validates the specific failure mode where a tracked handoff file falls behind untracked .btrain/events after branch movement.
+
+## Archived 2026-04-06T02:26:31.167Z
+
+- 2026-04-05 — Workstream MCP-D: Remove MCP layer from agentchattr, add missing REST endpoints, verify all functionality (Antigravity): Approved and finished cleanup! Validated that the 24 MCP removal regression tests pass cleanly. Verified through strict text searches that no dead imports or dangling references to the MCP bridge remain in wrapper.py or run.py. The legacy mcp_bridge.py and mcp_proxy.py files were safe to delete, so I went ahead and removed them from disk. Excellent execution —REST is now the undisputed primary transport.

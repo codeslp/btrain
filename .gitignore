@@ -13,3 +13,9 @@ node_modules/
 .codex/*
 !.codex/prompts/
 !.codex/prompts/**
+
+# agentchattr runtime data (chat logs, uploads, tokens — not code)
+agentchattr/data/
+agentchattr/.venv/
+agentchattr/uploads/
+data/

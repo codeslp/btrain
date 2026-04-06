@@ -168,11 +168,11 @@ def _format_lane_context(lane: dict, role: str = "writer") -> str:
     locked = lane.get("locked files", "(none)")
 
     if role == "reviewer":
-        role_note = f"You are reviewer. Review then: btrain handoff resolve --lane {lane_id} --summary '...' --actor '{reviewer}'"
+        role_note = f"Reviewer. btrain handoff resolve --lane {lane_id} --summary '...' --actor '{reviewer}'"
     elif role == "writer-waiting":
-        role_note = f"Waiting on @{reviewer} to review."
+        role_note = f"Waiting on {reviewer} to review."
     else:
-        role_note = f"You are writer. When done: btrain handoff update --lane {lane_id} --status needs-review, then @{reviewer} please review lane {lane_id}."
+        role_note = f"Writer. When done: btrain handoff update --lane {lane_id} --status needs-review --actor '{owner}'"
 
     parts = [
         f"LANE {lane_id}: {status} | {task}",
@@ -288,7 +288,8 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
 
 
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
-                   server_port: int = 8300, agent_name: str = "", get_token_fn=None,
+                   server_port: int = 8300, agent_name: str = "", base_name: str = "",
+                   get_token_fn=None,
                    refresh_interval: int = 10, cwd: str = ".", channel_holder=None):
     """Poll queue file and inject a context prompt when triggered."""
     first_mention = True
@@ -360,7 +361,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                             prompt = f"Message in #{channel}:"
                         if recent:
                             prompt += f"\n{recent}\n"
-                        prompt += "Run btrain handoff to check your lane. Only act on your assigned lane. Do NOT read agentchattr/data/ files."
+                        prompt += "Run btrain handoff. Only act on your assigned lane. Do NOT read agentchattr/data/."
 
                     # Use current identity (may have changed via rename)
                     current_name, _ = get_identity_fn()
@@ -390,9 +391,9 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                             last_rules_epoch = rules_data["epoch"]
                             _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
 
-                    # Agentchattr awareness (first trigger only — kept minimal)
+                    # Agentchattr awareness (first trigger only)
                     if first_mention:
-                        prompt += "\n\nCHAT: agentchattr-say -c agents 'msg' for agent talk. agentchattr-say -c general 'msg' for human. @mention reviewer when handing off."
+                        prompt += "\n\nYou are in a shared agent workspace. Handoff notifications are automatic."
 
                     # btrain lane context injection (FR-5, FR-6)
                     repo_root = _resolve_repo_root(cwd)
@@ -509,6 +510,12 @@ def main():
                 print(f"  Identity updated: {old_name} -> {new_name}")
             if new_token and new_token != old_token:
                 print(f"  Session refreshed for @{current_name}")
+            # Rewrite token file so agentchattr-say always reads the current token.
+            # Keyed by base agent name (matches BTRAIN_AGENT env that agentchattr-say reads).
+            try:
+                token_file.write_text(current_token, "utf-8")
+            except Exception:
+                pass
 
         return changed
 
@@ -555,11 +562,8 @@ def main():
         env=env,
     )
 
-    # Inject agentchattr chat env into the agent process
-    inject_env["AGENTCHATTR_TOKEN"] = assigned_token
-    inject_env["AGENTCHATTR_PORT"] = str(server_port)
+    # Inject agent identity into the agent process
     inject_env["BTRAIN_AGENT"] = agent
-    inject_env["PATH"] = str(Path(__file__).parent) + ":" + env.get("PATH", os.environ.get("PATH", ""))
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     print(f"  REST API: http://127.0.0.1:{server_port}")

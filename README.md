@@ -74,7 +74,7 @@ btrain handoff request-changes --lane a \
 | `btrain handoff resolve` | Approve and close a review |
 | `btrain handoff request-changes` | Return review findings to the writer |
 | `btrain status [--json]` | Show all lane states (JSON output for integrations) |
-| `btrain doctor [--repair]` | Health check; `--repair` fixes stale locks |
+| `btrain doctor [--repair]` | Health check; `--repair` fixes stale locks and workflow integrity |
 | `btrain locks` | List active file locks across lanes |
 | `btrain hooks` | Install managed pre-commit + pre-push guards |
 | `btrain override grant` | Human-confirmed override for blocked actions |
@@ -189,7 +189,7 @@ btrain rejects `needs-review` transitions with placeholder context or empty diff
 
 `changes-requested`: `spec-mismatch`, `regression-risk`, `missing-verification`, `security-risk`, `integration-breakage`
 
-`repair-needed`: `invalid-handoff`, `unreviewed-push`, `lock-mismatch`, `ownership-conflict`, `state-conflict`
+`repair-needed`: `invalid-handoff`, `unreviewed-push`, `lock-mismatch`, `ownership-conflict`, `state-conflict`, `invalid-transition`, `actor-mismatch`, `contradictory-state`
 
 ---
 

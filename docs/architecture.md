@@ -331,38 +331,39 @@ Compares with previous poll:
 
 ## Enforcement Layers
 
-Three layers prevent agents from skipping handoffs:
+Agent compliance relies on two advisory layers and two hard enforcement gates:
 
 ```
-Layer 1: Instructions (soft)
+Advisory: Instructions + Pre-Handoff Skill (soft)
 ┌───────────────────────────────────────────────────┐
 │  CLAUDE.md / AGENTS.md                            │
 │  - Must run `btrain handoff` before starting work │
 │  - Must run pre-handoff skill before needs-review │
 │  - Must fill all review context fields            │
+│                                                   │
+│  Pre-handoff skill (.claude/skills/ pre-handoff)  │
+│  - Checklist: placeholder context, empty diffs,   │
+│    unsimplified code, missing fields              │
+│  - Does NOT block — the agent follows guidance    │
 └───────────────────────────────────────────────────┘
                        │
                        ▼
-Layer 2: Handoff Validation (medium)
+Enforcement 1: btrain CLI Validation (hard gate)
 ┌───────────────────────────────────────────────────┐
-│  Pre-handoff skill (.claude/skills/ pre-handoff)  │
-│  - Advisory checklist: placeholder context,       │
-│    empty diffs, unsimplified code, missing fields │
-│  - Does NOT block — agent follows the guidance    │
-│                                                   │
-│  btrain handoff update (hard gate)                │
-│  - Rejects `needs-review` if context has          │
-│    placeholder text or missing required fields    │
+│  btrain handoff update --status needs-review      │
+│  - Rejects if context has placeholder text or     │
+│    missing required fields                        │
 │  - Rejects if no reviewable diff in locked files  │
 │  - Bypass: --override-id (human-granted override) │
 └───────────────────────────────────────────────────┘
                        │
                        ▼
-Layer 3: Git Hooks (hard)
+Enforcement 2: Git Hooks (hard gate)
 ┌───────────────────────────────────────────────────┐
 │  .git/hooks/pre-commit                            │
 │  - Blocks non-handoff commits while any lane is   │
 │    in needs-review (allows HANDOFF*.md changes)   │
+│  - Does NOT check file locks                      │
 │                                                   │
 │  .git/hooks/pre-push                              │
 │  - Blocks ALL pushes while any handoff is active  │

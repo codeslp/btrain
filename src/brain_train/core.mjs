@@ -2408,7 +2408,27 @@ async function resolveRepairAssignment(repoRoot, config, {
   actorLabel = "btrain",
 } = {}) {
   const events = await readWorkflowEvents(repoRoot, config, laneId)
-  const repairOwner = getCanonicalWorkflowActor(events) || existingCurrent.owner || actorLabel
+  const canonicalActor = getCanonicalWorkflowActor(events) || existingCurrent.owner || ""
+  const configuredAgents = getConfiguredAgentNames(config)
+
+  let repairOwner = canonicalActor
+
+  // If canonical actor is not in active agents, look for same-family fallback (WS4)
+  if (repairOwner && !configuredAgents.includes(repairOwner)) {
+    const canonicalTokens = tokenizeAgentIdentity(repairOwner)
+    const fallback = configuredAgents.find((agentName) => {
+      const agentTokens = tokenizeAgentIdentity(agentName)
+      return agentTokens.some((token) => canonicalTokens.includes(token))
+    })
+    if (fallback) {
+      repairOwner = fallback
+    }
+  }
+
+  if (!repairOwner) {
+    repairOwner = actorLabel
+  }
+
   const priorAttempts = countRepairEntries(events, reasonCode)
   const repairAttempts = priorAttempts + 1
   const repairEscalation = priorAttempts >= 1 ? "human" : ""
@@ -2419,6 +2439,48 @@ async function resolveRepairAssignment(repoRoot, config, {
     repairEscalation,
     priorAttempts,
   }
+}
+
+async function analyzeLaneIntegrity(repoRoot, config, laneState) {
+  const issues = []
+  const configuredAgents = new Set(config?.agents?.active || [])
+  const laneId = laneState._laneId || ""
+
+  // 1. Invalid transition: check event history if available
+  const events = await readWorkflowEvents(repoRoot, config, laneId)
+  if (events.length > 0) {
+    const lastEvent = events[events.length - 1]
+    const currentStatus = laneState.status
+    const lastEventStatus = lastEvent.after?.status
+
+    if (currentStatus === "needs-review" && lastEventStatus === "resolved") {
+      issues.push({
+        type: "invalid-transition",
+        message: `Lane ${laneId} jumped from \`resolved\` to \`needs-review\` without a claim or in-progress update.`,
+        reasonCode: "invalid-transition",
+      })
+    }
+  }
+
+  // 2. Actor mismatch: owner not in active list
+  if (isLaneActiveStatus(laneState.status) && laneState.owner && !configuredAgents.has(laneState.owner)) {
+    issues.push({
+      type: "actor-mismatch",
+      message: `Lane ${laneId} is \`${laneState.status}\` but owner "${laneState.owner}" is not in the active agent list.`,
+      reasonCode: "actor-mismatch",
+    })
+  }
+
+  // 3. Contradictory state: active status but no locks
+  if (isLaneActiveStatus(laneState.status) && laneState.lockCount === 0) {
+    issues.push({
+      type: "contradictory-state",
+      message: `Lane ${laneId} is \`${laneState.status}\` but has no active locks.`,
+      reasonCode: "contradictory-state",
+    })
+  }
+
+  return issues
 }
 
 function buildRepairNextAction({ repairOwner = "", repairAttempts = 0, repairEscalation = "", reasonCode = "" } = {}) {
@@ -5454,35 +5516,71 @@ async function applyWatchdogRepairs(repoRoot, {
 
   const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
   for (const laneState of laneStates) {
-    if (laneState.lockState !== "stale" || laneState.lockPaths.length === 0) {
-      continue
-    }
-
-    const releasedPaths = [...laneState.lockPaths]
-    await releaseLocks(repoRoot, laneState._laneId)
-    await appendWorkflowEvent(repoRoot, config, {
-      type: "watchdog-repair",
-      actor: actorLabel,
-      laneId: laneState._laneId,
-      details: {
-        repairType: "release-stale-locks",
-        releasedCount: releasedPaths.length,
-        releasedPaths,
-        previousStatus: laneState.status,
-      },
-    })
-    repairs.push({
-      type: "release-stale-locks",
-      laneId: laneState._laneId,
-      releasedCount: releasedPaths.length,
-      releasedPaths,
-      previousStatus: laneState.status,
-      summary: summarizeWatchdogRepair({
+    // 1. Stale lock release
+    if (laneState.lockState === "stale" && laneState.lockPaths.length > 0) {
+      const releasedPaths = [...laneState.lockPaths]
+      await releaseLocks(repoRoot, laneState._laneId)
+      await appendWorkflowEvent(repoRoot, config, {
+        type: "watchdog-repair",
+        actor: actorLabel,
+        laneId: laneState._laneId,
+        details: {
+          repairType: "release-stale-locks",
+          releasedCount: releasedPaths.length,
+          releasedPaths,
+          previousStatus: laneState.status,
+        },
+      })
+      repairs.push({
         type: "release-stale-locks",
         laneId: laneState._laneId,
         releasedCount: releasedPaths.length,
-      }),
-    })
+        releasedPaths,
+        previousStatus: laneState.status,
+        summary: summarizeWatchdogRepair({
+          type: "release-stale-locks",
+          laneId: laneState._laneId,
+          releasedCount: releasedPaths.length,
+        }),
+      })
+    }
+
+    // 2. Integrity checks (WS4)
+    const integrityIssues = await analyzeLaneIntegrity(repoRoot, config, laneState)
+    if (integrityIssues.length > 0) {
+      // Use the first integrity issue as the primary repair reason
+      const issue = integrityIssues[0]
+      const repairMetadata = await resolveRepairAssignment(repoRoot, config, {
+        laneId: laneState._laneId,
+        existingCurrent: laneState,
+        reasonCode: issue.reasonCode,
+        actorLabel,
+      })
+
+      const laneHandoffPath = getLaneHandoffPath(repoRoot, config, laneState._laneId)
+      await updateHandoff(repoRoot, {
+        status: "repair-needed",
+        ...repairMetadata,
+        reasonCode: issue.reasonCode,
+      }, {
+        laneId: laneState._laneId,
+        overrideHandoffPath: laneHandoffPath,
+        config,
+        actorLabel,
+        eventType: "watchdog-repair",
+        eventDetails: {
+          repairType: issue.type,
+          message: issue.message,
+          allIssues: integrityIssues.map((i) => i.type),
+        },
+      })
+
+      repairs.push({
+        type: issue.type,
+        laneId: laneState._laneId,
+        summary: `lane ${laneState._laneId}: ${issue.type} repair (${issue.message})`,
+      })
+    }
   }
 
   return repairs
@@ -5830,6 +5928,12 @@ async function doctorRepo(repoRoot, { repair = false } = {}) {
         } else {
           const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
           for (const laneState of laneStates) {
+            // Integrity issues (WS4)
+            const integrityIssues = await analyzeLaneIntegrity(repoRoot, config, laneState)
+            for (const issue of integrityIssues) {
+              issues.push(issue.message)
+            }
+
             if (laneState.repurposeReady) {
               repurposeReady.push({
                 laneId: laneState._laneId,

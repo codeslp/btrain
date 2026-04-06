@@ -57,7 +57,7 @@ temperature = 1.0
 # Path to the btrain-managed repo (relative to agentchattr or absolute).
 repo_path = ".."
 # Seconds between btrain status polls.
-poll_interval = 15
+poll_interval = 5
 
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.
