@@ -38,14 +38,42 @@ ROOT = Path(__file__).parent
 # ---------------------------------------------------------------------------
 
 def _resolve_repo_root(cwd: str) -> str | None:
-    """Resolve agent cwd to an absolute repo root path."""
+    """Resolve agent cwd to an absolute repo root path.
+
+    Handles absolute paths directly and resolves relative paths against ROOT.
+    """
     try:
-        resolved = (ROOT / cwd).resolve()
+        p = Path(cwd)
+        resolved = p.resolve() if p.is_absolute() else (ROOT / cwd).resolve()
         if resolved.is_dir():
             return str(resolved)
     except Exception:
         pass
     return None
+
+
+def _fetch_recent_messages(server_port: int, channel: str, token: str, limit: int = 5) -> str:
+    """Fetch last N messages from a channel via REST API. Returns formatted string."""
+    try:
+        import urllib.request
+        url = f"http://127.0.0.1:{server_port}/api/messages?channel={channel}&limit={limit}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            msgs = json.loads(resp.read())
+            if not msgs:
+                return ""
+            lines = []
+            for m in msgs:
+                sender = m.get("sender", "?")
+                text = m.get("text", "")
+                if text and sender:
+                    # Truncate long messages
+                    if len(text) > 200:
+                        text = text[:200] + "..."
+                    lines.append(f"  {sender}: {text}")
+            return "\n".join(lines[-limit:])
+    except Exception:
+        return ""
 
 
 def _fetch_btrain_context(repo_root: str, agent_name: str, timeout: float = 3.0) -> str:
@@ -291,6 +319,13 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                             channel_holder[0] = channel
 
                 if has_trigger:
+                    # Write channel state file so agentchattr-say picks up context
+                    try:
+                        chan_file = ROOT / "data" / f".agentchattr_channel_{agent_name}"
+                        chan_file.write_text(channel, "utf-8")
+                    except Exception:
+                        pass
+
                     # Signal activity BEFORE injecting — covers the thinking phase
                     if trigger_flag is not None:
                         trigger_flag[0] = True
@@ -316,10 +351,16 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 
                     if custom_prompt:
                         prompt = custom_prompt
-                    elif job_id:
-                        prompt = f"You were mentioned in job thread {job_id} in #{channel}. Read the thread and take appropriate action."
                     else:
-                        prompt = f"You were mentioned in #{channel}. Read recent messages and take appropriate action."
+                        # Fetch the triggering message so the agent has context without reading the log
+                        recent = _fetch_recent_messages(server_port, channel, get_token_fn() if get_token_fn else "", limit=3)
+                        if job_id:
+                            prompt = f"Job thread {job_id} in #{channel}."
+                        else:
+                            prompt = f"Message in #{channel}:"
+                        if recent:
+                            prompt += f"\n{recent}\n"
+                        prompt += "Run btrain handoff to check your lane. Only act on your assigned lane. Do NOT read agentchattr/data/ files."
 
                     # Use current identity (may have changed via rename)
                     current_name, _ = get_identity_fn()
@@ -351,7 +392,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 
                     # Agentchattr awareness (first trigger only — kept minimal)
                     if first_mention:
-                        prompt += "\n\nCHAT: Shared room with @claude @codex @gemini. Post: agentchattr-say 'msg'. @mention reviewer when handing off."
+                        prompt += "\n\nCHAT: agentchattr-say -c agents 'msg' for agent talk. agentchattr-say -c general 'msg' for human. @mention reviewer when handing off."
 
                     # btrain lane context injection (FR-5, FR-6)
                     repo_root = _resolve_repo_root(cwd)
@@ -396,7 +437,10 @@ def main():
 
     agent = args.agent
     agent_cfg = config.get("agents", {}).get(agent, {})
-    cwd = args.cwd or os.environ.get("BTRAIN_CHAT_REPO") or agent_cfg.get("cwd", ".")
+    cwd_raw = args.cwd or os.environ.get("BTRAIN_CHAT_REPO") or agent_cfg.get("cwd", ".")
+    # Resolve to absolute immediately — relative paths resolve against agentchattr/
+    # so readiness, agent launch, and btrain context injection all use the same path.
+    cwd = str((Path(cwd_raw).resolve()) if Path(cwd_raw).is_absolute() else (ROOT / cwd_raw).resolve())
     command = agent_cfg.get("command", agent)
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -424,6 +468,11 @@ def main():
     assigned_name = registration["name"]
     assigned_token = registration["token"]
     print(f"  Registered as: {assigned_name} (slot {registration.get('slot', '?')})")
+
+    # Write token file so agentchattr-say can read it from agent subprocesses
+    # (env vars set via env(1) don't propagate to agent-spawned shell commands)
+    token_file = data_dir / f".agentchattr_token_{agent}"
+    token_file.write_text(assigned_token, "utf-8")
 
     _identity_lock = threading.Lock()
     _identity = {
@@ -471,9 +520,13 @@ def main():
     env = {k: v for k, v in os.environ.items() if k not in strip_vars}
 
     # --- Pre-flight readiness checks ---
+    # cwd is already resolved to absolute — pass it directly so readiness
+    # validates the same path the agent will actually launch in.
+    effective_cfg = dict(agent_cfg)
+    effective_cfg["cwd"] = cwd
     try:
         from readiness import check_agent_readiness, _print_check
-        readiness_result = check_agent_readiness(agent, agent_cfg, base_dir=str(Path(__file__).parent))
+        readiness_result = check_agent_readiness(agent, effective_cfg, base_dir=str(Path(__file__).parent))
         if not readiness_result["ready"]:
             print(f"\n  Readiness check FAILED for {agent}:")
             _print_check("Binary", readiness_result["binary"], indent="    ")
@@ -505,6 +558,7 @@ def main():
     # Inject agentchattr chat env into the agent process
     inject_env["AGENTCHATTR_TOKEN"] = assigned_token
     inject_env["AGENTCHATTR_PORT"] = str(server_port)
+    inject_env["BTRAIN_AGENT"] = agent
     inject_env["PATH"] = str(Path(__file__).parent) + ":" + env.get("PATH", os.environ.get("PATH", ""))
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")

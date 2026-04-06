@@ -8,9 +8,35 @@
 
 PORT="${AGENTCHATTR_PORT:-8300}"
 TOKEN="${AGENTCHATTR_TOKEN:-}"
-CHANNEL="general"
 
-# Parse --channel flag
+# If no token in env, try reading from token files written by the wrapper
+if [ -z "$TOKEN" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    # Try agent-specific token file first (from BTRAIN_AGENT), then any token file
+    AGENT_NAME="${BTRAIN_AGENT:-}"
+    if [ -n "$AGENT_NAME" ] && [ -f "$SCRIPT_DIR/data/.agentchattr_token_${AGENT_NAME}" ]; then
+        TOKEN="$(cat "$SCRIPT_DIR/data/.agentchattr_token_${AGENT_NAME}")"
+    else
+        # Use the most recently written token file
+        LATEST="$(ls -t "$SCRIPT_DIR"/data/.agentchattr_token_* 2>/dev/null | head -1)"
+        if [ -n "$LATEST" ]; then
+            TOKEN="$(cat "$LATEST")"
+        fi
+    fi
+fi
+
+# Default channel: env override > channel state file > "general"
+CHANNEL="${AGENTCHATTR_CHANNEL:-}"
+if [ -z "$CHANNEL" ]; then
+    SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+    AGENT_NAME="${BTRAIN_AGENT:-}"
+    if [ -n "$AGENT_NAME" ] && [ -f "$SCRIPT_DIR/data/.agentchattr_channel_${AGENT_NAME}" ]; then
+        CHANNEL="$(cat "$SCRIPT_DIR/data/.agentchattr_channel_${AGENT_NAME}")"
+    fi
+fi
+CHANNEL="${CHANNEL:-general}"
+
+# Parse --channel flag (overrides default)
 if [ "$1" = "--channel" ] || [ "$1" = "-c" ]; then
     CHANNEL="$2"
     shift 2
@@ -27,9 +53,33 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
-curl -s -X POST "http://127.0.0.1:${PORT}/api/send" \
+# Build JSON payload via python3 for safe escaping of all special characters
+JSON_BODY="$(python3 -c "
+import json, sys
+print(json.dumps({'text': sys.argv[1], 'channel': sys.argv[2]}))
+" "$MESSAGE" "$CHANNEL" 2>/dev/null)"
+
+if [ -z "$JSON_BODY" ]; then
+    echo "Error: failed to build JSON payload (python3 required)"
+    exit 1
+fi
+
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://127.0.0.1:${PORT}/api/send" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Content-Type: application/json" \
-    -d "{\"text\":\"${MESSAGE}\",\"channel\":\"${CHANNEL}\"}" > /dev/null 2>&1
+    -d "$JSON_BODY")
 
-exit 0
+CURL_EXIT=$?
+if [ "$CURL_EXIT" -ne 0 ]; then
+    echo "Error: could not connect to agentchattr (port ${PORT}). Is the server running?"
+    exit 1
+fi
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+if [ "$HTTP_CODE" -ge 200 ] 2>/dev/null && [ "$HTTP_CODE" -lt 300 ] 2>/dev/null; then
+    exit 0
+else
+    BODY=$(echo "$RESPONSE" | sed '$d')
+    echo "Error: POST failed (HTTP ${HTTP_CODE:-unknown})${BODY:+ — $BODY}"
+    exit 1
+fi
