@@ -564,11 +564,11 @@ const server = http.createServer((req, res) => {
     const getAgentIdentity = (name) => {
       if (!name || name === 'Unassigned') return { short: '---', color: '#666' };
       const n = name.toLowerCase();
-      if (n.includes('codex') || n.includes('gpt')) return { short: 'GPT', color: '#00f0ff' }; // Neon Cyan
-      if (n.includes('opus') || n.includes('claude')) return { short: 'CLD', color: '#ff00ff' }; // Neon Magenta
-      if (n.includes('gemini')) return { short: 'GEM', color: '#ffb300' }; // Amber
-      if (n.includes('antigravity') || n.includes('anti')) return { short: 'ANTI', color: '#b366ff' }; // Neon Violet
-      return { short: name.substring(0,4).toUpperCase(), color: '#e6edf3' }; // Fallback White
+      if (n.includes('codex') || n.includes('gpt')) return { short: 'codex', color: '#00f0ff' };
+      if (n.includes('claude') || n.includes('opus')) return { short: 'claude', color: '#ff00ff' };
+      if (n.includes('gemini')) return { short: 'gemini', color: '#ffb300' };
+      if (n.includes('antigravity') || n.includes('anti')) return { short: 'antigravity', color: '#b366ff' };
+      return { short: n.split(' ')[0] || name.substring(0,6).toLowerCase(), color: '#e6edf3' };
     };
 
     window.toggleCard = function(id) {

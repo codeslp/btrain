@@ -48,6 +48,17 @@ fi
 
 ensure_venv
 
+# Pre-flight readiness check
+echo "  Checking gemini readiness..."
+if ! command -v gemini >/dev/null 2>&1; then
+    echo ""
+    echo "  FAIL: 'gemini' not found on PATH."
+    echo "  Install Gemini CLI: npm install -g @google/gemini-cli"
+    echo ""
+    exit 1
+fi
+echo "  OK: gemini found at $(command -v gemini)"
+
 if ! is_server_running; then
     if [ "$(uname -s)" = "Darwin" ]; then
         osascript -e "tell app \"Terminal\" to do script \"cd '$(pwd)' && .venv/bin/python run.py\"" > /dev/null 2>&1

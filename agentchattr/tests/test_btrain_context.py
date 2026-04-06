@@ -25,13 +25,13 @@ from wrapper import (
 # Sample btrain handoff output (multi-lane)
 SAMPLE_OUTPUT = """\
 repo: btrain
-agent check: Claude (runtime hints (claude, opus))
+agent check: claude (runtime hints (claude, opus))
 
 --- lane a ---
 task: Fix auth bug in login flow
 status: in-progress
-active agent: Claude
-peer reviewer: GPT
+active agent: claude
+peer reviewer: codex
 mode: manual
 locked files: src/auth.py, src/utils.py
 lock state: active
@@ -40,12 +40,12 @@ next: Work within the locked files, keep the lane in-progress, and hand off for 
 --- lane b ---
 task: Review dashboard rendering
 status: needs-review
-active agent: GPT
-peer reviewer: Claude
+active agent: codex
+peer reviewer: claude
 mode: manual
 locked files: scripts/serve-dashboard.js
 lock state: active
-next: Waiting on Claude to review the lane.
+next: Waiting on claude to review the lane.
 
 --- lane c ---
 task: (none)
@@ -60,19 +60,19 @@ next: Claim the next task for btrain (lane c).
 
 SAMPLE_CHANGES_REQUESTED = """\
 repo: btrain
-agent check: Claude (runtime hints (claude, opus))
+agent check: claude (runtime hints (claude, opus))
 
 --- lane a ---
 task: Update specs for REST-only migration
 status: changes-requested
-active agent: Claude
-peer reviewer: GPT
+active agent: claude
+peer reviewer: codex
 mode: manual
 locked files: specs/
 lock state: active
 reason code: spec-mismatch
 reason tags: sequencing, consistency
-next: Address GPT's review findings in the same lane and re-handoff for review.
+next: Address codex's review findings in the same lane and re-handoff for review.
 """
 
 
@@ -90,8 +90,8 @@ class TestSplitLaneBlocks(unittest.TestCase):
         lane_a = blocks[0]
         self.assertEqual(lane_a["task"], "Fix auth bug in login flow")
         self.assertEqual(lane_a["status"], "in-progress")
-        self.assertEqual(lane_a["active agent"], "Claude")
-        self.assertEqual(lane_a["peer reviewer"], "GPT")
+        self.assertEqual(lane_a["active agent"], "claude")
+        self.assertEqual(lane_a["peer reviewer"], "codex")
         self.assertEqual(lane_a["locked files"], "src/auth.py, src/utils.py")
         self.assertEqual(lane_a["lock state"], "active")
 
@@ -105,35 +105,34 @@ class TestSplitLaneBlocks(unittest.TestCase):
 class TestParseBtrainOutput(unittest.TestCase):
 
     def test_matches_writer_on_active_lane(self):
-        result = _parse_btrain_output(SAMPLE_OUTPUT, "Claude")
-        self.assertIn("lane=a", result)
-        self.assertIn("active writer", result)
+        result = _parse_btrain_output(SAMPLE_OUTPUT, "claude")
+        self.assertIn("LANE a", result)
+        self.assertIn("writer", result.lower())
         self.assertIn("Fix auth bug", result)
 
     def test_matches_reviewer_on_needs_review_lane(self):
-        result = _parse_btrain_output(SAMPLE_OUTPUT, "Claude")
-        # Claude is owner of lane a (in-progress) — that takes priority over reviewer of lane b
-        self.assertIn("lane=a", result)
+        result = _parse_btrain_output(SAMPLE_OUTPUT, "claude")
+        # claude is owner of lane a (in-progress) — that takes priority over reviewer of lane b
+        self.assertIn("LANE a", result)
 
     def test_reviewer_priority_when_not_owner(self):
-        # GPT is reviewer of no lane in needs-review, but is owner of lane b in needs-review
-        # Actually GPT is owner of lane b which is needs-review — so GPT gets writer-waiting
-        result = _parse_btrain_output(SAMPLE_OUTPUT, "GPT")
-        self.assertIn("lane=b", result)
-        self.assertIn("waiting on review", result)
+        # codex is owner of lane b which is needs-review — so codex gets writer-waiting
+        result = _parse_btrain_output(SAMPLE_OUTPUT, "codex")
+        self.assertIn("LANE b", result)
+        self.assertIn("Waiting on @claude", result)
 
     def test_case_insensitive_matching(self):
-        result = _parse_btrain_output(SAMPLE_OUTPUT, "claude")
-        self.assertIn("lane=a", result)
+        result = _parse_btrain_output(SAMPLE_OUTPUT, "Claude")
+        self.assertIn("LANE a", result)
 
     def test_no_match_returns_empty(self):
-        result = _parse_btrain_output(SAMPLE_OUTPUT, "Gemini")
+        result = _parse_btrain_output(SAMPLE_OUTPUT, "gemini")
         self.assertEqual(result, "")
 
     def test_changes_requested_matches_as_writer(self):
-        result = _parse_btrain_output(SAMPLE_CHANGES_REQUESTED, "Claude")
-        self.assertIn("lane=a", result)
-        self.assertIn("active writer", result)
+        result = _parse_btrain_output(SAMPLE_CHANGES_REQUESTED, "claude")
+        self.assertIn("LANE a", result)
+        self.assertIn("writer", result.lower())
         self.assertIn("changes-requested", result)
 
 
@@ -144,51 +143,40 @@ class TestFormatLaneContext(unittest.TestCase):
             "_lane_id": "a",
             "task": "Fix auth bug",
             "status": "in-progress",
-            "active agent": "Claude",
-            "peer reviewer": "GPT",
+            "active agent": "claude",
+            "peer reviewer": "codex",
             "locked files": "src/auth.py",
             "next": "Work within the locked files.",
         }
 
-    def test_contains_all_fr5_fields(self):
+    def test_contains_lane_fields(self):
         result = _format_lane_context(self.lane, "writer")
-        self.assertIn("lane=a", result)
+        self.assertIn("LANE a", result)
         self.assertIn("Fix auth bug", result)
         self.assertIn("in-progress", result)
-        self.assertIn("Claude", result)
-        self.assertIn("GPT", result)
+        self.assertIn("claude", result)
+        self.assertIn("codex", result)
         self.assertIn("src/auth.py", result)
-        self.assertIn("Work within the locked files.", result)
-        self.assertIn("HANDOFF_A.md", result)
 
-    def test_contains_fr6_protocol(self):
+    def test_writer_role_includes_review_instruction(self):
         result = _format_lane_context(self.lane, "writer")
-        self.assertIn("PROTOCOL:", result)
-        self.assertIn("btrain CLI", result)
-        self.assertIn("lock boundaries", result)
-        self.assertIn("source of truth", result)
+        self.assertIn("writer", result.lower())
+        self.assertIn("@codex", result)
 
-    def test_writer_role_note(self):
-        result = _format_lane_context(self.lane, "writer")
-        self.assertIn("active writer (Claude)", result)
-
-    def test_reviewer_role_note(self):
+    def test_reviewer_role_includes_resolve_command(self):
         result = _format_lane_context(self.lane, "reviewer")
-        self.assertIn("peer reviewer (GPT)", result)
-        self.assertIn("writer is Claude", result)
+        self.assertIn("reviewer", result.lower())
+        self.assertIn("btrain handoff resolve", result)
 
-    def test_writer_waiting_role_note(self):
+    def test_writer_waiting_mentions_reviewer(self):
         result = _format_lane_context(self.lane, "writer-waiting")
-        self.assertIn("waiting on review from GPT", result)
+        self.assertIn("@codex", result)
 
-    def test_handoff_doc_path_uses_uppercase_lane_id(self):
+    def test_compact_format(self):
+        """New format should be under 50 words."""
         result = _format_lane_context(self.lane, "writer")
-        self.assertIn("HANDOFF_A.md", result)
-
-    def test_multi_char_lane_id(self):
-        self.lane["_lane_id"] = "ids"
-        result = _format_lane_context(self.lane, "writer")
-        self.assertIn("HANDOFF_IDS.md", result)
+        word_count = len(result.split())
+        self.assertLess(word_count, 50, f"Format too verbose: {word_count} words")
 
 
 class TestResolveRepoRoot(unittest.TestCase):
@@ -223,8 +211,8 @@ class TestFetchBtrainContext(unittest.TestCase):
     def test_returns_context_on_success(self, _mock_which, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout=SAMPLE_OUTPUT)
         result = _fetch_btrain_context("/some/repo", "Claude")
-        self.assertIn("lane=a", result)
-        self.assertIn("BTRAIN LANE CONTEXT", result)
+        self.assertIn("LANE a", result)
+        self.assertIn("Fix auth bug", result)
 
     @patch("wrapper.subprocess.run", side_effect=FileNotFoundError)
     @patch("wrapper.shutil.which", return_value="/usr/local/bin/btrain")

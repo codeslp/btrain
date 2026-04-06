@@ -6,7 +6,7 @@
     <title>agentchattr</title>
     <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Exo+2:wght@400;500;600&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/shared-tokens.css?v=1">
-    <link rel="stylesheet" href="/static/style.css?v=300">
+    <link rel="stylesheet" href="/static/style.css?v=303">
     <link rel="stylesheet" href="/static/sessions.css?v=223">
     <link rel="stylesheet" href="/static/jobs.css?v=223">
     <link rel="icon" href="/static/favicon.ico">
@@ -132,10 +132,12 @@
             <div id="pins-list"></div>
         </div>
 
+        <div id="lane-pills-bar">
+            <div id="lane-tabs" class="lane-tabs lane-tabs-mini"></div>
+        </div>
+
         <div id="channel-bar">
             <div class="channel-bar-left-spacer" aria-hidden="true"></div>
-            <div id="lane-tabs" class="lane-tabs"></div>
-            <div id="lane-divider" class="channel-divider" style="display:none" aria-hidden="true"></div>
             <div class="channel-main">
                 <div id="channel-tabs"></div>
                 <button id="channel-add-btn" class="channel-add" onclick="showChannelCreateDialog()" title="Add channel">+</button>
@@ -159,8 +161,15 @@
         </div>
 
         <div id="content-area">
+            <aside id="lanes-panel">
+                <div class="lanes-grip" id="lanes-grip"></div>
+                <div class="lanes-panel-header">
+                    <span class="lanes-panel-title">Lanes</span>
+                    <button class="lanes-collapse-btn" onclick="toggleLanesPanel()" title="Collapse lanes">&#9664;</button>
+                </div>
+                <div id="lanes-panel-cards"></div>
+            </aside>
             <main id="timeline">
-                <div id="lane-header" class="lane-header hidden"></div>
                 <div id="loading-indicator">
                     <div class="loading-spinner"></div>
                     <span>Loading messages...</span>
@@ -328,8 +337,8 @@
     <script src="/static/store.js?v=223"></script>
     <script src="/static/sessions.js?v=223"></script>
     <script src="/static/jobs.js?v=224"></script>
-    <script src="/static/channels.js?v=300"></script>
+    <script src="/static/channels.js?v=303"></script>
     <script src="/static/rules-panel.js?v=223"></script>
-    <script src="/static/chat.js?v=300"></script>
+    <script src="/static/chat.js?v=304"></script>
 </body>
 </html>

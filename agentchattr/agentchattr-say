@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+# Post a message to the agentchattr chat from an agent CLI.
+# Usage: agentchattr-say "your message here"
+#        agentchattr-say "@codex please review lane a"
+#        agentchattr-say --channel a "lane a work complete"
+#
+# Reads AGENTCHATTR_TOKEN and AGENTCHATTR_PORT from environment (set by wrapper.py).
+
+PORT="${AGENTCHATTR_PORT:-8300}"
+TOKEN="${AGENTCHATTR_TOKEN:-}"
+CHANNEL="general"
+
+# Parse --channel flag
+if [ "$1" = "--channel" ] || [ "$1" = "-c" ]; then
+    CHANNEL="$2"
+    shift 2
+fi
+
+MESSAGE="$*"
+if [ -z "$MESSAGE" ]; then
+    echo "Usage: agentchattr-say [-c channel] 'message'"
+    exit 1
+fi
+
+if [ -z "$TOKEN" ]; then
+    echo "Error: AGENTCHATTR_TOKEN not set. This command works inside agentchattr agent sessions."
+    exit 1
+fi
+
+curl -s -X POST "http://127.0.0.1:${PORT}/api/send" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"text\":\"${MESSAGE}\",\"channel\":\"${CHANNEL}\"}" > /dev/null 2>&1
+
+exit 0

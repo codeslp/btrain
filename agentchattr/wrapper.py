@@ -129,7 +129,8 @@ def _split_lane_blocks(output: str) -> list[dict]:
 def _format_lane_context(lane: dict, role: str = "writer") -> str:
     """Format a compact btrain lane context block for prompt injection.
 
-    Covers spec 004 FR-5 (8 required fields) and FR-6 (protocol reinforcement).
+    Agent names in btrain project.toml must match agentchattr names
+    (claude, codex, gemini) so @mentions route correctly.
     """
     lane_id = lane.get("_lane_id", "?")
     task = lane.get("task", "(none)")
@@ -137,25 +138,18 @@ def _format_lane_context(lane: dict, role: str = "writer") -> str:
     owner = lane.get("active agent", "(unassigned)")
     reviewer = lane.get("peer reviewer", "(unassigned)")
     locked = lane.get("locked files", "(none)")
-    next_action = lane.get("next", "")
-    handoff_doc = f".claude/collab/HANDOFF_{lane_id.upper()}.md"
 
     if role == "reviewer":
-        role_note = f"You are the peer reviewer ({reviewer}). The writer is {owner}."
+        role_note = f"You are reviewer. Review then: btrain handoff resolve --lane {lane_id} --summary '...' --actor '{reviewer}'"
     elif role == "writer-waiting":
-        role_note = f"You are the writer ({owner}) but this lane is waiting on review from {reviewer}."
+        role_note = f"Waiting on @{reviewer} to review."
     else:
-        role_note = f"You are the active writer ({owner})."
+        role_note = f"You are writer. When done: btrain handoff update --lane {lane_id} --status needs-review, then @{reviewer} please review lane {lane_id}."
 
     parts = [
-        f'BTRAIN LANE CONTEXT: lane={lane_id} task="{task}" status={status}',
-        f"agent={owner} reviewer={reviewer} locked={locked}",
-        f'next="{next_action}" docs={handoff_doc}.',
+        f"LANE {lane_id}: {status} | {task}",
+        f"W={owner} R={reviewer} lock={locked}",
         role_note,
-        "PROTOCOL: Use btrain CLI for handoff transitions (do not edit handoff files directly).",
-        "Respect lock boundaries.",
-        "Treat handoff/spec/plan docs as source of truth.",
-        "Run `btrain handoff` before major transitions.",
     ]
     return " ".join(parts)
 
@@ -267,7 +261,7 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
 
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
-                   refresh_interval: int = 10, cwd: str = "."):
+                   refresh_interval: int = 10, cwd: str = ".", channel_holder=None):
     """Poll queue file and inject a context prompt when triggered."""
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
@@ -293,6 +287,8 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     has_trigger = True
                     if isinstance(data, dict) and "channel" in data:
                         channel = data["channel"]
+                        if channel_holder is not None:
+                            channel_holder[0] = channel
 
                 if has_trigger:
                     # Signal activity BEFORE injecting — covers the thinking phase
@@ -353,6 +349,10 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                             last_rules_epoch = rules_data["epoch"]
                             _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
 
+                    # Agentchattr awareness (first trigger only — kept minimal)
+                    if first_mention:
+                        prompt += "\n\nCHAT: Shared room with @claude @codex @gemini. Post: agentchattr-say 'msg'. @mention reviewer when handing off."
+
                     # btrain lane context injection (FR-5, FR-6)
                     repo_root = _resolve_repo_root(cwd)
                     if repo_root:
@@ -391,15 +391,29 @@ def main():
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
+    parser.add_argument("--cwd", type=str, default=None, help="Override working directory (target repo)")
     args, extra = parser.parse_known_args()
 
     agent = args.agent
     agent_cfg = config.get("agents", {}).get(agent, {})
-    cwd = agent_cfg.get("cwd", ".")
+    cwd = args.cwd or os.environ.get("BTRAIN_CHAT_REPO") or agent_cfg.get("cwd", ".")
     command = agent_cfg.get("command", agent)
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
     server_port = config.get("server", {}).get("port", 8300)
+    # Deregister any existing instances of this agent before registering
+    # (prevents duplicates when a wrapper restarts while the old one is still heartbeating)
+    try:
+        import urllib.request
+        dereg_req = urllib.request.Request(
+            f"http://127.0.0.1:{server_port}/api/deregister/{agent}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(dereg_req, timeout=3)
+    except Exception:
+        pass  # no existing instance or server not ready — fine
+
     try:
         registration = _register_instance(server_port, agent, args.label)
     except Exception as exc:
@@ -456,12 +470,30 @@ def main():
     strip_vars = {"CLAUDECODE"} | set(agent_cfg.get("strip_env", []))
     env = {k: v for k, v in os.environ.items() if k not in strip_vars}
 
-    resolved = shutil.which(command)
-    if not resolved:
-        print(f"  Error: '{command}' not found on PATH.")
-        print("  Install it first, then try again.")
-        sys.exit(1)
-    command = resolved
+    # --- Pre-flight readiness checks ---
+    try:
+        from readiness import check_agent_readiness, _print_check
+        readiness_result = check_agent_readiness(agent, agent_cfg, base_dir=str(Path(__file__).parent))
+        if not readiness_result["ready"]:
+            print(f"\n  Readiness check FAILED for {agent}:")
+            _print_check("Binary", readiness_result["binary"], indent="    ")
+            _print_check("CWD", readiness_result["cwd"], indent="    ")
+            _print_check("Auth", readiness_result["auth"], indent="    ")
+            print()
+            sys.exit(1)
+        for w in readiness_result.get("warnings", []):
+            print(f"  Warning: {w['message']}")
+            if w.get("recovery"):
+                print(f"  Fix: {w['recovery']}")
+        command = readiness_result["binary"].get("resolved", command)
+    except ImportError:
+        # Fallback if readiness module not available
+        resolved = shutil.which(command)
+        if not resolved:
+            print(f"  Error: '{command}' not found on PATH.")
+            print("  Install it first, then try again.")
+            sys.exit(1)
+        command = resolved
 
     launch_args, env, inject_env = _build_provider_launch(
         agent=agent,
@@ -469,6 +501,11 @@ def main():
         extra_args=extra,
         env=env,
     )
+
+    # Inject agentchattr chat env into the agent process
+    inject_env["AGENTCHATTR_TOKEN"] = assigned_token
+    inject_env["AGENTCHATTR_PORT"] = str(server_port)
+    inject_env["PATH"] = str(Path(__file__).parent) + ":" + env.get("PATH", os.environ.get("PATH", ""))
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     print(f"  REST API: http://127.0.0.1:{server_port}")
@@ -525,7 +562,7 @@ def main():
             kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
                     "server_port": server_port, "agent_name": assigned_name,
                     "get_token_fn": get_token, "refresh_interval": _refresh_interval,
-                    "cwd": cwd},
+                    "cwd": cwd, "channel_holder": _last_channel},
             daemon=True,
         )
         _watcher_thread.start()
@@ -541,7 +578,7 @@ def main():
                     kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
                             "server_port": server_port, "agent_name": assigned_name,
                             "get_token_fn": get_token, "refresh_interval": _refresh_interval,
-                            "cwd": cwd},
+                            "cwd": cwd, "channel_holder": _last_channel},
                     daemon=True,
                 )
                 _watcher_thread.start()
@@ -595,6 +632,9 @@ def main():
     threading.Thread(target=_activity_monitor, daemon=True).start()
 
     _agent_pid = [None]
+
+    # Track which channel the last prompt was for (used by agentchattr-say context)
+    _last_channel = ["general"]
 
     if sys.platform == "win32":
         from wrapper_windows import get_activity_checker, run_agent

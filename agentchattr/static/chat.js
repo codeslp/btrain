@@ -4116,77 +4116,113 @@ function initHelpTour() {
 // Lane header
 // ---------------------------------------------------------------------------
 
-function renderLaneHeader() {
-    const header = document.getElementById('lane-header');
-    if (!header) return;
+// Status priority for sorting lane cards (active lanes first)
+const _STATUS_PRIORITY = {
+    'in-progress': 0,
+    'needs-review': 1,
+    'changes-requested': 2,
+    'repair-needed': 3,
+    'resolved': 4,
+    'idle': 5,
+};
 
-    const isLane = laneChannels.includes(activeChannel);
-    if (!isLane) {
-        header.classList.add('hidden');
-        return;
-    }
+function renderLanesPanel() {
+    const container = document.getElementById('lanes-panel-cards');
+    if (!container) return;
 
     const lanes = (btrainLanes.lanes || []);
-    const lane = lanes.find(l => l._laneId === activeChannel);
-    if (!lane) {
-        header.classList.add('hidden');
+    if (lanes.length === 0) {
+        container.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px;">Waiting for btrain data...</div>';
         return;
     }
 
-    const status = lane.status || 'idle';
-    header.classList.remove('hidden');
-    header.dataset.status = status;
+    // Sort by status priority
+    const sorted = [...lanes].sort((a, b) =>
+        (_STATUS_PRIORITY[a.status] ?? 5) - (_STATUS_PRIORITY[b.status] ?? 5)
+    );
 
-    // Build the full card-style header (mirrors dashboard lane-card)
-    const laneUpper = lane._laneId.toUpperCase();
-    const statusLabel = status.toUpperCase().replace(/-/g, ' ');
-    const statusCls = 'status-' + status;
-    const isRepairNeeded = status === 'repair-needed';
+    const cards = sorted.map(lane => {
+        const status = lane.status || 'idle';
+        const laneUpper = lane._laneId.toUpperCase();
+        const statusLabel = status.toUpperCase().replace(/-/g, ' ');
+        const statusCls = 'status-' + status;
+        const isActive = lane._laneId === activeChannel;
 
-    // Agent meta (W // Owner, R // Reviewer)
-    let agentMeta = '';
-    if (lane.owner || lane.reviewer) {
-        let metaRows = '';
-        if (lane.owner) metaRows += `<span class="lh-owner">W // <strong>${_esc(lane.owner)}</strong></span>`;
-        if (lane.reviewer) metaRows += `<span class="lh-owner">R // <strong>${_esc(lane.reviewer)}</strong></span>`;
-        if (lane.repairOwner) metaRows += `<span class="lh-owner lh-repair-owner">FIX // <strong>${_esc(lane.repairOwner)}</strong></span>`;
-        agentMeta = `<div class="lh-agents-meta">${metaRows}</div>`;
-    }
+        // Hot seat
+        const hotSeatName = window._resolveHotSeat ? window._resolveHotSeat(lane) : '';
+        const hasHotSeat = hotSeatName && status !== 'resolved' && status !== 'idle';
+        const hsIdentity = hasHotSeat && window._getAgentIdentity ? window._getAgentIdentity(hotSeatName) : null;
 
-    // Locks
-    let locksHtml = '';
-    if (lane.lockedFiles && lane.lockedFiles.length) {
-        locksHtml = `<div class="lh-locks">${_esc(lane.lockedFiles.join(', '))}</div>`;
-    }
+        // Agent colors
+        const wId = window._getAgentIdentity ? window._getAgentIdentity(lane.owner) : null;
+        const rId = window._getAgentIdentity ? window._getAgentIdentity(lane.reviewer) : null;
 
-    // Details (collapsible)
-    let detailRows = '';
-    if (lane.lockState && lane.lockState !== 'clear')
-        detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Lock state</span> ${_esc(lane.lockState)}</div>`;
-    if (lane.nextAction)
-        detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Next</span> ${_esc(_truncate(lane.nextAction, 200))}</div>`;
-    if (lane.reasonCode)
-        detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Reason</span> ${_esc(lane.reasonCode)}${lane.reasonTags?.length ? ' (' + lane.reasonTags.join(', ') + ')' : ''}</div>`;
-    if (lane.repurposeReady)
-        detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Repurpose</span> Ready${lane.repurposeReason ? ' — ' + _esc(lane.repurposeReason) : ''}</div>`;
-    if (lane.lastUpdated)
-        detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Updated</span> ${_esc(lane.lastUpdated)}</div>`;
+        const hotSeatBadge = hasHotSeat && hsIdentity
+            ? `<div class="lp-card-hotseat" style="color:${hsIdentity.color};border-color:${hsIdentity.color};">${hsIdentity.short}</div>`
+            : '';
 
-    header.innerHTML = `
-        <div class="lh-card-header" onclick="toggleLaneHeader()">
-            <div class="lh-lane-id">LANE ${laneUpper}</div>
-            <div class="lh-lane-status ${statusCls}${isRepairNeeded ? ' lh-repair-tape' : ''}">[${statusLabel}]</div>
-        </div>
-        ${agentMeta}
-        <div class="lh-desc">${lane.task ? _esc(lane.task) : ''}</div>
-        ${locksHtml}
-        <div class="lh-details-wrapper${_laneHeaderCollapsed ? '' : ' expanded'}">
-            <div class="lh-details-inner">
-                ${detailRows}
-                <div class="lh-detail-row lh-source"><span class="lh-detail-label">Source</span> <code>.claude/collab/HANDOFF_${laneUpper}.md</code></div>
+        let agents = '';
+        if (lane.owner) agents += `W // <span style="color:${wId ? wId.color : '#e6edf3'}">${_esc(lane.owner)}</span>`;
+        if (lane.reviewer) agents += `${agents ? ' &nbsp; ' : ''}R // <span style="color:${rId ? rId.color : '#e6edf3'}">${_esc(lane.reviewer)}</span>`;
+
+        // Locks
+        let locksHtml = '';
+        if (lane.lockedFiles && lane.lockedFiles.length) {
+            locksHtml = `<div class="lh-locks" style="margin-bottom: 8px;">${_esc(lane.lockedFiles.join(', '))}</div>`;
+        }
+
+        // Details (collapsible)
+        let detailRows = '';
+        if (lane.lockState && lane.lockState !== 'clear')
+            detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Lock state</span> ${_esc(lane.lockState)}</div>`;
+        if (lane.nextAction)
+            detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Next</span> ${_esc(_truncate(lane.nextAction, 200))}</div>`;
+        if (lane.reasonCode)
+            detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Reason</span> ${_esc(lane.reasonCode)}${lane.reasonTags?.length ? ' (' + lane.reasonTags.join(', ') + ')' : ''}</div>`;
+        if (lane.repurposeReady)
+            detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Repurpose</span> Ready${lane.repurposeReason ? ' — ' + _esc(lane.repurposeReason) : ''}</div>`;
+        if (lane.lastUpdated)
+            detailRows += `<div class="lh-detail-row"><span class="lh-detail-label">Updated</span> ${_esc(lane.lastUpdated)}</div>`;
+
+        const detailsHtml = detailRows ? `
+            <div class="lh-details-wrapper lp-details-wrapper">
+                <div class="lh-details-inner">
+                    ${detailRows}
+                    <div class="lh-detail-row lh-source" style="margin-top: 8px;"><span class="lh-detail-label">Source</span> <code>.claude/collab/HANDOFF_${laneUpper}.md</code></div>
+                </div>
             </div>
-        </div>
-    `;
+        ` : '';
+
+        const isExpanded = isActive && (_expandedLaneCards[lane._laneId] !== false);
+
+        return `<div class="lp-card${isActive ? ' active' : ''}${isExpanded ? ' expanded' : ''}" data-status="${status}" data-lane="${lane._laneId}" onclick="toggleLaneCard('${lane._laneId}')">
+            ${hotSeatBadge}
+            <div class="lp-card-status ${statusCls}">[${statusLabel}]</div>
+            <div class="lp-card-id">LANE ${laneUpper}</div>
+            ${agents ? `<div class="lp-card-agents" style="margin-bottom: 8px;">${agents}</div>` : ''}
+            <div class="lh-desc" style="font-size: 13px; margin-bottom: 6px; display: block; -webkit-line-clamp: unset;">${lane.task ? _esc(lane.task) : '(no task)'}</div>
+            ${locksHtml}
+            ${detailsHtml}
+        </div>`;
+    }).join('');
+
+    container.innerHTML = cards;
+}
+
+let _expandedLaneCards = {};
+window.toggleLaneCard = function(laneId) {
+    if (laneId === activeChannel) {
+        _expandedLaneCards[laneId] = _expandedLaneCards[laneId] === false ? true : false;
+        renderLanesPanel();
+    } else {
+        _expandedLaneCards[laneId] = true;
+        switchChannel(laneId);
+    }
+};
+
+// Keep renderLaneHeader as alias for backward compat (called from switchChannel)
+function renderLaneHeader() {
+    renderLanesPanel();
 }
 
 function _esc(s) {
@@ -4197,17 +4233,16 @@ function _truncate(s, max) {
     return s.length > max ? s.slice(0, max) + '...' : s;
 }
 
-let _laneHeaderCollapsed = false;
-function toggleLaneHeader() {
-    _laneHeaderCollapsed = !_laneHeaderCollapsed;
-    const header = document.getElementById('lane-header');
-    if (!header) return;
-    const wrapper = header.querySelector('.lh-details-wrapper');
-    if (wrapper) wrapper.classList.toggle('expanded', !_laneHeaderCollapsed);
+function toggleLanesPanel() {
+    const panel = document.getElementById('lanes-panel');
+    if (!panel) return;
+    panel.classList.toggle('collapsed');
+    localStorage.setItem('lanes-panel-collapsed', panel.classList.contains('collapsed') ? '1' : '');
 }
 
 window.renderLaneHeader = renderLaneHeader;
-window.toggleLaneHeader = toggleLaneHeader;
+window.renderLanesPanel = renderLanesPanel;
+window.toggleLanesPanel = toggleLanesPanel;
 
 // --- Start ---
 

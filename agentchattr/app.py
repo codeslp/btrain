@@ -493,7 +493,7 @@ def configure(cfg: dict, session_token: str = ""):
 
     # --- btrain lane state poller ---
     btrain_cfg = cfg.get("btrain", {})
-    btrain_repo = btrain_cfg.get("repo_path", "")
+    btrain_repo = os.environ.get("BTRAIN_CHAT_REPO") or btrain_cfg.get("repo_path", "")
     btrain_interval = int(btrain_cfg.get("poll_interval", 15))
 
     if btrain_repo:
@@ -2328,6 +2328,34 @@ async def list_lane_archives(lane_id: str):
         reverse=True,
     )
     return JSONResponse({"archives": archives})
+
+
+# --- Agent readiness endpoint ---
+
+_readiness_state = {"cache": {}, "ts": 0.0}
+_readiness_lock = threading.Lock()
+
+@app.get("/api/btrain/readiness")
+def get_agent_readiness():
+    """Return per-agent readiness checks. Cached for 60s.
+
+    Sync def so FastAPI runs it in a threadpool (readiness checks call subprocess).
+    Lock prevents concurrent requests from stampeding the cache.
+    """
+    now = _time_mod.time()
+    with _readiness_lock:
+        if now - _readiness_state["ts"] < 60 and _readiness_state["cache"]:
+            return JSONResponse(_readiness_state["cache"])
+
+        try:
+            from readiness import check_all_agents
+            results = check_all_agents(config.get("agents", {}), str(Path(__file__).parent))
+            _readiness_state["cache"] = {"agents": results, "checked_at": now}
+            _readiness_state["ts"] = now
+            return JSONResponse(_readiness_state["cache"])
+        except Exception as e:
+            log.warning(f"readiness check failed: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/register")

@@ -19,6 +19,31 @@ const _LANE_STATUS_ANIM = {
     'idle':              'status-idle',
 };
 
+// Hot seat resolution (mirrors dashboard HOT_SEAT_RESOLVERS)
+function _resolveHotSeat(lane) {
+    const status = lane.status || 'idle';
+    if (status === 'in-progress') return lane.owner || '';
+    if (status === 'needs-review') return lane.reviewer || '';
+    if (status === 'changes-requested') return lane.owner || '';
+    if (status === 'repair-needed') return lane.repairOwner || lane.owner || '';
+    return '';
+}
+
+// Agent identity → short name + neon color (mirrors dashboard getAgentIdentity)
+function _getAgentIdentity(name) {
+    if (!name) return { short: '---', color: '#666', chat: '' };
+    const n = name.toLowerCase();
+    if (n.includes('codex') || n.includes('gpt')) return { short: 'CDX', color: '#00f0ff', chat: 'codex' };
+    if (n.includes('opus') || n.includes('claude')) return { short: 'CLD', color: '#ff00ff', chat: 'claude' };
+    if (n.includes('gemini')) return { short: 'GEM', color: '#ffb300', chat: 'gemini' };
+    if (n.includes('antigravity') || n.includes('anti')) return { short: 'ANTI', color: '#b366ff', chat: 'antigravity' };
+    return { short: name.substring(0, 3).toUpperCase(), color: '#e6edf3', chat: n.split(' ')[0] };
+}
+
+// Expose for chat.js lane header
+window._resolveHotSeat = _resolveHotSeat;
+window._getAgentIdentity = _getAgentIdentity;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -75,16 +100,21 @@ function renderChannelTabs() {
 
                 // Colored lane box with letter
                 const box = document.createElement('div');
-                box.className = 'lane-box ' + status.replace(/-/g, '-');
+                box.className = 'lane-box ' + status;
                 box.textContent = lid.toUpperCase();
                 pill.appendChild(box);
 
-                // Agent label below
+                // Hot seat agent label (color-coded like dashboard)
+                const hotSeatName = _resolveHotSeat(lane);
+                const hasHotSeat = hotSeatName && status !== 'resolved' && status !== 'idle';
+                const identity = hasHotSeat ? _getAgentIdentity(hotSeatName) : { short: '---', color: 'var(--text-muted)' };
+
                 const agentLabel = document.createElement('div');
                 agentLabel.className = 'lane-pill-agent';
-                if (lane.owner) {
-                    // Show first 3 chars of owner name
-                    agentLabel.textContent = lane.owner.slice(0, 3).toUpperCase();
+                agentLabel.textContent = identity.short;
+                agentLabel.style.color = identity.color;
+                if (hasHotSeat) {
+                    pill.classList.add('has-hotseat');
                 }
                 pill.appendChild(agentLabel);
 
@@ -434,8 +464,59 @@ function deleteChannel(name) {
 // ---------------------------------------------------------------------------
 
 function _channelsInit() {
-    // Nothing to do yet -- channel rendering is driven by chat.js calling
-    // renderChannelTabs() and filterMessagesByChannel() at the right times.
+    _setupLanesGrip();
+    // Restore collapsed state
+    if (localStorage.getItem('lanes-panel-collapsed') === '1') {
+        const panel = document.getElementById('lanes-panel');
+        if (panel) panel.classList.add('collapsed');
+    }
+}
+
+function _setupLanesGrip() {
+    const grip = document.getElementById('lanes-grip');
+    const panel = document.getElementById('lanes-panel');
+    if (!grip || !panel) return;
+
+    let dragging = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    grip.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        dragging = true;
+        startX = e.clientX;
+        startWidth = panel.offsetWidth;
+        grip.classList.add('dragging');
+        panel.style.transition = 'none';
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        // Grip is on right edge — dragging right increases width
+        const delta = e.clientX - startX;
+        const newWidth = Math.min(Math.max(startWidth + delta, 60), window.innerWidth * 0.5);
+        panel.style.setProperty('--lanes-panel-w', newWidth + 'px');
+        panel.style.width = newWidth + 'px';
+        // Auto-collapse if dragged very narrow
+        panel.classList.toggle('collapsed', newWidth <= 70);
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        grip.classList.remove('dragging');
+        panel.style.transition = '';
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        localStorage.setItem('lanes-panel-collapsed', panel.classList.contains('collapsed') ? '1' : '');
+    });
+
+    // Double-click grip to toggle collapse
+    grip.addEventListener('dblclick', () => {
+        if (window.toggleLanesPanel) window.toggleLanesPanel();
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -4152,6 +4152,246 @@ footer {
 .help-pulse { animation: helpPulse 1s ease 3; }
 
 /* ---------------------------------------------------------------------------
+   Lane pills bar (mini summary above content area)
+   --------------------------------------------------------------------------- */
+
+#lane-pills-bar {
+    display: flex;
+    align-items: center;
+    padding: 3px 16px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-height: 32px;
+    gap: 4px;
+}
+#lane-pills-bar:empty { display: none; }
+
+/* ---------------------------------------------------------------------------
+   Lanes panel (left side-panel)
+   --------------------------------------------------------------------------- */
+
+#lanes-panel {
+    --lanes-panel-w: 300px;
+    width: var(--lanes-panel-w);
+    min-width: 60px;
+    max-width: 50vw;
+    flex-shrink: 0;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    transition: width 0.2s ease;
+}
+
+#lanes-panel.collapsed {
+    width: 60px;
+    min-width: 60px;
+}
+
+.lanes-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.lanes-panel-title {
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+}
+
+#lanes-panel.collapsed .lanes-panel-title { display: none; }
+
+.lanes-collapse-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: background 0.15s;
+}
+.lanes-collapse-btn:hover { background: var(--white-08); }
+
+#lanes-panel.collapsed .lanes-collapse-btn {
+    transform: rotate(180deg);
+}
+
+#lanes-panel-cards {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* Resize grip (right edge) */
+.lanes-grip {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.15s;
+    z-index: 3;
+}
+.lanes-grip:hover,
+.lanes-grip.dragging {
+    background: var(--accent);
+}
+
+/* --- Lane card in panel --- */
+.lp-card {
+    background: linear-gradient(145deg, var(--surface) 0%, #0d1017 100%);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s ease;
+    overflow: hidden;
+    flex-shrink: 0; /* Ensures cards don't get squished and clipped inside the side rail */
+}
+.lp-card:hover {
+    background: linear-gradient(145deg, var(--surface-hover) 0%, #151a25 100%);
+    border-color: #3b4455;
+}
+.lp-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 8px var(--accent-soft);
+}
+
+/* Status border-top colors */
+.lp-card[data-status="idle"]              { border-top-color: var(--idle); }
+.lp-card[data-status="in-progress"]       { border-top-color: var(--in-progress); }
+.lp-card[data-status="needs-review"]      { border-top-color: var(--needs-review); }
+.lp-card[data-status="changes-requested"] { border-top-color: var(--changes-requested); }
+.lp-card[data-status="repair-needed"]     { border-top-color: var(--repair-needed); overflow: hidden; }
+.lp-card[data-status="repair-needed"]::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 8px;
+    background: var(--repair-needed-tape);
+    pointer-events: none;
+}
+.lp-card[data-status="resolved"]          { border-top-color: var(--resolved); }
+
+.lp-details-wrapper {
+    margin-top: 0;
+    transition: grid-template-rows 0.2s ease, margin-top 0.2s ease, padding-top 0.2s ease;
+}
+.lp-card.expanded .lp-details-wrapper {
+    grid-template-rows: 1fr;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.lp-card-status {
+    font-family: var(--font-heading);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 2px;
+    display: inline-block;
+    margin-bottom: 6px;
+}
+
+.lp-card-id {
+    font-family: var(--font-heading);
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+}
+
+.lp-card-agents {
+    font-family: var(--font-heading);
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.lp-card-task {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.lp-card-hotseat {
+    position: absolute;
+    top: -1px;
+    right: 8px;
+    font-family: var(--font-heading);
+    font-size: 8px;
+    font-weight: 600;
+    padding: 1px 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: var(--bg);
+    border: 1px solid;
+    border-top: none;
+    border-radius: 0 0 3px 3px;
+}
+
+/* Collapsed state: slim lane badges */
+#lanes-panel.collapsed .lp-card {
+    padding: 6px 4px;
+    border-top-width: 2px;
+    text-align: center;
+}
+#lanes-panel.collapsed .lp-card-status,
+#lanes-panel.collapsed .lp-card-agents,
+#lanes-panel.collapsed .lp-card-task,
+#lanes-panel.collapsed .lp-card-hotseat,
+#lanes-panel.collapsed .lh-desc,
+#lanes-panel.collapsed .lh-locks,
+#lanes-panel.collapsed .lp-details-wrapper {
+    display: none;
+}
+#lanes-panel.collapsed .lp-card-id {
+    font-size: 16px;
+    margin: 0;
+}
+
+@media (max-width: 768px) {
+    #lanes-panel { width: 60px; min-width: 60px; }
+    #lanes-panel .lanes-panel-title { display: none; }
+    #lanes-panel .lp-card-status,
+    #lanes-panel .lp-card-agents,
+    #lanes-panel .lp-card-task,
+    #lanes-panel .lp-card-hotseat { display: none; }
+    #lanes-panel .lp-card { padding: 6px 4px; text-align: center; }
+    #lanes-panel .lp-card-id { font-size: 16px; margin: 0; }
+}
+
+/* ---------------------------------------------------------------------------
    Lane pills & lane header (WS5) — mirrors btrain dashboard
    --------------------------------------------------------------------------- */
 
@@ -4162,6 +4402,19 @@ footer {
     align-items: flex-end;
     gap: 3px;
     flex-shrink: 0;
+    padding: 2px 0;
+}
+
+/* Mini pills (30% smaller for the pills bar) */
+.lane-tabs-mini .lane-pill {
+    width: 28px;
+}
+.lane-tabs-mini .lane-pill .lane-box {
+    height: 20px;
+    font-size: 12px;
+}
+.lane-tabs-mini .lane-pill-agent {
+    font-size: 7px;
     padding: 2px 0;
 }
 
@@ -4278,14 +4531,33 @@ footer {
     background: linear-gradient(145deg, var(--surface) 0%, #0d1017 100%);
     border: 1px solid var(--border);
     border-top: 3px solid var(--border);
-    padding: 16px;
+    padding: 20px 24px;
+    border-radius: 4px;
     position: sticky;
     top: 0;
     z-index: 2;
-    margin: -16px -16px 8px;
+    margin: -16px -16px 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     transition: border-top-color var(--duration-normal) ease;
 }
 .lane-header.hidden { display: none; }
+
+/* Hot seat badge (mirrors dashboard .lane-hot-seat) */
+.lh-hot-seat {
+    position: absolute;
+    top: -12px;
+    right: 16px;
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: var(--surface, #0e1119);
+    border: 1px solid;
+    border-radius: 2px;
+    z-index: 3;
+}
 
 /* Border-top by status */
 .lane-header[data-status="idle"]              { border-top-color: var(--idle); }
@@ -4304,32 +4576,38 @@ footer {
 }
 .lane-header[data-status="resolved"]          { border-top-color: var(--resolved); }
 
-/* Card header row: LANE A + [STATUS] */
+/* Status bar at top of card */
+.lh-status-bar {
+    margin-bottom: 16px;
+}
+
+/* Card header row: LANE A */
 .lh-card-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 12px;
+    margin-bottom: 16px;
     cursor: pointer;
     user-select: none;
 }
 
 .lh-lane-id {
     font-family: var(--font-heading);
-    font-size: 20px;
+    font-size: 22px;
     font-weight: 600;
     color: #fff;
 }
 
 .lh-lane-status {
     font-family: var(--font-heading);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    padding: 3px 8px;
+    padding: 4px 10px;
     text-transform: uppercase;
     letter-spacing: 1px;
     background: rgba(0, 0, 0, 0.3);
     border-radius: 2px;
+    display: inline-block;
 }
 .lh-lane-status.status-idle              { color: var(--idle); }
 .lh-lane-status.status-in-progress       { color: var(--in-progress); }
@@ -4380,11 +4658,11 @@ footer {
 
 /* Task description */
 .lh-desc {
-    font-size: 15px;
+    font-size: 17px;
     color: #fff;
     line-height: 1.4;
     font-weight: 500;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
 }
 
 /* Lock files tag */

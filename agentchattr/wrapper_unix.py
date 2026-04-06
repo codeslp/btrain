@@ -79,6 +79,7 @@ def get_activity_checker(session_name, trigger_flag=None):
     return check
 
 
+
 def run_agent(
     command,
     extra_args,

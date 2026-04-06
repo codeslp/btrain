@@ -1,0 +1,152 @@
+#!/usr/bin/env sh
+# btrain chat — launch agentchattr agents for any repo
+#
+# Usage:
+#   ./chat claude                  # launch Claude on the current directory
+#   ./chat codex /path/to/repo     # launch Codex on a specific repo
+#   ./chat gemini                   # launch Gemini on the current directory
+#   ./chat all                      # launch all 3 (opens new terminal tabs)
+#   ./chat server                   # start only the agentchattr server
+#   ./chat status                   # check readiness for all agents
+#
+# The agentchattr server starts automatically on first agent launch.
+# Open http://127.0.0.1:8300 in your browser to see the chat UI.
+
+set -e
+
+BTRAIN_ROOT="$(cd "$(dirname "$0")" && pwd)"
+AGENTCHATTR="$BTRAIN_ROOT/agentchattr"
+AGENT="${1:-}"
+TARGET_REPO="${2:-$(pwd)}"
+TARGET_REPO="$(cd "$TARGET_REPO" 2>/dev/null && pwd)" || { echo "Error: directory '$2' does not exist."; exit 1; }
+
+# Resolve python
+PYTHON_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+else
+    echo "Error: Python 3 is required but not found on PATH."
+    exit 1
+fi
+
+# Ensure venv
+ensure_venv() {
+    cd "$AGENTCHATTR"
+    if [ -d ".venv" ] && [ ! -x ".venv/bin/python" ]; then
+        echo "  Recreating .venv..."
+        rm -rf .venv
+    fi
+    if [ ! -x ".venv/bin/python" ]; then
+        echo "  Creating virtual environment..."
+        "$PYTHON_BIN" -m venv .venv || { echo "Error: failed to create .venv."; exit 1; }
+        .venv/bin/python -m pip install -q -r requirements.txt || { echo "Error: failed to install deps."; exit 1; }
+    fi
+}
+
+is_server_running() {
+    lsof -i :8300 -sTCP:LISTEN >/dev/null 2>&1 || \
+    ss -tlnp 2>/dev/null | grep -q ':8300 ' 2>/dev/null
+}
+
+start_server() {
+    if is_server_running; then
+        echo "  Server already running on :8300"
+        return
+    fi
+    echo "  Starting agentchattr server..."
+    cd "$AGENTCHATTR"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        osascript -e "tell app \"Terminal\" to do script \"cd '$AGENTCHATTR' && BTRAIN_CHAT_REPO='$TARGET_REPO' .venv/bin/python run.py\"" > /dev/null 2>&1
+    else
+        BTRAIN_CHAT_REPO="$TARGET_REPO" .venv/bin/python run.py > data/server.log 2>&1 &
+    fi
+    i=0
+    while [ "$i" -lt 30 ]; do
+        is_server_running && break
+        sleep 0.5
+        i=$((i + 1))
+    done
+    is_server_running || { echo "Error: server failed to start."; exit 1; }
+    echo "  Server ready at http://127.0.0.1:8300"
+}
+
+launch_agent() {
+    local agent_name="$1"
+    echo ""
+    echo "  Launching $agent_name on $TARGET_REPO"
+    echo "  ========================================="
+    cd "$AGENTCHATTR"
+    BTRAIN_CHAT_REPO="$TARGET_REPO" .venv/bin/python wrapper.py "$agent_name" --cwd "$TARGET_REPO"
+}
+
+launch_in_tab() {
+    local agent_name="$1"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        osascript -e "tell app \"Terminal\" to do script \"cd '$BTRAIN_ROOT' && BTRAIN_CHAT_REPO='$TARGET_REPO' '$AGENTCHATTR/.venv/bin/python' '$AGENTCHATTR/wrapper.py' '$agent_name' --cwd '$TARGET_REPO'\"" > /dev/null 2>&1
+    else
+        echo "  Open a new terminal and run:  ./chat $agent_name $TARGET_REPO"
+    fi
+}
+
+usage() {
+    echo "btrain chat — launch agentchattr agents"
+    echo ""
+    echo "Usage:"
+    echo "  ./chat claude [/path/to/repo]    Launch Claude agent"
+    echo "  ./chat codex  [/path/to/repo]    Launch Codex agent"
+    echo "  ./chat gemini [/path/to/repo]    Launch Gemini agent"
+    echo "  ./chat all    [/path/to/repo]    Launch all 3 in separate tabs"
+    echo "  ./chat server [/path/to/repo]    Start the server only"
+    echo "  ./chat status                    Check readiness for all agents"
+    echo ""
+    echo "Default repo: current directory ($(pwd))"
+    echo "Chat UI: http://127.0.0.1:8300"
+}
+
+# ---- Main ----
+
+case "$AGENT" in
+    claude|codex|gemini)
+        ensure_venv
+        start_server
+        launch_agent "$AGENT"
+        ;;
+    all)
+        ensure_venv
+        start_server
+        echo ""
+        echo "  Opening agent tabs for: claude, codex, gemini"
+        echo "  Target repo: $TARGET_REPO"
+        launch_in_tab claude
+        launch_in_tab codex
+        sleep 1
+        launch_in_tab gemini
+        echo ""
+        echo "  All agents launching. Open http://127.0.0.1:8300"
+        ;;
+    server)
+        ensure_venv
+        start_server
+        echo "  Server running. Launch agents with: ./chat claude"
+        ;;
+    status)
+        ensure_venv
+        cd "$AGENTCHATTR"
+        BTRAIN_CHAT_REPO="$TARGET_REPO" .venv/bin/python readiness.py
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    "")
+        usage
+        exit 1
+        ;;
+    *)
+        echo "Unknown agent: $AGENT"
+        echo ""
+        usage
+        exit 1
+        ;;
+esac

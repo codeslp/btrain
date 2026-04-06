@@ -38,6 +38,17 @@ is_server_running() {
 
 ensure_venv
 
+# Pre-flight readiness check
+echo "  Checking codex readiness..."
+if ! command -v codex >/dev/null 2>&1; then
+    echo ""
+    echo "  FAIL: 'codex' not found on PATH."
+    echo "  Install Codex CLI: npm install -g @openai/codex"
+    echo ""
+    exit 1
+fi
+echo "  OK: codex found at $(command -v codex)"
+
 if ! is_server_running; then
     if [ "$(uname -s)" = "Darwin" ]; then
         osascript -e "tell app \"Terminal\" to do script \"cd '$(pwd)' && .venv/bin/python run.py\"" > /dev/null 2>&1

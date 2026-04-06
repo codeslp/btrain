@@ -2,9 +2,9 @@
 name = "btrain"
 
 [agents]
-reviewer_default = "GPT"
-writer_default = "Claude"
-active = ["Claude", "GPT", "Gemini"]
+reviewer_default = "codex"
+writer_default = "claude"
+active = ["claude", "codex", "gemini"]
 
 [lanes]
 per_agent = 3

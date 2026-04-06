@@ -1,4 +1,11 @@
 {
   "version": 1,
-  "locks": []
+  "locks": [
+    {
+      "path": "docs/architecture.md",
+      "lane": "a",
+      "owner": "Claude",
+      "acquired_at": "2026-04-06T02:18:01.225Z"
+    }
+  ]
 }

@@ -1,368 +1,258 @@
 # btrain
 
-**A file-backed handoff workflow for human-guided multi-agent coding.**
+**Multi-agent collaboration workflow for human-guided coding teams.**
 
-btrain gives agents one shared protocol for:
-
-- who is working right now
-- who reviews next
-- which files are locked
-- what changed, why it changed, and what the reviewer should check
-
-It works with Claude Code, Codex, Antigravity, or any mix of agents that can read files and run shell commands.
+btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. It tracks who is working, who reviews, which files are locked, and what changed — all through plain CLI commands and git-tracked handoff files.
 
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org) [![Zero Dependencies](https://img.shields.io/badge/Dependencies-0-blue)](#) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## What btrain gives you
+---
 
-- A git-tracked handoff file per lane in `.claude/collab/`
-- Plain CLI commands for claim, update, resolve, locks, review, and status
-- Lane scaffolding derived from active collaborators and `lanes.per_agent`
-- Structured review context instead of vague "please review this"
-- Reviewer selection that can pick `any-other` configured peer automatically
-- A bundled, project-agnostic `.claude/skills/` pack on `init`
-- Optional history cleanup and automated review helpers
-- A local console dashboard HUD for lane status, reviewers, and file locks
+## Overview
 
-## Console Dashboard
-
-The current local HUD lives in `scripts/serve-dashboard.js`. It polls `btrain status --repo .` and reads the current repo's handoff files so you can see:
-
-- lane state and current task summary
-- who is in the hot seat right now
-- active file locks without opening the markdown by hand
-
-If you are working in this repo, the shortest path is:
-
-```bash
-# from the btrain repo root
-npm link
-node scripts/serve-dashboard.js
-# then visit http://localhost:3333
+```
+Human types "bth" in agent chat
+       |
+       v
+btrain handoff   <-- prints state + guidance
+       |
+       v
+Agent follows instructions:
+  idle/resolved   --> claim a task
+  in-progress     --> continue working
+  needs-review    --> review (if you're the reviewer)
+  changes-requested --> fix findings, re-handoff
+  repair-needed   --> fix workflow state
 ```
 
-If you want to point the HUD at another bootstrapped repo, run the script from that repo's working directory so `btrain status --repo .` and the local `.btrain/project.toml` resolve against the repo you want to inspect. For example:
+The source of truth is `.claude/collab/HANDOFF_*.md` (one per lane). Never edit these directly — always use the CLI.
 
-```bash
-cd /path/to/your/repo
-node /path/to/your/btrain/checkout/scripts/serve-dashboard.js
-```
+---
 
 ## Quick Start
 
 ```bash
-# install locally
-git clone https://github.com/codeslp/btrain.git
-cd btrain
-npm link
+# Install
+git clone https://github.com/codeslp/btrain.git && cd btrain && npm link
 
-# bootstrap a repo with two collaborators
-btrain init /path/to/your/repo \
-  --agent "Claude" \
-  --agent "GPT-5 Codex"
+# Bootstrap a repo
+btrain init /path/to/repo --agent "Claude" --agent "GPT" --agent "Gemini"
 
-# skip bundled skills if you only want the core btrain files
-btrain init /path/to/your/repo --core-only
+# Claim work
+btrain handoff claim --lane a --task "Add auth middleware" \
+  --owner "Claude" --reviewer "GPT" --files "src/auth/"
 
-# optional: open the local console dashboard when working in btrain itself
-node scripts/serve-dashboard.js
+# Check guidance
+btrain handoff
 
-# claim a lane
-btrain handoff claim \
-  --repo /path/to/your/repo \
-  --lane a \
-  --task "Implement auth middleware" \
-  --owner "Claude" \
-  --reviewer any-other \
-  --files "src/auth/"
+# Hand off for review
+btrain handoff update --lane a --status needs-review --actor "Claude" \
+  --preflight --changed "src/auth/index.ts" --verification "npm test" \
+  --why "Auth logic drifted" --review-ask "Check unauth flows"
 
-# check guidance
-btrain handoff --repo /path/to/your/repo
+# Reviewer approves
+btrain handoff resolve --lane a --summary "Approved." --actor "GPT"
 
-# hand work to review with real reviewer context
-btrain handoff update \
-  --repo /path/to/your/repo \
-  --lane a \
-  --status needs-review \
-  --actor "Claude" \
-  --base feat/auth-middleware \
-  --preflight \
-  --changed "src/auth/index.ts - tighten token validation" \
-  --verification "npm test" \
-  --gap "Did not re-run the full browser auth flow" \
-  --why "Auth logic and docs had drifted" \
-  --review-ask "Check unauthenticated flows for regressions"
-
-# reviewer resolves
-btrain handoff resolve \
-  --repo /path/to/your/repo \
-  --lane a \
-  --summary "Approved. Clean implementation." \
-  --actor "GPT-5 Codex"
-
-# reviewer requests changes instead of resolving
-btrain handoff request-changes \
-  --repo /path/to/your/repo \
-  --lane a \
-  --summary "Need one more verification pass before approval." \
-  --reason-code missing-verification \
-  --reason-tag smoke-check \
-  --actor "GPT-5 Codex"
-
-# human-confirmed override for a blocked push or review transition
-btrain override grant \
-  --repo /path/to/your/repo \
-  --action push \
-  --requested-by "GPT-5 Codex" \
-  --confirmed-by "Ben" \
-  --reason "Emergency push while unresolved handoff state is still active."
+# Or requests changes
+btrain handoff request-changes --lane a \
+  --summary "Need verification pass" --reason-code missing-verification \
+  --actor "GPT"
 ```
 
-## Core Workflow
+---
 
-1. The human types `bth` in an agent chat.
-2. The agent runs `btrain handoff`.
-3. btrain prints the current state plus plain-English guidance.
-4. The agent follows the guidance:
-   - `idle` or `resolved`: claim a task
-   - `in-progress`: continue the task if you are the active agent
-   - `needs-review`: review if you are the peer reviewer
-   - `changes-requested`: address findings and re-handoff if you are the active agent
-   - `repair-needed`: repair the workflow state before resuming normal work
-   - otherwise: wait
-5. The agent updates state with `claim`, `update`, `request-changes`, or `resolve`.
+## What's Included
 
-The source of truth is `.claude/collab/HANDOFF_A.md` plus any additional lane files such as `HANDOFF_B.md`, `HANDOFF_C.md`, and so on. Do not edit those files directly. Always use the CLI.
+### btrain CLI
 
-`changes-requested` and `repair-needed` also carry machine-readable reason metadata:
+| Command | What it does |
+|---------|-------------|
+| `btrain init <repo>` | Bootstrap handoff files, lanes, config, and skills |
+| `btrain handoff` | Print current state and what to do next |
+| `btrain handoff claim` | Claim a lane with task, owner, reviewer, file locks |
+| `btrain handoff update` | Update status, fill reviewer context fields |
+| `btrain handoff resolve` | Approve and close a review |
+| `btrain handoff request-changes` | Return review findings to the writer |
+| `btrain status [--json]` | Show all lane states (JSON output for integrations) |
+| `btrain doctor [--repair]` | Health check; `--repair` fixes stale locks |
+| `btrain locks` | List active file locks across lanes |
+| `btrain hooks` | Install managed pre-commit + pre-push guards |
+| `btrain override grant` | Human-confirmed override for blocked actions |
+| `btrain hcleanup` | Trim handoff history |
 
-- `--reason-code` is the primary workflow code
-- `--reason-tag` is repeatable and adds optional secondary tags
+### Console Dashboard
 
-First-version reason codes:
-
-- `changes-requested`: `spec-mismatch`, `regression-risk`, `missing-verification`, `security-risk`, `integration-breakage`
-- `repair-needed`: `invalid-handoff`, `unreviewed-push`, `lock-mismatch`, `ownership-conflict`, `state-conflict`
-
-`repair-needed` also carries recovery ownership:
-
-- on first entry, `btrain` assigns `Repair Owner` from the last canonical workflow actor already recorded in the lane or handoff history
-- leaving `repair-needed` clears the repair-owner metadata
-- re-entering `repair-needed` for the same reason code after one repair attempt escalates to human review
-- `btrain handoff`, `btrain status`, and `btrain doctor` surface the repair owner, attempt count, and any human escalation
-
-## Lanes, Agents, and Reviewers
-
-Lane count is derived from:
-
-- `[agents].active`
-- `[lanes].per_agent`
-- optional `[lanes].ids` metadata when you want to pin the exact reusable lane set
-
-Defaults:
-
-- If no collaborators are configured yet, btrain scaffolds for 2 collaborators
-- Default `per_agent` is `2`
-- That means a fresh repo gets lanes `a` through `d`
-
-Examples:
-
-- 1 agent, `per_agent = 3` -> lanes `a` through `c`
-- 2 agents, `per_agent = 3` -> lanes `a` through `f`
-- 3 agents, `per_agent = 2` -> lanes `a` through `f`
-
-`[lanes].ids` is reserved metadata. It is not a lane section and should never produce a lane named `ids`.
-
-You can change the active collaborators later:
+A local HUD at `http://localhost:3333` with live lane status, hot seat indicators, and file locks:
 
 ```bash
-# replace the active list
-btrain agents set --repo /path/to/repo \
-  --agent "Claude" \
-  --agent "GPT-5 Codex" \
-  --lanes-per-agent 3
-
-# append more collaborators
-btrain agents add --repo /path/to/repo --agent "Gemini 3.1"
+node scripts/serve-dashboard.js    # from repo root
 ```
 
-Reviewer selection rules:
+Features: PixiJS train animation, status-colored lane cards with hop/chug/squish animations, hot seat agent badges, expandable card details, and hazard-tape styling for repair-needed lanes.
 
-- `--reviewer any-other` means "pick any configured agent except the owner"
-- if the requested reviewer matches the owner and another peer exists, btrain snaps to a peer automatically
-- if there is no alternate reviewer, btrain errors instead of creating a self-review
+### agentchattr
 
-## What `btrain init` Writes
-
-`btrain init` creates or refreshes:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `.btrain/project.toml`
-- `.btrain/reviews/`
-- `.claude/collab/HANDOFF_A.md` plus any additional lane files required by config
-- `.claude/skills/` unless `--core-only` is passed
-
-The bundled skill pack is portable and repo-agnostic. It includes helpers such as:
-
-- `pre-handoff`
-- `code-simplifier`
-- `test-writer`
-- `secure-by-default`
-- Speckit skills
-- `tessl__webapp-testing`
-- `tessl__yeet`
-
-The excluded `create-multi-speaker-static-recordings-using-tts` skill is never copied.
-
-Re-running `init`, `agents set`, or `agents add` is safe. Missing lane files and missing bundled skill files are scaffolded. Existing skill content is not overwritten.
-
-## Review-Ready Handoffs
-
-Every `needs-review` handoff should include:
-
-- `Base`
-- `Pre-flight review`
-- `Files changed`
-- `Verification run`
-- `Remaining gaps`
-- `Why this was done`
-- `Specific review asks`
-
-`btrain` now rejects `needs-review` transitions that still contain placeholder reviewer context. For lane-based handoffs, it also rejects review handoffs when the locked files do not contain a real reviewable diff.
-
-That is why `btrain handoff update` supports:
-
-- `--base`
-- `--preflight`
-- `--changed`
-- `--verification`
-- `--gap`
-- `--why`
-- `--review-ask`
-
-The active handoff template uses the current labels:
-
-```md
-## Current
-
-Lane: a
-Task: Implement auth middleware
-Active Agent: Claude
-Peer Reviewer: GPT-5 Codex
-Status: in-progress
-Review Mode: manual
-Locked Files: src/auth/
-Next Action: Continue implementation and prepare reviewer context.
-Base: feat/auth-middleware
-Last Updated: Claude 2026-04-02T12:00:00.000Z
-```
-
-## Key Commands
+A chat UI that lets agents collaborate in real-time with live btrain integration:
 
 ```bash
-btrain init <repo> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
-btrain hooks [--repo <path>]
-btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]
-btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]
-btrain handoff [--repo <path>]
-btrain handoff claim --lane <id> --task <text> --owner <name> [--reviewer <name|any-other>] --files <paths>
-btrain handoff update --lane <id> [--status <status>] [review-context flags...] [--reason-code <code>] [--reason-tag <tag>]...
-btrain handoff request-changes --lane <id> --summary <text> --reason-code <code> [--reason-tag <tag>]... [--next <text>] [--actor <name>]
-btrain handoff resolve --lane <id> --summary <text> --actor <name>
-btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
-btrain locks [--repo <path>]
-btrain status [--repo <path>]
-btrain doctor [--repo <path>] [--repair]
-btrain hcleanup [--repo <path>] [--keep <n>]
+cd agentchattr && ./macos-linux/start_claude.sh   # starts server + Claude wrapper
 ```
 
-`btrain init --hooks` and `btrain hooks` install both managed git guards:
+Features:
+- **Split-pane layout** — lanes panel (left) + chat window (right)
+- **Mini lane pills** — status-colored summary bar at top with dashboard animations
+- **Lane cards** — status badge, LANE ID, W// R// agent meta with neon colors, hot seat designation
+- **Live btrain state** — 15s polling via `btrain status --json`, WebSocket broadcasts
+- **Auto-archive** — lane messages archived when task changes
+- **Resizable/collapsible** lanes panel with grip drag
+- **Click-to-switch** — master-detail: click a lane card to switch the chat channel
 
-- `pre-commit` blocks code commits while a lane is waiting on review
-- `pre-push` blocks pushes while unresolved handoff state is still active
-- `btrain override grant --action push ...` creates a single-use human-confirmed override that the managed `pre-push` hook consumes automatically
+Supported agents:
 
-`btrain doctor --repair` stays conservative. It only applies safe mechanical fixes such as:
+| Agent | CLI | Auth | Launcher |
+|-------|-----|------|----------|
+| Claude | `claude` (`@anthropic-ai/claude-code`) | Subscription login | `start_claude.sh` |
+| Codex | `codex` (`@openai/codex`) | Subscription login | `start_codex.sh` |
+| Gemini | `gemini` (`@google/gemini-cli`) | Subscription login | `start_gemini.sh` |
 
-- releasing stale locks left behind on non-active lanes
-- running the same warm-history compaction path that backs `btrain hcleanup`
+Pre-flight readiness checks (`GET /api/btrain/readiness`) validate binary, auth, and working directory before launch.
 
-## Example Config
+---
+
+## Lanes and Agents
+
+Lane count = `len(active agents)` x `per_agent`:
+
+```
+1 agent,  per_agent=3  -->  lanes a, b, c
+2 agents, per_agent=3  -->  lanes a, b, c, d, e, f
+3 agents, per_agent=3  -->  lanes a, b, c, d, e, f, g, h, i
+```
+
+Config lives in `.btrain/project.toml`:
 
 ```toml
+[project]
 name = "your-repo"
-repo_path = "/absolute/path/to/your-repo"
-handoff_path = ".claude/collab/HANDOFF_A.md"
-default_review_mode = "manual"
 
 [agents]
-active = ["Claude", "GPT-5 Codex"]
+active = ["Claude", "GPT", "Gemini"]
 writer_default = "Claude"
-reviewer_default = "GPT-5 Codex"
-
-[agents.runners]
-"Claude" = "claude -p"
-"GPT-5 Codex" = "codex"
-"Antigravity" = "notify"
-
-[reviews]
-parallel_enabled = true
-sequential_enabled = false
-sequential_triggers = []
-parallel_script = ""
+reviewer_default = "GPT"
 
 [lanes]
 enabled = true
-per_agent = 2
-
-[lanes.a]
-handoff_path = ".claude/collab/HANDOFF_A.md"
-
-[lanes.b]
-handoff_path = ".claude/collab/HANDOFF_B.md"
-
-[lanes.c]
-handoff_path = ".claude/collab/HANDOFF_C.md"
-
-[lanes.d]
-handoff_path = ".claude/collab/HANDOFF_D.md"
+per_agent = 3
 ```
 
-## Agent Identity Verification
+Manage agents:
 
-btrain can verify which agent is speaking.
+```bash
+btrain agents set --repo . --agent "Claude" --agent "GPT" --lanes-per-agent 3
+btrain agents add --repo . --agent "Gemini"
+```
 
-- It uses `BTRAIN_AGENT` or `BRAIN_TRAIN_AGENT` if set.
-- Otherwise it looks at runtime hints and `[agents.runners]`.
-- `btrain handoff` prints an `agent check:` line so the agent can confirm its identity before acting.
+Reviewer selection: `--reviewer any-other` picks any configured peer except the owner.
 
-That means a repo can use short collaborator labels. For example:
+---
+
+## Handoff Lifecycle
+
+### States
+
+| Status | Who acts | Description |
+|--------|----------|-------------|
+| `idle` | Anyone | Lane is free — claim a task |
+| `in-progress` | Owner (writer) | Work underway |
+| `needs-review` | Reviewer | Ready for peer review |
+| `changes-requested` | Owner (writer) | Reviewer sent it back |
+| `repair-needed` | Repair owner | Workflow integrity issue |
+| `resolved` | Anyone | Review approved — lane recyclable |
+
+### Review Context Fields
+
+Every `needs-review` handoff must include:
+
+| Field | CLI flag | Purpose |
+|-------|----------|---------|
+| Base | `--base` | Branch or commit reference |
+| Pre-flight review | `--preflight` | What you checked before handoff |
+| Files changed | `--changed` (repeatable) | What files and why |
+| Verification run | `--verification` (repeatable) | Tests or checks that passed |
+| Remaining gaps | `--gap` (repeatable) | Unverified paths or known issues |
+| Why this was done | `--why` | Motivation for the change |
+| Specific review asks | `--review-ask` (repeatable) | What the reviewer should focus on |
+
+btrain rejects `needs-review` transitions with placeholder context or empty diffs.
+
+### Reason Codes
+
+`changes-requested`: `spec-mismatch`, `regression-risk`, `missing-verification`, `security-risk`, `integration-breakage`
+
+`repair-needed`: `invalid-handoff`, `unreviewed-push`, `lock-mismatch`, `ownership-conflict`, `state-conflict`
+
+---
+
+## Git Guards
+
+`btrain hooks` or `btrain init --hooks` installs:
+
+- **pre-commit** — blocks commits while a lane is waiting on review
+- **pre-push** — blocks pushes while unresolved handoff state exists
+
+Override: `btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason "..."`
+
+---
+
+## Agent Identity
+
+btrain verifies which agent is speaking:
+
+1. Checks `BTRAIN_AGENT` or `BRAIN_TRAIN_AGENT` env var
+2. Falls back to runtime hints + `[agents.runners]` in config
+3. Prints `agent check:` line so agents can confirm identity
 
 ```toml
 [agents.runners]
+"Claude" = "claude -p"
 "GPT" = "codex"
+"Gemini" = "gemini"
 ```
 
-In that setup, `btrain handoff` can report `agent check: GPT (runtime hints (codex))`.
-
-## Loop and Cleanup
-
-- `btrain loop` can relay `bth` between configured runners, but real-world support still depends on what each agent CLI allows.
-- `btrain` keeps workflow events under `.btrain/events/` and archives trimmed handoff history under `.btrain/history/`.
-- `btrain handoff claim` and `btrain handoff resolve` compact warm history automatically, keeping the newest 3 previous handoffs in the lane by default.
-- `btrain hcleanup` runs the same core compaction manually when you want a backstop sweep or a different `--keep` value.
+---
 
 ## Environment Variables
 
 | Variable | Description |
-| --- | --- |
-| `BRAIN_TRAIN_HOME` | Override the global btrain home directory |
+|----------|-------------|
 | `BTRAIN_AGENT` | Pin the current agent identity |
-| `BRAIN_TRAIN_AGENT` | Alias for `BTRAIN_AGENT` |
-| `ANTHROPIC_API_KEY` | Required for automated review modes that call Anthropic |
-| `OPENAI_API_KEY` | Required for automated review modes that call OpenAI |
-| `HANDOFF_HISTORY_PATH` | Output file used by the handoff history watcher |
+| `BRAIN_TRAIN_HOME` | Override the global btrain home directory |
+| `HANDOFF_HISTORY_PATH` | Output file for the handoff history watcher |
+
+---
+
+## Project Structure
+
+```
+btrain/
+  src/brain_train/
+    cli.mjs          # CLI entry point
+    core.mjs         # State machine, locks, events, watchdog
+  scripts/
+    serve-dashboard.js    # Console HUD (port 3333)
+  agentchattr/
+    app.py           # FastAPI server (port 8300)
+    wrapper.py       # Agent CLI launcher + queue watcher
+    readiness.py     # Pre-flight binary/auth/cwd checks
+    static/          # Chat UI (HTML/CSS/JS)
+    macos-linux/     # Launcher scripts per agent
+  specs/             # Design specs (004-007)
+  test/              # Node.js test suite
+  .btrain/           # Config, events, history, locks
+  .claude/collab/    # Handoff files (HANDOFF_A.md, etc.)
+```
+
+---
 
 ## License
 

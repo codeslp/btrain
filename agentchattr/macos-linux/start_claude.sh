@@ -38,6 +38,17 @@ is_server_running() {
 
 ensure_venv
 
+# Pre-flight readiness check
+echo "  Checking claude readiness..."
+if ! command -v claude >/dev/null 2>&1; then
+    echo ""
+    echo "  FAIL: 'claude' not found on PATH."
+    echo "  Install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code"
+    echo ""
+    exit 1
+fi
+echo "  OK: claude found at $(command -v claude)"
+
 if ! is_server_running; then
     if [ "$(uname -s)" = "Darwin" ]; then
         osascript -e "tell app \"Terminal\" to do script \"cd '$(pwd)' && .venv/bin/python run.py\"" > /dev/null 2>&1
