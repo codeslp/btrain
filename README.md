@@ -283,6 +283,12 @@ btrain/
 
 ---
 
+## Credits
+
+The `agentchattr/` chat UI is built on [agentchattr](https://github.com/bcurts/agentchattr) by [@bcurts](https://github.com/bcurts). btrain extends it with btrain lane integration, auto-notify handoff routing, split-pane lane cards, and multi-agent orchestration.
+
+---
+
 ## License
 
 MIT
