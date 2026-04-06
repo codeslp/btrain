@@ -1,7 +1,8 @@
 node_modules/
 .DS_Store
 *.log
-.btrain/reviews/
+.btrain/*
+!.btrain/project.toml
 .claude/settings.local.json
 
 .claude/collab/HANDOFF*.md

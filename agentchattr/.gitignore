@@ -34,4 +34,4 @@ agentchattr-*.zip
 # Local-only files
 goals.py
 pr-reviews/
-agentchattr/.btrain/
+.btrain/
