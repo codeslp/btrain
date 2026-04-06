@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "bin": {
-    "btrain": "./src/brain_train/cli.mjs"
+    "btrain": "./src/brain_train/cli.mjs",
+    "btrain-chat": "./chat"
   },
   "scripts": {
     "test": "node --test 'test/**/*.test.mjs'",

@@ -44,8 +44,8 @@
       <div class="hero-badge">File-backed &middot; Zero dependencies &middot; MIT licensed</div>
       <p class="hero-tagline">Stop your AI agents from<br>stepping on each other</p>
       <p class="hero-sub">
-        One agent writes. One reviews. Multi-lane handoffs keep both agents productive,
-        and the local console dashboard gives you a live lane read without opening the handoff files.
+        Claude, Codex, and Gemini work in parallel lanes. One writes, one reviews.
+        The chat UI and console dashboard give you full visibility without opening handoff files.
       </p>
       <div class="hero-cta">
         <a href="#quickstart" class="btn btn-primary">Get Started</a>
@@ -181,39 +181,43 @@
   <!-- Dashboard -->
   <section id="dashboard" class="section">
     <div class="container">
-      <div class="section-label">Console Dashboard</div>
-      <h2>See lane status without reading markdown</h2>
+      <div class="section-label">Agent Chat + Console Dashboard</div>
+      <h2>Two UIs for full visibility</h2>
       <div class="cards">
         <div class="card">
-          <div class="card-icon">&#128065;</div>
-          <h3>Live lane read</h3>
-          <p>The local HUD polls <code>btrain status --repo .</code> and shows the current lane list, state, and ownership in one place.</p>
+          <div class="card-icon">&#128172;</div>
+          <h3>agentchattr</h3>
+          <p>Multi-agent chat UI at <code>:8300</code>. Split-pane layout with live lane cards, auto-notify on handoff transitions, and @mention routing between Claude, Codex, and Gemini.</p>
         </div>
         <div class="card">
-          <div class="card-icon">&#128101;</div>
-          <h3>Hot-seat clarity</h3>
-          <p>It surfaces who should be acting right now: the writer on <code>in-progress</code>, the reviewer on <code>needs-review</code>, or nobody when a lane is idle.</p>
+          <div class="card-icon">&#128065;</div>
+          <h3>Console Dashboard</h3>
+          <p>Local HUD at <code>:3333</code> with animated lane cards, hot-seat badges, hazard-tape for repair-needed, and expandable handoff details.</p>
         </div>
         <div class="card">
           <div class="card-icon">&#128274;</div>
-          <h3>Lock visibility</h3>
-          <p>You can see locked files and the lane summary at a glance, which makes cross-lane conflicts easier to spot before they become real edits.</p>
+          <h3>Self-healing notifications</h3>
+          <p>The poller auto-posts @mentions to <code>#agents</code> when lanes transition. Content-hash dedup ensures lost notifications get re-sent.</p>
         </div>
       </div>
-      <div class="flow-detail" style="margin-top:1.5rem">
-        <p>The current dashboard entrypoint is <code>scripts/serve-dashboard.js</code>. Right now it is a local HUD prototype for working on <code>btrain</code> itself, not a first-class <code>btrain dashboard</code> CLI command yet.</p>
-      </div>
       <div class="code-block" style="margin-top:1.5rem">
-        <pre><code><span class="t-dim"># from the btrain repo root</span>
-<span class="t-prompt">$</span> npm link
-<span class="t-prompt">$</span> node scripts/serve-dashboard.js
-<span class="t-dim">[BTrain Dashboard] HUD Status monitor is running on http://localhost:3333</span>
+        <pre><code><span class="t-dim"># Install (one time)</span>
+<span class="t-prompt">$</span> cd btrain && npm link
 
-<span class="t-prompt">$</span> open http://localhost:3333
-<span class="t-dim"># or visit the URL in your browser</span></code></pre>
+<span class="t-dim"># Launch all 3 agents on any repo</span>
+<span class="t-prompt">$</span> btrain-chat all /path/to/your/repo
+<span class="t-dim"># Chat UI: http://localhost:8300</span>
+
+<span class="t-dim"># Console dashboard (from the target repo)</span>
+<span class="t-prompt">$</span> cd /path/to/your/repo
+<span class="t-prompt">$</span> node /path/to/btrain/scripts/serve-dashboard.js
+<span class="t-dim"># Dashboard: http://localhost:3333</span>
+
+<span class="t-dim"># Check agent readiness</span>
+<span class="t-prompt">$</span> btrain-chat status</code></pre>
       </div>
       <div class="flow-detail" style="margin-top:1rem">
-        <p>To inspect another bootstrapped repo, <code>cd</code> into that repo first, then run <code>node /path/to/your/btrain/checkout/scripts/serve-dashboard.js</code> so the HUD resolves that repo's <code>.btrain/project.toml</code> and handoff files.</p>
+        <p>Agents need <code>claude</code>, <code>codex</code>, and <code>gemini</code> CLIs installed plus <code>tmux</code>. Run <code>btrain-chat status</code> to check readiness. Each agent authenticates via subscription login (no API keys needed).</p>
       </div>
     </div>
   </section>

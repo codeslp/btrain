@@ -36,27 +36,30 @@ The source of truth is `.claude/collab/HANDOFF_*.md` (one per lane). Never edit 
 git clone https://github.com/codeslp/btrain.git && cd btrain && npm link
 
 # Bootstrap a repo
-btrain init /path/to/repo --agent "Claude" --agent "GPT" --agent "Gemini"
+btrain init /path/to/repo --agent "claude" --agent "codex" --agent "gemini"
+
+# Launch the chat UI with all agents
+btrain-chat all /path/to/repo
 
 # Claim work
 btrain handoff claim --lane a --task "Add auth middleware" \
-  --owner "Claude" --reviewer "GPT" --files "src/auth/"
+  --owner "claude" --reviewer "codex" --files "src/auth/"
 
 # Check guidance
 btrain handoff
 
-# Hand off for review
-btrain handoff update --lane a --status needs-review --actor "Claude" \
+# Hand off for review (poller auto-notifies the reviewer in #agents)
+btrain handoff update --lane a --status needs-review --actor "claude" \
   --preflight --changed "src/auth/index.ts" --verification "npm test" \
   --why "Auth logic drifted" --review-ask "Check unauth flows"
 
 # Reviewer approves
-btrain handoff resolve --lane a --summary "Approved." --actor "GPT"
+btrain handoff resolve --lane a --summary "Approved." --actor "codex"
 
 # Or requests changes
 btrain handoff request-changes --lane a \
   --summary "Need verification pass" --reason-code missing-verification \
-  --actor "GPT"
+  --actor "codex"
 ```
 
 ---
@@ -90,32 +93,58 @@ node scripts/serve-dashboard.js    # from repo root
 
 Features: PixiJS train animation, status-colored lane cards with hop/chug/squish animations, hot seat agent badges, expandable card details, and hazard-tape styling for repair-needed lanes.
 
-### agentchattr
+### agentchattr (Multi-Agent Chat)
 
-A chat UI that lets agents collaborate in real-time with live btrain integration:
+A chat UI where Claude, Codex, and Gemini collaborate in real-time with live btrain integration.
+
+**Launch agents on any repo:**
 
 ```bash
-cd agentchattr && ./macos-linux/start_claude.sh   # starts server + Claude wrapper
+# Install (one time)
+npm link                        # registers btrain + btrain-chat commands
+
+# Launch all 3 agents on your repo
+btrain-chat all /path/to/repo
+
+# Or one at a time
+btrain-chat claude /path/to/repo
+btrain-chat codex /path/to/repo
+btrain-chat gemini /path/to/repo
+
+# From inside the repo directory
+cd /path/to/repo && btrain-chat all .
+
+# Check agent readiness
+btrain-chat status
+
+# Start server only
+btrain-chat server /path/to/repo
 ```
 
-Features:
+Then open **http://127.0.0.1:8300** — the repo name shows in the header.
+
+**Features:**
 - **Split-pane layout** — lanes panel (left) + chat window (right)
-- **Mini lane pills** — status-colored summary bar at top with dashboard animations
-- **Lane cards** — status badge, LANE ID, W// R// agent meta with neon colors, hot seat designation
-- **Live btrain state** — 15s polling via `btrain status --json`, WebSocket broadcasts
+- **Mini lane pills** — status-colored summary bar with dashboard animations
+- **Lane cards** — status badge, LANE ID, W// R// agent meta, hot seat designation
+- **Live btrain state** — 5s polling via `btrain status --json`, WebSocket broadcasts
+- **Auto-notify** — poller auto-posts @mentions to `#agents` on handoff transitions
+- **Self-healing** — content-hash dedup ensures notifications re-send if lost
 - **Auto-archive** — lane messages archived when task changes
 - **Resizable/collapsible** lanes panel with grip drag
 - **Click-to-switch** — master-detail: click a lane card to switch the chat channel
 
-Supported agents:
+**Supported agents:**
 
-| Agent | CLI | Auth | Launcher |
-|-------|-----|------|----------|
-| Claude | `claude` (`@anthropic-ai/claude-code`) | Subscription login | `start_claude.sh` |
-| Codex | `codex` (`@openai/codex`) | Subscription login | `start_codex.sh` |
-| Gemini | `gemini` (`@google/gemini-cli`) | Subscription login | `start_gemini.sh` |
+| Agent | CLI | Install | Auth |
+|-------|-----|---------|------|
+| Claude | `claude` | `npm i -g @anthropic-ai/claude-code` | Subscription login |
+| Codex | `codex` | `npm i -g @openai/codex` | Subscription login |
+| Gemini | `gemini` | `npm i -g @google/gemini-cli` | Subscription login |
 
-Pre-flight readiness checks (`GET /api/btrain/readiness`) validate binary, auth, and working directory before launch.
+**Also needed:** `tmux` (`brew install tmux`) and `ripgrep` (`brew install ripgrep`) for Gemini.
+
+Pre-flight readiness checks (`btrain-chat status` or `GET /api/btrain/readiness`) validate binary, auth, and working directory before launch.
 
 ---
 

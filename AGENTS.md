@@ -13,7 +13,7 @@ This repo uses the `btrain` collaboration workflow.
 
 ### Collaboration Setup
 
-- Active collaborating agents: `Claude`, `GPT`, `Gemini`
+- Active collaborating agents: `claude`, `codex`, `gemini`
 - Current lane target: 9 lane(s) (3 per collaborating agent): `a`, `b`, `c`, `d`, `e`, `f`, `g`, `h`, `i`
 - Change `[agents].active` or `[lanes].per_agent`, then run `btrain init`, `btrain agents set`, or `btrain agents add` to scaffold missing lanes and refresh docs.
 

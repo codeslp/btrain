@@ -14,7 +14,15 @@
 
 set -e
 
-BTRAIN_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Follow symlinks to find the real btrain repo root
+SELF="$0"
+while [ -L "$SELF" ]; do
+    DIR="$(cd "$(dirname "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    # Handle relative symlinks
+    case "$SELF" in /*) ;; *) SELF="$DIR/$SELF" ;; esac
+done
+BTRAIN_ROOT="$(cd "$(dirname "$SELF")" && pwd)"
 AGENTCHATTR="$BTRAIN_ROOT/agentchattr"
 AGENT="${1:-}"
 TARGET_REPO="${2:-$(pwd)}"

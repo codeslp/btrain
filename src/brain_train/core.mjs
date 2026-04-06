@@ -129,6 +129,30 @@ const BTRAIN_GITIGNORE_ENTRIES = [
   ".claude/collab/",
 ]
 
+async function ensureSymlink(targetPath, linkPath) {
+  // Create a relative symlink from linkPath → targetPath
+  // If linkPath already exists as a symlink pointing to the right target, skip.
+  // If it exists as a regular file, leave it alone (user may have customized it).
+  try {
+    const stat = await fs.lstat(linkPath)
+    if (stat.isSymbolicLink()) {
+      const existing = await fs.readlink(linkPath)
+      const expectedTarget = path.relative(path.dirname(linkPath), targetPath)
+      if (existing === expectedTarget || existing === targetPath) {
+        return // already correct
+      }
+      await fs.unlink(linkPath) // wrong target, recreate
+    } else {
+      return // regular file exists, don't overwrite
+    }
+  } catch {
+    // doesn't exist, create it
+  }
+
+  const relTarget = path.relative(path.dirname(linkPath), targetPath)
+  await fs.symlink(relTarget, linkPath)
+}
+
 async function ensureBtrainGitignore(repoRoot) {
   const gitignorePath = path.join(repoRoot, ".gitignore")
   let content = ""
@@ -898,6 +922,9 @@ function getRepoPaths(repoRoot) {
     handoffPath: path.resolve(repoRoot, DEFAULT_HANDOFF_RELATIVE_PATH),
     agentsPath: path.join(repoRoot, "AGENTS.md"),
     claudePath: path.join(repoRoot, "CLAUDE.md"),
+    geminiPath: path.join(repoRoot, "GEMINI.md"),
+    codexPromptsDir: path.join(repoRoot, ".codex", "prompts"),
+    codexAgentsPath: path.join(repoRoot, ".codex", "prompts", "AGENTS.md"),
     skillsPath: path.join(repoRoot, ".claude", "skills"),
   }
 }
@@ -1719,6 +1746,13 @@ async function initRepo(repoPathInput, options = {}) {
       : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config) }),
   )
 
+  // Symlink GEMINI.md → CLAUDE.md (Gemini CLI reads GEMINI.md)
+  await ensureSymlink(repoPaths.claudePath, repoPaths.geminiPath)
+
+  // Symlink .codex/prompts/AGENTS.md → ../../AGENTS.md (Codex CLI reads .codex/prompts/)
+  await ensureDir(repoPaths.codexPromptsDir)
+  await ensureSymlink(repoPaths.agentsPath, repoPaths.codexAgentsPath)
+
   // Only create the single-file handoff if lanes are NOT enabled.
   // When lanes are enabled, per-lane handoff files are created below instead.
   const laneConfigs = getLaneConfigs(config)
@@ -2132,6 +2166,22 @@ async function listGitStatusPaths(repoRoot, pathspecs = []) {
   }
 }
 
+async function listStagedPaths(repoRoot, pathspecs = []) {
+  const args = ["-C", repoRoot, "diff", "--cached", "--name-only"]
+  if (pathspecs.length > 0) {
+    args.push("--", ...pathspecs)
+  }
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      cwd: repoRoot,
+      maxBuffer: 1024 * 1024,
+    })
+    return stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
   const resolvedBase = String(base || "").trim()
   if (!resolvedBase) {
@@ -2170,8 +2220,9 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
 
   if (pathspecs.length > 0) {
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
-    const baseDiffPaths = changedPaths.length === 0 ? await listDiffPathsFromBase(repoRoot, base, pathspecs) : []
-    if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
+    const stagedPaths = changedPaths.length === 0 ? await listStagedPaths(repoRoot, pathspecs) : []
+    const baseDiffPaths = changedPaths.length === 0 && stagedPaths.length === 0 ? await listDiffPathsFromBase(repoRoot, base, pathspecs) : []
+    if (changedPaths.length === 0 && stagedPaths.length === 0 && baseDiffPaths.length === 0) {
       issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
     }
   }
