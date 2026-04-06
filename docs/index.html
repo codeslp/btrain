@@ -494,35 +494,6 @@ btrain handoff claim --lane b --task "Scoring" \
     </div>
   </section>
 
-  <!-- Loop Status -->
-  <section id="loop" class="section section-dark">
-    <div class="container">
-      <div class="section-label">Transparency</div>
-      <h2>What we tried: btrain loop</h2>
-      <div class="loop-content">
-        <p>We built <code>btrain loop</code> to automate the <code>bth</code> relay &mdash; watch the active handoff file, dispatch the right agent CLI, repeat until resolved. <strong>The implementation works.</strong> The remaining limitation is what each agent CLI allows in practice.</p>
-        <h3>Why it doesn't fully work in practice</h3>
-        <p>Both Claude Code and Codex CLI have sandbox models that block the nested subprocess calls that <code>btrain loop</code> needs:</p>
-        <div class="loop-issues">
-          <div class="loop-issue">
-            <strong>Codex</strong> (<code>--full-auto</code>)
-            <p>Its sandbox uses <code>sandbox-exec</code> which blocks child processes from running btrain.<br>
-            <code class="error">sandbox_apply: Operation not permitted</code></p>
-          </div>
-          <div class="loop-issue">
-            <strong>Claude Code</strong> (<code>-p</code>)
-            <p>Requires <code>--permission-mode bypassPermissions</code> which is unsafe for production.</p>
-          </div>
-          <div class="loop-issue">
-            <strong>Antigravity</strong>
-            <p>IDE-embedded with no CLI &mdash; uses <code>notify</code> mode (loop waits for manual action).</p>
-          </div>
-        </div>
-        <h3>Current recommendation</h3>
-        <p>Use <code>bth</code> manually in each agent's chat window. The loop infrastructure exists and will become practical as agent CLIs improve their headless orchestration support. <code>btrain loop --dry-run</code> still works for testing your runner configuration.</p>
-      </div>
-    </div>
-  </section>
 
   <!-- About -->
   <section id="about" class="section">
