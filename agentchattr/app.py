@@ -591,45 +591,32 @@ def configure(cfg: dict, session_token: str = ""):
 
                 _btrain_prev_tasks[lid] = new_task
 
-                # Auto-notify agents on handoff transitions
+                # Auto-notify: if a lane needs action, ensure the right @mention exists in #agents
                 new_status = lane.get("status", "")
-                old_status = _btrain_prev_statuses.get(lid, "")
-                owner = lane.get("owner", "")
-                reviewer = lane.get("reviewer", "")
+                owner = (lane.get("owner") or "").lower()
+                reviewer = (lane.get("reviewer") or "").lower()
 
-                if new_status != old_status and store:
-                    if new_status == "needs-review" and reviewer:
-                        store.add(
-                            "btrain",
-                            f"@{reviewer} lane {lid} is ready for your review. Run: btrain handoff --lane {lid}",
-                            msg_type="system",
-                            channel="agents",
-                        )
-                    elif new_status == "changes-requested" and owner:
-                        reason = lane.get("reasonCode", "")
-                        store.add(
-                            "btrain",
-                            f"@{owner} lane {lid} has changes requested{' (' + reason + ')' if reason else ''}. Run: btrain handoff --lane {lid}",
-                            msg_type="system",
-                            channel="agents",
-                        )
-                    elif new_status == "repair-needed":
-                        repair_owner = lane.get("repairOwner", owner)
-                        store.add(
-                            "btrain",
-                            f"@{repair_owner} lane {lid} needs repair. Run: btrain doctor --repair",
-                            msg_type="system",
-                            channel="agents",
-                        )
-                    elif new_status == "resolved" and old_status == "needs-review" and owner:
-                        store.add(
-                            "btrain",
-                            f"@{owner} lane {lid} approved and resolved.",
-                            msg_type="system",
-                            channel="agents",
-                        )
+                # Hash the lane state — if it changed, a new notification is needed
+                import hashlib as _hl
+                lane_fingerprint = _hl.sha256(
+                    json.dumps(lane, sort_keys=True).encode()
+                ).hexdigest()[:8]
 
-                _btrain_prev_statuses[lid] = new_status
+                notify_text = ""
+                if new_status == "needs-review" and reviewer:
+                    notify_text = f"@{reviewer} lane {lid} ready for review. btrain handoff --lane {lid} #{lane_fingerprint}"
+                elif new_status == "changes-requested" and owner:
+                    reason = lane.get("reasonCode", "")
+                    notify_text = f"@{owner} lane {lid} changes requested{' (' + reason + ')' if reason else ''}. btrain handoff --lane {lid} #{lane_fingerprint}"
+                elif new_status == "repair-needed":
+                    repair_owner = (lane.get("repairOwner") or lane.get("owner") or "").lower()
+                    notify_text = f"@{repair_owner} lane {lid} needs repair. btrain doctor --repair #{lane_fingerprint}"
+
+                if notify_text and store:
+                    recent = store.get_recent(count=30, channel="agents")
+                    exists = any(m.get("sender") == "btrain" and f"#{lane_fingerprint}" in m.get("text", "") for m in recent)
+                    if not exists:
+                        store.add("btrain", notify_text, channel="agents")
 
             # Broadcast lane state to WebSocket clients on any change
             changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
@@ -674,11 +661,11 @@ def configure(cfg: dict, session_token: str = ""):
                     lane_chs = room_settings.get("lane_channels", [])
                     for ch in channels + lane_chs:
                         msgs = store.get_recent(count=999_999_999, channel=ch)
-                        if len(msgs) > 100:
+                        if len(msgs) > 200:
                             # Keep last 200, clear the rest by rewriting
                             trim_count = len(msgs) - 200
                             log.info(f"cleanup: trimming {trim_count} old messages from #{ch}")
-                            ids_to_keep = {m["id"] for m in msgs[-100:]}
+                            ids_to_keep = {m["id"] for m in msgs[-200:]}
                             with store._lock:
                                 store._messages = [m for m in store._messages
                                                    if m.get("channel", "general") != ch

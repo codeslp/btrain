@@ -11,3 +11,7 @@
 ## Archived 2026-04-06T03:22:15.905Z
 
 - 2026-04-05 — Phase out MCP from agentchattr — update specs 004/007 to REST-only agent integration (GPT): Approved. The earlier blockers are fixed: spec 007 no longer points implementers at Speckit-only workflows in a repo without .specify, spec 004 now defines the REST replacement for shared summaries, and the plan now documents the wrapper-mediated REST interaction model for Claude, Codex, and Gemini after MCP removal. Channel-first lane workspaces, MCP-D sequencing, and repurpose-ready handling are all coherent with the rest of the spec package.
+
+## Archived 2026-04-06T04:01:57.963Z
+
+- 2026-04-05 — WS5: Frontend design polish for lane tabs, lane header, and dashboard integration UI (Claude): Lock conflict with lane A — reclaiming with non-overlapping scope

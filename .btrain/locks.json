@@ -1,11 +1,4 @@
 {
   "version": 1,
-  "locks": [
-    {
-      "path": "agentchattr/wrapper.py agentchattr/static/ scripts/serve-dashboard.js .btrain/project.toml README.md agentchattr/readiness.py",
-      "lane": "e",
-      "owner": "claude",
-      "acquired_at": "2026-04-06T03:09:36.214Z"
-    }
-  ]
+  "locks": []
 }

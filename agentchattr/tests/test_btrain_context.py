@@ -119,7 +119,7 @@ class TestParseBtrainOutput(unittest.TestCase):
         # codex is owner of lane b which is needs-review — so codex gets writer-waiting
         result = _parse_btrain_output(SAMPLE_OUTPUT, "codex")
         self.assertIn("LANE b", result)
-        self.assertIn("Waiting on @claude", result)
+        self.assertIn("Waiting on claude", result)
 
     def test_case_insensitive_matching(self):
         result = _parse_btrain_output(SAMPLE_OUTPUT, "Claude")
@@ -161,7 +161,7 @@ class TestFormatLaneContext(unittest.TestCase):
     def test_writer_role_includes_review_instruction(self):
         result = _format_lane_context(self.lane, "writer")
         self.assertIn("writer", result.lower())
-        self.assertIn("@codex", result)
+        self.assertIn("needs-review", result)
 
     def test_reviewer_role_includes_resolve_command(self):
         result = _format_lane_context(self.lane, "reviewer")
@@ -170,7 +170,7 @@ class TestFormatLaneContext(unittest.TestCase):
 
     def test_writer_waiting_mentions_reviewer(self):
         result = _format_lane_context(self.lane, "writer-waiting")
-        self.assertIn("@codex", result)
+        self.assertIn("codex", result)
 
     def test_compact_format(self):
         """New format should be under 50 words."""
