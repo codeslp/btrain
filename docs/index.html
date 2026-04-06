@@ -368,59 +368,80 @@ btrain handoff claim --lane b --task "Scoring" \
               <th></th>
               <th>btrain</th>
               <th>Claude Squad</th>
-              <th>Manual Relay</th>
               <th>CrewAI / AutoGen</th>
+              <th>Manual Relay</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td>Approach</td>
-              <td>Sequential handoff + concurrent lanes</td>
-              <td>Parallel workspace multiplexer</td>
-              <td>Copy-paste between agent chats</td>
-              <td>Python agent pipelines</td>
-            </tr>
-            <tr>
-              <td>State storage</td>
-              <td>Markdown files in git + lock registry</td>
-              <td>tmux sessions + git worktrees</td>
+              <td>Coordination</td>
+              <td>Deterministic state machine + file locks</td>
+              <td>Git worktrees, human picks</td>
+              <td>LLM-driven routing</td>
               <td>Human memory</td>
-              <td>In-memory / custom</td>
             </tr>
             <tr>
-              <td>Dependencies</td>
-              <td>0 (Node.js built-ins)</td>
-              <td>tmux, gh</td>
-              <td>None</td>
-              <td>Python packages</td>
+              <td>Multi-agent chat</td>
+              <td>Built-in (agentchattr with @mention routing)</td>
+              <td>Separate terminals</td>
+              <td>API-level only</td>
+              <td>Copy-paste between windows</td>
             </tr>
             <tr>
               <td>Agent support</td>
-              <td>Any (Claude, Codex, Antigravity, ...)</td>
+              <td>Claude, Codex, Gemini (subscription CLIs)</td>
               <td>Claude Code, Codex, Aider</td>
+              <td>LLM APIs (not CLI agents)</td>
               <td>Any</td>
-              <td>LLM APIs (not IDE agents)</td>
             </tr>
             <tr>
-              <td>Review workflow</td>
-              <td>Built-in (manual, parallel, hybrid)</td>
+              <td>Review enforcement</td>
+              <td>Git hooks block unreviewed pushes + commits</td>
               <td>Manual (git diff)</td>
-              <td>Ad hoc</td>
               <td>Custom</td>
+              <td>Trust</td>
             </tr>
             <tr>
-              <td>Audit trail</td>
-              <td>Git history + Previous Handoffs section</td>
-              <td>Git branches</td>
+              <td>File conflict prevention</td>
+              <td>Lock registry per lane, validated on claim</td>
+              <td>Separate worktrees</td>
               <td>None</td>
-              <td>Custom logging</td>
+              <td>None</td>
             </tr>
             <tr>
-              <td>Setup time</td>
-              <td>~60 seconds</td>
-              <td>~5 minutes</td>
+              <td>Handoff notifications</td>
+              <td>Auto @mention with content-hash dedup</td>
               <td>None</td>
-              <td>Python env setup</td>
+              <td>Programmatic callbacks</td>
+              <td>Manual</td>
+            </tr>
+            <tr>
+              <td>Self-repair</td>
+              <td>Watchdog fixes stale locks, routes repair-needed</td>
+              <td>Manual cleanup</td>
+              <td>Retry logic</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td>State storage</td>
+              <td>Git-tracked markdown + JSON lock registry</td>
+              <td>tmux sessions + git worktrees</td>
+              <td>In-memory / custom DB</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td>Token overhead</td>
+              <td>~20 words/trigger (rules, not LLM coordination)</td>
+              <td>None (manual switching)</td>
+              <td>High (LLM routes every step)</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td>Setup</td>
+              <td><code>npm link && btrain init</code></td>
+              <td><code>go install</code> + config</td>
+              <td>Python env + YAML pipelines</td>
+              <td>None</td>
             </tr>
           </tbody>
         </table>
