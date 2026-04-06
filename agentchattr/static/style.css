@@ -81,6 +81,28 @@ header {
     gap: 10px;
 }
 
+.repo-name {
+    font-family: var(--font-heading);
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 0;
+}
+
+.app-badge {
+    font-family: var(--font-heading);
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: var(--white-06);
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
 .header-logo {
     width: 24px;
     height: 24px;

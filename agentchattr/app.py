@@ -508,6 +508,9 @@ def configure(cfg: dict, session_token: str = ""):
         _agentchattr_root = Path(__file__).parent
         btrain_repo_abs = str((_agentchattr_root / btrain_repo).resolve())
 
+        # Set repo name in settings so the UI can display it
+        room_settings["repo_name"] = Path(btrain_repo_abs).name
+
         # Resolve btrain binary — check PATH, npm global bin, and fallback to node + cli.mjs
         import shutil as _shutil
         _btrain_cmd = None

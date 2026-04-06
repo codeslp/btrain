@@ -1736,9 +1736,16 @@ function updateTyping(agent, active) {
 let pendingChannelSwitch = null;
 
 function applySettings(data) {
+    if (data.repo_name) {
+        const repoEl = document.getElementById('repo-name');
+        if (repoEl) repoEl.textContent = data.repo_name;
+        document.title = data.repo_name + ' — agentchattr';
+    }
     if (data.title) {
-        document.getElementById('room-title').textContent = data.title;
-        document.title = data.title;
+        if (!data.repo_name) {
+            document.getElementById('room-title').textContent = data.title;
+            document.title = data.title;
+        }
     }
     if (data.username) {
         username = data.username;

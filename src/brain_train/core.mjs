@@ -122,6 +122,31 @@ async function ensureDir(targetPath) {
   await fs.mkdir(targetPath, { recursive: true })
 }
 
+const BTRAIN_GITIGNORE_ENTRIES = [
+  "# btrain operational state (not source code — do not track)",
+  ".btrain/*",
+  "!.btrain/project.toml",
+  ".claude/collab/",
+]
+
+async function ensureBtrainGitignore(repoRoot) {
+  const gitignorePath = path.join(repoRoot, ".gitignore")
+  let content = ""
+  try {
+    content = await readText(gitignorePath)
+  } catch {
+    // no .gitignore yet
+  }
+
+  const missing = BTRAIN_GITIGNORE_ENTRIES.filter(
+    (entry) => !entry.startsWith("#") && !content.includes(entry),
+  )
+  if (missing.length === 0) return
+
+  const block = "\n" + BTRAIN_GITIGNORE_ENTRIES.join("\n") + "\n"
+  await writeText(gitignorePath, content.trimEnd() + "\n" + block)
+}
+
 async function readText(targetPath) {
   return fs.readFile(targetPath, "utf8")
 }
@@ -1721,6 +1746,9 @@ async function initRepo(repoPathInput, options = {}) {
       await writeLockRegistry(repoRoot, { version: 1, locks: [] })
     }
   }
+
+  // Ensure .gitignore excludes btrain operational files
+  await ensureBtrainGitignore(repoRoot)
 
   const bundledSkillsResult = shouldScaffoldBundledSkills
     ? await syncBundledSkills(repoPaths.skillsPath)
