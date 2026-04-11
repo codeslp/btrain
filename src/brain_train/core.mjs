@@ -2333,12 +2333,20 @@ async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
   }
 
   const headRef = await resolveGitRevision(repoRoot, "HEAD")
-  const baseRef = await resolveGitRevision(repoRoot, resolvedBase)
+  let baseRef = await resolveGitRevision(repoRoot, resolvedBase)
+
+  // If the full base string doesn't resolve (e.g. it's a prose description like
+  // "Branch 001-source-references forked from main at af14b47"), try to extract
+  // candidate git refs from the string and resolve each one.
+  if (!baseRef) {
+    baseRef = await extractResolvableRef(repoRoot, resolvedBase)
+  }
+
   if (!headRef || !baseRef) {
     return []
   }
 
-  const args = ["-C", repoRoot, "diff", "--name-only", `${resolvedBase}...HEAD`]
+  const args = ["-C", repoRoot, "diff", "--name-only", `${baseRef}...HEAD`]
   if (pathspecs.length > 0) {
     args.push("--", ...pathspecs)
   }
@@ -2357,6 +2365,38 @@ async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
   } catch {
     return []
   }
+}
+
+async function extractResolvableRef(repoRoot, proseBase) {
+  // Extract candidate refs: SHA-like hex strings (7-40 chars) and branch-like
+  // tokens (e.g. "main", "001-source-references") from the prose string.
+  // Try each candidate in order; return the first one that resolves.
+  const candidates = []
+
+  // Match hex strings that look like short/full SHAs (7-40 hex chars, word-bounded)
+  for (const match of proseBase.matchAll(/\b([0-9a-f]{7,40})\b/gi)) {
+    candidates.push(match[1])
+  }
+
+  // Match branch-like tokens (e.g. "main", "001-source-references", "feat/foo")
+  for (const match of proseBase.matchAll(/\b(\d{3,}-[a-z][a-z0-9-]*)\b/gi)) {
+    candidates.push(match[1])
+  }
+  for (const match of proseBase.matchAll(/\b(main|master|develop|HEAD)\b/gi)) {
+    candidates.push(match[1])
+  }
+  for (const match of proseBase.matchAll(/\b(origin\/[a-zA-Z0-9._-]+)\b/g)) {
+    candidates.push(match[1])
+  }
+
+  for (const candidate of candidates) {
+    const ref = await resolveGitRevision(repoRoot, candidate)
+    if (ref) {
+      return ref
+    }
+  }
+
+  return null
 }
 
 async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [], skipDiff = false } = {}) {

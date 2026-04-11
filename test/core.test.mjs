@@ -3631,3 +3631,78 @@ describe("handoff history launch-agent rename compatibility", () => {
     assert.doesNotMatch(launchctlCalls, /ai-sales-brain-train/)
   })
 })
+
+// ──────────────────────────────────────────────
+// Regression: prose Base field with embedded SHA
+// ──────────────────────────────────────────────
+
+describe("needs-review with human-readable Base field", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await runGit(["init", tmpDir], tmpDir)
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+
+    // Create an initial commit so we have a base ref
+    await fs.writeFile(path.join(tmpDir, "README.md"), "# test\n", "utf8")
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "initial"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("accepts a prose Base string containing an embedded short SHA when locked files have a diff", async () => {
+    // Get the current HEAD short SHA to embed in the prose Base field
+    const { stdout: baseShortSha } = await runGit(["rev-parse", "--short", "HEAD"], tmpDir)
+
+    // Claim a lane with locked files
+    let result = await runBtrain(
+      [
+        "handoff", "claim",
+        "--repo", tmpDir,
+        "--lane", "a",
+        "--task", "Prose base regression test",
+        "--owner", "WriterBot",
+        "--reviewer", "ReviewerBot",
+        "--files", "src/",
+      ],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+
+    // Create a file change in the locked path and commit it
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.ts"), "export const x = 1;\n", "utf8")
+    await runGit(["add", "src/feature.ts"], tmpDir)
+    await runGit(["commit", "-m", "add feature"], tmpDir)
+
+    // Attempt needs-review with a human-readable Base string (not a bare ref)
+    // This is the bug: the prose string "Branch foo forked at abc1234" fails git rev-parse
+    const proseBase = `Branch 001-source-references forked from main at ${baseShortSha}. Plan commits: abc1234, def5678.`
+    result = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "WriterBot",
+          base: proseBase,
+          changed: ["src/feature.ts - added feature"],
+          verification: ["npm test"],
+          gap: ["None"],
+          why: ["Testing prose base field."],
+          reviewAsk: ["Verify the diff check works."],
+        }),
+        "--lane", "a",
+      ],
+      tmpDir,
+    )
+
+    // BUG: This currently fails with "reviewable diff in locked files"
+    // because listDiffPathsFromBase passes the full prose string to git rev-parse
+    assert.equal(result.code, 0, `Expected success but got: ${result.stderr}`)
+    assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+  })
+})
+
