@@ -84,7 +84,7 @@ btrain handoff request-changes --lane a \
 
 ### Console Dashboard
 
-`btrain init` scaffolds a local dashboard entrypoint into the target repo at `scripts/serve-dashboard.js`.
+`btrain init` scaffolds a local dashboard entrypoint plus the handoff-history helpers into the target repo under `scripts/`.
 
 A local HUD at `http://localhost:3333` with live lane status, hot seat indicators, and file locks:
 

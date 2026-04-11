@@ -355,6 +355,18 @@ describe("btrain init", () => {
       "dashboard entrypoint should exist",
     )
     await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "handoff-history-watcher.mjs")),
+      "handoff history watcher should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "install-handoff-history-launch-agent.sh")),
+      "handoff history launch-agent installer should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "register-handoff-watch-path.sh")),
+      "handoff history watch registration helper should exist",
+    )
+    await assert.doesNotReject(
       fs.access(path.join(tmpDir, "agentchattr", "run.py")),
       "agentchattr runner should exist",
     )
@@ -417,6 +429,10 @@ describe("btrain init", () => {
         fs.access(path.join(localTmpDir, "agentchattr", "run.py")),
         "agentchattr scaffold should be skipped in core-only mode",
       )
+      const gitignore = await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8")
+      assert.ok(!gitignore.includes("agentchattr/data/"), gitignore)
+      assert.ok(!gitignore.includes("agentchattr/.venv/"), gitignore)
+      assert.ok(!gitignore.includes("agentchattr/uploads/"), gitignore)
     } finally {
       await rmDir(localTmpDir)
     }
@@ -3559,5 +3575,59 @@ describe("handoff history launch-agent rename compatibility", () => {
     const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
     assert.match(launchctlCalls, /bootout gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
     assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.btrain\.plist/)
+  })
+
+  it("bootstrapped repo history helpers derive repo-specific paths and labels", async () => {
+    const repoRoot = path.join(tmpDir, "mech_ai-demo")
+    const codexHome = path.join(tmpDir, "codex-home-generic")
+    const fakeHome = path.join(tmpDir, "home-generic")
+    const launchctlLog = path.join(tmpDir, "launchctl-generic.log")
+    const fakeBinDir = await setupFakeLaunchctl(path.join(tmpDir, "generic-bin"))
+    const historyPath = path.join(tmpDir, "generic-history.md")
+    const watchedRepo = path.join(tmpDir, "generic-watched-repo")
+    const expectedConfigDir = path.join(codexHome, "collab", "mech_ai_demo")
+    const expectedConfigPath = path.join(expectedConfigDir, "handoff-history-agent.env")
+    const expectedWatchListPath = path.join(expectedConfigDir, "handoff-watch-paths.txt")
+    const expectedPlistPath = path.join(fakeHome, "Library", "LaunchAgents", "com.codeslp.handoff-history.mech-ai-demo.plist")
+
+    await fs.mkdir(repoRoot, { recursive: true })
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(watchedRepo, { recursive: true })
+    await fs.writeFile(historyPath, "# history\n", "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+    await runGit(["init", repoRoot], repoRoot)
+
+    const initResult = await runBtrain(["init", repoRoot], repoRoot)
+    assert.equal(initResult.code, 0, initResult.stderr)
+
+    const result = await runShellScript(
+      path.join(repoRoot, "scripts", "install-handoff-history-launch-agent.sh"),
+      [],
+      repoRoot,
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        HANDOFF_HISTORY_PATH_OVERRIDE: historyPath,
+        WATCH_REPO_PATH_OVERRIDE: watchedRepo,
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    await assert.doesNotReject(fs.access(expectedConfigPath), "expected generic config path should exist")
+    await assert.doesNotReject(fs.access(expectedWatchListPath), "expected generic watch list should exist")
+    await assert.doesNotReject(fs.access(expectedPlistPath), "expected generic plist should exist")
+
+    const config = await fs.readFile(expectedConfigPath, "utf8")
+    const watchList = await fs.readFile(expectedWatchListPath, "utf8")
+    const plist = await fs.readFile(expectedPlistPath, "utf8")
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+
+    assert.ok(config.includes(`HANDOFF_HISTORY_PATH=${historyPath}`), config)
+    assert.ok(watchList.includes(watchedRepo), watchList)
+    assert.ok(plist.includes("<string>com.codeslp.handoff-history.mech-ai-demo</string>"), plist)
+    assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.mech-ai-demo\.plist/)
+    assert.doesNotMatch(launchctlCalls, /ai-sales-brain-train/)
   })
 })

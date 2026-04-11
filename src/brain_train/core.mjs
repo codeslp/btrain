@@ -39,6 +39,21 @@ const BUNDLED_DEV_TOOLS = [
     targetParts: ["scripts", "serve-dashboard.js"],
   },
   {
+    label: "handoff-history-watcher",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "handoff-history-watcher.mjs"),
+    targetParts: ["scripts", "handoff-history-watcher.mjs"],
+  },
+  {
+    label: "handoff-history-install",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "install-handoff-history-launch-agent.sh"),
+    targetParts: ["scripts", "install-handoff-history-launch-agent.sh"],
+  },
+  {
+    label: "handoff-history-register",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "register-handoff-watch-path.sh"),
+    targetParts: ["scripts", "register-handoff-watch-path.sh"],
+  },
+  {
     label: "agentchattr",
     sourcePath: BUNDLED_AGENTCHATTR_DIR,
     targetParts: ["agentchattr"],
@@ -144,19 +159,33 @@ async function ensureDir(targetPath) {
   await fs.mkdir(targetPath, { recursive: true })
 }
 
-const BTRAIN_GITIGNORE_ENTRIES = [
+const CORE_GITIGNORE_ENTRIES = [
   "# btrain operational state (not source code — do not track)",
   ".btrain/*",
   "!.btrain/project.toml",
   ".claude/collab/",
-  "",
+]
+
+const DEV_TOOL_GITIGNORE_ENTRIES = [
   "# agentchattr runtime data (chat logs, uploads, tokens — not source)",
   "agentchattr/data/",
   "agentchattr/.venv/",
   "agentchattr/uploads/",
 ]
 
-async function ensureBtrainGitignore(repoRoot) {
+function buildBtrainGitignoreEntries({ includeDevToolIgnores = true } = {}) {
+  if (!includeDevToolIgnores) {
+    return CORE_GITIGNORE_ENTRIES
+  }
+
+  return [
+    ...CORE_GITIGNORE_ENTRIES,
+    "",
+    ...DEV_TOOL_GITIGNORE_ENTRIES,
+  ]
+}
+
+async function ensureBtrainGitignore(repoRoot, { includeDevToolIgnores = true } = {}) {
   const gitignorePath = path.join(repoRoot, ".gitignore")
   let content = ""
   try {
@@ -165,12 +194,13 @@ async function ensureBtrainGitignore(repoRoot) {
     // no .gitignore yet
   }
 
-  const missing = BTRAIN_GITIGNORE_ENTRIES.filter(
-    (entry) => !entry.startsWith("#") && !content.includes(entry),
+  const entries = buildBtrainGitignoreEntries({ includeDevToolIgnores })
+  const missing = entries.filter(
+    (entry) => entry && !entry.startsWith("#") && !content.includes(entry),
   )
   if (missing.length === 0) return
 
-  const block = "\n" + BTRAIN_GITIGNORE_ENTRIES.join("\n") + "\n"
+  const block = "\n" + entries.join("\n") + "\n"
   await writeText(gitignorePath, content.trimEnd() + "\n" + block)
 }
 
@@ -1907,7 +1937,7 @@ async function initRepo(repoPathInput, options = {}) {
   }
 
   // Ensure .gitignore excludes btrain operational files
-  await ensureBtrainGitignore(repoRoot)
+  await ensureBtrainGitignore(repoRoot, { includeDevToolIgnores: shouldScaffoldDevTools })
 
   const bundledSkillsResult = shouldScaffoldBundledSkills
     ? await syncBundledSkills(repoPaths.skillsPath)

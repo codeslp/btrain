@@ -103,7 +103,7 @@ Environment:
 
 Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
-  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack plus \`scripts/serve-dashboard.js\` and \`agentchattr/\` unless you pass \`--core-only\`.
+  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack plus repo-local dashboard, handoff-history helpers, and \`agentchattr/\` unless you pass \`--core-only\`.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
