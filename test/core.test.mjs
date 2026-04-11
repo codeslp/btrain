@@ -349,6 +349,28 @@ describe("btrain init", () => {
     )
   })
 
+  it("scaffolds the local dashboard and agentchattr toolchain by default", async () => {
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "serve-dashboard.js")),
+      "dashboard entrypoint should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "agentchattr", "run.py")),
+      "agentchattr runner should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "agentchattr", "macos-linux", "start_codex.sh")),
+      "agentchattr launcher should exist",
+    )
+  })
+
+  it("adds agentchattr runtime ignores to .gitignore", async () => {
+    const gitignore = await fs.readFile(path.join(tmpDir, ".gitignore"), "utf8")
+    assert.ok(gitignore.includes("agentchattr/data/"), gitignore)
+    assert.ok(gitignore.includes("agentchattr/.venv/"), gitignore)
+    assert.ok(gitignore.includes("agentchattr/uploads/"), gitignore)
+  })
+
   it("AGENTS.md contains the managed block with CLI-first rule", async () => {
     const content = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
     assert.ok(content.includes("<!-- btrain:managed:start -->"), "Missing managed start fence")
@@ -387,6 +409,14 @@ describe("btrain init", () => {
         fs.access(path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
         "bundled skills should be skipped in core-only mode",
       )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, "scripts", "serve-dashboard.js")),
+        "dashboard scaffold should be skipped in core-only mode",
+      )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, "agentchattr", "run.py")),
+        "agentchattr scaffold should be skipped in core-only mode",
+      )
     } finally {
       await rmDir(localTmpDir)
     }
@@ -414,6 +444,36 @@ describe("btrain init", () => {
 
       assert.equal(await fs.readFile(preservedSkillPath, "utf8"), "custom skill text\n")
       await assert.doesNotReject(fs.access(restoredAssetPath), "missing bundled asset should be restored")
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("re-running init restores missing dev-tool files without overwriting existing tool content", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const preservedConfigPath = path.join(localTmpDir, "agentchattr", "config.toml")
+      const restoredDashboardPath = path.join(localTmpDir, "scripts", "serve-dashboard.js")
+      const restoredAgentAssetPath = path.join(localTmpDir, "agentchattr", "open_chat.html")
+
+      await fs.writeFile(preservedConfigPath, "custom agentchattr config\n", "utf8")
+      await fs.rm(restoredDashboardPath)
+      await fs.rm(restoredAgentAssetPath)
+
+      result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      assert.equal(await fs.readFile(preservedConfigPath, "utf8"), "custom agentchattr config\n")
+      await assert.doesNotReject(fs.access(restoredDashboardPath), "missing dashboard file should be restored")
+      await assert.doesNotReject(fs.access(restoredAgentAssetPath), "missing agentchattr asset should be restored")
     } finally {
       await rmDir(localTmpDir)
     }
@@ -1658,6 +1718,124 @@ describe("btrain doctor", () => {
   })
 })
 
+describe("btrain doctor feedback monitoring", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("init scaffolds FEEDBACK_LOG.md", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const content = await fs.readFile(feedbackPath, "utf8")
+    assert.ok(content.includes("Feedback Log"), content)
+    assert.ok(!content.includes("{{repoName}}"), "Template variables should be rendered")
+  })
+
+  it("init --core-only skips FEEDBACK_LOG.md and feedback guidance in managed block", async () => {
+    const coreOnlyDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", coreOnlyDir])
+      await runBtrain(["init", coreOnlyDir, "--core-only"], coreOnlyDir)
+      const feedbackPath = path.join(coreOnlyDir, ".claude", "collab", "FEEDBACK_LOG.md")
+      const exists = await fs.access(feedbackPath).then(() => true, () => false)
+      assert.ok(!exists, "FEEDBACK_LOG.md should not be created with --core-only")
+      const agentsContent = await fs.readFile(path.join(coreOnlyDir, "AGENTS.md"), "utf8")
+      assert.ok(!agentsContent.includes("feedback-triage"), "AGENTS.md should not mention feedback-triage with --core-only")
+      assert.ok(!agentsContent.includes("bug-fix"), "AGENTS.md should not mention bug-fix with --core-only")
+      const claudeContent = await fs.readFile(path.join(coreOnlyDir, "CLAUDE.md"), "utf8")
+      assert.ok(!claudeContent.includes("feedback-triage"), "CLAUDE.md should not mention feedback-triage with --core-only")
+      assert.ok(!claudeContent.includes("bug-fix"), "CLAUDE.md should not mention bug-fix with --core-only")
+    } finally {
+      await rmDir(coreOnlyDir)
+    }
+  })
+
+  it("doctor warns on stale feedback entries", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const staleEntry = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-001: Button does not work",
+      "- **Reported:** 2020-01-01",
+      "- **Category:** BUG",
+      "- **Status:** new",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, staleEntry, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("FB-BUG-001"), stdout)
+    assert.ok(stdout.includes("days"), stdout)
+  })
+
+  it("doctor warns on missing required fields", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const badEntry = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-002: Another issue",
+      "- **Reported:** 2025-01-01",
+      "- **Notes:** something",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, badEntry, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("missing Category"), stdout)
+    assert.ok(stdout.includes("missing Status"), stdout)
+  })
+
+  it("doctor does not warn on healthy entries", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const healthyContent = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-001: Fixed issue",
+      "- **Reported:** 2025-04-01",
+      "- **Category:** BUG",
+      "- **Status:** verified",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, healthyContent, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("FB-BUG-001"), stdout)
+  })
+
+  it("doctor warns when FEEDBACK_LOG.md is missing", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    await fs.unlink(feedbackPath).catch(() => {})
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("FEEDBACK_LOG.md"), stdout)
+  })
+
+  it("--skip-feedback suppresses feedback warnings", async () => {
+    // feedback log is already missing from the previous test
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir, "--skip-feedback"], tmpDir)
+    assert.ok(!stdout.includes("FEEDBACK_LOG.md"), stdout)
+  })
+
+  it("feedback disabled in config suppresses warnings", async () => {
+    const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    await fs.writeFile(tomlPath, toml + "\n[feedback]\nenabled = false\n", "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("FEEDBACK_LOG.md"), stdout)
+    // Restore
+    await fs.writeFile(tomlPath, toml, "utf8")
+  })
+})
+
 describe("btrain doctor --repair", () => {
   it("releases stale lane locks as a safe mechanical repair", async () => {
     const tmpDir = await makeTmpDir()
@@ -2885,6 +3063,150 @@ describe("multi-lane handoff lifecycle", () => {
 
     assert.notEqual(code, 0)
     assert.match(stderr, /reviewable diff in locked files/)
+  })
+
+  it("allows lane review handoffs with --no-diff even without a reviewable diff", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "feat/auth-work",
+          changed: ["docs/README.md - documentation-only update"],
+          verification: ["manual review of docs"],
+          gap: ["None - docs only"],
+          why: ["Documentation update for auth module."],
+          reviewAsk: ["Verify docs accuracy."],
+        }),
+        "--lane",
+        "a",
+        "--no-diff",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, `Expected success but got stderr: ${stderr}`)
+  })
+
+  it("accepts later lane updates when locked files were stored as a legacy space-separated blob", async () => {
+    const legacyDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", legacyDir])
+      await runBtrain(["init", legacyDir], legacyDir)
+      await enableLanes(legacyDir)
+      await runBtrain(["init", legacyDir], legacyDir)
+
+      const claimResult = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          legacyDir,
+          "--lane",
+          "a",
+          "--task",
+          "Auth work",
+          "--owner",
+          "Claude",
+          "--reviewer",
+          "Gemini",
+          "--files",
+          "src/auth/guard.ts,src/auth/util.ts",
+        ],
+        legacyDir,
+      )
+      assert.equal(claimResult.code, 0, claimResult.stderr)
+
+      await fs.mkdir(path.join(legacyDir, "src", "auth"), { recursive: true })
+      await fs.writeFile(path.join(legacyDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+      await fs.writeFile(path.join(legacyDir, "src", "auth", "util.ts"), "export const util = true\n", "utf8")
+
+      const reviewResult = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(legacyDir, {
+            actor: "Claude",
+            reviewer: "Gemini",
+            base: "HEAD",
+            changed: ["src/auth/guard.ts - auth guard", "src/auth/util.ts - auth util"],
+            verification: ["node --test test/core.test.mjs"],
+            gap: ["Did not run manual smoke validation"],
+            why: ["Auth lane is ready for review."],
+            reviewAsk: ["Check the auth lane changes."],
+          }),
+          "--lane",
+          "a",
+        ],
+        legacyDir,
+      )
+      assert.equal(reviewResult.code, 0, reviewResult.stderr)
+
+      const handoffPath = path.join(legacyDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const legacyContent = handoffContent.replace(
+        "Locked Files: src/auth/guard.ts, src/auth/util.ts",
+        "Locked Files: src/auth/guard.ts src/auth/util.ts",
+      )
+      await fs.writeFile(handoffPath, legacyContent, "utf8")
+
+      const rerouteResult = await runBtrain(
+        ["handoff", "update", "--repo", legacyDir, "--lane", "a", "--reviewer", "Codex", "--actor", "Claude"],
+        legacyDir,
+      )
+
+      assert.equal(rerouteResult.code, 0, rerouteResult.stderr)
+      assert.ok(rerouteResult.stdout.includes("peer reviewer: Codex"), rerouteResult.stdout)
+    } finally {
+      await rmDir(legacyDir)
+    }
+  })
+
+  it("does not split a legitimate locked file path that contains spaces", async () => {
+    const spacedDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", spacedDir])
+      await runBtrain(["init", spacedDir], spacedDir)
+      await enableLanes(spacedDir)
+      await runBtrain(["init", spacedDir], spacedDir)
+
+      const claimResult = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          spacedDir,
+          "--lane",
+          "a",
+          "--task",
+          "Docs work",
+          "--owner",
+          "Claude",
+          "--reviewer",
+          "Gemini",
+          "--files",
+          "docs/My File.md",
+        ],
+        spacedDir,
+      )
+      assert.equal(claimResult.code, 0, claimResult.stderr)
+
+      const updateResult = await runBtrain(
+        ["handoff", "update", "--repo", spacedDir, "--lane", "a", "--reviewer", "Codex", "--actor", "Claude"],
+        spacedDir,
+      )
+
+      assert.equal(updateResult.code, 0, updateResult.stderr)
+      assert.ok(updateResult.stdout.includes("peer reviewer: Codex"), updateResult.stdout)
+      assert.ok(updateResult.stdout.includes("docs/My File.md"), updateResult.stdout)
+    } finally {
+      await rmDir(spacedDir)
+    }
   })
 
   it("update lane a to needs-review", async () => {

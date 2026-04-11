@@ -36,7 +36,7 @@ function printHelp() {
 
 Usage:
   btrain init <repo-path> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
-                                                                              Bootstrap a repo (--hooks installs managed git guards)
+                                                                              Bootstrap a repo, local dashboard, and agentchattr (--hooks installs managed git guards)
   btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>]                                                 Check whose turn it is and what to do
@@ -72,7 +72,7 @@ Handoff/Lane Options:
   --agent <name>    Repeatable for \`init\`, \`agents set\`, and \`agents add\`. Updates \`[agents].active\`.
   --lanes-per-agent <n>
                     Sets \`[lanes].per_agent\` when used with \`init\`, \`agents set\`, or \`agents add\`.
-  --core-only       Init only the btrain core files/docs. Skips bundled project skills.
+  --core-only       Init only the btrain core files/docs. Skips bundled project skills and local dev tools.
   --base <ref>      Branch or commit for the work under review.
   --preflight [text]
                     Mark or describe the pre-flight review that was completed.
@@ -87,6 +87,7 @@ Handoff/Lane Options:
                     Required when entering \`changes-requested\` or \`repair-needed\`.
   --reason-tag <tag>
                     Repeatable. Optional secondary tags for reason-code metadata.
+  --no-diff           Skip the reviewable-diff gate for this handoff (e.g. docs-only or config changes).
   --override-id <id>
                     Consume a previously granted audited override when re-running a blocked action.
   --requested-by <agent>
@@ -94,6 +95,7 @@ Handoff/Lane Options:
   --confirmed-by <human>
                     Human confirming the audited override.
   --reason <text>   Required audit reason for \`override grant\`.
+  --skip-feedback   Skip feedback log checks in \`doctor\` output.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
@@ -101,7 +103,7 @@ Environment:
 
 Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
-  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack unless you pass \`--core-only\`.
+  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack plus \`scripts/serve-dashboard.js\` and \`agentchattr/\` unless you pass \`--core-only\`.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
@@ -531,6 +533,7 @@ async function run() {
       agent: options.agent,
       lanesPerAgent: options["lanes-per-agent"],
       scaffoldBundledSkills: !options["core-only"],
+      scaffoldDevTools: !options["core-only"],
     })
     console.log(`Initialized ${result.repoName}`)
     console.log(`repo: ${result.repoRoot}`)
@@ -546,6 +549,20 @@ async function run() {
         copiedCount > 0
           ? `bundled skills: copied ${copiedCount} skill${copiedCount === 1 ? "" : "s"}`
           : "bundled skills: no missing bundled skills",
+      )
+    }
+    if (options["core-only"]) {
+      console.log("dev tools: skipped (--core-only)")
+    } else if (result.devToolsResult?.skippedReason === "self") {
+      console.log("dev tools: source bundle already present in this repo")
+    } else if (result.devToolsResult?.missingTools?.length) {
+      console.log(`dev tools: source bundle missing (${result.devToolsResult.missingTools.join(", ")})`)
+    } else if (result.devToolsResult) {
+      const copiedCount = result.devToolsResult.copiedFileCount
+      console.log(
+        copiedCount > 0
+          ? `dev tools: copied ${copiedCount} file${copiedCount === 1 ? "" : "s"} (${result.devToolsResult.copiedTools.join(", ")})`
+          : "dev tools: no missing dashboard / agentchattr files",
       )
     }
 
@@ -725,7 +742,7 @@ async function run() {
   if (command === "doctor") {
     const options = parseOptions(rest)
     const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const results = await doctor({ repoRoot, repair: !!options.repair })
+    const results = await doctor({ repoRoot, repair: !!options.repair, skipFeedback: !!options["skip-feedback"] })
     console.log(`btrain home: ${getBrainTrainHome()}`)
     console.log("")
     if (results.length === 0) {

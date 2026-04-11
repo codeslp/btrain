@@ -28,9 +28,31 @@ const DEFAULT_CURRENT = {
 
 const execFileAsync = promisify(execFile)
 const CORE_DIR = path.dirname(fileURLToPath(import.meta.url))
-const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.resolve(CORE_DIR, "..", "..", "scripts", "option_a_review.py")
-const BUNDLED_SKILLS_DIR = path.resolve(CORE_DIR, "..", "..", ".claude", "skills")
+const PACKAGE_ROOT = path.resolve(CORE_DIR, "..", "..")
+const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "option_a_review.py")
+const BUNDLED_SKILLS_DIR = path.join(PACKAGE_ROOT, ".claude", "skills")
+const BUNDLED_AGENTCHATTR_DIR = path.join(PACKAGE_ROOT, "agentchattr")
+const BUNDLED_DEV_TOOLS = [
+  {
+    label: "dashboard",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "serve-dashboard.js"),
+    targetParts: ["scripts", "serve-dashboard.js"],
+  },
+  {
+    label: "agentchattr",
+    sourcePath: BUNDLED_AGENTCHATTR_DIR,
+    targetParts: ["agentchattr"],
+    shouldSkip: ({ relativePath }) => shouldSkipBundledAgentchattrPath(relativePath),
+  },
+]
 const EXCLUDED_BUNDLED_SKILLS = new Set(["create-multi-speaker-static-recordings-using-tts"])
+const EXCLUDED_AGENTCHATTR_RUNTIME_NAMES = new Set([
+  ".pytest_cache",
+  ".venv",
+  "__pycache__",
+  "data",
+  "uploads",
+])
 const SUPPORTED_REVIEW_MODES = new Set(["manual", "parallel", "hybrid"])
 const DEFAULT_HANDOFF_RELATIVE_PATH = ".claude/collab/HANDOFF_A.md"
 const LOCKS_FILENAME = "locks.json"
@@ -127,6 +149,11 @@ const BTRAIN_GITIGNORE_ENTRIES = [
   ".btrain/*",
   "!.btrain/project.toml",
   ".claude/collab/",
+  "",
+  "# agentchattr runtime data (chat logs, uploads, tokens — not source)",
+  "agentchattr/data/",
+  "agentchattr/.venv/",
+  "agentchattr/uploads/",
 ]
 
 async function ensureBtrainGitignore(repoRoot) {
@@ -647,7 +674,29 @@ function resolveReasonMetadata(existingCurrent, nextStatus, options = {}, { requ
 }
 
 function normalizePathList(paths) {
-  return [...new Set((Array.isArray(paths) ? paths : []).filter(Boolean))].sort()
+  const normalized = (Array.isArray(paths) ? paths : [])
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean)
+
+  return [...new Set(normalized)].sort()
+}
+
+function normalizeLockedPathList(paths, knownPaths = []) {
+  const normalizedPaths = normalizePathList(paths)
+  const normalizedKnownPaths = normalizePathList(knownPaths)
+
+  if (normalizedPaths.length !== 1 || normalizedKnownPaths.length < 2) {
+    return normalizedPaths
+  }
+
+  const [legacyBlob] = normalizedPaths
+  if (legacyBlob.includes(",")) {
+    return normalizedPaths
+  }
+
+  // Older handoff files could collapse multiple locked paths into one space-separated field.
+  const legacyParts = normalizePathList(legacyBlob.split(/\s+/))
+  return samePathList(legacyParts, normalizedKnownPaths) ? legacyParts : normalizedPaths
 }
 
 function samePathList(left, right) {
@@ -766,8 +815,8 @@ function formatLockedPaths(paths) {
 }
 
 function buildLaneLockState(current, laneLocks) {
-  const handoffPaths = normalizePathList(current.lockedFiles)
   const registryPaths = normalizePathList(laneLocks.map((lock) => lock.path))
+  const handoffPaths = normalizeLockedPathList(current.lockedFiles, registryPaths)
 
   if (registryPaths.length === 0 && handoffPaths.length === 0) {
     return {
@@ -899,6 +948,7 @@ function getRepoPaths(repoRoot) {
     agentsPath: path.join(repoRoot, "AGENTS.md"),
     claudePath: path.join(repoRoot, "CLAUDE.md"),
     skillsPath: path.join(repoRoot, ".claude", "skills"),
+    feedbackLogPath: path.join(repoRoot, ".claude", "collab", "FEEDBACK_LOG.md"),
   }
 }
 
@@ -973,11 +1023,12 @@ function formatInlineCodeList(values) {
   return values.map((value) => `\`${value}\``).join(", ")
 }
 
-function buildManagedBlockVariables(config) {
+function buildManagedBlockVariables(config, { includeFeedbackGuidance = true } = {}) {
   const collaborators = getCollaborationAgentNames(config)
   const laneIds = (getLaneConfigs(config) || getDerivedLaneIds(config)).map((lane) => lane.id || lane)
   const laneExamples = laneIds.slice(0, Math.min(laneIds.length, 6))
   const lanesPerAgent = getLanesPerAgent(config)
+  const feedbackEnabled = includeFeedbackGuidance && getFeedbackConfig(config).enabled
 
   return {
     activeAgentsSummary:
@@ -986,6 +1037,9 @@ function buildManagedBlockVariables(config) {
         : 'not configured yet. Add `active = ["Agent A", "Agent B"]` under `[agents]`.',
     laneSummary: `${laneIds.length} lane(s) (${lanesPerAgent} per collaborating agent): ${formatInlineCodeList(laneIds)}`,
     laneExamples: formatInlineCodeList(laneExamples),
+    feedbackGuidance: feedbackEnabled
+      ? "- Use the `feedback-triage` skill when processing user-reported issues. It logs entries to `.claude/collab/FEEDBACK_LOG.md` and drives test-first resolution.\n- Use the `bug-fix` skill for developer-found bugs. Write a failing reproduction test before editing production code."
+      : "",
   }
 }
 
@@ -1002,6 +1056,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
   "- Repo config lives at `.btrain/project.toml`.",
+  "{{feedbackGuidance}}",
   "",
   "### Collaboration Setup",
   "",
@@ -1110,6 +1165,24 @@ const TEMPLATE_DEFAULTS = {
     "",
   ].join("\n"),
 
+  "feedback-log.md": [
+    "# Feedback Log",
+    "",
+    "User-reported feedback for {{repoName}}. Single source of truth for triage and resolution.",
+    "",
+    "| Status | Meaning |",
+    "|--------|---------|",
+    "| new | Logged, awaiting user confirmation of triage |",
+    "| triaged | User confirmed category, ready for test/fix |",
+    "| test-written | Reproduction test exists and fails |",
+    "| fixed | Code fix applied, test passes |",
+    "| verified | Full test suite passes, no regressions |",
+    "| blocked-spec | Requires spec change via speckit before work begins |",
+    "",
+    "---",
+    "",
+  ].join("\n"),
+
   "pre-commit-hook.sh": renderPreCommitHook(),
   "pre-push-hook.sh": renderPrePushHook(),
 }
@@ -1149,28 +1222,58 @@ async function loadTemplate(filename) {
   return readText(path.join(templatesDir, filename))
 }
 
-async function copyMissingTree(sourcePath, targetPath) {
+function shouldSkipBundledAgentchattrPath(relativePath = "") {
+  if (!relativePath) {
+    return false
+  }
+
+  const normalizedSegments = String(relativePath)
+    .split(path.sep)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+
+  if (normalizedSegments.some((segment) => EXCLUDED_AGENTCHATTR_RUNTIME_NAMES.has(segment))) {
+    return true
+  }
+
+  const leafName = normalizedSegments[normalizedSegments.length - 1] || ""
+  return leafName.endsWith(".pyc")
+}
+
+async function copyMissingTree(sourcePath, targetPath, options = {}, relativePath = "") {
   const sourceStats = await fs.lstat(sourcePath)
   if (sourceStats.isSymbolicLink()) {
-    return copyMissingTree(await fs.realpath(sourcePath), targetPath)
+    return copyMissingTree(await fs.realpath(sourcePath), targetPath, options, relativePath)
+  }
+
+  if (options.shouldSkip?.({ relativePath, sourcePath, sourceStats, targetPath })) {
+    return 0
   }
 
   if (sourceStats.isDirectory()) {
     await ensureDir(targetPath)
     const entries = await fs.readdir(sourcePath)
+    let copiedCount = 0
     for (const entry of entries.sort((left, right) => left.localeCompare(right))) {
-      await copyMissingTree(path.join(sourcePath, entry), path.join(targetPath, entry))
+      const nextRelativePath = relativePath ? path.join(relativePath, entry) : entry
+      copiedCount += await copyMissingTree(
+        path.join(sourcePath, entry),
+        path.join(targetPath, entry),
+        options,
+        nextRelativePath,
+      )
     }
-    return
+    return copiedCount
   }
 
   if (await pathExists(targetPath)) {
-    return
+    return 0
   }
 
   await ensureDir(path.dirname(targetPath))
   await fs.copyFile(sourcePath, targetPath)
   await fs.chmod(targetPath, sourceStats.mode)
+  return 1
 }
 
 async function syncBundledSkills(targetSkillsPath) {
@@ -1219,6 +1322,54 @@ async function syncBundledSkills(targetSkillsPath) {
     copiedSkills,
     skippedSkills,
     skippedReason: "",
+  }
+}
+
+async function syncBundledDevTools(repoRoot) {
+  const copiedTools = []
+  const missingTools = []
+  const selfTools = []
+  let copiedFileCount = 0
+
+  for (const tool of BUNDLED_DEV_TOOLS) {
+    if (!(await pathExists(tool.sourcePath))) {
+      missingTools.push(tool.label)
+      continue
+    }
+
+    const targetPath = path.join(repoRoot, ...tool.targetParts)
+    if (path.resolve(tool.sourcePath) === path.resolve(targetPath)) {
+      selfTools.push(tool.label)
+      continue
+    }
+
+    const copiedForTool = await copyMissingTree(tool.sourcePath, targetPath, {
+      shouldSkip: tool.shouldSkip,
+    })
+    copiedFileCount += copiedForTool
+
+    if (copiedForTool > 0) {
+      copiedTools.push(tool.label)
+    }
+  }
+
+  let skippedReason = ""
+  if (copiedTools.length === 0) {
+    if (selfTools.length === BUNDLED_DEV_TOOLS.length) {
+      skippedReason = "self"
+    } else if (missingTools.length > 0) {
+      skippedReason = "bundle-missing"
+    } else {
+      skippedReason = "no-missing-files"
+    }
+  }
+
+  return {
+    copiedTools,
+    copiedFileCount,
+    missingTools,
+    selfTools,
+    skippedReason,
   }
 }
 
@@ -1651,6 +1802,7 @@ async function initRepo(repoPathInput, options = {}) {
   const now = formatIsoTimestamp()
   const requestedAgents = normalizeStringList(options.agent)
   const shouldScaffoldBundledSkills = options.scaffoldBundledSkills === true
+  const shouldScaffoldDevTools = options.scaffoldDevTools === true
   const requestedLanesPerAgent = normalizePositiveInteger(
     options.lanesPerAgent,
     undefined,
@@ -1695,10 +1847,10 @@ async function initRepo(repoPathInput, options = {}) {
   }
 
   const config = await readProjectConfig(repoRoot)
-  const managedBlock = await getManagedBlockTemplate(repoRoot)
+  const managedBlock = await getManagedBlockTemplate(repoRoot, { includeFeedbackGuidance: shouldScaffoldBundledSkills })
   const instructionTemplateVars = {
     roleLabel: "agent",
-    ...buildManagedBlockVariables(config),
+    ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }),
   }
 
   const agentsExists = await pathExists(repoPaths.agentsPath)
@@ -1716,7 +1868,7 @@ async function initRepo(repoPathInput, options = {}) {
     repoPaths.claudePath,
     claudeExists
       ? replaceManagedBlock(claudeContent, managedBlock)
-      : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config) }),
+      : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }) }),
   )
 
   // Only create the single-file handoff if lanes are NOT enabled.
@@ -1747,11 +1899,21 @@ async function initRepo(repoPathInput, options = {}) {
     }
   }
 
+  // Scaffold FEEDBACK_LOG.md if feedback tracking is enabled and bundled skills are included.
+  // --core-only skips bundled skills including feedback-triage, so the log is not useful without the skill.
+  if (shouldScaffoldBundledSkills && getFeedbackConfig(config).enabled && !(await pathExists(repoPaths.feedbackLogPath))) {
+    const feedbackLogTemplate = await loadTemplate("feedback-log.md")
+    await writeText(repoPaths.feedbackLogPath, renderTemplate(feedbackLogTemplate, templateVars))
+  }
+
   // Ensure .gitignore excludes btrain operational files
   await ensureBtrainGitignore(repoRoot)
 
   const bundledSkillsResult = shouldScaffoldBundledSkills
     ? await syncBundledSkills(repoPaths.skillsPath)
+    : null
+  const devToolsResult = shouldScaffoldDevTools
+    ? await syncBundledDevTools(repoRoot)
     : null
 
   upsertRepoEntry(registry, {
@@ -1777,6 +1939,7 @@ async function initRepo(repoPathInput, options = {}) {
     repoPaths,
     hookResult,
     bundledSkillsResult,
+    devToolsResult,
   }
 }
 
@@ -1805,6 +1968,7 @@ async function syncActiveAgents(repoRoot, options = {}) {
     agent: nextAgents,
     lanesPerAgent: options.lanesPerAgent,
     scaffoldBundledSkills: false,
+    scaffoldDevTools: false,
   })
 }
 
@@ -2165,10 +2329,10 @@ async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
   }
 }
 
-async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [] } = {}) {
+async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [], skipDiff = false } = {}) {
   const issues = collectNeedsReviewContextIssues({ base, contextSectionText })
 
-  if (pathspecs.length > 0) {
+  if (!skipDiff && pathspecs.length > 0) {
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
     const baseDiffPaths = changedPaths.length === 0 ? await listDiffPathsFromBase(repoRoot, base, pathspecs) : []
     if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
@@ -2972,11 +3136,13 @@ async function patchHandoff(repoRoot, options) {
             actorLabel: resolvedActor || effectiveOwner,
           })
         } else {
+          const handoffCfg = getHandoffConfig(config)
           await validateNeedsReviewTransition(repoRoot, {
             laneId,
             base: baseForReview,
             contextSectionText: nextContextSectionText,
             pathspecs: effectiveFiles,
+            skipDiff: !handoffCfg.requireDiff || !!options["no-diff"],
           })
         }
       }
@@ -3107,9 +3273,11 @@ async function patchHandoff(repoRoot, options) {
         actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
       })
     } else {
+      const handoffCfg = getHandoffConfig(config)
       await validateNeedsReviewTransition(repoRoot, {
         base: options.base !== undefined ? options.base : existingCurrent.base,
         contextSectionText: nextContextSectionText,
+        skipDiff: !handoffCfg.requireDiff || !!options["no-diff"],
       })
     }
   }
@@ -3641,6 +3809,20 @@ function getReviewConfig(config) {
         : DEFAULT_PARALLEL_REVIEW_SCRIPT,
     hybridPathTriggers: Array.isArray(reviews.hybrid_path_triggers) ? reviews.hybrid_path_triggers : [],
     hybridContentTriggers: Array.isArray(reviews.hybrid_content_triggers) ? reviews.hybrid_content_triggers : [],
+  }
+}
+
+function getHandoffConfig(config) {
+  const handoff = config?.handoff && typeof config.handoff === "object" ? config.handoff : {}
+  return {
+    requireDiff: handoff.require_diff !== false,
+  }
+}
+
+function getFeedbackConfig(config) {
+  const feedback = config?.feedback && typeof config.feedback === "object" ? config.feedback : {}
+  return {
+    enabled: feedback.enabled !== false,
   }
 }
 
@@ -5614,11 +5796,25 @@ async function applyWatchdogRepairs(repoRoot, {
   return repairs
 }
 
-async function getManagedBlockTemplate(repoRoot = null) {
+async function getManagedBlockTemplate(repoRoot = null, { includeFeedbackGuidance } = {}) {
   const templateContent = await loadTemplate("managed-block.md")
   const config = repoRoot ? await readProjectConfig(repoRoot) : null
-  const rendered = renderTemplate(templateContent, buildManagedBlockVariables(config))
-  return extractManagedBlock(rendered) || rendered.trim()
+  // If includeFeedbackGuidance is not explicitly passed, auto-detect from the repo
+  let feedbackGuidance = includeFeedbackGuidance
+  if (feedbackGuidance === undefined && repoRoot) {
+    const repoPaths = getRepoPaths(repoRoot)
+    feedbackGuidance = await pathExists(path.join(repoPaths.skillsPath, "feedback-triage"))
+  }
+  if (feedbackGuidance === undefined) {
+    feedbackGuidance = true
+  }
+  const rendered = renderTemplate(
+    templateContent,
+    buildManagedBlockVariables(config, { includeFeedbackGuidance: feedbackGuidance }),
+  )
+  // Clean up consecutive blank lines from conditional template variables
+  const cleaned = rendered.replace(/\n{3,}/g, "\n\n")
+  return extractManagedBlock(cleaned) || cleaned.trim()
 }
 
 function hasTemplateDrift(content, managedTemplate) {
@@ -5861,7 +6057,49 @@ async function getStatus({ repoRoot } = {}) {
   return statuses
 }
 
-async function doctorRepo(repoRoot, { repair = false } = {}) {
+function checkFeedbackLogHealth(content) {
+  const warnings = []
+  const entries = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const headerMatch = /^## (FB-\w+-\d+):/.exec(lines[i])
+    if (headerMatch) {
+      entries.push({ id: headerMatch[1], startLine: i })
+    }
+  }
+
+  for (let idx = 0; idx < entries.length; idx++) {
+    const entry = entries[idx]
+    const endLine = idx + 1 < entries.length ? entries[idx + 1].startLine : lines.length
+    const entryText = lines.slice(entry.startLine, endLine).join("\n")
+
+    if (!entryText.includes("**Category:**")) {
+      warnings.push(`Feedback ${entry.id}: missing Category field.`)
+    }
+
+    const statusMatch = entryText.match(/\*\*Status:\*\*\s*(\S+)/)
+    if (!statusMatch) {
+      warnings.push(`Feedback ${entry.id}: missing Status field.`)
+      continue
+    }
+
+    const status = statusMatch[1]
+    if (status === "new" || status === "triaged") {
+      const reportedMatch = entryText.match(/\*\*Reported:\*\*\s*(\d{4}-\d{2}-\d{2})/)
+      if (reportedMatch) {
+        const daysSince = (Date.now() - new Date(reportedMatch[1]).getTime()) / (1000 * 60 * 60 * 24)
+        if (daysSince > 7) {
+          warnings.push(`Feedback ${entry.id} has been \`${status}\` for ${Math.floor(daysSince)} days.`)
+        }
+      }
+    }
+  }
+
+  return warnings
+}
+
+async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {}) {
   const issues = []
   const warnings = []
   const repurposeReady = []
@@ -5925,6 +6163,19 @@ async function doctorRepo(repoRoot, { repair = false } = {}) {
 
   if (overrides.length > 0) {
     warnings.push(`Active audited overrides: ${overrides.map((record) => formatOverrideSummary(record)).join(", ")}`)
+  }
+
+  // Feedback log monitoring
+  const feedbackCfg = getFeedbackConfig(config)
+  if (feedbackCfg.enabled && !skipFeedback) {
+    if (await pathExists(repoPaths.feedbackLogPath)) {
+      const feedbackContent = await readText(repoPaths.feedbackLogPath)
+      for (const issue of checkFeedbackLogHealth(feedbackContent)) {
+        warnings.push(issue)
+      }
+    } else if (await pathExists(repoPaths.projectTomlPath)) {
+      warnings.push("Missing `.claude/collab/FEEDBACK_LOG.md`. Run `btrain init .` to create it.")
+    }
   }
 
   // Lane-specific checks
@@ -6056,9 +6307,9 @@ async function doctorRepo(repoRoot, { repair = false } = {}) {
   }
 }
 
-async function doctor({ repoRoot, repair = false } = {}) {
+async function doctor({ repoRoot, repair = false, skipFeedback = false } = {}) {
   if (repoRoot) {
-    return [await doctorRepo(repoRoot, { repair })]
+    return [await doctorRepo(repoRoot, { repair, skipFeedback })]
   }
 
   const repos = await getRegisteredRepos()
@@ -6075,7 +6326,7 @@ async function doctor({ repoRoot, repair = false } = {}) {
       continue
     }
 
-    results.push(await doctorRepo(repo.path, { repair }))
+    results.push(await doctorRepo(repo.path, { repair, skipFeedback }))
   }
 
   return results
