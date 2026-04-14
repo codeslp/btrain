@@ -24,6 +24,8 @@ from jobs import JobStore
 from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
 from agents import AgentTrigger
+from btrain.notifications import build_btrain_notification_text
+from btrain.validator import btrainValidator
 from registry import RuntimeRegistry
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
@@ -69,6 +71,7 @@ _btrain_lock = threading.Lock()
 _btrain_cache: dict = {}  # raw JSON from `btrain status --json`
 _btrain_prev_tasks: dict[str, str] = {}  # lane_id -> last known task (for change detection)
 _btrain_prev_statuses: dict[str, str] = {}  # lane_id -> last known status (for handoff notifications)
+btrain_validator = None
 
 # Agent hats (persisted to data/hats.json)
 agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
@@ -305,7 +308,6 @@ def configure(cfg: dict, session_token: str = ""):
     agents = AgentTrigger(registry, data_dir=data_dir)
 
     # btrain Conflict Detection
-    from rules import btrainValidator
     global btrain_validator
     btrain_validator = btrainValidator()
 
@@ -601,27 +603,19 @@ def configure(cfg: dict, session_token: str = ""):
 
                 # Auto-notify: if a lane needs action, ensure the right @mention exists in #agents
                 new_status = lane.get("status", "")
-                owner = (lane.get("owner") or "").lower()
-                reviewer = (lane.get("reviewer") or "").lower()
+                old_status = _btrain_prev_statuses.get(lid, "")
+                _btrain_prev_statuses[lid] = new_status
 
-                # Hash the lane state — if it changed, a new notification is needed
-                import hashlib as _hl
-                lane_fingerprint = _hl.sha256(
-                    json.dumps(lane, sort_keys=True).encode()
-                ).hexdigest()[:8]
-
-                notify_text = ""
-                if new_status == "needs-review" and reviewer:
-                    notify_text = f"@{reviewer} lane {lid} ready for review. btrain handoff --lane {lid} #{lane_fingerprint}"
-                elif new_status == "changes-requested" and owner:
-                    reason = lane.get("reasonCode", "")
-                    notify_text = f"@{owner} lane {lid} changes requested{' (' + reason + ')' if reason else ''}. btrain handoff --lane {lid} #{lane_fingerprint}"
-                elif new_status == "repair-needed":
-                    repair_owner = (lane.get("repairOwner") or lane.get("owner") or "").lower()
-                    notify_text = f"@{repair_owner} lane {lid} needs repair. btrain doctor --repair #{lane_fingerprint}"
+                notify_text = build_btrain_notification_text(
+                    lane,
+                    previous_status=old_status,
+                    agents_cfg=config.get("agents", {}),
+                    registry=registry,
+                )
 
                 if notify_text and store:
                     recent = store.get_recent(count=30, channel="agents")
+                    lane_fingerprint = notify_text.rsplit("#", 1)[-1]
                     exists = any(m.get("sender") == "btrain" and f"#{lane_fingerprint}" in m.get("text", "") for m in recent)
                     if not exists:
                         store.add("btrain", notify_text, channel="agents")
@@ -909,10 +903,10 @@ async def _handle_new_message(msg: dict):
     # btrain Conflict Detection (Workstream 6)
     if btrain_validator:
         with _btrain_lock:
-            lanes = _btrain_cache.get("lanes", [])
-            warnings = btrain_validator.validate(sender, text, channel, lanes)
-            for w in warnings:
-                store.add("system", w, channel=channel)
+            lanes = list(_btrain_cache.get("lanes", []))
+        warnings = btrain_validator.validate(sender, text, channel, lanes)
+        for w in warnings:
+            store.add("system", w, channel=channel)
 
     # Check for slash commands — use stripped text (sans @mentions)
     if stripped == "/continue":

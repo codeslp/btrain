@@ -61,7 +61,7 @@ The CLI manages the collaboration state machine. All state is file-based (no dat
 
 | Command | Purpose |
 |---------|---------|
-| `btrain init <repo> [--hooks]` | Bootstrap repo with lanes, handoff files, git hooks |
+| `btrain init <repo> [--hooks]` | Bootstrap repo with lanes, handoff files, git hooks, local dashboard, and agentchattr |
 | `btrain handoff` | Check state, print per-agent guidance |
 | `btrain handoff claim --lane a --task "..." --owner "..." --reviewer "..."` | Claim a task on a lane |
 | `btrain handoff update --lane a --status needs-review` | Transition lane status |

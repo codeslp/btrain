@@ -6,6 +6,27 @@ import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
+// ---------------------------------------------------------------------------
+// Structured error class — gives blocked agents actionable remediation steps
+// ---------------------------------------------------------------------------
+class BtrainError extends Error {
+  /**
+   * @param {object} opts
+   * @param {string} opts.message  – What went wrong (one-liner).
+   * @param {string} [opts.reason] – Why this is enforced / what condition failed.
+   * @param {string} [opts.fix]    – Exact command or step to resolve it.
+   * @param {string} [opts.context] – Extra info (e.g. valid values, current state).
+   */
+  constructor({ message, reason, fix, context }) {
+    const parts = [`✖ ${message}`]
+    if (reason)  parts.push(`  ↳ Why: ${reason}`)
+    if (fix)     parts.push(`  ✦ Fix: ${fix}`)
+    if (context) parts.push(`  ℹ ${context}`)
+    super(parts.join("\n"))
+    this.name = "BtrainError"
+  }
+}
+
 const MANAGED_START = "<!-- btrain:managed:start -->"
 const MANAGED_END = "<!-- btrain:managed:end -->"
 
@@ -28,9 +49,46 @@ const DEFAULT_CURRENT = {
 
 const execFileAsync = promisify(execFile)
 const CORE_DIR = path.dirname(fileURLToPath(import.meta.url))
-const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.resolve(CORE_DIR, "..", "..", "scripts", "option_a_review.py")
-const BUNDLED_SKILLS_DIR = path.resolve(CORE_DIR, "..", "..", ".claude", "skills")
+const PACKAGE_ROOT = path.resolve(CORE_DIR, "..", "..")
+const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "option_a_review.py")
+const BUNDLED_SKILLS_DIR = path.join(PACKAGE_ROOT, ".claude", "skills")
+const BUNDLED_AGENTCHATTR_DIR = path.join(PACKAGE_ROOT, "agentchattr")
+const BUNDLED_DEV_TOOLS = [
+  {
+    label: "dashboard",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "serve-dashboard.js"),
+    targetParts: ["scripts", "serve-dashboard.js"],
+  },
+  {
+    label: "handoff-history-watcher",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "handoff-history-watcher.mjs"),
+    targetParts: ["scripts", "handoff-history-watcher.mjs"],
+  },
+  {
+    label: "handoff-history-install",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "install-handoff-history-launch-agent.sh"),
+    targetParts: ["scripts", "install-handoff-history-launch-agent.sh"],
+  },
+  {
+    label: "handoff-history-register",
+    sourcePath: path.join(PACKAGE_ROOT, "scripts", "register-handoff-watch-path.sh"),
+    targetParts: ["scripts", "register-handoff-watch-path.sh"],
+  },
+  {
+    label: "agentchattr",
+    sourcePath: BUNDLED_AGENTCHATTR_DIR,
+    targetParts: ["agentchattr"],
+    shouldSkip: ({ relativePath }) => shouldSkipBundledAgentchattrPath(relativePath),
+  },
+]
 const EXCLUDED_BUNDLED_SKILLS = new Set(["create-multi-speaker-static-recordings-using-tts"])
+const EXCLUDED_AGENTCHATTR_RUNTIME_NAMES = new Set([
+  ".pytest_cache",
+  ".venv",
+  "__pycache__",
+  "data",
+  "uploads",
+])
 const SUPPORTED_REVIEW_MODES = new Set(["manual", "parallel", "hybrid"])
 const DEFAULT_HANDOFF_RELATIVE_PATH = ".claude/collab/HANDOFF_A.md"
 const LOCKS_FILENAME = "locks.json"
@@ -122,38 +180,33 @@ async function ensureDir(targetPath) {
   await fs.mkdir(targetPath, { recursive: true })
 }
 
-const BTRAIN_GITIGNORE_ENTRIES = [
+const CORE_GITIGNORE_ENTRIES = [
   "# btrain operational state (not source code — do not track)",
   ".btrain/*",
   "!.btrain/project.toml",
   ".claude/collab/",
 ]
 
-async function ensureSymlink(targetPath, linkPath) {
-  // Create a relative symlink from linkPath → targetPath
-  // If linkPath already exists as a symlink pointing to the right target, skip.
-  // If it exists as a regular file, leave it alone (user may have customized it).
-  try {
-    const stat = await fs.lstat(linkPath)
-    if (stat.isSymbolicLink()) {
-      const existing = await fs.readlink(linkPath)
-      const expectedTarget = path.relative(path.dirname(linkPath), targetPath)
-      if (existing === expectedTarget || existing === targetPath) {
-        return // already correct
-      }
-      await fs.unlink(linkPath) // wrong target, recreate
-    } else {
-      return // regular file exists, don't overwrite
-    }
-  } catch {
-    // doesn't exist, create it
+const DEV_TOOL_GITIGNORE_ENTRIES = [
+  "# agentchattr runtime data (chat logs, uploads, tokens — not source)",
+  "agentchattr/data/",
+  "agentchattr/.venv/",
+  "agentchattr/uploads/",
+]
+
+function buildBtrainGitignoreEntries({ includeDevToolIgnores = true } = {}) {
+  if (!includeDevToolIgnores) {
+    return CORE_GITIGNORE_ENTRIES
   }
 
-  const relTarget = path.relative(path.dirname(linkPath), targetPath)
-  await fs.symlink(relTarget, linkPath)
+  return [
+    ...CORE_GITIGNORE_ENTRIES,
+    "",
+    ...DEV_TOOL_GITIGNORE_ENTRIES,
+  ]
 }
 
-async function ensureBtrainGitignore(repoRoot) {
+async function ensureBtrainGitignore(repoRoot, { includeDevToolIgnores = true } = {}) {
   const gitignorePath = path.join(repoRoot, ".gitignore")
   let content = ""
   try {
@@ -162,12 +215,13 @@ async function ensureBtrainGitignore(repoRoot) {
     // no .gitignore yet
   }
 
-  const missing = BTRAIN_GITIGNORE_ENTRIES.filter(
-    (entry) => !entry.startsWith("#") && !content.includes(entry),
+  const entries = buildBtrainGitignoreEntries({ includeDevToolIgnores })
+  const missing = entries.filter(
+    (entry) => entry && !entry.startsWith("#") && !content.includes(entry),
   )
   if (missing.length === 0) return
 
-  const block = "\n" + BTRAIN_GITIGNORE_ENTRIES.join("\n") + "\n"
+  const block = "\n" + entries.join("\n") + "\n"
   await writeText(gitignorePath, content.trimEnd() + "\n" + block)
 }
 
@@ -199,7 +253,11 @@ async function resolveGitHooksDir(repoRoot) {
   const gitPointer = await readText(gitEntryPath)
   const gitDirMatch = /^gitdir:\s*(.+)$/m.exec(gitPointer)
   if (!gitDirMatch) {
-    throw new Error(`Could not parse gitdir from ${gitEntryPath}`)
+    throw new BtrainError({
+      message: `Could not parse gitdir from ${gitEntryPath}.`,
+      reason: "The .git entry is not a directory and does not contain a valid gitdir pointer.",
+      fix: "Verify the repo is a valid git repository. Re-clone if the .git entry is corrupted.",
+    })
   }
 
   const gitDir = path.resolve(repoRoot, gitDirMatch[1].trim())
@@ -324,13 +382,14 @@ function renderPreCommitHook() {
     '      NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF")',
     '      if [ -n "$NON_HANDOFF" ]; then',
     '        echo ""',
-    "        echo \"btrain: blocked — $HANDOFF status is 'needs-review'.\"",
-    '        echo "Only the peer reviewer should be committing right now."',
+    '        echo "✖ btrain: blocked commit — $HANDOFF status is \'needs-review\'."',
+    '        echo "  ↳ Why: Only the peer reviewer should be committing right now."',
     '        echo ""',
-    '        echo "Staged non-handoff files:"',
-    '        echo "$NON_HANDOFF" | sed \'s/^/  /\'',
+    '        echo "  Staged non-handoff files:"',
+    '        echo "$NON_HANDOFF" | sed \'s/^/    /\'',
     '        echo ""',
-    '        echo "To bypass: git commit --no-verify"',
+    '        echo "  ✦ Fix: Wait for the reviewer to resolve, or bypass with: git commit --no-verify"',
+    '        echo "         To resolve the lane: btrain handoff resolve --lane <id> --summary \"...\""',
     '        exit 1',
     '      fi',
     '    fi',
@@ -370,11 +429,16 @@ function renderPrePushHook() {
     '  fi',
     '  ',
     '  echo ""',
-    '  echo "btrain: blocked push — unresolved handoff state is still active."',
-    '  echo "Resolve, review, or explicitly return the active lane before pushing."',
+    '  echo "✖ btrain: blocked push — unresolved handoff state is still active."',
+    '  echo "  ↳ Why: Pushing while lanes are active can overwrite in-progress work."',
     '  echo ""',
-    '  echo "Active handoffs:"',
-    '  printf "%b" "$ACTIVE_HANDOFFS" | sed \'s/^/  /\'',
+    '  echo "  Active handoffs:"',
+    '  printf "%b" "$ACTIVE_HANDOFFS" | sed \'s/^/    /\'',
+    '  echo ""',
+    '  echo "  ✦ Fix: Resolve all active lanes first:"',
+    '  echo "         btrain handoff resolve --lane <id> --summary \"...\""',
+    '  echo "         Or request a one-time bypass:"',
+    '  echo "         btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason \"...\""',
     '  exit 1',
     "fi",
     "",
@@ -412,7 +476,11 @@ function compareLaneIds(left, right) {
 
 function buildLaneId(index) {
   if (!Number.isInteger(index) || index < 0) {
-    throw new Error(`Invalid lane index: ${index}`)
+    throw new BtrainError({
+      message: `Invalid lane index: ${index}.`,
+      reason: "Lane indices must be non-negative integers.",
+      fix: "Check the [lanes] config in .btrain/project.toml and run \`btrain doctor\` to verify lane setup.",
+    })
   }
 
   let remaining = index
@@ -511,7 +579,12 @@ function getLaneHandoffPath(repoRoot, config, laneId) {
 
   const lane = laneConfigs.find((l) => l.id === laneId)
   if (!lane) {
-    throw new Error(`Unknown lane: ${laneId}. Available lanes: ${laneConfigs.map((l) => l.id).join(", ")}`)
+    throw new BtrainError({
+      message: `Unknown lane: ${laneId}.`,
+      reason: "The specified lane ID is not configured in this repo.",
+      fix: `Use --lane with one of the available lanes.`,
+      context: `Available lanes: ${laneConfigs.map((l) => l.id).join(", ")}.`,
+    })
   }
 
   const configuredPath = lane.handoffPath
@@ -563,9 +636,11 @@ function validateHandoffStatus(status, label = "--status") {
   }
 
   if (!VALID_HANDOFF_STATUSES.has(status)) {
-    throw new Error(
-      `${label} must be one of: ${[...VALID_HANDOFF_STATUSES].join(", ")}.`,
-    )
+    throw new BtrainError({
+      message: `Invalid handoff status: "${status}".`,
+      reason: `${label} received an unrecognized value.`,
+      fix: `Use one of the valid statuses: ${[...VALID_HANDOFF_STATUSES].join(", ")}.`,
+    })
   }
 }
 
@@ -610,18 +685,22 @@ function validateReasonCodeForStatus(status, reasonCode, label = "--reason-code"
   }
 
   if (!validCodes.has(reasonCode)) {
-    throw new Error(
-      `${label} for ${status} must be one of: ${[...validCodes].join(", ")}.`,
-    )
+    throw new BtrainError({
+      message: `Invalid reason code "${reasonCode}" for status "${status}".`,
+      reason: `${label} must match one of the predefined codes for this status.`,
+      fix: `Use --reason-code with one of: ${[...validCodes].join(", ")}.`,
+    })
   }
 }
 
 function validateReasonTags(reasonTags, label = "--reason-tag") {
   for (const tag of reasonTags) {
     if (!REASON_TAG_PATTERN.test(tag)) {
-      throw new Error(
-        `${label} values must be lowercase slug tokens like "smoke-check" or "locks". Received "${tag}".`,
-      )
+      throw new BtrainError({
+        message: `Invalid reason tag: "${tag}".`,
+        reason: `${label} values must be lowercase slug tokens (letters, numbers, hyphens).`,
+        fix: `Use a format like "smoke-check" or "locks". Example: --reason-tag smoke-check`,
+      })
     }
   }
 }
@@ -633,9 +712,11 @@ function resolveReasonMetadata(existingCurrent, nextStatus, options = {}, { requ
 
   if (!validCodes) {
     if (reasonCodeProvided || reasonTagsProvided) {
-      throw new Error(
-        "`--reason-code` and `--reason-tag` are only supported for `changes-requested` and `repair-needed` handoffs.",
-      )
+      throw new BtrainError({
+        message: "`--reason-code` and `--reason-tag` are not supported for this status.",
+        reason: "Reason codes are only applicable to `changes-requested` and `repair-needed` transitions.",
+        fix: "Remove --reason-code and --reason-tag from your command, or change --status to `changes-requested` or `repair-needed`.",
+      })
     }
     return { reasonCode: "", reasonTags: [] }
   }
@@ -652,13 +733,19 @@ function resolveReasonMetadata(existingCurrent, nextStatus, options = {}, { requ
       : []
 
   if (requireReasonOnTransition && nextStatus !== existingCurrent.status && !nextReasonCode) {
-    throw new Error(
-      `Entering \`${nextStatus}\` requires --reason-code. Valid codes: ${[...validCodes].join(", ")}.`,
-    )
+    throw new BtrainError({
+      message: `Entering \`${nextStatus}\` requires a reason code.`,
+      reason: "Transitions into this status require an audit trail so the reviewer or repair owner knows why.",
+      fix: `Add --reason-code to your command. Valid codes: ${[...validCodes].join(", ")}.`,
+    })
   }
 
   if (!nextReasonCode && nextReasonTags.length > 0) {
-    throw new Error("`--reason-tag` requires `--reason-code`.")
+    throw new BtrainError({
+      message: "`--reason-tag` requires `--reason-code`.",
+      reason: "Tags are supplementary metadata that only make sense when a primary reason code is set.",
+      fix: "Add --reason-code <code> before --reason-tag. Example: --reason-code spec-mismatch --reason-tag smoke-check",
+    })
   }
 
   validateReasonCodeForStatus(nextStatus, nextReasonCode)
@@ -671,7 +758,29 @@ function resolveReasonMetadata(existingCurrent, nextStatus, options = {}, { requ
 }
 
 function normalizePathList(paths) {
-  return [...new Set((Array.isArray(paths) ? paths : []).filter(Boolean))].sort()
+  const normalized = (Array.isArray(paths) ? paths : [])
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean)
+
+  return [...new Set(normalized)].sort()
+}
+
+function normalizeLockedPathList(paths, knownPaths = []) {
+  const normalizedPaths = normalizePathList(paths)
+  const normalizedKnownPaths = normalizePathList(knownPaths)
+
+  if (normalizedPaths.length !== 1 || normalizedKnownPaths.length < 2) {
+    return normalizedPaths
+  }
+
+  const [legacyBlob] = normalizedPaths
+  if (legacyBlob.includes(",")) {
+    return normalizedPaths
+  }
+
+  // Older handoff files could collapse multiple locked paths into one space-separated field.
+  const legacyParts = normalizePathList(legacyBlob.split(/\s+/))
+  return samePathList(legacyParts, normalizedKnownPaths) ? legacyParts : normalizedPaths
 }
 
 function samePathList(left, right) {
@@ -738,7 +847,12 @@ async function acquireLocks(repoRoot, laneId, owner, files) {
     const conflictMessages = conflicts.map(
       (c) => `  ${c.file} — locked by lane ${c.lockedBy} (${c.owner}): ${c.path}`,
     )
-    throw new Error(`File lock conflict:\n${conflictMessages.join("\n")}`)
+    throw new BtrainError({
+      message: "File lock conflict.",
+      reason: `Another lane already holds locks on the requested paths:\n${conflictMessages.join("\n")}`,
+      fix: `Choose different files, wait for the other lane to resolve, or force-release with \`btrain locks release-lane --lane <conflicting-lane>\`.`,
+      context: "Run `btrain locks` to see all active locks.",
+    })
   }
 
   // Remove existing locks for this lane first
@@ -790,8 +904,8 @@ function formatLockedPaths(paths) {
 }
 
 function buildLaneLockState(current, laneLocks) {
-  const handoffPaths = normalizePathList(current.lockedFiles)
   const registryPaths = normalizePathList(laneLocks.map((lock) => lock.path))
+  const handoffPaths = normalizeLockedPathList(current.lockedFiles, registryPaths)
 
   if (registryPaths.length === 0 && handoffPaths.length === 0) {
     return {
@@ -926,6 +1040,7 @@ function getRepoPaths(repoRoot) {
     codexPromptsDir: path.join(repoRoot, ".codex", "prompts"),
     codexAgentsPath: path.join(repoRoot, ".codex", "prompts", "AGENTS.md"),
     skillsPath: path.join(repoRoot, ".claude", "skills"),
+    feedbackLogPath: path.join(repoRoot, ".claude", "collab", "FEEDBACK_LOG.md"),
   }
 }
 
@@ -1000,11 +1115,12 @@ function formatInlineCodeList(values) {
   return values.map((value) => `\`${value}\``).join(", ")
 }
 
-function buildManagedBlockVariables(config) {
+function buildManagedBlockVariables(config, { includeFeedbackGuidance = true } = {}) {
   const collaborators = getCollaborationAgentNames(config)
   const laneIds = (getLaneConfigs(config) || getDerivedLaneIds(config)).map((lane) => lane.id || lane)
   const laneExamples = laneIds.slice(0, Math.min(laneIds.length, 6))
   const lanesPerAgent = getLanesPerAgent(config)
+  const feedbackEnabled = includeFeedbackGuidance && getFeedbackConfig(config).enabled
 
   return {
     activeAgentsSummary:
@@ -1013,6 +1129,9 @@ function buildManagedBlockVariables(config) {
         : 'not configured yet. Add `active = ["Agent A", "Agent B"]` under `[agents]`.',
     laneSummary: `${laneIds.length} lane(s) (${lanesPerAgent} per collaborating agent): ${formatInlineCodeList(laneIds)}`,
     laneExamples: formatInlineCodeList(laneExamples),
+    feedbackGuidance: feedbackEnabled
+      ? "- Use the `feedback-triage` skill when processing user-reported issues. It logs entries to `.claude/collab/FEEDBACK_LOG.md` and drives test-first resolution.\n- Use the `bug-fix` skill for developer-found bugs. Write a failing reproduction test before editing production code."
+      : "",
   }
 }
 
@@ -1029,6 +1148,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
   "- Repo config lives at `.btrain/project.toml`.",
+  "{{feedbackGuidance}}",
   "",
   "### Collaboration Setup",
   "",
@@ -1137,6 +1257,24 @@ const TEMPLATE_DEFAULTS = {
     "",
   ].join("\n"),
 
+  "feedback-log.md": [
+    "# Feedback Log",
+    "",
+    "User-reported feedback for {{repoName}}. Single source of truth for triage and resolution.",
+    "",
+    "| Status | Meaning |",
+    "|--------|---------|",
+    "| new | Logged, awaiting user confirmation of triage |",
+    "| triaged | User confirmed category, ready for test/fix |",
+    "| test-written | Reproduction test exists and fails |",
+    "| fixed | Code fix applied, test passes |",
+    "| verified | Full test suite passes, no regressions |",
+    "| blocked-spec | Requires spec change via speckit before work begins |",
+    "",
+    "---",
+    "",
+  ].join("\n"),
+
   "pre-commit-hook.sh": renderPreCommitHook(),
   "pre-push-hook.sh": renderPrePushHook(),
 }
@@ -1176,28 +1314,58 @@ async function loadTemplate(filename) {
   return readText(path.join(templatesDir, filename))
 }
 
-async function copyMissingTree(sourcePath, targetPath) {
+function shouldSkipBundledAgentchattrPath(relativePath = "") {
+  if (!relativePath) {
+    return false
+  }
+
+  const normalizedSegments = String(relativePath)
+    .split(path.sep)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+
+  if (normalizedSegments.some((segment) => EXCLUDED_AGENTCHATTR_RUNTIME_NAMES.has(segment))) {
+    return true
+  }
+
+  const leafName = normalizedSegments[normalizedSegments.length - 1] || ""
+  return leafName.endsWith(".pyc")
+}
+
+async function copyMissingTree(sourcePath, targetPath, options = {}, relativePath = "") {
   const sourceStats = await fs.lstat(sourcePath)
   if (sourceStats.isSymbolicLink()) {
-    return copyMissingTree(await fs.realpath(sourcePath), targetPath)
+    return copyMissingTree(await fs.realpath(sourcePath), targetPath, options, relativePath)
+  }
+
+  if (options.shouldSkip?.({ relativePath, sourcePath, sourceStats, targetPath })) {
+    return 0
   }
 
   if (sourceStats.isDirectory()) {
     await ensureDir(targetPath)
     const entries = await fs.readdir(sourcePath)
+    let copiedCount = 0
     for (const entry of entries.sort((left, right) => left.localeCompare(right))) {
-      await copyMissingTree(path.join(sourcePath, entry), path.join(targetPath, entry))
+      const nextRelativePath = relativePath ? path.join(relativePath, entry) : entry
+      copiedCount += await copyMissingTree(
+        path.join(sourcePath, entry),
+        path.join(targetPath, entry),
+        options,
+        nextRelativePath,
+      )
     }
-    return
+    return copiedCount
   }
 
   if (await pathExists(targetPath)) {
-    return
+    return 0
   }
 
   await ensureDir(path.dirname(targetPath))
   await fs.copyFile(sourcePath, targetPath)
   await fs.chmod(targetPath, sourceStats.mode)
+  return 1
 }
 
 async function syncBundledSkills(targetSkillsPath) {
@@ -1246,6 +1414,54 @@ async function syncBundledSkills(targetSkillsPath) {
     copiedSkills,
     skippedSkills,
     skippedReason: "",
+  }
+}
+
+async function syncBundledDevTools(repoRoot) {
+  const copiedTools = []
+  const missingTools = []
+  const selfTools = []
+  let copiedFileCount = 0
+
+  for (const tool of BUNDLED_DEV_TOOLS) {
+    if (!(await pathExists(tool.sourcePath))) {
+      missingTools.push(tool.label)
+      continue
+    }
+
+    const targetPath = path.join(repoRoot, ...tool.targetParts)
+    if (path.resolve(tool.sourcePath) === path.resolve(targetPath)) {
+      selfTools.push(tool.label)
+      continue
+    }
+
+    const copiedForTool = await copyMissingTree(tool.sourcePath, targetPath, {
+      shouldSkip: tool.shouldSkip,
+    })
+    copiedFileCount += copiedForTool
+
+    if (copiedForTool > 0) {
+      copiedTools.push(tool.label)
+    }
+  }
+
+  let skippedReason = ""
+  if (copiedTools.length === 0) {
+    if (selfTools.length === BUNDLED_DEV_TOOLS.length) {
+      skippedReason = "self"
+    } else if (missingTools.length > 0) {
+      skippedReason = "bundle-missing"
+    } else {
+      skippedReason = "no-missing-files"
+    }
+  }
+
+  return {
+    copiedTools,
+    copiedFileCount,
+    missingTools,
+    selfTools,
+    skippedReason,
   }
 }
 
@@ -1434,7 +1650,11 @@ function normalizeOverrideAction(action) {
 function validateOverrideAction(action) {
   const normalized = normalizeOverrideAction(action)
   if (!VALID_OVERRIDE_ACTIONS.has(normalized)) {
-    throw new Error(`--action must be one of: ${[...VALID_OVERRIDE_ACTIONS].join(", ")}.`)
+    throw new BtrainError({
+      message: `Invalid override action: "${action || "(empty)"}"`,
+      reason: "The --action value is not recognized.",
+      fix: `Use --action with one of: ${[...VALID_OVERRIDE_ACTIONS].join(", ")}.`,
+    })
   }
   return normalized
 }
@@ -1505,20 +1725,40 @@ async function grantOverride(repoRoot, options = {}) {
   const laneId = typeof options.lane === "string" ? options.lane.trim() : ""
 
   if (!requestedBy) {
-    throw new Error("`btrain override grant` requires --requested-by.")
+    throw new BtrainError({
+      message: "`btrain override grant` requires --requested-by.",
+      reason: "An audited override must identify which agent requested it.",
+      fix: `btrain override grant --action ${action} --requested-by <agent> --confirmed-by <human> --reason "..."`,
+    })
   }
   if (!confirmedBy) {
-    throw new Error("`btrain override grant` requires --confirmed-by.")
+    throw new BtrainError({
+      message: "`btrain override grant` requires --confirmed-by.",
+      reason: "An audited override must be confirmed by a human.",
+      fix: `btrain override grant --action ${action} --requested-by ${requestedBy} --confirmed-by <human> --reason "..."`,
+    })
   }
   if (!reason) {
-    throw new Error("`btrain override grant` requires --reason.")
+    throw new BtrainError({
+      message: "`btrain override grant` requires --reason.",
+      reason: "An audited override must have a documented reason for the audit trail.",
+      fix: `btrain override grant --action ${action} --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
+    })
   }
 
   if (action === "needs-review" && laneConfigs && !laneId) {
-    throw new Error("`btrain override grant --action needs-review` requires --lane when [lanes] is enabled.")
+    throw new BtrainError({
+      message: "`btrain override grant --action needs-review` requires --lane when [lanes] is enabled.",
+      reason: "The needs-review override must target a specific lane in multi-lane repos.",
+      fix: `btrain override grant --action needs-review --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
+    })
   }
   if (action === "push" && laneId) {
-    throw new Error("`btrain override grant --action push` is repo-scoped and does not accept --lane.")
+    throw new BtrainError({
+      message: "`btrain override grant --action push` does not accept --lane.",
+      reason: "Push overrides are repo-scoped (they bypass the pre-push hook for the whole repo).",
+      fix: "Remove --lane from the command.",
+    })
   }
   if (laneId && laneConfigs) {
     getLaneHandoffPath(repoRoot, config, laneId)
@@ -1528,9 +1768,11 @@ async function grantOverride(repoRoot, options = {}) {
   const overrides = await listActiveOverrides(repoRoot)
   const duplicate = overrides.find((record) => record.action === action && (record.laneId || "") === laneId)
   if (duplicate) {
-    throw new Error(
-      `An active override already exists for ${action} ${laneId ? `on lane ${laneId}` : "at repo scope"} (${duplicate.id}).`,
-    )
+    throw new BtrainError({
+      message: `An active override already exists for \`${action}\` ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
+      reason: `Override ${duplicate.id} is still pending. Only one override per action+scope is allowed.`,
+      fix: `Consume or wait for the existing override first. To consume it: btrain override consume --action ${action}${laneId ? ` --lane ${laneId}` : ""} --actor <agent>`,
+    })
   }
 
   const id = buildOverrideId(action)
@@ -1583,22 +1825,36 @@ async function consumeOverride(repoRoot, options = {}) {
   if (overrideId) {
     record = overrides.find((candidate) => candidate.id === overrideId) || null
     if (!record) {
-      throw new Error(`No active override found for id ${overrideId}.`)
+      throw new BtrainError({
+        message: `No active override found for id "${overrideId}".`,
+        reason: "The override may have already been consumed or the ID is incorrect.",
+        fix: "Run `btrain override list` to see active overrides, or grant a new one with `btrain override grant`.",
+      })
     }
   } else {
     record = overrides.find((candidate) => candidate.action === action && (candidate.laneId || "") === laneId) || null
     if (!record) {
-      throw new Error(
-        `No active override found for ${action} ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
-      )
+      throw new BtrainError({
+        message: `No active override found for \`${action}\` ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
+        reason: "No matching pending override exists for this action and scope.",
+        fix: `Grant one first: btrain override grant --action ${action}${laneId ? ` --lane ${laneId}` : ""} --requested-by <agent> --confirmed-by <human> --reason "..."`,
+      })
     }
   }
 
   if (record.action !== action) {
-    throw new Error(`Override ${record.id} is for ${record.action}, not ${action}.`)
+    throw new BtrainError({
+      message: `Override ${record.id} is for \`${record.action}\`, not \`${action}\`.`,
+      reason: "The override's action does not match the requested action.",
+      fix: `Use --action ${record.action} or grant a new override for \`${action}\`.`,
+    })
   }
   if (laneId && (record.laneId || "") !== laneId) {
-    throw new Error(`Override ${record.id} is scoped to lane ${record.laneId || "(repo)"}, not lane ${laneId}.`)
+    throw new BtrainError({
+      message: `Override ${record.id} is scoped to lane ${record.laneId || "(repo)"}, not lane ${laneId}.`,
+      reason: "The override's lane scope does not match the requested lane.",
+      fix: `Use --lane ${record.laneId || ""} to match the override, or grant a new override for lane ${laneId}.`,
+    })
   }
 
   await fs.rm(record.path, { force: true })
@@ -1661,7 +1917,11 @@ async function initRepo(repoPathInput, options = {}) {
   const repoRoot = path.resolve(repoPathInput)
   const stats = await fs.stat(repoRoot)
   if (!stats.isDirectory()) {
-    throw new Error(`Not a directory: ${repoRoot}`)
+    throw new BtrainError({
+      message: `Not a directory: ${repoRoot}`,
+      reason: "btrain init requires a path to an existing directory.",
+      fix: `Verify the path exists and is a directory: ls -la ${repoRoot}`,
+    })
   }
 
   const repoName = normalizeRepoName(repoRoot)
@@ -1678,6 +1938,7 @@ async function initRepo(repoPathInput, options = {}) {
   const now = formatIsoTimestamp()
   const requestedAgents = normalizeStringList(options.agent)
   const shouldScaffoldBundledSkills = options.scaffoldBundledSkills === true
+  const shouldScaffoldDevTools = options.scaffoldDevTools === true
   const requestedLanesPerAgent = normalizePositiveInteger(
     options.lanesPerAgent,
     undefined,
@@ -1722,10 +1983,10 @@ async function initRepo(repoPathInput, options = {}) {
   }
 
   const config = await readProjectConfig(repoRoot)
-  const managedBlock = await getManagedBlockTemplate(repoRoot)
+  const managedBlock = await getManagedBlockTemplate(repoRoot, { includeFeedbackGuidance: shouldScaffoldBundledSkills })
   const instructionTemplateVars = {
     roleLabel: "agent",
-    ...buildManagedBlockVariables(config),
+    ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }),
   }
 
   const agentsExists = await pathExists(repoPaths.agentsPath)
@@ -1743,7 +2004,7 @@ async function initRepo(repoPathInput, options = {}) {
     repoPaths.claudePath,
     claudeExists
       ? replaceManagedBlock(claudeContent, managedBlock)
-      : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config) }),
+      : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }) }),
   )
 
   // Symlink GEMINI.md → CLAUDE.md (Gemini CLI reads GEMINI.md)
@@ -1781,11 +2042,21 @@ async function initRepo(repoPathInput, options = {}) {
     }
   }
 
+  // Scaffold FEEDBACK_LOG.md if feedback tracking is enabled and bundled skills are included.
+  // --core-only skips bundled skills including feedback-triage, so the log is not useful without the skill.
+  if (shouldScaffoldBundledSkills && getFeedbackConfig(config).enabled && !(await pathExists(repoPaths.feedbackLogPath))) {
+    const feedbackLogTemplate = await loadTemplate("feedback-log.md")
+    await writeText(repoPaths.feedbackLogPath, renderTemplate(feedbackLogTemplate, templateVars))
+  }
+
   // Ensure .gitignore excludes btrain operational files
-  await ensureBtrainGitignore(repoRoot)
+  await ensureBtrainGitignore(repoRoot, { includeDevToolIgnores: shouldScaffoldDevTools })
 
   const bundledSkillsResult = shouldScaffoldBundledSkills
     ? await syncBundledSkills(repoPaths.skillsPath)
+    : null
+  const devToolsResult = shouldScaffoldDevTools
+    ? await syncBundledDevTools(repoRoot)
     : null
 
   upsertRepoEntry(registry, {
@@ -1811,18 +2082,27 @@ async function initRepo(repoPathInput, options = {}) {
     repoPaths,
     hookResult,
     bundledSkillsResult,
+    devToolsResult,
   }
 }
 
 async function syncActiveAgents(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   if (!config) {
-    throw new Error("`btrain agents` requires an initialized repo. Run `btrain init <repo-path>` first.")
+    throw new BtrainError({
+      message: "`btrain agents` requires an initialized repo.",
+      reason: "No .btrain/project.toml was found at the resolved repo path.",
+      fix: "Run `btrain init <repo-path>` first to bootstrap the repo.",
+    })
   }
 
   const requestedAgents = normalizeStringList(options.agent)
   if (requestedAgents.length === 0) {
-    throw new Error("`btrain agents` requires at least one `--agent <name>`.")
+    throw new BtrainError({
+      message: "`btrain agents` requires at least one agent name.",
+      reason: "The --agent flag was not provided or was empty.",
+      fix: "btrain agents set --repo . --agent claude --agent codex",
+    })
   }
 
   const currentAgents = getCollaborationAgentNames(config)
@@ -1839,6 +2119,7 @@ async function syncActiveAgents(repoRoot, options = {}) {
     agent: nextAgents,
     lanesPerAgent: options.lanesPerAgent,
     scaffoldBundledSkills: false,
+    scaffoldDevTools: false,
   })
 }
 
@@ -1867,7 +2148,11 @@ async function resolveRepoRoot(repoOverride) {
 
   const repoRoot = await findRepoRoot()
   if (!repoRoot) {
-    throw new Error("Could not find a bootstrapped repo. Run `btrain init /path/to/repo` first or pass `--repo`.")
+    throw new BtrainError({
+      message: "Could not find a bootstrapped repo.",
+      reason: "No .btrain/project.toml was found in the current directory or any parent.",
+      fix: "Run `btrain init /path/to/repo` first, or pass --repo /path/to/repo to specify the repo explicitly.",
+    })
   }
 
   return repoRoot
@@ -2098,7 +2383,14 @@ function normalizeReviewContextLine(line) {
 
 function isPlaceholderReviewContextLine(line) {
   const normalized = normalizeReviewContextLine(line)
-  return REVIEW_CONTEXT_PLACEHOLDER_PATTERNS.some((pattern) => normalized.includes(pattern))
+  if (!normalized) return true
+  // Short standalone placeholders must match the entire line (prevents false
+  // positives from legitimate text like "pending commits" or "none yet seen").
+  const exactPlaceholders = ["pending", "pending.", "none yet", "none yet."]
+  if (exactPlaceholders.includes(normalized)) return true
+  // Longer phrases can use substring matching safely.
+  if (normalized.includes("fill this in before handoff")) return true
+  return false
 }
 
 function collectNeedsReviewContextIssues({ base, contextSectionText }) {
@@ -2189,12 +2481,20 @@ async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
   }
 
   const headRef = await resolveGitRevision(repoRoot, "HEAD")
-  const baseRef = await resolveGitRevision(repoRoot, resolvedBase)
+  let baseRef = await resolveGitRevision(repoRoot, resolvedBase)
+
+  // If the full base string doesn't resolve (e.g. it's a prose description like
+  // "Branch 001-source-references forked from main at af14b47"), try to extract
+  // candidate git refs from the string and resolve each one.
+  if (!baseRef) {
+    baseRef = await extractResolvableRef(repoRoot, resolvedBase)
+  }
+
   if (!headRef || !baseRef) {
     return []
   }
 
-  const args = ["-C", repoRoot, "diff", "--name-only", `${resolvedBase}...HEAD`]
+  const args = ["-C", repoRoot, "diff", "--name-only", `${baseRef}...HEAD`]
   if (pathspecs.length > 0) {
     args.push("--", ...pathspecs)
   }
@@ -2215,22 +2515,78 @@ async function listDiffPathsFromBase(repoRoot, base, pathspecs = []) {
   }
 }
 
-async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [] } = {}) {
-  const issues = collectNeedsReviewContextIssues({ base, contextSectionText })
+async function extractResolvableRef(repoRoot, proseBase) {
+  // Extract candidate refs: SHA-like hex strings (7-40 chars) and branch-like
+  // tokens (e.g. "main", "001-source-references") from the prose string.
+  // Try each candidate in order; return the first one that resolves.
+  const candidates = []
 
-  if (pathspecs.length > 0) {
-    const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
-    const stagedPaths = changedPaths.length === 0 ? await listStagedPaths(repoRoot, pathspecs) : []
-    const baseDiffPaths = changedPaths.length === 0 && stagedPaths.length === 0 ? await listDiffPathsFromBase(repoRoot, base, pathspecs) : []
-    if (changedPaths.length === 0 && stagedPaths.length === 0 && baseDiffPaths.length === 0) {
-      issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
+  // Match hex strings that look like short/full SHAs (7-40 hex chars, word-bounded)
+  for (const match of proseBase.matchAll(/\b([0-9a-f]{7,40})\b/gi)) {
+    candidates.push(match[1])
+  }
+
+  // Match branch-like tokens (e.g. "main", "001-source-references", "feat/foo")
+  for (const match of proseBase.matchAll(/\b(\d{3,}-[a-z][a-z0-9-]*)\b/gi)) {
+    candidates.push(match[1])
+  }
+  for (const match of proseBase.matchAll(/\b(main|master|develop|HEAD)\b/gi)) {
+    candidates.push(match[1])
+  }
+  for (const match of proseBase.matchAll(/\b(origin\/[a-zA-Z0-9._-]+)\b/g)) {
+    candidates.push(match[1])
+  }
+
+  for (const candidate of candidates) {
+    const ref = await resolveGitRevision(repoRoot, candidate)
+    if (ref) {
+      return ref
     }
   }
 
+  return null
+}
+
+async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [], skipDiff = false } = {}) {
+  const issues = collectNeedsReviewContextIssues({ base, contextSectionText })
+
+  if (!skipDiff && pathspecs.length > 0) {
+    const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
+
+    // Only run the base-diff check if git status found nothing uncommitted
+    if (changedPaths.length === 0) {
+      const resolvedBase = String(base || "").trim()
+      const baseRef = resolvedBase
+        ? (await resolveGitRevision(repoRoot, resolvedBase)) || (await extractResolvableRef(repoRoot, resolvedBase))
+        : null
+
+      if (baseRef) {
+        // Base resolved — run the actual diff check
+        const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
+        if (baseDiffPaths.length === 0) {
+          issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
+        }
+      }
+      // If baseRef is null we cannot verify the diff, so we skip the check
+      // rather than blocking the agent in an unrecoverable loop.
+    }
+  }
+
+  const hasDiffIssue = issues.some((issue) => issue.includes("reviewable diff"))
+
   if (issues.length > 0) {
-    throw new Error(
-      `Cannot enter \`needs-review\` until reviewer context is complete. Missing or placeholder fields: ${issues.join(", ")}.`,
-    )
+    const laneFlag = laneId ? ` --lane ${laneId}` : ""
+    const baseFix = hasDiffIssue
+      ? `\n         If the diff check is wrong, bypass it with: btrain handoff update${laneFlag} --status needs-review --no-diff --actor "<agent>"`
+      : ""
+    throw new BtrainError({
+      message: "Cannot enter `needs-review` — reviewer context is incomplete.",
+      reason: `Missing or placeholder fields: ${issues.join(", ")}.`,
+      fix: (laneId
+        ? `btrain handoff update --lane ${laneId} --preflight "..." --changed "file1" --verification "tests pass" --gap "none" --why "..." --review-ask "..."`
+        : `btrain handoff update --preflight "..." --changed "file1" --verification "tests pass" --gap "none" --why "..." --review-ask "..."`) + baseFix,
+      context: "All six reviewer-context fields must be filled with real content (not placeholders) before moving to needs-review.",
+    })
   }
 }
 
@@ -2764,7 +3120,11 @@ async function claimHandoff(repoRoot, options) {
   }
 
   if (!options.task || !options.owner) {
-    throw new Error("`btrain handoff claim` requires --task and --owner.")
+    throw new BtrainError({
+      message: "`btrain handoff claim` requires --task and --owner.",
+      reason: "A claim must specify what task to work on and which agent owns it.",
+      fix: `btrain handoff claim --task "<describe the task>" --owner "<agent-name>" --files "src/"`,
+    })
   }
 
   const config = await readProjectConfig(repoRoot)
@@ -2777,7 +3137,12 @@ async function claimHandoff(repoRoot, options) {
     const laneStates = await readAllLaneStates(repoRoot, config)
     laneId = findAvailableLane(laneStates)
     if (!laneId) {
-      throw new Error("No available lanes. All lanes are currently in-progress or needs-review.")
+      throw new BtrainError({
+        message: "No available lanes.",
+        reason: "All lanes are currently in-progress or needs-review.",
+        fix: "Resolve or repurpose an existing lane first with `btrain handoff resolve --lane <id> --summary \"...\"`, then re-claim.",
+        context: "Run `btrain handoff` to see the status of all lanes.",
+      })
     }
   }
 
@@ -2786,12 +3151,21 @@ async function claimHandoff(repoRoot, options) {
   if (laneConfigs && laneId) {
     const existingLane = await readLaneState(repoRoot, config, laneId)
     if (!["idle", "resolved"].includes(existingLane.status)) {
-      throw new Error(
-        `Lane ${laneId} is already ${existingLane.status}. Use \`btrain handoff update --lane ${laneId}\` or \`btrain handoff resolve --lane ${laneId}\`.`,
-      )
+      throw new BtrainError({
+        message: `Lane ${laneId} is already \`${existingLane.status}\`.`,
+        reason: "You can only claim a lane that is idle or resolved.",
+        fix: existingLane.status === "needs-review"
+          ? `Review and resolve the lane first: btrain handoff resolve --lane ${laneId} --summary "..."`
+          : `Continue or update the existing work: btrain handoff update --lane ${laneId} --status needs-review --actor "${options.owner}"`,
+        context: `Current task: ${existingLane.task || "(none)"}. Owner: ${existingLane.owner || "(unassigned)"}.`,
+      })
     }
     if (files.length === 0) {
-      throw new Error(`Lane ${laneId} claims require --files so in-progress work maps cleanly to file locks.`)
+      throw new BtrainError({
+        message: `Lane ${laneId} claims require --files.`,
+        reason: "File locks map in-progress work to lanes so concurrent agents don't collide.",
+        fix: `btrain handoff claim --lane ${laneId} --task "${options.task || '...'}" --owner "${options.owner}" --files "src/,docs/"`,
+      })
     }
     await acquireLocks(repoRoot, laneId, options.owner, files)
   }
@@ -2806,9 +3180,11 @@ async function claimHandoff(repoRoot, options) {
   })
 
   if (!resolvedReviewer) {
-    throw new Error(
-      `Could not infer a reviewer different from "${options.owner}". Pass --reviewer <other-agent> or configure additional agents in .btrain/project.toml.`,
-    )
+    throw new BtrainError({
+      message: `Could not infer a reviewer different from "${options.owner}".`,
+      reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
+      fix: `Pass --reviewer <other-agent> explicitly, or add more agents to .btrain/project.toml with \`btrain agents add --repo . --agent <name>\`.`,
+    })
   }
 
   const updates = {
@@ -2875,7 +3251,12 @@ async function patchHandoff(repoRoot, options) {
   const config = await readProjectConfig(repoRoot)
   const laneConfigs = getLaneConfigs(config)
   if (laneConfigs && !options.lane) {
-    throw new Error("`btrain handoff update` requires --lane when [lanes] is enabled.")
+    throw new BtrainError({
+      message: "`btrain handoff update` requires --lane when [lanes] is enabled.",
+      reason: "Multi-lane repos need an explicit lane target so btrain knows which lane to update.",
+      fix: `btrain handoff update --lane <id> --status <status> --actor "<agent>"`,
+      context: "Run `btrain handoff` to see available lanes and their current status.",
+    })
   }
 
   validateHandoffStatus(options.status)
@@ -2937,9 +3318,11 @@ async function patchHandoff(repoRoot, options) {
         })
 
         if (!inferredReviewer) {
-          throw new Error(
-            `Could not infer a reviewer different from "${resolvedActor || "the actor"}". Pass --reviewer <other-agent> or configure additional agents in .btrain/project.toml.`,
-          )
+          throw new BtrainError({
+            message: `Could not infer a reviewer different from "${resolvedActor || "the actor"}".`,
+            reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
+            fix: `Pass --reviewer <other-agent> explicitly, or add more agents with \`btrain agents add --repo . --agent <name>\`.`,
+          })
         }
 
         updates.reviewer = inferredReviewer
@@ -2992,13 +3375,20 @@ async function patchHandoff(repoRoot, options) {
       }
 
       if (nextStatus === "resolved") {
-        throw new Error(`Use \`btrain handoff resolve --lane ${laneId}\` so btrain can clear the lane locks.`)
+        throw new BtrainError({
+          message: `Cannot set status to \`resolved\` via \`handoff update\`.`,
+          reason: "The resolve command handles lock cleanup and history archival that \`update\` does not.",
+          fix: `btrain handoff resolve --lane ${laneId} --summary "..." --actor "${resolvedActor || effectiveOwner}"`,
+        })
       }
 
       if (isLaneActiveStatus(nextStatus) && currentLane.lockState === "mismatch" && options.files === undefined) {
-        throw new Error(
-          `Lane ${laneId} lock state is out of sync. Re-run \`btrain handoff update --lane ${laneId} --files "..." --actor "${resolvedActor || effectiveOwner}"\` to resync it.`,
-        )
+        throw new BtrainError({
+          message: `Lane ${laneId} lock state is out of sync.`,
+          reason: "The locks in .btrain/locks.json don't match the handoff file.",
+          fix: `btrain handoff update --lane ${laneId} --files "..." --actor "${resolvedActor || effectiveOwner}"`,
+          context: "Pass --files with the correct working set to resync the locks.",
+        })
       }
 
       const effectiveFiles = normalizePathList(
@@ -3023,20 +3413,24 @@ async function patchHandoff(repoRoot, options) {
             actorLabel: resolvedActor || effectiveOwner,
           })
         } else {
+          const handoffCfg = getHandoffConfig(config)
           await validateNeedsReviewTransition(repoRoot, {
             laneId,
             base: baseForReview,
             contextSectionText: nextContextSectionText,
             pathspecs: effectiveFiles,
+            skipDiff: !handoffCfg.requireDiff || !!options["no-diff"],
           })
         }
       }
 
       if (isLaneActiveStatus(nextStatus)) {
         if (effectiveFiles.length === 0) {
-          throw new Error(
-            `Lane ${laneId} cannot be ${nextStatus} without locked files. Pass --files to declare the working set.`,
-          )
+          throw new BtrainError({
+            message: `Lane ${laneId} cannot be \`${nextStatus}\` without locked files.`,
+            reason: "Active lanes require file locks to prevent cross-lane collisions.",
+            fix: `btrain handoff update --lane ${laneId} --status ${nextStatus} --files "src/,..." --actor "${effectiveOwner}"`,
+          })
         }
         await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles)
         updates.lockedFiles = effectiveFiles
@@ -3089,9 +3483,11 @@ async function patchHandoff(repoRoot, options) {
     })
 
     if (!inferredReviewer) {
-      throw new Error(
-        `Could not infer a reviewer different from "${resolvedActor || "the actor"}". Pass --reviewer <other-agent> or configure additional agents in .btrain/project.toml.`,
-      )
+      throw new BtrainError({
+        message: `Could not infer a reviewer different from "${resolvedActor || "the actor"}".`,
+        reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
+        fix: `Pass --reviewer <other-agent> explicitly, or add more agents with \`btrain agents add --repo . --agent <name>\`.`,
+      })
     }
 
     updates.reviewer = inferredReviewer
@@ -3158,9 +3554,11 @@ async function patchHandoff(repoRoot, options) {
         actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
       })
     } else {
+      const handoffCfg = getHandoffConfig(config)
       await validateNeedsReviewTransition(repoRoot, {
         base: options.base !== undefined ? options.base : existingCurrent.base,
         contextSectionText: nextContextSectionText,
+        skipDiff: !handoffCfg.requireDiff || !!options["no-diff"],
       })
     }
   }
@@ -3199,11 +3597,20 @@ async function requestChangesHandoff(repoRoot, options) {
   const laneId = options.lane
 
   if (!options.summary) {
-    throw new Error("`btrain handoff request-changes` requires --summary.")
+    throw new BtrainError({
+      message: "`btrain handoff request-changes` requires --summary.",
+      reason: "The reviewer must provide a summary of the changes they're requesting.",
+      fix: `btrain handoff request-changes --lane <id> --summary "Describe the issues found" --reason-code spec-mismatch --actor "<reviewer>"`,
+    })
   }
 
   if (laneConfigs && !laneId) {
-    throw new Error("`btrain handoff request-changes` requires --lane when [lanes] is enabled.")
+    throw new BtrainError({
+      message: "`btrain handoff request-changes` requires --lane when [lanes] is enabled.",
+      reason: "Multi-lane repos need an explicit lane target.",
+      fix: `btrain handoff request-changes --lane <id> --summary "..." --reason-code <code> --actor "${actorLabel}"`,
+      context: "Run `btrain handoff` to see available lanes and their current status.",
+    })
   }
 
   const overrideHandoffPath = laneId ? getLaneHandoffPath(repoRoot, config, laneId) : null
@@ -3213,15 +3620,21 @@ async function requestChangesHandoff(repoRoot, options) {
       : await readCurrentState(repoRoot)
 
   if (existingCurrent.status !== "needs-review") {
-    throw new Error(
-      `\`btrain handoff request-changes\` requires the current status to be \`needs-review\`, found \`${existingCurrent.status || "unknown"}\`.`,
-    )
+    throw new BtrainError({
+      message: `Cannot request changes — lane status is \`${existingCurrent.status || "unknown"}\`, not \`needs-review\`.`,
+      reason: "Changes can only be requested when a lane is waiting for peer review.",
+      fix: laneId
+        ? `Run \`btrain handoff\` to check the lane status. The owner must first move to needs-review with: btrain handoff update --lane ${laneId} --status needs-review --actor "${existingCurrent.owner || 'owner'}"`
+        : "Run `btrain handoff` to check the current handoff status.",
+    })
   }
 
   if (existingCurrent.reviewer && resolvedActor && existingCurrent.reviewer !== resolvedActor) {
-    throw new Error(
-      `Only the peer reviewer "${existingCurrent.reviewer}" can request changes for this handoff.`,
-    )
+    throw new BtrainError({
+      message: `Only the peer reviewer "${existingCurrent.reviewer}" can request changes.`,
+      reason: `You are identified as "${resolvedActor}", but the assigned reviewer is "${existingCurrent.reviewer}".`,
+      fix: `Either log in as the correct reviewer, or set BTRAIN_AGENT=${existingCurrent.reviewer} if the runtime detection is wrong.`,
+    })
   }
   const reasonMetadata = resolveReasonMetadata(existingCurrent, "changes-requested", options, {
     requireReasonOnTransition: true,
@@ -3234,9 +3647,11 @@ async function requestChangesHandoff(repoRoot, options) {
       currentLane.handoffPaths.length > 0 ? currentLane.handoffPaths : currentLane.lockPaths
 
     if (effectiveFiles.length === 0) {
-      throw new Error(
-        `Lane ${laneId} cannot move to \`changes-requested\` without locked files. Repair the lane locks first.`,
-      )
+      throw new BtrainError({
+        message: `Lane ${laneId} cannot move to \`changes-requested\` without locked files.`,
+        reason: "The lane has no active file locks, which indicates a corrupted or manually cleared state.",
+        fix: `Repair the lane locks first: btrain handoff update --lane ${laneId} --files "..." --actor "${existingCurrent.owner || actorLabel}"`,
+      })
     }
 
     if (currentLane.lockState !== "active") {
@@ -3282,7 +3697,12 @@ async function resolveHandoff(repoRoot, options) {
 
   // Lane-aware resolve: read state from lane-specific file
   if (laneConfigs && !laneId) {
-    throw new Error("`btrain handoff resolve` requires --lane when [lanes] is enabled.")
+    throw new BtrainError({
+      message: "`btrain handoff resolve` requires --lane when [lanes] is enabled.",
+      reason: "Multi-lane repos need an explicit lane target so btrain can clear the correct locks.",
+      fix: `btrain handoff resolve --lane <id> --summary "..." --actor "${actorLabel}"`,
+      context: "Run `btrain handoff` to see available lanes and their current status.",
+    })
   }
 
   if (laneId) {
@@ -3695,6 +4115,20 @@ function getReviewConfig(config) {
   }
 }
 
+function getHandoffConfig(config) {
+  const handoff = config?.handoff && typeof config.handoff === "object" ? config.handoff : {}
+  return {
+    requireDiff: handoff.require_diff !== false,
+  }
+}
+
+function getFeedbackConfig(config) {
+  const feedback = config?.feedback && typeof config.feedback === "object" ? config.feedback : {}
+  return {
+    enabled: feedback.enabled !== false,
+  }
+}
+
 function getAgentRunnerMap(config) {
   const runners =
     config?.agents?.runners && typeof config.agents.runners === "object"
@@ -3893,9 +4327,11 @@ function resolveVerifiedActor(config, actor, env = process.env) {
 
   if (agentCheck.status === "verified") {
     if (requestedActor && requestedActor.toLowerCase() !== agentCheck.agentName.toLowerCase()) {
-      throw new Error(
-        `Actor "${requestedActor}" does not match the detected agent "${agentCheck.agentName}". Update --actor or set BTRAIN_AGENT if the runtime check is wrong.`,
-      )
+      throw new BtrainError({
+        message: `Actor "${requestedActor}" does not match the detected agent "${agentCheck.agentName}".`,
+        reason: "The --actor flag value conflicts with the runtime-detected agent identity.",
+        fix: `Use --actor "${agentCheck.agentName}" to match the detected identity, or set BTRAIN_AGENT=${requestedActor} to override detection.`,
+      })
     }
 
     return {
@@ -4033,7 +4469,11 @@ async function listReviewArtifacts(repoRoot) {
 async function runReview({ repoRoot, mode, base, head } = {}) {
   const config = await readProjectConfig(repoRoot)
   if (!config) {
-    throw new Error("Missing `.btrain/project.toml`. Run `btrain init` first.")
+    throw new BtrainError({
+      message: "Missing `.btrain/project.toml`.",
+      reason: "This command requires a btrain-initialized repo.",
+      fix: "Run `btrain init .` or `btrain init <repo-path>` to bootstrap the repo first.",
+    })
   }
 
   const current = await readCurrentState(repoRoot)
@@ -4049,9 +4489,11 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
   const resolvedHead = head || "HEAD"
 
   if (!SUPPORTED_REVIEW_MODES.has(resolvedMode.mode)) {
-    throw new Error(
-      `Review mode "${resolvedMode.mode}" is not implemented yet. Supported modes: manual, parallel, hybrid.`,
-    )
+    throw new BtrainError({
+      message: `Review mode "${resolvedMode.mode}" is not supported.`,
+      reason: "Only manual, parallel, and hybrid review modes are implemented.",
+      fix: "Set the review mode to one of: manual, parallel, hybrid. Update review.mode in .btrain/project.toml or pass --mode.",
+    })
   }
 
   if (resolvedMode.mode === "manual") {
@@ -4070,7 +4512,11 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
   }
 
   if (!reviewConfig.parallelEnabled) {
-    throw new Error("Parallel review is disabled in `.btrain/project.toml`.")
+    throw new BtrainError({
+      message: "Parallel review is disabled.",
+      reason: "The [review] section in .btrain/project.toml has parallel_enabled = false or it is not configured.",
+      fix: "Set `parallel_enabled = true` under [review] in .btrain/project.toml, or use `--mode manual` for manual reviews.",
+    })
   }
 
   await ensureDir(repoPaths.reviewsDir)
@@ -4082,7 +4528,11 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
   const scriptPath = resolveReviewScriptPath(reviewConfig.parallelScript, repoRoot)
 
   if (!(await pathExists(scriptPath))) {
-    throw new Error(`Parallel review script not found: ${scriptPath}`)
+    throw new BtrainError({
+      message: `Parallel review script not found: ${scriptPath}`,
+      reason: "The configured review script path does not exist on disk.",
+      fix: "Check [review].parallel_script in .btrain/project.toml and verify the script path is correct.",
+    })
   }
 
   let stdout = ""
@@ -4183,7 +4633,11 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
 async function getReviewStatus(repoRoot) {
   const config = await readProjectConfig(repoRoot)
   if (!config) {
-    throw new Error("Missing `.btrain/project.toml`. Run `btrain init` first.")
+    throw new BtrainError({
+      message: "Missing `.btrain/project.toml`.",
+      reason: "This command requires a btrain-initialized repo.",
+      fix: "Run `btrain init .` or `btrain init <repo-path>` to bootstrap the repo first.",
+    })
   }
 
   const current = await readCurrentState(repoRoot)
@@ -4268,7 +4722,11 @@ function parseShellWords(commandText) {
   }
 
   if (quote) {
-    throw new Error(`Unterminated quote in runner command: ${commandText}`)
+    throw new BtrainError({
+      message: `Unterminated quote in runner command.`,
+      reason: `The command string has an unmatched quote character.`,
+      fix: `Fix the quoting in the runner command in .btrain/project.toml: ${commandText}`,
+    })
   }
 
   if (current) {
@@ -4911,7 +5369,11 @@ async function executeLoopCliRunnerWithStreaming(agentName, runner, { repoRoot, 
 
 async function executeLoopCliRunner(agentName, runner, { repoRoot, timeoutMs, onEvent }) {
   if (!(await isExecutableAvailable(runner.command))) {
-    throw new Error(`Runner command not found on PATH for ${agentName}: ${runner.command}`)
+    throw new BtrainError({
+      message: `Runner command not found on PATH for ${agentName}: ${runner.command}`,
+      reason: "The configured runner executable is not available in the current shell PATH.",
+      fix: `Install ${runner.command} or update [agents.runners.${agentName}] in .btrain/project.toml to the correct command.`,
+    })
   }
 
   if (runner.streamMode === "claude-stream-json" || runner.streamMode === "codex-json") {
@@ -4973,7 +5435,11 @@ function normalizePositiveInteger(value, defaultValue, label) {
 
   const parsed = Number.parseInt(String(value), 10)
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${label} must be a positive integer.`)
+    throw new BtrainError({
+      message: `${label} must be a positive integer.`,
+      reason: `Received "${value}" which is not a valid positive integer.`,
+      fix: `Provide a positive integer value for ${label}. Example: --${label.replace(/[\[\].]/g, "").toLowerCase().replace(/\s+/g, "-")} 3`,
+    })
   }
   return parsed
 }
@@ -4985,7 +5451,11 @@ function normalizePositiveDuration(value, defaultMs, label) {
 
   const parsed = Number.parseFloat(String(value))
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${label} must be a positive number.`)
+    throw new BtrainError({
+      message: `${label} must be a positive number.`,
+      reason: `Received "${value}" which is not a valid positive number.`,
+      fix: `Provide a positive number for ${label}. Example: --timeout 60`,
+    })
   }
   return Math.round(parsed * 1000)
 }
@@ -5136,7 +5606,11 @@ async function runLoop({
 } = {}) {
   const config = await readProjectConfig(repoRoot)
   if (!config) {
-    throw new Error("Missing `.btrain/project.toml`. Run `btrain init` first.")
+    throw new BtrainError({
+      message: "Missing `.btrain/project.toml`.",
+      reason: "This command requires a btrain-initialized repo.",
+      fix: "Run `btrain init .` or `btrain init <repo-path>` to bootstrap the repo first.",
+    })
   }
 
   const repoName = config?.name || normalizeRepoName(repoRoot)
@@ -5665,11 +6139,25 @@ async function applyWatchdogRepairs(repoRoot, {
   return repairs
 }
 
-async function getManagedBlockTemplate(repoRoot = null) {
+async function getManagedBlockTemplate(repoRoot = null, { includeFeedbackGuidance } = {}) {
   const templateContent = await loadTemplate("managed-block.md")
   const config = repoRoot ? await readProjectConfig(repoRoot) : null
-  const rendered = renderTemplate(templateContent, buildManagedBlockVariables(config))
-  return extractManagedBlock(rendered) || rendered.trim()
+  // If includeFeedbackGuidance is not explicitly passed, auto-detect from the repo
+  let feedbackGuidance = includeFeedbackGuidance
+  if (feedbackGuidance === undefined && repoRoot) {
+    const repoPaths = getRepoPaths(repoRoot)
+    feedbackGuidance = await pathExists(path.join(repoPaths.skillsPath, "feedback-triage"))
+  }
+  if (feedbackGuidance === undefined) {
+    feedbackGuidance = true
+  }
+  const rendered = renderTemplate(
+    templateContent,
+    buildManagedBlockVariables(config, { includeFeedbackGuidance: feedbackGuidance }),
+  )
+  // Clean up consecutive blank lines from conditional template variables
+  const cleaned = rendered.replace(/\n{3,}/g, "\n\n")
+  return extractManagedBlock(cleaned) || cleaned.trim()
 }
 
 function hasTemplateDrift(content, managedTemplate) {
@@ -5711,7 +6199,11 @@ async function registerRepo(repoPathInput) {
   const repoRoot = path.resolve(repoPathInput)
   const stats = await fs.stat(repoRoot)
   if (!stats.isDirectory()) {
-    throw new Error(`Not a directory: ${repoRoot}`)
+    throw new BtrainError({
+      message: `Not a directory: ${repoRoot}`,
+      reason: "btrain register requires a path to an existing directory.",
+      fix: `Verify the path exists and is a directory: ls -la ${repoRoot}`,
+    })
   }
 
   const repoPaths = getRepoPaths(repoRoot)
@@ -5721,7 +6213,11 @@ async function registerRepo(repoPathInput) {
   const hasHandoff = await pathExists(configuredRepoPaths.handoffPath)
 
   if (!hasProjectToml && !hasHandoff) {
-    throw new Error("Repo is not bootstrapped enough to register. Create `.btrain/project.toml` or `.claude/collab/HANDOFF_A.md`, or run `btrain init` instead.")
+    throw new BtrainError({
+      message: "Repo is not bootstrapped enough to register.",
+      reason: "Neither .btrain/project.toml nor a handoff file exists at this path.",
+      fix: "Run `btrain init <repo-path>` to fully bootstrap the repo, or create `.btrain/project.toml` manually.",
+    })
   }
 
   const repoName = config?.name || normalizeRepoName(repoRoot)
@@ -5912,7 +6408,49 @@ async function getStatus({ repoRoot } = {}) {
   return statuses
 }
 
-async function doctorRepo(repoRoot, { repair = false } = {}) {
+function checkFeedbackLogHealth(content) {
+  const warnings = []
+  const entries = []
+  const lines = content.split("\n")
+
+  for (let i = 0; i < lines.length; i++) {
+    const headerMatch = /^## (FB-\w+-\d+):/.exec(lines[i])
+    if (headerMatch) {
+      entries.push({ id: headerMatch[1], startLine: i })
+    }
+  }
+
+  for (let idx = 0; idx < entries.length; idx++) {
+    const entry = entries[idx]
+    const endLine = idx + 1 < entries.length ? entries[idx + 1].startLine : lines.length
+    const entryText = lines.slice(entry.startLine, endLine).join("\n")
+
+    if (!entryText.includes("**Category:**")) {
+      warnings.push(`Feedback ${entry.id}: missing Category field.`)
+    }
+
+    const statusMatch = entryText.match(/\*\*Status:\*\*\s*(\S+)/)
+    if (!statusMatch) {
+      warnings.push(`Feedback ${entry.id}: missing Status field.`)
+      continue
+    }
+
+    const status = statusMatch[1]
+    if (status === "new" || status === "triaged") {
+      const reportedMatch = entryText.match(/\*\*Reported:\*\*\s*(\d{4}-\d{2}-\d{2})/)
+      if (reportedMatch) {
+        const daysSince = (Date.now() - new Date(reportedMatch[1]).getTime()) / (1000 * 60 * 60 * 24)
+        if (daysSince > 7) {
+          warnings.push(`Feedback ${entry.id} has been \`${status}\` for ${Math.floor(daysSince)} days.`)
+        }
+      }
+    }
+  }
+
+  return warnings
+}
+
+async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {}) {
   const issues = []
   const warnings = []
   const repurposeReady = []
@@ -5976,6 +6514,19 @@ async function doctorRepo(repoRoot, { repair = false } = {}) {
 
   if (overrides.length > 0) {
     warnings.push(`Active audited overrides: ${overrides.map((record) => formatOverrideSummary(record)).join(", ")}`)
+  }
+
+  // Feedback log monitoring
+  const feedbackCfg = getFeedbackConfig(config)
+  if (feedbackCfg.enabled && !skipFeedback) {
+    if (await pathExists(repoPaths.feedbackLogPath)) {
+      const feedbackContent = await readText(repoPaths.feedbackLogPath)
+      for (const issue of checkFeedbackLogHealth(feedbackContent)) {
+        warnings.push(issue)
+      }
+    } else if (await pathExists(repoPaths.projectTomlPath)) {
+      warnings.push("Missing `.claude/collab/FEEDBACK_LOG.md`. Run `btrain init .` to create it.")
+    }
   }
 
   // Lane-specific checks
@@ -6107,9 +6658,9 @@ async function doctorRepo(repoRoot, { repair = false } = {}) {
   }
 }
 
-async function doctor({ repoRoot, repair = false } = {}) {
+async function doctor({ repoRoot, repair = false, skipFeedback = false } = {}) {
   if (repoRoot) {
-    return [await doctorRepo(repoRoot, { repair })]
+    return [await doctorRepo(repoRoot, { repair, skipFeedback })]
   }
 
   const repos = await getRegisteredRepos()
@@ -6126,13 +6677,14 @@ async function doctor({ repoRoot, repair = false } = {}) {
       continue
     }
 
-    results.push(await doctorRepo(repo.path, { repair }))
+    results.push(await doctorRepo(repo.path, { repair, skipFeedback }))
   }
 
   return results
 }
 
 export {
+  BtrainError,
   acquireLocks,
   checkHandoff,
   pushAgentPrompt,

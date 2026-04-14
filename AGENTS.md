@@ -10,11 +10,13 @@ This repo uses the `btrain` collaboration workflow.
 - Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.
 - Run `btrain status` or `btrain doctor` if the local workflow files look stale.
 - Repo config lives at `.btrain/project.toml`.
+- Use the `feedback-triage` skill when processing user-reported issues. It logs entries to `.claude/collab/FEEDBACK_LOG.md` and drives test-first resolution.
+- Use the `bug-fix` skill for developer-found bugs. Write a failing reproduction test before editing production code.
 
 ### Collaboration Setup
 
-- Active collaborating agents: `claude`, `codex`, `gemini`
-- Current lane target: 9 lane(s) (3 per collaborating agent): `a`, `b`, `c`, `d`, `e`, `f`, `g`, `h`, `i`
+- Active collaborating agents: `claude`, `codex`
+- Current lane target: 6 lane(s) (3 per collaborating agent): `a`, `b`, `c`, `d`, `e`, `f`
 - Change `[agents].active` or `[lanes].per_agent`, then run `btrain init`, `btrain agents set`, or `btrain agents add` to scaffold missing lanes and refresh docs.
 
 ### Multi-Lane Workflow
@@ -78,7 +80,7 @@ Do not create empty handoffs. Placeholder reviewer context, no code changes, or 
 Mandatory handoff gate:
 
 - Right after `btrain handoff claim`, replace any placeholder reviewer context with a real in-progress summary. Never leave "Fill this in before handoff" text on an active lane.
-- Before `btrain handoff update --status needs-review`, confirm the locked files contain real reviewable work. A current diff in the locked files or a specific authored commit must exist.
+- Before `btrain handoff update --status needs-review`, confirm the locked files contain real reviewable work. A current diff in the locked files or a specific authored commit must exist. For non-code changes (docs, config, etc.), pass `--no-diff` to skip the diff gate, or set `require_diff = false` under `[handoff]` in `.btrain/project.toml` to disable it repo-wide.
 - Every `needs-review` handoff must name the changed files, summarize what changed, list the verification that was run, and call out any remaining gaps or unverified paths.
 - If pre-flight review shows the intended fix is already present, the diff is empty, or the user already made the change, do not send the lane to the reviewer as a no-op. Mark it stale or superseded in context and move on.
 
@@ -115,6 +117,8 @@ Project-specific skills live in `.claude/skills/`.
 - `reflect` - Post-failure reflection to turn incidents into durable prevention steps
 - `skill-creator` - Create or revise repo-local skills under `.claude/skills/`
 - `test-writer` - Write or expand unit, integration, and component tests
+- `feedback-triage` - Triage user-reported feedback into the feedback log, then drive test-first resolution or route to speckit
+- `bug-fix` - Test-first bug investigation: define bug, write failing test, fix, prove fix
 
 ### Usage rules
 
@@ -127,3 +131,5 @@ Project-specific skills live in `.claude/skills/`.
 - Use `reflect` after meaningful failures or regressions.
 - Use `skill-creator` when adding or revising skills instead of writing `SKILL.md` from scratch.
 - Use `test-writer` when adding tests, expanding coverage, or writing regression tests for bug fixes.
+- Use `feedback-triage` when processing user-reported issues or when the user says "feedback", "triage", or "user reported".
+- Use `bug-fix` when investigating developer-found bugs or regressions. Do not use it for user-reported feedback (use `feedback-triage` instead).

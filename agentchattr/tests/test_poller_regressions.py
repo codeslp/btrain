@@ -10,6 +10,14 @@ by exercising the logic against a minimal in-memory mock.
 
 import threading
 import unittest
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from btrain.notifications import build_btrain_notification_text
 
 
 class MockStore:
@@ -104,6 +112,50 @@ class TestFirstPollBaseline(unittest.TestCase):
 
         agents_msgs = self.store.get_recent(count=999, channel="agents")
         self.assertEqual(len(agents_msgs), 0, "Same status should not notify")
+
+
+class TestBtrainNotificationHelpers(unittest.TestCase):
+    def setUp(self):
+        self.agents_cfg = {
+            "claude": {"label": "Claude"},
+            "codex": {"label": "Codex"},
+            "gemini": {"label": "Gemini"},
+        }
+
+    def test_in_progress_transition_notifies_owner(self):
+        lane = {
+            "_laneId": "a",
+            "status": "in-progress",
+            "owner": "claude",
+            "reviewer": "codex",
+            "task": "Fix the handoff wake-up",
+        }
+
+        notify_text = build_btrain_notification_text(
+            lane,
+            previous_status="resolved",
+            agents_cfg=self.agents_cfg,
+        )
+
+        self.assertIn("@claude lane a", notify_text)
+        self.assertIn("btrain handoff --lane a #", notify_text)
+
+    def test_gpt_reviewer_alias_maps_to_codex(self):
+        lane = {
+            "_laneId": "b",
+            "status": "needs-review",
+            "owner": "Claude",
+            "reviewer": "GPT",
+            "task": "Review alias handling",
+        }
+
+        notify_text = build_btrain_notification_text(
+            lane,
+            previous_status="in-progress",
+            agents_cfg=self.agents_cfg,
+        )
+
+        self.assertTrue(notify_text.startswith("@codex lane b ready for review."), notify_text)
 
 
 def _run_cleanup(messages, channel, threshold=200):

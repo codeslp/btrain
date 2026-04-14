@@ -349,6 +349,40 @@ describe("btrain init", () => {
     )
   })
 
+  it("scaffolds the local dashboard and agentchattr toolchain by default", async () => {
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "serve-dashboard.js")),
+      "dashboard entrypoint should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "handoff-history-watcher.mjs")),
+      "handoff history watcher should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "install-handoff-history-launch-agent.sh")),
+      "handoff history launch-agent installer should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "register-handoff-watch-path.sh")),
+      "handoff history watch registration helper should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "agentchattr", "run.py")),
+      "agentchattr runner should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "agentchattr", "macos-linux", "start_codex.sh")),
+      "agentchattr launcher should exist",
+    )
+  })
+
+  it("adds agentchattr runtime ignores to .gitignore", async () => {
+    const gitignore = await fs.readFile(path.join(tmpDir, ".gitignore"), "utf8")
+    assert.ok(gitignore.includes("agentchattr/data/"), gitignore)
+    assert.ok(gitignore.includes("agentchattr/.venv/"), gitignore)
+    assert.ok(gitignore.includes("agentchattr/uploads/"), gitignore)
+  })
+
   it("AGENTS.md contains the managed block with CLI-first rule", async () => {
     const content = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
     assert.ok(content.includes("<!-- btrain:managed:start -->"), "Missing managed start fence")
@@ -387,6 +421,18 @@ describe("btrain init", () => {
         fs.access(path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
         "bundled skills should be skipped in core-only mode",
       )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, "scripts", "serve-dashboard.js")),
+        "dashboard scaffold should be skipped in core-only mode",
+      )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, "agentchattr", "run.py")),
+        "agentchattr scaffold should be skipped in core-only mode",
+      )
+      const gitignore = await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8")
+      assert.ok(!gitignore.includes("agentchattr/data/"), gitignore)
+      assert.ok(!gitignore.includes("agentchattr/.venv/"), gitignore)
+      assert.ok(!gitignore.includes("agentchattr/uploads/"), gitignore)
     } finally {
       await rmDir(localTmpDir)
     }
@@ -414,6 +460,36 @@ describe("btrain init", () => {
 
       assert.equal(await fs.readFile(preservedSkillPath, "utf8"), "custom skill text\n")
       await assert.doesNotReject(fs.access(restoredAssetPath), "missing bundled asset should be restored")
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("re-running init restores missing dev-tool files without overwriting existing tool content", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const preservedConfigPath = path.join(localTmpDir, "agentchattr", "config.toml")
+      const restoredDashboardPath = path.join(localTmpDir, "scripts", "serve-dashboard.js")
+      const restoredAgentAssetPath = path.join(localTmpDir, "agentchattr", "open_chat.html")
+
+      await fs.writeFile(preservedConfigPath, "custom agentchattr config\n", "utf8")
+      await fs.rm(restoredDashboardPath)
+      await fs.rm(restoredAgentAssetPath)
+
+      result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      assert.equal(await fs.readFile(preservedConfigPath, "utf8"), "custom agentchattr config\n")
+      await assert.doesNotReject(fs.access(restoredDashboardPath), "missing dashboard file should be restored")
+      await assert.doesNotReject(fs.access(restoredAgentAssetPath), "missing agentchattr asset should be restored")
     } finally {
       await rmDir(localTmpDir)
     }
@@ -709,7 +785,7 @@ describe("btrain handoff lifecycle", () => {
     )
 
     assert.notEqual(code, 0)
-    assert.match(stderr, /Cannot enter `needs-review` until reviewer context is complete/)
+    assert.match(stderr, /Cannot enter `needs-review`/)
   })
 
   it("update transitions to needs-review when reviewer context is complete", async () => {
@@ -843,7 +919,7 @@ describe("btrain handoff lifecycle", () => {
     )
 
     assert.notEqual(code, 0)
-    assert.match(stderr, /requires --reason-code/)
+    assert.match(stderr, /requires a reason code/)
   })
 
   it("resolve transitions to resolved", async () => {
@@ -1203,6 +1279,7 @@ describe("audited overrides", () => {
 
     try {
       await exec("git", ["init", tmpDir])
+      await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
       await runBtrain(["init", tmpDir], tmpDir)
 
       let result = await runBtrain(
@@ -1494,7 +1571,7 @@ describe("extended handoff statuses", () => {
     )
 
     assert.notEqual(code, 0)
-    assert.match(stderr, /requires --reason-code/)
+    assert.match(stderr, /requires a reason code/)
   })
 
   it("supports repair-needed guidance", async () => {
@@ -1655,6 +1732,124 @@ describe("btrain doctor", () => {
 
     const doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
     assert.ok(doctorResult.stdout.includes("repurpose-ready"), doctorResult.stdout)
+  })
+})
+
+describe("btrain doctor feedback monitoring", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("init scaffolds FEEDBACK_LOG.md", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const content = await fs.readFile(feedbackPath, "utf8")
+    assert.ok(content.includes("Feedback Log"), content)
+    assert.ok(!content.includes("{{repoName}}"), "Template variables should be rendered")
+  })
+
+  it("init --core-only skips FEEDBACK_LOG.md and feedback guidance in managed block", async () => {
+    const coreOnlyDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", coreOnlyDir])
+      await runBtrain(["init", coreOnlyDir, "--core-only"], coreOnlyDir)
+      const feedbackPath = path.join(coreOnlyDir, ".claude", "collab", "FEEDBACK_LOG.md")
+      const exists = await fs.access(feedbackPath).then(() => true, () => false)
+      assert.ok(!exists, "FEEDBACK_LOG.md should not be created with --core-only")
+      const agentsContent = await fs.readFile(path.join(coreOnlyDir, "AGENTS.md"), "utf8")
+      assert.ok(!agentsContent.includes("feedback-triage"), "AGENTS.md should not mention feedback-triage with --core-only")
+      assert.ok(!agentsContent.includes("bug-fix"), "AGENTS.md should not mention bug-fix with --core-only")
+      const claudeContent = await fs.readFile(path.join(coreOnlyDir, "CLAUDE.md"), "utf8")
+      assert.ok(!claudeContent.includes("feedback-triage"), "CLAUDE.md should not mention feedback-triage with --core-only")
+      assert.ok(!claudeContent.includes("bug-fix"), "CLAUDE.md should not mention bug-fix with --core-only")
+    } finally {
+      await rmDir(coreOnlyDir)
+    }
+  })
+
+  it("doctor warns on stale feedback entries", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const staleEntry = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-001: Button does not work",
+      "- **Reported:** 2020-01-01",
+      "- **Category:** BUG",
+      "- **Status:** new",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, staleEntry, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("FB-BUG-001"), stdout)
+    assert.ok(stdout.includes("days"), stdout)
+  })
+
+  it("doctor warns on missing required fields", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const badEntry = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-002: Another issue",
+      "- **Reported:** 2025-01-01",
+      "- **Notes:** something",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, badEntry, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("missing Category"), stdout)
+    assert.ok(stdout.includes("missing Status"), stdout)
+  })
+
+  it("doctor does not warn on healthy entries", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const healthyContent = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-001: Fixed issue",
+      "- **Reported:** 2025-04-01",
+      "- **Category:** BUG",
+      "- **Status:** verified",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, healthyContent, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("FB-BUG-001"), stdout)
+  })
+
+  it("doctor warns when FEEDBACK_LOG.md is missing", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    await fs.unlink(feedbackPath).catch(() => {})
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("FEEDBACK_LOG.md"), stdout)
+  })
+
+  it("--skip-feedback suppresses feedback warnings", async () => {
+    // feedback log is already missing from the previous test
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir, "--skip-feedback"], tmpDir)
+    assert.ok(!stdout.includes("FEEDBACK_LOG.md"), stdout)
+  })
+
+  it("feedback disabled in config suppresses warnings", async () => {
+    const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    await fs.writeFile(tomlPath, toml + "\n[feedback]\nenabled = false\n", "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("FEEDBACK_LOG.md"), stdout)
+    // Restore
+    await fs.writeFile(tomlPath, toml, "utf8")
   })
 })
 
@@ -2296,7 +2491,7 @@ describe("btrain push", () => {
     const output = `${stdout}\n${stderr}`
     assert.equal(code, 1, output)
     assert.ok(
-      output.includes("`btrain push` has been removed. Use `btrain handoff` plus `handoff claim|update|resolve` only."),
+      output.includes("`btrain push` has been removed."),
       output,
     )
   })
@@ -2797,6 +2992,7 @@ describe("multi-lane handoff lifecycle", () => {
     const { promisify } = await import("node:util")
     const exec = promisify(execFile)
     await exec("git", ["init", tmpDir])
+    await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
     await runBtrain(["init", tmpDir], tmpDir)
     await enableLanes(tmpDir)
     // Re-run init to create lane handoff files
@@ -2870,7 +3066,7 @@ describe("multi-lane handoff lifecycle", () => {
       [
         ...buildNeedsReviewArgs(tmpDir, {
           actor: "Claude",
-          base: "feat/auth-work",
+          base: "HEAD",
           changed: ["src/auth/guard.ts - supposed auth lane work"],
           verification: ["node --test test/core.test.mjs"],
           gap: ["Did not run a browser login smoke test"],
@@ -2885,6 +3081,150 @@ describe("multi-lane handoff lifecycle", () => {
 
     assert.notEqual(code, 0)
     assert.match(stderr, /reviewable diff in locked files/)
+  })
+
+  it("allows lane review handoffs with --no-diff even without a reviewable diff", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "feat/auth-work",
+          changed: ["docs/README.md - documentation-only update"],
+          verification: ["manual review of docs"],
+          gap: ["None - docs only"],
+          why: ["Documentation update for auth module."],
+          reviewAsk: ["Verify docs accuracy."],
+        }),
+        "--lane",
+        "a",
+        "--no-diff",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, `Expected success but got stderr: ${stderr}`)
+  })
+
+  it("accepts later lane updates when locked files were stored as a legacy space-separated blob", async () => {
+    const legacyDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", legacyDir])
+      await runBtrain(["init", legacyDir], legacyDir)
+      await enableLanes(legacyDir)
+      await runBtrain(["init", legacyDir], legacyDir)
+
+      const claimResult = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          legacyDir,
+          "--lane",
+          "a",
+          "--task",
+          "Auth work",
+          "--owner",
+          "Claude",
+          "--reviewer",
+          "Gemini",
+          "--files",
+          "src/auth/guard.ts,src/auth/util.ts",
+        ],
+        legacyDir,
+      )
+      assert.equal(claimResult.code, 0, claimResult.stderr)
+
+      await fs.mkdir(path.join(legacyDir, "src", "auth"), { recursive: true })
+      await fs.writeFile(path.join(legacyDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+      await fs.writeFile(path.join(legacyDir, "src", "auth", "util.ts"), "export const util = true\n", "utf8")
+
+      const reviewResult = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(legacyDir, {
+            actor: "Claude",
+            reviewer: "Gemini",
+            base: "HEAD",
+            changed: ["src/auth/guard.ts - auth guard", "src/auth/util.ts - auth util"],
+            verification: ["node --test test/core.test.mjs"],
+            gap: ["Did not run manual smoke validation"],
+            why: ["Auth lane is ready for review."],
+            reviewAsk: ["Check the auth lane changes."],
+          }),
+          "--lane",
+          "a",
+        ],
+        legacyDir,
+      )
+      assert.equal(reviewResult.code, 0, reviewResult.stderr)
+
+      const handoffPath = path.join(legacyDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const legacyContent = handoffContent.replace(
+        "Locked Files: src/auth/guard.ts, src/auth/util.ts",
+        "Locked Files: src/auth/guard.ts src/auth/util.ts",
+      )
+      await fs.writeFile(handoffPath, legacyContent, "utf8")
+
+      const rerouteResult = await runBtrain(
+        ["handoff", "update", "--repo", legacyDir, "--lane", "a", "--reviewer", "Codex", "--actor", "Claude"],
+        legacyDir,
+      )
+
+      assert.equal(rerouteResult.code, 0, rerouteResult.stderr)
+      assert.ok(rerouteResult.stdout.includes("peer reviewer: Codex"), rerouteResult.stdout)
+    } finally {
+      await rmDir(legacyDir)
+    }
+  })
+
+  it("does not split a legitimate locked file path that contains spaces", async () => {
+    const spacedDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", spacedDir])
+      await runBtrain(["init", spacedDir], spacedDir)
+      await enableLanes(spacedDir)
+      await runBtrain(["init", spacedDir], spacedDir)
+
+      const claimResult = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          spacedDir,
+          "--lane",
+          "a",
+          "--task",
+          "Docs work",
+          "--owner",
+          "Claude",
+          "--reviewer",
+          "Gemini",
+          "--files",
+          "docs/My File.md",
+        ],
+        spacedDir,
+      )
+      assert.equal(claimResult.code, 0, claimResult.stderr)
+
+      const updateResult = await runBtrain(
+        ["handoff", "update", "--repo", spacedDir, "--lane", "a", "--reviewer", "Codex", "--actor", "Claude"],
+        spacedDir,
+      )
+
+      assert.equal(updateResult.code, 0, updateResult.stderr)
+      assert.ok(updateResult.stdout.includes("peer reviewer: Codex"), updateResult.stdout)
+      assert.ok(updateResult.stdout.includes("docs/My File.md"), updateResult.stdout)
+    } finally {
+      await rmDir(spacedDir)
+    }
   })
 
   it("update lane a to needs-review", async () => {
@@ -3040,7 +3380,7 @@ describe("multi-lane guardrails", () => {
       tmpDir,
     )
     assert.notEqual(secondClaim.code, 0)
-    assert.ok(secondClaim.stderr.includes("already in-progress"), secondClaim.stderr)
+    assert.ok(secondClaim.stderr.includes("already `in-progress`"), secondClaim.stderr)
   })
 
   it("resyncs the lane lock registry when --files changes", async () => {
@@ -3238,4 +3578,133 @@ describe("handoff history launch-agent rename compatibility", () => {
     assert.match(launchctlCalls, /bootout gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
     assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.btrain\.plist/)
   })
+
+  it("bootstrapped repo history helpers derive repo-specific paths and labels", async () => {
+    const repoRoot = path.join(tmpDir, "mech_ai-demo")
+    const codexHome = path.join(tmpDir, "codex-home-generic")
+    const fakeHome = path.join(tmpDir, "home-generic")
+    const launchctlLog = path.join(tmpDir, "launchctl-generic.log")
+    const fakeBinDir = await setupFakeLaunchctl(path.join(tmpDir, "generic-bin"))
+    const historyPath = path.join(tmpDir, "generic-history.md")
+    const watchedRepo = path.join(tmpDir, "generic-watched-repo")
+    const expectedConfigDir = path.join(codexHome, "collab", "mech_ai_demo")
+    const expectedConfigPath = path.join(expectedConfigDir, "handoff-history-agent.env")
+    const expectedWatchListPath = path.join(expectedConfigDir, "handoff-watch-paths.txt")
+    const expectedPlistPath = path.join(fakeHome, "Library", "LaunchAgents", "com.codeslp.handoff-history.mech-ai-demo.plist")
+
+    await fs.mkdir(repoRoot, { recursive: true })
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(watchedRepo, { recursive: true })
+    await fs.writeFile(historyPath, "# history\n", "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+    await runGit(["init", repoRoot], repoRoot)
+
+    const initResult = await runBtrain(["init", repoRoot], repoRoot)
+    assert.equal(initResult.code, 0, initResult.stderr)
+
+    const result = await runShellScript(
+      path.join(repoRoot, "scripts", "install-handoff-history-launch-agent.sh"),
+      [],
+      repoRoot,
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        HANDOFF_HISTORY_PATH_OVERRIDE: historyPath,
+        WATCH_REPO_PATH_OVERRIDE: watchedRepo,
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    await assert.doesNotReject(fs.access(expectedConfigPath), "expected generic config path should exist")
+    await assert.doesNotReject(fs.access(expectedWatchListPath), "expected generic watch list should exist")
+    await assert.doesNotReject(fs.access(expectedPlistPath), "expected generic plist should exist")
+
+    const config = await fs.readFile(expectedConfigPath, "utf8")
+    const watchList = await fs.readFile(expectedWatchListPath, "utf8")
+    const plist = await fs.readFile(expectedPlistPath, "utf8")
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+
+    assert.ok(config.includes(`HANDOFF_HISTORY_PATH=${historyPath}`), config)
+    assert.ok(watchList.includes(watchedRepo), watchList)
+    assert.ok(plist.includes("<string>com.codeslp.handoff-history.mech-ai-demo</string>"), plist)
+    assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.mech-ai-demo\.plist/)
+    assert.doesNotMatch(launchctlCalls, /ai-sales-brain-train/)
+  })
 })
+
+// ──────────────────────────────────────────────
+// Regression: prose Base field with embedded SHA
+// ──────────────────────────────────────────────
+
+describe("needs-review with human-readable Base field", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await runGit(["init", tmpDir], tmpDir)
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+
+    // Create an initial commit so we have a base ref
+    await fs.writeFile(path.join(tmpDir, "README.md"), "# test\n", "utf8")
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "initial"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("accepts a prose Base string containing an embedded short SHA when locked files have a diff", async () => {
+    // Get the current HEAD short SHA to embed in the prose Base field
+    const { stdout: baseShortSha } = await runGit(["rev-parse", "--short", "HEAD"], tmpDir)
+
+    // Claim a lane with locked files
+    let result = await runBtrain(
+      [
+        "handoff", "claim",
+        "--repo", tmpDir,
+        "--lane", "a",
+        "--task", "Prose base regression test",
+        "--owner", "WriterBot",
+        "--reviewer", "ReviewerBot",
+        "--files", "src/",
+      ],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+
+    // Create a file change in the locked path and commit it
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.ts"), "export const x = 1;\n", "utf8")
+    await runGit(["add", "src/feature.ts"], tmpDir)
+    await runGit(["commit", "-m", "add feature"], tmpDir)
+
+    // Attempt needs-review with a human-readable Base string (not a bare ref)
+    // This is the bug: the prose string "Branch foo forked at abc1234" fails git rev-parse
+    const proseBase = `Branch 001-source-references forked from main at ${baseShortSha}. Plan commits: abc1234, def5678.`
+    result = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "WriterBot",
+          base: proseBase,
+          changed: ["src/feature.ts - added feature"],
+          verification: ["npm test"],
+          gap: ["None"],
+          why: ["Testing prose base field."],
+          reviewAsk: ["Verify the diff check works."],
+        }),
+        "--lane", "a",
+      ],
+      tmpDir,
+    )
+
+    // BUG: This currently fails with "reviewable diff in locked files"
+    // because listDiffPathsFromBase passes the full prose string to git rev-parse
+    assert.equal(result.code, 0, `Expected success but got: ${result.stderr}`)
+    assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+  })
+})
+

@@ -2,6 +2,7 @@
 
 import path from "node:path"
 import {
+  BtrainError,
   checkHandoff,
   claimHandoff,
   compactHandoffHistory,
@@ -36,7 +37,7 @@ function printHelp() {
 
 Usage:
   btrain init <repo-path> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
-                                                                              Bootstrap a repo (--hooks installs managed git guards)
+                                                                              Bootstrap a repo, local dashboard, and agentchattr (--hooks installs managed git guards)
   btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>]                                                 Check whose turn it is and what to do
@@ -72,7 +73,7 @@ Handoff/Lane Options:
   --agent <name>    Repeatable for \`init\`, \`agents set\`, and \`agents add\`. Updates \`[agents].active\`.
   --lanes-per-agent <n>
                     Sets \`[lanes].per_agent\` when used with \`init\`, \`agents set\`, or \`agents add\`.
-  --core-only       Init only the btrain core files/docs. Skips bundled project skills.
+  --core-only       Init only the btrain core files/docs. Skips bundled project skills and local dev tools.
   --base <ref>      Branch or commit for the work under review.
   --preflight [text]
                     Mark or describe the pre-flight review that was completed.
@@ -87,6 +88,7 @@ Handoff/Lane Options:
                     Required when entering \`changes-requested\` or \`repair-needed\`.
   --reason-tag <tag>
                     Repeatable. Optional secondary tags for reason-code metadata.
+  --no-diff           Skip the reviewable-diff gate for this handoff (e.g. docs-only or config changes).
   --override-id <id>
                     Consume a previously granted audited override when re-running a blocked action.
   --requested-by <agent>
@@ -94,6 +96,7 @@ Handoff/Lane Options:
   --confirmed-by <human>
                     Human confirming the audited override.
   --reason <text>   Required audit reason for \`override grant\`.
+  --skip-feedback   Skip feedback log checks in \`doctor\` output.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
@@ -101,7 +104,7 @@ Environment:
 
 Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
-  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack unless you pass \`--core-only\`.
+  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack plus repo-local dashboard, handoff-history helpers, and \`agentchattr/\` unless you pass \`--core-only\`.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
@@ -523,7 +526,11 @@ async function run() {
     const options = parseOptions(rest)
     const targetPath = options._[0]
     if (!targetPath) {
-      throw new Error("`btrain init` requires a repo path.")
+      throw new BtrainError({
+        message: "`btrain init` requires a repo path.",
+        reason: "No positional argument was provided.",
+        fix: "btrain init /path/to/repo",
+      })
     }
 
     const result = await initRepo(targetPath, {
@@ -531,6 +538,7 @@ async function run() {
       agent: options.agent,
       lanesPerAgent: options["lanes-per-agent"],
       scaffoldBundledSkills: !options["core-only"],
+      scaffoldDevTools: !options["core-only"],
     })
     console.log(`Initialized ${result.repoName}`)
     console.log(`repo: ${result.repoRoot}`)
@@ -548,6 +556,20 @@ async function run() {
           : "bundled skills: no missing bundled skills",
       )
     }
+    if (options["core-only"]) {
+      console.log("dev tools: skipped (--core-only)")
+    } else if (result.devToolsResult?.skippedReason === "self") {
+      console.log("dev tools: source bundle already present in this repo")
+    } else if (result.devToolsResult?.missingTools?.length) {
+      console.log(`dev tools: source bundle missing (${result.devToolsResult.missingTools.join(", ")})`)
+    } else if (result.devToolsResult) {
+      const copiedCount = result.devToolsResult.copiedFileCount
+      console.log(
+        copiedCount > 0
+          ? `dev tools: copied ${copiedCount} file${copiedCount === 1 ? "" : "s"} (${result.devToolsResult.copiedTools.join(", ")})`
+          : "dev tools: no missing dashboard / agentchattr files",
+      )
+    }
 
     if (result.hookResult) {
       printHookInstallResult("pre-commit hook", result.hookResult.preCommit)
@@ -559,7 +581,12 @@ async function run() {
   if (command === "agents") {
     const subcommand = ["set", "add"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
-      throw new Error("`btrain agents` requires a subcommand: set or add.")
+      throw new BtrainError({
+        message: "`btrain agents` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain agents set --repo . --agent claude --agent codex",
+        context: "Available subcommands: set, add.",
+      })
     }
 
     const options = parseOptions(rest.slice(1))
@@ -624,7 +651,11 @@ async function run() {
     const options = parseOptions(rest)
     const targetPath = options._[0]
     if (!targetPath) {
-      throw new Error("`btrain register` requires a repo path.")
+      throw new BtrainError({
+        message: "`btrain register` requires a repo path.",
+        reason: "No positional argument was provided.",
+        fix: "btrain register /path/to/repo",
+      })
     }
 
     const result = await registerRepo(targetPath)
@@ -643,7 +674,12 @@ async function run() {
   if (command === "review") {
     const subcommand = ["run", "status"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
-      throw new Error("`btrain review` requires a subcommand: run or status.")
+      throw new BtrainError({
+        message: "`btrain review` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain review run --repo . --mode parallel",
+        context: "Available subcommands: run, status.",
+      })
     }
 
     const options = parseOptions(rest.slice(1))
@@ -725,7 +761,7 @@ async function run() {
   if (command === "doctor") {
     const options = parseOptions(rest)
     const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const results = await doctor({ repoRoot, repair: !!options.repair })
+    const results = await doctor({ repoRoot, repair: !!options.repair, skipFeedback: !!options["skip-feedback"] })
     console.log(`btrain home: ${getBrainTrainHome()}`)
     console.log("")
     if (results.length === 0) {
@@ -756,7 +792,12 @@ async function run() {
   if (command === "override") {
     const subcommand = ["grant", "consume", "list"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
-      throw new Error("`btrain override` requires a subcommand: grant, consume, or list.")
+      throw new BtrainError({
+        message: "`btrain override` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason \"...\" ",
+        context: "Available subcommands: grant, consume, list.",
+      })
     }
 
     const options = parseOptions(rest.slice(1))
@@ -815,7 +856,12 @@ async function run() {
 
     if (subcommand === "release") {
       if (!options.path) {
-        throw new Error("`btrain locks release` requires --path.")
+        throw new BtrainError({
+          message: "`btrain locks release` requires --path.",
+          reason: "You must specify which lock path to release.",
+          fix: "btrain locks release --path src/",
+          context: "Run `btrain locks` to see all active lock paths.",
+        })
       }
       const removed = await forceReleaseLock(repoRoot, options.path)
       console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
@@ -824,7 +870,12 @@ async function run() {
 
     if (subcommand === "release-lane") {
       if (!options.lane) {
-        throw new Error("`btrain locks release-lane` requires --lane.")
+        throw new BtrainError({
+          message: "`btrain locks release-lane` requires --lane.",
+          reason: "You must specify which lane's locks to release.",
+          fix: "btrain locks release-lane --lane a",
+          context: "Run `btrain locks` to see which lanes have active locks.",
+        })
       }
       const released = await releaseLocks(repoRoot, options.lane)
       console.log(`Released ${released.length} lock(s) for lane ${options.lane}`)
@@ -857,10 +908,18 @@ async function run() {
   }
 
   if (command === "push") {
-    throw new Error("`btrain push` has been removed. Use `btrain handoff` plus `handoff claim|update|resolve` only.")
+    throw new BtrainError({
+      message: "`btrain push` has been removed.",
+      reason: "The push workflow was replaced by the handoff claim/update/resolve flow.",
+      fix: "Use `btrain handoff claim`, `btrain handoff update`, and `btrain handoff resolve` instead.",
+    })
   }
 
-  throw new Error(`Unknown command: ${command}`)
+  throw new BtrainError({
+    message: `Unknown command: "${command}".`,
+    reason: "This is not a recognized btrain command.",
+    fix: "Run `btrain --help` to see all available commands.",
+  })
 }
 
 run().catch((error) => {
