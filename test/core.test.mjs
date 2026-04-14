@@ -785,7 +785,7 @@ describe("btrain handoff lifecycle", () => {
     )
 
     assert.notEqual(code, 0)
-    assert.match(stderr, /Cannot enter `needs-review` until reviewer context is complete/)
+    assert.match(stderr, /Cannot enter `needs-review`/)
   })
 
   it("update transitions to needs-review when reviewer context is complete", async () => {
@@ -919,7 +919,7 @@ describe("btrain handoff lifecycle", () => {
     )
 
     assert.notEqual(code, 0)
-    assert.match(stderr, /requires --reason-code/)
+    assert.match(stderr, /requires a reason code/)
   })
 
   it("resolve transitions to resolved", async () => {
@@ -1279,6 +1279,7 @@ describe("audited overrides", () => {
 
     try {
       await exec("git", ["init", tmpDir])
+      await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
       await runBtrain(["init", tmpDir], tmpDir)
 
       let result = await runBtrain(
@@ -1570,7 +1571,7 @@ describe("extended handoff statuses", () => {
     )
 
     assert.notEqual(code, 0)
-    assert.match(stderr, /requires --reason-code/)
+    assert.match(stderr, /requires a reason code/)
   })
 
   it("supports repair-needed guidance", async () => {
@@ -2490,7 +2491,7 @@ describe("btrain push", () => {
     const output = `${stdout}\n${stderr}`
     assert.equal(code, 1, output)
     assert.ok(
-      output.includes("`btrain push` has been removed. Use `btrain handoff` plus `handoff claim|update|resolve` only."),
+      output.includes("`btrain push` has been removed."),
       output,
     )
   })
@@ -2991,6 +2992,7 @@ describe("multi-lane handoff lifecycle", () => {
     const { promisify } = await import("node:util")
     const exec = promisify(execFile)
     await exec("git", ["init", tmpDir])
+    await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
     await runBtrain(["init", tmpDir], tmpDir)
     await enableLanes(tmpDir)
     // Re-run init to create lane handoff files
@@ -3064,7 +3066,7 @@ describe("multi-lane handoff lifecycle", () => {
       [
         ...buildNeedsReviewArgs(tmpDir, {
           actor: "Claude",
-          base: "feat/auth-work",
+          base: "HEAD",
           changed: ["src/auth/guard.ts - supposed auth lane work"],
           verification: ["node --test test/core.test.mjs"],
           gap: ["Did not run a browser login smoke test"],
@@ -3378,7 +3380,7 @@ describe("multi-lane guardrails", () => {
       tmpDir,
     )
     assert.notEqual(secondClaim.code, 0)
-    assert.ok(secondClaim.stderr.includes("already in-progress"), secondClaim.stderr)
+    assert.ok(secondClaim.stderr.includes("already `in-progress`"), secondClaim.stderr)
   })
 
   it("resyncs the lane lock registry when --files changes", async () => {

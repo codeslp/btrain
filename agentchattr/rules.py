@@ -4,8 +4,9 @@ import json
 import time
 import threading
 import uuid
-import re
 from pathlib import Path
+
+from btrain.validator import btrainValidator
 
 MAX_ACTIVE_RULES = 10
 MAX_TEXT_CHARS = 160
@@ -267,73 +268,5 @@ class RuleStore:
         return self.count_draft()
 
 
-# ---------------------------------------------------------------------------
-# btrain Conflict Detection (Workstream 6)
-# ---------------------------------------------------------------------------
-
-class btrainValidator:
-    """Detects drift or rule violations by checking message text against lane state."""
-
-    def __init__(self):
-        # Keywords that suggest an agent is claiming a task or role
-        self._claim_patterns = [
-            re.compile(r"\b(i'll|i will|i am|claiming|taking)\b.*\b(task|lane|work|issue)\b", re.I),
-            re.compile(r"\b(starting|working on)\b.*\b(lane|task)\b", re.I),
-        ]
-        # Keywords that suggest an agent is requesting or performing a handoff
-        self._handoff_patterns = [
-            re.compile(r"\b(handing off|ready for review|finished|completed)\b", re.I),
-            re.compile(r"\bbtrain\s+handoff\b", re.I),
-        ]
-
-    def validate(self, sender: str, text: str, channel: str, btrain_lanes: list[dict]) -> list[str]:
-        """Check for contradictions between chat claims and canonical btrain state.
-        
-        Returns a list of warning strings.
-        """
-        warnings = []
-        sender_lower = sender.lower()
-        
-        # Determine target lane from channel (#a, #b, etc.)
-        lane_id = ""
-        if channel.startswith("#") and len(channel) == 2:
-            lane_id = channel.lstrip("#").lower()
-        
-        # If not a lane channel, check if the text mentions a specific lane
-        if not lane_id:
-            lane_match = re.search(r"\blane\s+([a-i])\b", text, re.I)
-            if lane_match:
-                lane_id = lane_match.group(1).lower()
-        
-        if not lane_id:
-            return []
-
-        lane = next((l for l in btrain_lanes if l.get("_laneId", "").lower() == lane_id), None)
-        if not lane:
-            return []
-
-        status = lane.get("status", "idle")
-        owner = (lane.get("owner") or "").lower()
-        reviewer = (lane.get("reviewer") or "").lower()
-
-        # 1. Check for 'claim' drift (agent claiming someone else's lane)
-        is_claiming = any(p.search(text) for p in self._claim_patterns)
-        if is_claiming:
-            if owner and owner != sender_lower and status != "resolved" and status != "idle":
-                warnings.append(
-                    f"Conflict: @{sender} is claiming lane {lane_id}, but it is currently locked by @{owner}."
-                )
-
-        # 2. Check for 'handoff' drift (agent acting as owner when they aren't)
-        is_handoff = any(p.search(text) for p in self._handoff_patterns)
-        if is_handoff:
-            if owner and owner != sender_lower and status == "in-progress":
-                warnings.append(
-                    f"Drift: @{sender} is reporting progress on lane {lane_id}, but the canonical owner is @{owner}."
-                )
-            if reviewer and reviewer != sender_lower and status == "needs-review":
-                warnings.append(
-                    f"Drift: @{sender} is acting on a review for lane {lane_id}, but the canonical reviewer is @{reviewer}."
-                )
-
-        return warnings
+# btrainValidator is implemented in btrain.validator and re-exported here
+# to keep the existing rules.py import surface stable.

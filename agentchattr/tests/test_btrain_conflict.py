@@ -58,6 +58,22 @@ class TestBtrainConflict(unittest.TestCase):
         warnings = self.validator.validate("gemini", "btrain handoff resolve --lane b", "#b", self.lanes)
         self.assertTrue(any("Drift" in w and "@claude" in w for w in warnings))
 
+    def test_allows_owner_ready_for_review_follow_up(self):
+        warnings = self.validator.validate("codex", "ready for review on lane b", "#b", self.lanes)
+        self.assertEqual(warnings, [])
+
+    def test_explicit_lane_target_overrides_channel_lane(self):
+        warnings = self.validator.validate("codex", "btrain handoff resolve --lane b", "#a", self.lanes)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("lane b", warnings[0])
+        self.assertIn("@claude", warnings[0])
+
+    def test_plain_lane_mention_overrides_channel_lane(self):
+        warnings = self.validator.validate("gemini", "reviewing lane b now", "#a", self.lanes)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("lane b", warnings[0])
+        self.assertIn("@claude", warnings[0])
+
     def test_lane_mention_in_general(self):
         # Detection works in #general if lane is explicitly mentioned
         warnings = self.validator.validate("gemini", "I am starting lane a", "general", self.lanes)

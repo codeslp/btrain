@@ -7,6 +7,7 @@ and _resolve_repo_root from wrapper.py.
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -193,6 +194,54 @@ class TestResolveRepoRoot(unittest.TestCase):
 
 
 class TestFetchBtrainContext(unittest.TestCase):
+
+    @patch("wrapper.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_prefers_rest_api_writer_context(self, mock_urlopen, mock_run):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "lanes": [
+                {
+                    "_laneId": "a",
+                    "task": "Fix auth bug in login flow",
+                    "status": "in-progress",
+                    "owner": "claude",
+                    "reviewer": "codex",
+                    "lockedFiles": ["src/auth.py", "src/utils.py"],
+                },
+            ],
+        }).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
+
+        self.assertIn("LANE a", result)
+        self.assertIn("writer", result.lower())
+        mock_run.assert_not_called()
+
+    @patch("wrapper.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_prefers_rest_api_reviewer_context(self, mock_urlopen, mock_run):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "lanes": [
+                {
+                    "_laneId": "b",
+                    "task": "Review dashboard rendering",
+                    "status": "needs-review",
+                    "owner": "codex",
+                    "reviewer": "claude",
+                    "lockedFiles": ["scripts/serve-dashboard.js"],
+                },
+            ],
+        }).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
+
+        self.assertIn("LANE b", result)
+        self.assertIn("reviewer", result.lower())
+        mock_run.assert_not_called()
 
     @patch("wrapper.shutil.which", return_value=None)
     def test_returns_empty_when_btrain_not_installed(self, _mock_which):

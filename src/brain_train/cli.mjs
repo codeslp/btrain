@@ -2,6 +2,7 @@
 
 import path from "node:path"
 import {
+  BtrainError,
   checkHandoff,
   claimHandoff,
   compactHandoffHistory,
@@ -525,7 +526,11 @@ async function run() {
     const options = parseOptions(rest)
     const targetPath = options._[0]
     if (!targetPath) {
-      throw new Error("`btrain init` requires a repo path.")
+      throw new BtrainError({
+        message: "`btrain init` requires a repo path.",
+        reason: "No positional argument was provided.",
+        fix: "btrain init /path/to/repo",
+      })
     }
 
     const result = await initRepo(targetPath, {
@@ -576,7 +581,12 @@ async function run() {
   if (command === "agents") {
     const subcommand = ["set", "add"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
-      throw new Error("`btrain agents` requires a subcommand: set or add.")
+      throw new BtrainError({
+        message: "`btrain agents` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain agents set --repo . --agent claude --agent codex",
+        context: "Available subcommands: set, add.",
+      })
     }
 
     const options = parseOptions(rest.slice(1))
@@ -641,7 +651,11 @@ async function run() {
     const options = parseOptions(rest)
     const targetPath = options._[0]
     if (!targetPath) {
-      throw new Error("`btrain register` requires a repo path.")
+      throw new BtrainError({
+        message: "`btrain register` requires a repo path.",
+        reason: "No positional argument was provided.",
+        fix: "btrain register /path/to/repo",
+      })
     }
 
     const result = await registerRepo(targetPath)
@@ -660,7 +674,12 @@ async function run() {
   if (command === "review") {
     const subcommand = ["run", "status"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
-      throw new Error("`btrain review` requires a subcommand: run or status.")
+      throw new BtrainError({
+        message: "`btrain review` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain review run --repo . --mode parallel",
+        context: "Available subcommands: run, status.",
+      })
     }
 
     const options = parseOptions(rest.slice(1))
@@ -773,7 +792,12 @@ async function run() {
   if (command === "override") {
     const subcommand = ["grant", "consume", "list"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
-      throw new Error("`btrain override` requires a subcommand: grant, consume, or list.")
+      throw new BtrainError({
+        message: "`btrain override` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason \"...\" ",
+        context: "Available subcommands: grant, consume, list.",
+      })
     }
 
     const options = parseOptions(rest.slice(1))
@@ -832,7 +856,12 @@ async function run() {
 
     if (subcommand === "release") {
       if (!options.path) {
-        throw new Error("`btrain locks release` requires --path.")
+        throw new BtrainError({
+          message: "`btrain locks release` requires --path.",
+          reason: "You must specify which lock path to release.",
+          fix: "btrain locks release --path src/",
+          context: "Run `btrain locks` to see all active lock paths.",
+        })
       }
       const removed = await forceReleaseLock(repoRoot, options.path)
       console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
@@ -841,7 +870,12 @@ async function run() {
 
     if (subcommand === "release-lane") {
       if (!options.lane) {
-        throw new Error("`btrain locks release-lane` requires --lane.")
+        throw new BtrainError({
+          message: "`btrain locks release-lane` requires --lane.",
+          reason: "You must specify which lane's locks to release.",
+          fix: "btrain locks release-lane --lane a",
+          context: "Run `btrain locks` to see which lanes have active locks.",
+        })
       }
       const released = await releaseLocks(repoRoot, options.lane)
       console.log(`Released ${released.length} lock(s) for lane ${options.lane}`)
@@ -874,10 +908,18 @@ async function run() {
   }
 
   if (command === "push") {
-    throw new Error("`btrain push` has been removed. Use `btrain handoff` plus `handoff claim|update|resolve` only.")
+    throw new BtrainError({
+      message: "`btrain push` has been removed.",
+      reason: "The push workflow was replaced by the handoff claim/update/resolve flow.",
+      fix: "Use `btrain handoff claim`, `btrain handoff update`, and `btrain handoff resolve` instead.",
+    })
   }
 
-  throw new Error(`Unknown command: ${command}`)
+  throw new BtrainError({
+    message: `Unknown command: "${command}".`,
+    reason: "This is not a recognized btrain command.",
+    fix: "Run `btrain --help` to see all available commands.",
+  })
 }
 
 run().catch((error) => {

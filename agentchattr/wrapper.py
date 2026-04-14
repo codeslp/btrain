@@ -22,13 +22,20 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+from btrain.context import (
+    fetch_btrain_context as _btrain_fetch_btrain_context,
+    format_lane_context as _btrain_format_lane_context,
+    parse_btrain_output as _btrain_parse_btrain_output,
+    resolve_repo_root as _btrain_resolve_repo_root,
+    split_lane_blocks as _btrain_split_lane_blocks,
+)
 
 ROOT = Path(__file__).parent
 
@@ -38,18 +45,8 @@ ROOT = Path(__file__).parent
 # ---------------------------------------------------------------------------
 
 def _resolve_repo_root(cwd: str) -> str | None:
-    """Resolve agent cwd to an absolute repo root path.
-
-    Handles absolute paths directly and resolves relative paths against ROOT.
-    """
-    try:
-        p = Path(cwd)
-        resolved = p.resolve() if p.is_absolute() else (ROOT / cwd).resolve()
-        if resolved.is_dir():
-            return str(resolved)
-    except Exception:
-        pass
-    return None
+    """Resolve agent cwd to an absolute repo root path."""
+    return _btrain_resolve_repo_root(cwd, ROOT)
 
 
 def _fetch_recent_messages(server_port: int, channel: str, token: str, limit: int = 5) -> str:
@@ -77,162 +74,27 @@ def _fetch_recent_messages(server_port: int, channel: str, token: str, limit: in
 
 
 def _fetch_btrain_context(server_port: int, agent_name: str, repo_root: str, timeout: float = 3.0) -> str:
-    """Fetch formatted lane context for this agent via REST API with CLI fallback.
-
-    Returns empty string on any failure.
-    """
-    # Priority 1: REST API (fast, uses cached poller state)
-    try:
-        import urllib.request
-        url = f"http://127.0.0.1:{server_port}/api/btrain/lanes"
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            lane_data = json.loads(resp.read())
-            lanes = lane_data.get("lanes", [])
-            
-            agent_lower = agent_name.lower()
-            active_statuses = {"in-progress", "changes-requested", "repair-needed"}
-
-            # Priority 1a: agent is owner of an active lane
-            for lane in lanes:
-                if lane.get("owner", "").lower() == agent_lower and lane.get("status", "") in active_statuses:
-                    return _format_lane_context_from_json(lane, "writer")
-
-            # Priority 1b: agent is reviewer of a needs-review lane
-            for lane in lanes:
-                if lane.get("reviewer", "").lower() == agent_lower and lane.get("status", "") == "needs-review":
-                    return _format_lane_context_from_json(lane, "reviewer")
-
-            # Priority 1c: agent is owner of a needs-review lane (waiting)
-            for lane in lanes:
-                if lane.get("owner", "").lower() == agent_lower and lane.get("status", "") == "needs-review":
-                    return _format_lane_context_from_json(lane, "writer-waiting")
-    except Exception:
-        pass
-
-    # Priority 2: CLI fallback (shell out to btrain handoff)
-    btrain_bin = shutil.which("btrain")
-    if not btrain_bin:
-        return ""
-    try:
-        result = subprocess.run(
-            [btrain_bin, "handoff", "--repo", repo_root],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        if result.returncode != 0:
-            return ""
-        return _parse_btrain_output(result.stdout, agent_name)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return ""
-
-
-def _format_lane_context_from_json(lane: dict, role: str = "writer") -> str:
-    """Format a compact btrain lane context block from JSON state."""
-    lane_id = lane.get("_laneId", "?")
-    task = lane.get("task", "(none)")
-    status = lane.get("status", "unknown")
-    owner = lane.get("owner", "(unassigned)")
-    reviewer = lane.get("reviewer", "(unassigned)")
-    locked = ", ".join(lane.get("lockedFiles", [])) or "(none)"
-
-    if role == "reviewer":
-        role_note = f"Reviewer. btrain handoff resolve --lane {lane_id} --summary '...' --actor '{reviewer}'"
-    elif role == "writer-waiting":
-        role_note = f"Waiting on {reviewer} to review."
-    else:
-        role_note = f"Writer. When done: btrain handoff update --lane {lane_id} --status needs-review --actor '{owner}'"
-
-    parts = [
-        f"LANE {lane_id}: {status} | {task}",
-        f"W={owner} R={reviewer} lock={locked}",
-        role_note,
-    ]
-    return " ".join(parts)
-
-
-_LANE_HEADER_RE = re.compile(r"^--- lane (\S+) ---$")
-_KV_RE = re.compile(r"^([a-z][a-z ]+):\s*(.*)$", re.IGNORECASE)
+    """Fetch formatted lane context for this agent via REST API with CLI fallback."""
+    return _btrain_fetch_btrain_context(
+        server_port,
+        agent_name,
+        repo_root,
+        timeout=timeout,
+        run=subprocess.run,
+        which=shutil.which,
+    )
 
 
 def _parse_btrain_output(output: str, agent_name: str) -> str:
-    """Parse btrain handoff output and return formatted context for agent_name's lane."""
-    blocks = _split_lane_blocks(output)
-    if not blocks:
-        return ""
-
-    agent_lower = agent_name.lower()
-
-    # Priority 1: agent is owner of an active lane (in-progress, changes-requested, repair-needed)
-    active_statuses = {"in-progress", "changes-requested", "repair-needed"}
-    for block in blocks:
-        if block.get("active agent", "").lower() == agent_lower and block.get("status", "") in active_statuses:
-            return _format_lane_context(block, "writer")
-
-    # Priority 2: agent is reviewer of a needs-review lane
-    for block in blocks:
-        if block.get("peer reviewer", "").lower() == agent_lower and block.get("status", "") == "needs-review":
-            return _format_lane_context(block, "reviewer")
-
-    # Priority 3: agent is owner of a needs-review lane (waiting on reviewer)
-    for block in blocks:
-        if block.get("active agent", "").lower() == agent_lower and block.get("status", "") == "needs-review":
-            return _format_lane_context(block, "writer-waiting")
-
-    return ""
+    return _btrain_parse_btrain_output(output, agent_name)
 
 
 def _split_lane_blocks(output: str) -> list[dict]:
-    """Split btrain handoff output into per-lane key-value blocks."""
-    lines = output.splitlines()
-    blocks: list[dict] = []
-    current: dict | None = None
-
-    for line in lines:
-        header_match = _LANE_HEADER_RE.match(line.strip())
-        if header_match:
-            if current is not None:
-                blocks.append(current)
-            current = {"_lane_id": header_match.group(1)}
-            continue
-        if current is None:
-            continue
-        kv_match = _KV_RE.match(line.strip())
-        if kv_match:
-            key = kv_match.group(1).strip().lower()
-            value = kv_match.group(2).strip()
-            current[key] = value
-
-    if current is not None:
-        blocks.append(current)
-
-    return blocks
+    return _btrain_split_lane_blocks(output)
 
 
 def _format_lane_context(lane: dict, role: str = "writer") -> str:
-    """Format a compact btrain lane context block for prompt injection.
-
-    Agent names in btrain project.toml must match agentchattr names
-    (claude, codex, gemini) so @mentions route correctly.
-    """
-    lane_id = lane.get("_lane_id", "?")
-    task = lane.get("task", "(none)")
-    status = lane.get("status", "unknown")
-    owner = lane.get("active agent", "(unassigned)")
-    reviewer = lane.get("peer reviewer", "(unassigned)")
-    locked = lane.get("locked files", "(none)")
-
-    if role == "reviewer":
-        role_note = f"Reviewer. btrain handoff resolve --lane {lane_id} --summary '...' --actor '{reviewer}'"
-    elif role == "writer-waiting":
-        role_note = f"Waiting on {reviewer} to review."
-    else:
-        role_note = f"Writer. When done: btrain handoff update --lane {lane_id} --status needs-review --actor '{owner}'"
-
-    parts = [
-        f"LANE {lane_id}: {status} | {task}",
-        f"W={owner} R={reviewer} lock={locked}",
-        role_note,
-    ]
-    return " ".join(parts)
+    return _btrain_format_lane_context(lane, role)
 
 
 # ---------------------------------------------------------------------------
