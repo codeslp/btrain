@@ -47,6 +47,17 @@ const DEFAULT_CURRENT = {
   lastUpdated: "",
 }
 
+function createEmptyDelegationPacket() {
+  return {
+    objective: "",
+    deliverable: "",
+    constraints: [],
+    acceptance: [],
+    budget: "",
+    doneWhen: "",
+  }
+}
+
 const execFileAsync = promisify(execFile)
 const CORE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = path.resolve(CORE_DIR, "..", "..")
@@ -178,6 +189,28 @@ async function pathExists(targetPath) {
 
 async function ensureDir(targetPath) {
   await fs.mkdir(targetPath, { recursive: true })
+}
+
+async function ensureSymlink(targetPath, linkPath) {
+  try {
+    const stat = await fs.lstat(linkPath)
+    if (stat.isSymbolicLink()) {
+      const existing = await fs.readlink(linkPath)
+      const expectedTarget = path.relative(path.dirname(linkPath), targetPath)
+      if (existing === expectedTarget || existing === targetPath) {
+        return
+      }
+      await fs.unlink(linkPath)
+    } else {
+      return
+    }
+  } catch {
+    // link does not exist yet
+  }
+
+  await ensureDir(path.dirname(linkPath))
+  const relativeTarget = path.relative(path.dirname(linkPath), targetPath)
+  await fs.symlink(relativeTarget, linkPath)
 }
 
 const CORE_GITIGNORE_ENTRIES = [
@@ -1142,6 +1175,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "This repo uses the `btrain` collaboration workflow.",
   "",
   "- **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF_*.md` files directly.",
+  "- Keep the lane `Delegation Packet` current for active work: `Objective`, `Deliverable`, `Constraints`, `Acceptance checks`, `Budget`, and `Done when`.",
   "- When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.",
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
@@ -1195,6 +1229,32 @@ const TEMPLATE_DEFAULTS = {
     "Next Action: Claim the next task for {{repoName}}. Use `btrain handoff claim --lane {{laneId}} --task \"...\" --owner \"...\" --reviewer \"...\" --files \"...\"`.",
     "Base: ",
     "Last Updated: btrain {{timestamp}}",
+    "",
+    "## Delegation Packet",
+    "",
+    "Objective:",
+    "",
+    "Fill this in when the lane is claimed or re-scoped.",
+    "",
+    "Deliverable:",
+    "",
+    "Fill this in when the lane is claimed or re-scoped.",
+    "",
+    "Constraints:",
+    "",
+    "- Stay within the current lane scope unless the lane is re-scoped.",
+    "",
+    "Acceptance checks:",
+    "",
+    "- Fill this in when the lane is claimed or re-scoped.",
+    "",
+    "Budget:",
+    "",
+    "Keep the first pass lane-scoped and explicit.",
+    "",
+    "Done when:",
+    "",
+    "The lane can move to `needs-review` or to a narrower follow-up handoff.",
     "",
     "## Context for Peer Review",
     "",
@@ -2207,6 +2267,140 @@ function buildCurrentSection(current) {
   return lines.join("\n")
 }
 
+function normalizeParagraphValue(value, fallbackValue = "") {
+  const lines = normalizeOptionArray(value)
+    ?.flatMap((item) => String(item).split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  return lines && lines.length > 0 ? lines.join("\n") : fallbackValue
+}
+
+function normalizeListValue(value, fallbackValues = []) {
+  const lines = normalizeOptionArray(value)
+    ?.flatMap((item) => String(item).split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^-+\s*/, "").trim())
+
+  return lines && lines.length > 0 ? lines : fallbackValues
+}
+
+function splitParagraphValue(value, fallbackLines = []) {
+  return normalizeParagraphLines(value, fallbackLines)
+}
+
+function buildDefaultDelegationPacket({ task = "", lockedFiles = [] } = {}) {
+  const normalizedLocks = normalizePathList(lockedFiles)
+
+  return {
+    objective: String(task || "").trim() || "Complete the claimed lane task with reviewable progress.",
+    deliverable: "Produce reviewable changes or artifacts inside the claimed lane scope.",
+    constraints: [
+      normalizedLocks.length > 0
+        ? `Stay within locked files unless the lane is re-scoped: ${normalizedLocks.join(", ")}`
+        : "Stay within the currently claimed lane scope unless the lane is re-scoped.",
+      "Preserve unrelated local changes and existing workflow state.",
+    ],
+    acceptance: [
+      "Leave the lane with concrete, reviewable progress.",
+      "Capture verification and remaining gaps before handoff.",
+    ],
+    budget: "Keep the first pass lane-scoped. Update the packet if scope or constraints change.",
+    doneWhen: "The lane is ready for `needs-review` or for a narrower follow-up handoff with explicit remaining gaps.",
+  }
+}
+
+function normalizeDelegationPacket(packet = {}, defaults = createEmptyDelegationPacket()) {
+  const fallback = {
+    ...createEmptyDelegationPacket(),
+    ...defaults,
+  }
+
+  return {
+    objective: normalizeParagraphValue(packet.objective, fallback.objective),
+    deliverable: normalizeParagraphValue(packet.deliverable, fallback.deliverable),
+    constraints: normalizeListValue(packet.constraints, fallback.constraints || []),
+    acceptance: normalizeListValue(packet.acceptance, fallback.acceptance || []),
+    budget: normalizeParagraphValue(packet.budget, fallback.budget),
+    doneWhen: normalizeParagraphValue(packet.doneWhen, fallback.doneWhen),
+  }
+}
+
+function buildDelegationPacketValue(existingPacket = {}, options = {}, defaults = {}) {
+  const defaultPacket = buildDefaultDelegationPacket(defaults)
+  const existing = normalizeDelegationPacket(existingPacket, defaultPacket)
+
+  return normalizeDelegationPacket({
+    objective:
+      options.objective !== undefined
+        ? normalizeParagraphValue(options.objective, existing.objective || defaultPacket.objective)
+        : existing.objective || defaultPacket.objective,
+    deliverable:
+      options.deliverable !== undefined
+        ? normalizeParagraphValue(options.deliverable, existing.deliverable || defaultPacket.deliverable)
+        : existing.deliverable || defaultPacket.deliverable,
+    constraints:
+      options.constraint !== undefined
+        ? normalizeListValue(
+            options.constraint,
+            existing.constraints.length > 0 ? existing.constraints : defaultPacket.constraints,
+          )
+        : existing.constraints.length > 0
+          ? existing.constraints
+          : defaultPacket.constraints,
+    acceptance:
+      options.acceptance !== undefined
+        ? normalizeListValue(
+            options.acceptance,
+            existing.acceptance.length > 0 ? existing.acceptance : defaultPacket.acceptance,
+          )
+        : existing.acceptance.length > 0
+          ? existing.acceptance
+          : defaultPacket.acceptance,
+    budget:
+      options.budget !== undefined
+        ? normalizeParagraphValue(options.budget, existing.budget || defaultPacket.budget)
+        : existing.budget || defaultPacket.budget,
+    doneWhen:
+      options["done-when"] !== undefined
+        ? normalizeParagraphValue(options["done-when"], existing.doneWhen || defaultPacket.doneWhen)
+        : existing.doneWhen || defaultPacket.doneWhen,
+  })
+}
+
+function buildDelegationPacketSection(packet = {}, defaults = {}) {
+  const normalized = normalizeDelegationPacket(packet, buildDefaultDelegationPacket(defaults))
+
+  return [
+    "## Delegation Packet",
+    "",
+    "Objective:",
+    "",
+    ...splitParagraphValue(normalized.objective),
+    "",
+    "Deliverable:",
+    "",
+    ...splitParagraphValue(normalized.deliverable),
+    "",
+    "Constraints:",
+    "",
+    ...normalized.constraints.map((line) => `- ${line}`),
+    "",
+    "Acceptance checks:",
+    "",
+    ...normalized.acceptance.map((line) => `- ${line}`),
+    "",
+    "Budget:",
+    "",
+    ...splitParagraphValue(normalized.budget),
+    "",
+    "Done when:",
+    "",
+    ...splitParagraphValue(normalized.doneWhen),
+  ].join("\n")
+}
+
 function buildContextForReviewerSection(options = {}) {
   const whyLines = normalizeParagraphLines(
     options.whyLines,
@@ -2338,6 +2532,54 @@ function parseContextForReviewerSection(content) {
   return result
 }
 
+function parseDelegationPacketSection(content) {
+  const bounds = findSectionBounds(content, /^## Delegation Packet.*$/)
+  if (!bounds) {
+    return createEmptyDelegationPacket()
+  }
+
+  const result = createEmptyDelegationPacket()
+  const listKeys = new Set(["constraints", "acceptance"])
+  const keyByHeading = {
+    "objective:": "objective",
+    "deliverable:": "deliverable",
+    "constraints:": "constraints",
+    "acceptance checks:": "acceptance",
+    "budget:": "budget",
+    "done when:": "doneWhen",
+  }
+
+  let activeKey = null
+
+  for (const rawLine of bounds.text.split("\n").slice(1)) {
+    const trimmed = rawLine.trim()
+    if (!trimmed) {
+      continue
+    }
+
+    const nextKey = keyByHeading[trimmed.toLowerCase()]
+    if (nextKey) {
+      activeKey = nextKey
+      continue
+    }
+
+    if (!activeKey) {
+      continue
+    }
+
+    if (listKeys.has(activeKey)) {
+      result[activeKey].push(trimmed.replace(/^-+\s*/, "").trim())
+      continue
+    }
+
+    result[activeKey] = result[activeKey]
+      ? `${result[activeKey]}\n${trimmed}`
+      : trimmed
+  }
+
+  return normalizeDelegationPacket(result)
+}
+
 function mergeContextForReviewerSection(existingContent, options = {}) {
   const existing = parseContextForReviewerSection(existingContent)
   const explicitPreflight = options.preflight === true
@@ -2370,6 +2612,17 @@ function mergeContextForReviewerSection(existingContent, options = {}) {
     whyLines: nextWhyLines,
     reviewAskLines: nextReviewAskLines,
   })
+}
+
+function hasDelegationPacketUpdates(options = {}) {
+  return [
+    "objective",
+    "deliverable",
+    "constraint",
+    "acceptance",
+    "budget",
+    "done-when",
+  ].some((key) => options[key] !== undefined)
 }
 
 function normalizeReviewContextLine(line) {
@@ -2646,11 +2899,17 @@ async function readCurrentState(repoRoot, options = {}) {
   const config = options.config || await readProjectConfig(repoRoot)
   const handoffPath = options.handoffPath || getConfiguredRepoPaths(repoRoot, config).handoffPath
   const laneId = typeof options.laneId === "string" ? options.laneId : ""
-  let current = { ...DEFAULT_CURRENT }
+  let current = {
+    ...DEFAULT_CURRENT,
+    delegationPacket: createEmptyDelegationPacket(),
+  }
 
   if (await pathExists(handoffPath)) {
     const content = await readText(handoffPath)
-    current = parseCurrentSection(content)
+    current = {
+      ...parseCurrentSection(content),
+      delegationPacket: parseDelegationPacketSection(content),
+    }
   }
 
   const events = await readWorkflowEvents(repoRoot, config, laneId)
@@ -2800,22 +3059,35 @@ function getStateUpdatedDate(current, fallbackValue = "") {
 function resolveCurrentStateFromWorkflowEvents(current, events) {
   const latestEvent = getLatestStateSnapshotEvent(events)
   if (!latestEvent) {
-    return current
+    return {
+      ...current,
+      delegationPacket: normalizeDelegationPacket(current?.delegationPacket),
+    }
   }
 
   const eventDate = getStateUpdatedDate(latestEvent.after, latestEvent.recordedAt)
   const currentDate = getStateUpdatedDate(current)
 
   if (!eventDate) {
-    return current
+    return {
+      ...current,
+      delegationPacket: normalizeDelegationPacket(current?.delegationPacket),
+    }
   }
   if (currentDate && eventDate.getTime() <= currentDate.getTime()) {
-    return current
+    return {
+      ...current,
+      delegationPacket: normalizeDelegationPacket(current?.delegationPacket),
+    }
   }
 
   return {
     ...DEFAULT_CURRENT,
     ...latestEvent.after,
+    delegationPacket:
+      latestEvent.after?.delegationPacket !== undefined
+        ? normalizeDelegationPacket(latestEvent.after.delegationPacket)
+        : normalizeDelegationPacket(current?.delegationPacket),
   }
 }
 
@@ -3055,7 +3327,10 @@ async function updateHandoff(repoRoot, updates, options = {}) {
   }
 
   const existingContent = await readText(handoffPath)
-  const existingCurrent = parseCurrentSection(existingContent)
+  const existingCurrent = {
+    ...parseCurrentSection(existingContent),
+    delegationPacket: parseDelegationPacketSection(existingContent),
+  }
   const nextCurrent = {
     ...existingCurrent,
     ...updates,
@@ -3080,6 +3355,14 @@ async function updateHandoff(repoRoot, updates, options = {}) {
       nextContent,
       /^## Context for (Reviewer|Peer Review).*$/,
       options.contextSectionText,
+    )
+  }
+
+  if (options.delegationPacketSectionText) {
+    nextContent = replaceOrPrependSection(
+      nextContent,
+      /^## Delegation Packet.*$/,
+      options.delegationPacketSectionText,
     )
   }
 
@@ -3198,6 +3481,10 @@ async function claimHandoff(repoRoot, options) {
       options.next || "Work within the locked files, keep the lane in-progress, and hand off for review when ready.",
     base: options.base || "",
     lastUpdated: `${options.owner} ${formatIsoTimestamp()}`,
+    delegationPacket: buildDelegationPacketValue(createEmptyDelegationPacket(), options, {
+      task: options.task,
+      lockedFiles: files,
+    }),
   }
 
   if (laneId) {
@@ -3213,6 +3500,10 @@ async function claimHandoff(repoRoot, options) {
       updates,
       {
         actorLabel: options.owner,
+        delegationPacketSectionText: buildDelegationPacketSection(updates.delegationPacket, {
+          task: options.task,
+          lockedFiles: files,
+        }),
         contextSectionText: buildContextForReviewerSection(),
         reviewResponseText: buildPendingReviewResponseSection(),
         config,
@@ -3234,6 +3525,10 @@ async function claimHandoff(repoRoot, options) {
     updates,
     {
       actorLabel: options.owner,
+      delegationPacketSectionText: buildDelegationPacketSection(updates.delegationPacket, {
+        task: options.task,
+        lockedFiles: files,
+      }),
       contextSectionText: buildContextForReviewerSection(),
       reviewResponseText: buildPendingReviewResponseSection(),
       eventType: "claim",
@@ -3399,6 +3694,13 @@ async function patchHandoff(repoRoot, options) {
             : currentLane.lockPaths,
       )
       const baseForReview = options.base !== undefined ? options.base : existingCurrent.base
+      const delegationPacketUpdated = hasDelegationPacketUpdates(options)
+      const nextDelegationPacket = delegationPacketUpdated
+        ? buildDelegationPacketValue(existingCurrent.delegationPacket, options, {
+            task: updates.task ?? existingCurrent.task,
+            lockedFiles: effectiveFiles,
+          })
+        : existingCurrent.delegationPacket
       const nextContextSectionText = mergeContextForReviewerSection(existingContent, options)
       const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
       let overrideRecord = null
@@ -3448,11 +3750,21 @@ async function patchHandoff(repoRoot, options) {
         || options["review-ask"] !== undefined
           ? nextContextSectionText
           : undefined
+      if (delegationPacketUpdated) {
+        updates.delegationPacket = nextDelegationPacket
+      }
 
       return updateHandoff(repoRoot, updates, {
         actorLabel: resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
+        delegationPacketSectionText:
+          delegationPacketUpdated
+            ? buildDelegationPacketSection(nextDelegationPacket, {
+                task: updates.task ?? existingCurrent.task,
+                lockedFiles: effectiveFiles,
+              })
+            : undefined,
         contextSectionText,
         eventType: "update",
         laneId,
@@ -3542,6 +3854,13 @@ async function patchHandoff(repoRoot, options) {
     })
   }
   const nextContextSectionText = mergeContextForReviewerSection(existingContent, options)
+  const delegationPacketUpdated = hasDelegationPacketUpdates(options)
+  const nextDelegationPacket = delegationPacketUpdated
+    ? buildDelegationPacketValue(existingCurrent.delegationPacket, options, {
+        task: updates.task ?? existingCurrent.task,
+        lockedFiles: updates.lockedFiles ?? existingCurrent.lockedFiles,
+      })
+    : existingCurrent.delegationPacket
   const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
   let overrideRecord = null
 
@@ -3572,9 +3891,19 @@ async function patchHandoff(repoRoot, options) {
     || options["review-ask"] !== undefined
       ? nextContextSectionText
       : undefined
+  if (delegationPacketUpdated) {
+    updates.delegationPacket = nextDelegationPacket
+  }
 
   return updateHandoff(repoRoot, updates, {
     actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
+    delegationPacketSectionText:
+      delegationPacketUpdated
+        ? buildDelegationPacketSection(nextDelegationPacket, {
+            task: updates.task ?? existingCurrent.task,
+            lockedFiles: updates.lockedFiles ?? existingCurrent.lockedFiles,
+          })
+        : undefined,
     contextSectionText,
     config,
     eventType: "update",

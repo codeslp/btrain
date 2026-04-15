@@ -2,7 +2,7 @@
 
 **A Kanban board with mandatory peer review gates and mechanical integrity enforcement, designed for concurrent AI agents.**
 
-btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. Lanes are WIP-limited work items moving through status columns (`idle` -> `in-progress` -> `needs-review` -> `resolved`), with feedback loops (`changes-requested`, `repair-needed`) that route work back to the writer or escalate to a human. Work is pulled, not pushed — agents claim lanes when capacity opens. File locks provide branch-level isolation without actual git branches, because AI agents share a single worktree. A watchdog auto-detects invalid state transitions, and every handoff requires structured reviewer context (files changed, verification run, review asks) — essentially a PR description built into the workflow.
+btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. Lanes are WIP-limited work items moving through status columns (`idle` -> `in-progress` -> `needs-review` -> `resolved`), with feedback loops (`changes-requested`, `repair-needed`) that route work back to the writer or escalate to a human. Work is pulled, not pushed — agents claim lanes when capacity opens. File locks provide branch-level isolation without actual git branches, because AI agents share a single worktree. A watchdog auto-detects invalid state transitions, every active lane carries a structured delegation packet, and every handoff requires structured reviewer context (files changed, verification run, review asks) — essentially a PR description plus a worker contract built into the workflow.
 
 The closest human equivalent: a team using a Kanban board where every card requires a PR approval before moving to "done", with automated integrity enforcement that a human board can't provide.
 
@@ -74,8 +74,8 @@ btrain handoff request-changes --lane a \
 |---------|-------------|
 | `btrain init <repo>` | Bootstrap handoff files, lanes, config, skills, dashboard, and agentchattr |
 | `btrain handoff` | Print current state and what to do next |
-| `btrain handoff claim` | Claim a lane with task, owner, reviewer, file locks |
-| `btrain handoff update` | Update status, fill reviewer context fields |
+| `btrain handoff claim` | Claim a lane with task, owner, reviewer, file locks, and a delegation packet |
+| `btrain handoff update` | Update status, delegation packet fields, and reviewer context |
 | `btrain handoff resolve` | Approve and close a review |
 | `btrain handoff request-changes` | Return review findings to the writer |
 | `btrain status [--json]` | Show all lane states (JSON output for integrations) |
@@ -178,6 +178,21 @@ Reviewer selection: `--reviewer any-other` picks any configured peer except the 
 ---
 
 ## Handoff Lifecycle
+
+### Delegation Packet
+
+Every active lane may carry a structured `Delegation Packet` describing the contract for the work:
+
+| Field | CLI flag | Purpose |
+|-------|----------|---------|
+| Objective | `--objective` | What the lane is trying to achieve |
+| Deliverable | `--deliverable` | Expected reviewable output or artifact |
+| Constraints | `--constraint` (repeatable) | Scope, safety, or workflow boundaries |
+| Acceptance checks | `--acceptance` (repeatable) | What must be true for the lane to count as done |
+| Budget | `--budget` | Effort or scope budget for the current pass |
+| Done when | `--done-when` | Concrete completion condition |
+
+`btrain handoff claim` seeds these fields with useful defaults, and `btrain handoff update` can refine them as the lane is clarified or re-scoped.
 
 ### States
 

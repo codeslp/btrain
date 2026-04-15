@@ -778,6 +778,80 @@ describe("btrain handoff lifecycle", () => {
     assert.ok(stdout.includes("task: Test task"), `Expected task name: ${stdout}`)
   })
 
+  it("claim initializes a structured delegation packet from the lane task", async () => {
+    const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+
+    assert.ok(stdout.includes("objective: Test task"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("## Delegation Packet"), content)
+    assert.ok(content.includes("Objective:\n\nTest task"), content)
+    assert.ok(content.includes("Deliverable:\n\nProduce reviewable changes or artifacts inside the claimed lane scope."), content)
+    assert.ok(content.includes("- Leave the lane with concrete, reviewable progress."), content)
+    assert.ok(content.includes("Done when:\n\nThe lane is ready for `needs-review` or for a narrower follow-up handoff with explicit remaining gaps."), content)
+  })
+
+  it("update writes explicit delegation packet fields and exposes them in status json", async () => {
+    const updateResult = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--actor",
+        "TestBot",
+        "--objective",
+        "Implement the structured delegation packet flow end-to-end.",
+        "--deliverable",
+        "Reviewable core, CLI, docs, and tests for delegation metadata.",
+        "--constraint",
+        "Do not widen the lock model in this slice.",
+        "--constraint",
+        "Keep needs-review validation backward-compatible.",
+        "--acceptance",
+        "Claim/update can write delegation metadata.",
+        "--acceptance",
+        "status --json exposes the packet.",
+        "--budget",
+        "One lane-scoped implementation pass plus focused regression tests.",
+        "--done-when",
+        "The lane carries machine-readable delegation data without breaking existing handoff flows.",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(updateResult.code, 0, updateResult.stderr)
+
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(handoffResult.stdout.includes("objective: Implement the structured delegation packet flow end-to-end."), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("done when: The lane carries machine-readable delegation data without breaking existing handoff flows."), handoffResult.stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Implement the structured delegation packet flow end-to-end."), content)
+    assert.ok(content.includes("Reviewable core, CLI, docs, and tests for delegation metadata."), content)
+    assert.ok(content.includes("- Do not widen the lock model in this slice."), content)
+    assert.ok(content.includes("- Keep needs-review validation backward-compatible."), content)
+    assert.ok(content.includes("- Claim/update can write delegation metadata."), content)
+    assert.ok(content.includes("- status --json exposes the packet."), content)
+    assert.ok(content.includes("One lane-scoped implementation pass plus focused regression tests."), content)
+    assert.ok(content.includes("The lane carries machine-readable delegation data without breaking existing handoff flows."), content)
+
+    const statusResult = await runBtrain(["status", "--repo", tmpDir, "--json"], tmpDir)
+    const status = JSON.parse(statusResult.stdout)
+    assert.equal(status[0].current.delegationPacket.objective, "Implement the structured delegation packet flow end-to-end.")
+    assert.equal(status[0].current.delegationPacket.deliverable, "Reviewable core, CLI, docs, and tests for delegation metadata.")
+    assert.deepEqual(status[0].current.delegationPacket.constraints, [
+      "Do not widen the lock model in this slice.",
+      "Keep needs-review validation backward-compatible.",
+    ])
+    assert.deepEqual(status[0].current.delegationPacket.acceptance, [
+      "Claim/update can write delegation metadata.",
+      "status --json exposes the packet.",
+    ])
+    assert.equal(status[0].current.delegationPacket.budget, "One lane-scoped implementation pass plus focused regression tests.")
+    assert.equal(status[0].current.delegationPacket.doneWhen, "The lane carries machine-readable delegation data without breaking existing handoff flows.")
+  })
+
   it("rejects needs-review while reviewer context is still placeholder-only", async () => {
     const { code, stderr } = await runBtrain(
       ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--actor", "TestBot"],
@@ -3707,4 +3781,3 @@ describe("needs-review with human-readable Base field", () => {
     assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
   })
 })
-

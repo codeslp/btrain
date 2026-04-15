@@ -84,6 +84,17 @@ Handoff/Lane Options:
   --why <text>      Why the change was made.
   --review-ask <text>
                     Repeatable. One specific review ask for the reviewer.
+  --objective <text>
+                    Delegation packet objective for the lane.
+  --deliverable <text>
+                    Expected reviewable output or artifact for the lane.
+  --constraint <text>
+                    Repeatable. Constraint or boundary for the lane.
+  --acceptance <text>
+                    Repeatable. Acceptance check for the lane.
+  --budget <text>   Effort or scope budget for the lane.
+  --done-when <text>
+                    Concrete completion condition for the lane.
   --reason-code <code>
                     Required when entering \`changes-requested\` or \`repair-needed\`.
   --reason-tag <tag>
@@ -152,6 +163,14 @@ function parseOptions(args) {
   return options
 }
 
+function formatPacketValue(value) {
+  const lines = String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return lines[0] || ""
+}
+
 function formatRepoStatus(status) {
   const updatedLine = status.staleness
     ? `${status.current.lastUpdated || "(unknown)"} ${status.staleness.label}`
@@ -175,6 +194,9 @@ function formatRepoStatus(status) {
       lines.push(
         `  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}${lockSuffix}${repurposeSuffix}${reasonSuffix}`,
       )
+      if (lane.delegationPacket?.objective) {
+        lines.push(`    objective: ${formatPacketValue(lane.delegationPacket.objective)}`)
+      }
       if (lane.repairOwner) {
         lines.push(`    repair owner: ${lane.repairOwner}`)
       }
@@ -194,6 +216,9 @@ function formatRepoStatus(status) {
     lines.push(`  peer reviewer: ${status.current.reviewer || "(unassigned)"}`)
     lines.push(`  review mode: ${status.current.reviewMode || "manual"}`)
     lines.push(`  status: ${status.current.status || "(unknown)"}`)
+    if (status.current.delegationPacket?.objective) {
+      lines.push(`  objective: ${formatPacketValue(status.current.delegationPacket.objective)}`)
+    }
     lines.push(`  next: ${status.current.nextAction || "(none)"}`)
     if (status.current.reasonCode) {
       lines.push(`  reason code: ${status.current.reasonCode}`)
@@ -408,6 +433,12 @@ function printHandoffState(result) {
       console.log(`active agent: ${lane.owner || "(unassigned)"}`)
       console.log(`peer reviewer: ${lane.reviewer || "(unassigned)"}`)
       console.log(`mode: ${lane.reviewMode || "manual"}`)
+      if (lane.delegationPacket?.objective) {
+        console.log(`objective: ${formatPacketValue(lane.delegationPacket.objective)}`)
+      }
+      if (lane.delegationPacket?.doneWhen) {
+        console.log(`done when: ${formatPacketValue(lane.delegationPacket.doneWhen)}`)
+      }
       console.log(`locked files: ${lane.lockPaths?.length ? lane.lockPaths.join(", ") : "(none)"}`)
       console.log(`lock state: ${lane.lockState || "clear"}`)
       console.log(`next: ${lane.nextAction || "(none)"}`)
@@ -441,6 +472,12 @@ function printHandoffState(result) {
     console.log(`active agent: ${result.current.owner || "(unassigned)"}`)
     console.log(`peer reviewer: ${result.current.reviewer || "(unassigned)"}`)
     console.log(`mode: ${result.current.reviewMode || "manual"}`)
+    if (result.current.delegationPacket?.objective) {
+      console.log(`objective: ${formatPacketValue(result.current.delegationPacket.objective)}`)
+    }
+    if (result.current.delegationPacket?.doneWhen) {
+      console.log(`done when: ${formatPacketValue(result.current.delegationPacket.doneWhen)}`)
+    }
     console.log(`next: ${result.current.nextAction || "(none)"}`)
     if (result.current.reasonCode) {
       console.log(`reason code: ${result.current.reasonCode}`)
