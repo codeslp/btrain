@@ -1,5 +1,5 @@
 const http = require('http');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -38,78 +38,170 @@ function getActiveAgents() {
   return [];
 }
 
+function normalizeTextList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+}
+
+function normalizeParagraphLines(value) {
+  return String(value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function summarizeText(value) {
+  return normalizeParagraphLines(value).join(' ');
+}
+
+function hasDelegationPacketData(packet) {
+  if (!packet || typeof packet !== 'object') {
+    return false;
+  }
+
+  return Boolean(
+    summarizeText(packet.objective) ||
+    summarizeText(packet.deliverable) ||
+    normalizeTextList(packet.constraints).length > 0 ||
+    normalizeTextList(packet.acceptance).length > 0 ||
+    summarizeText(packet.budget) ||
+    summarizeText(packet.doneWhen)
+  );
+}
+
+function appendParagraphSection(lines, title, value) {
+  const paragraphLines = normalizeParagraphLines(value);
+  if (paragraphLines.length === 0) {
+    return;
+  }
+
+  lines.push(`${title}:`, '', ...paragraphLines, '');
+}
+
+function appendBulletSection(lines, title, values) {
+  const items = normalizeTextList(values);
+  if (items.length === 0) {
+    return;
+  }
+
+  lines.push(`${title}:`, '', ...items.map((item) => `- ${item}`), '');
+}
+
+function buildLaneFullText(lane) {
+  const lockPaths = normalizeTextList(lane.lockPaths);
+  const reasonTags = normalizeTextList(lane.reasonTags);
+  const packet = lane.delegationPacket || {};
+  const lines = [
+    `Lane: ${lane._laneId || lane.lane || '(unknown)'}`,
+    `Task: ${lane.task || '(no task)'}`,
+    `Status: ${lane.status || 'idle'}`,
+  ];
+
+  if (lane.owner) {
+    lines.push(`Writer: ${lane.owner}`);
+  }
+  if (lane.reviewer) {
+    lines.push(`Reviewer: ${lane.reviewer}`);
+  }
+  if (lane.repairOwner) {
+    lines.push(`Repair owner: ${lane.repairOwner}`);
+  }
+  if (lane.reasonCode) {
+    lines.push(`Reason code: ${lane.reasonCode}`);
+  }
+  if (reasonTags.length > 0) {
+    lines.push(`Reason tags: ${reasonTags.join(', ')}`);
+  }
+  if (lane.base) {
+    lines.push(`Base: ${lane.base}`);
+  }
+  if (lockPaths.length > 0) {
+    lines.push(`Locks: ${lockPaths.join(', ')}`);
+  }
+  if (lane.nextAction) {
+    lines.push('');
+    appendParagraphSection(lines, 'Next action', lane.nextAction);
+  }
+  if (hasDelegationPacketData(packet)) {
+    lines.push('## Delegation Packet', '');
+    appendParagraphSection(lines, 'Objective', packet.objective);
+    appendParagraphSection(lines, 'Deliverable', packet.deliverable);
+    appendBulletSection(lines, 'Constraints', packet.constraints);
+    appendBulletSection(lines, 'Acceptance checks', packet.acceptance);
+    appendParagraphSection(lines, 'Budget', packet.budget);
+    appendParagraphSection(lines, 'Done when', packet.doneWhen);
+  }
+
+  while (lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+
+  return lines.join('\n');
+}
+
+function isBugLane(task, detailLines, status) {
+  if (status === 'resolved') {
+    return false;
+  }
+
+  const bugPattern = /\b(bug|issue)\b/i;
+  return detailLines.some((value) => bugPattern.test(String(value || ''))) || bugPattern.test(task || '');
+}
+
+function toDashboardLane(lane) {
+  const task = lane.task || '(no task)';
+  const writer = lane.owner || '';
+  const reviewer = lane.reviewer || '';
+  const repairOwner = lane.repairOwner || '';
+  const lockPaths = normalizeTextList(lane.lockPaths);
+  const packet = lane.delegationPacket || {};
+  const objective = summarizeText(packet.objective);
+  const doneWhen = summarizeText(packet.doneWhen);
+  const fullText = buildLaneFullText(lane);
+  const detailLines = [
+    task,
+    lane.nextAction,
+    lane.reasonCode,
+    objective,
+    summarizeText(packet.deliverable),
+    summarizeText(packet.budget),
+    doneWhen,
+    ...normalizeTextList(packet.constraints),
+    ...normalizeTextList(packet.acceptance),
+  ];
+
+  let hotSeat = 'Unassigned';
+  const resolveHotSeat = HOT_SEAT_RESOLVERS[lane.status];
+  if (resolveHotSeat) {
+    hotSeat = resolveHotSeat({ writer, reviewer, repairOwner }) || 'Unassigned';
+  }
+
+  return {
+    id: lane._laneId || lane.lane || '',
+    status: lane.status || 'idle',
+    desc: task,
+    writer,
+    reviewer,
+    repairOwner,
+    hotSeat,
+    locks: lockPaths.join(', '),
+    objective,
+    doneWhen,
+    fullText,
+    isBug: isBugLane(task, detailLines, lane.status),
+  };
+}
+
 function getBtrainStatus() {
   try {
-    const raw = execSync('btrain status --repo .').toString();
-    const lines = raw.split('\n');
-
-    let currentLanes = [];
-
-    for (const line of lines) {
-      if (line.includes('lane ')) {
-        const match = line.match(/lane (\w+): ([-a-zA-Z]+) — (.*?)\((.*?)\)(?: \[(.*?)\])?/);
-        if (match) {
-          const laneId = match[1];
-          const status = match[2];
-          let desc = match[3].trim();
-          let writer = match[4];
-          let reviewer = 'any-other';
-          let repairOwner = '';
-          let bodyText = '';
-          
-          try {
-            const hwPath = path.join(process.cwd(), '.claude', 'collab', `HANDOFF_${laneId.toUpperCase()}.md`);
-            if (fs.existsSync(hwPath)) {
-              const fileContent = fs.readFileSync(hwPath, 'utf8');
-              bodyText = fileContent;
-              const aaMatch = fileContent.match(/Active Agent:\s*(.+)/);
-              const prMatch = fileContent.match(/Peer Reviewer:\s*(.+)/);
-              const roMatch = fileContent.match(/Repair Owner:\s*(.+)/);
-              if (aaMatch) writer = aaMatch[1].trim();
-              if (prMatch) reviewer = prMatch[1].trim();
-              if (roMatch) repairOwner = roMatch[1].trim();
-            }
-          } catch(e) { }
-
-          let hotSeat = 'Unassigned';
-          const isBugCandidate = desc.toLowerCase().includes('bug') || desc.toLowerCase().includes('issue') || bodyText.toLowerCase().includes('bug') || bodyText.toLowerCase().includes('issue');
-          const isBug = isBugCandidate && status !== 'resolved';
-
-          const resolveHotSeat = HOT_SEAT_RESOLVERS[status];
-          if (resolveHotSeat) {
-            hotSeat = resolveHotSeat({ writer, reviewer, repairOwner }) || 'Unassigned';
-          }
-
-          currentLanes.push({
-            id: laneId,
-            status: status,
-            desc: desc,
-            writer: writer,
-            reviewer: reviewer,
-            repairOwner: repairOwner,
-            hotSeat: hotSeat,
-            locks: match[5] || '',
-            fullText: bodyText,
-            isBug: isBug
-          });
-        } else {
-          const idleMatch = line.match(/lane (\w+): (idle) — \(no task\)/);
-          if (idleMatch) {
-            currentLanes.push({
-              id: idleMatch[1],
-              status: idleMatch[2],
-              desc: '(no task)',
-              writer: '',
-              reviewer: '',
-              repairOwner: '',
-              hotSeat: 'Unassigned',
-              locks: '',
-              fullText: 'Lane is currently idle.'
-            });
-          }
-        }
-      }
-    }
+    const raw = execFileSync('btrain', ['status', '--repo', '.', '--json'], { encoding: 'utf8' });
+    const statuses = JSON.parse(raw);
+    const repoStatus = Array.isArray(statuses) ? statuses[0] : null;
+    const currentLanes = Array.isArray(repoStatus?.lanes) ? repoStatus.lanes.map(toDashboardLane) : [];
     return { lanes: currentLanes, activeAgents: getActiveAgents() };
   } catch (error) {
     console.error('Error fetching btrain status:', error);
@@ -486,6 +578,34 @@ const server = http.createServer((req, res) => {
       font-weight: 500;
     }
 
+    .lane-packet-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .lane-packet-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #c6d0dc;
+    }
+
+    .lane-packet-label {
+      color: var(--text-muted);
+      letter-spacing: 1px;
+      min-width: 68px;
+      flex: 0 0 auto;
+    }
+
+    .lane-packet-value {
+      white-space: pre-wrap;
+    }
+
     .lane-locks {
       font-family: 'Chakra Petch', sans-serif;
       font-size: 12px;
@@ -688,6 +808,22 @@ const server = http.createServer((req, res) => {
             \` : ''}
 
             <div class="lane-desc">\${lane.desc}</div>
+            \${lane.objective || lane.doneWhen ? \`
+              <div class="lane-packet-summary">
+                \${lane.objective ? \`
+                  <div class="lane-packet-row">
+                    <span class="lane-packet-label">OBJ //</span>
+                    <span class="lane-packet-value">\${escapeHtml(lane.objective)}</span>
+                  </div>
+                \` : ''}
+                \${lane.doneWhen ? \`
+                  <div class="lane-packet-row">
+                    <span class="lane-packet-label">DONE //</span>
+                    <span class="lane-packet-value">\${escapeHtml(lane.doneWhen)}</span>
+                  </div>
+                \` : ''}
+              </div>
+            \` : ''}
             \${lane.locks ? \`<div class="lane-locks">\${lane.locks}</div>\` : ''}
 
             <div class="details-wrapper">

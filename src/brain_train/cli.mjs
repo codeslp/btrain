@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import fs from "node:fs/promises"
 import path from "node:path"
 import {
   BtrainError,
@@ -61,6 +62,7 @@ Usage:
   btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
   btrain repos                                                                   List registered repos
+  btrain go [--repo <path>]                                                      Bootstrap context: files an agent must read to work correctly
   btrain hcleanup [--repo <path>] [--keep <n>]                                   Trim handoff history, archive old entries
 
 Handoff/Lane Options:
@@ -117,8 +119,9 @@ Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
   - \`init\` also scaffolds the bundled \`.claude/skills/\` pack plus repo-local dashboard, handoff-history helpers, and \`agentchattr/\` unless you pass \`--core-only\`.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
+  - \`loop\` reads the active harness profile from \`[harness].active_profile\` in \`.btrain/project.toml\`; new repos default to the bundled \`default\` profile.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
-  - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches the prompt \`bth\`.
+  - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches \`bth\`; the lane delegation packet is surfaced via \`btrain handoff\`, not embedded in the prompt.
   - \`review run\` automates \`parallel\` and \`hybrid\` modes. \`manual\` mode reports a no-op.
   - \`sync-templates\` only updates the managed blocks in \`AGENTS.md\` and \`CLAUDE.md\`.
   - When \`[lanes]\` is configured in project.toml, agents can work concurrently on separate lanes.
@@ -168,7 +171,49 @@ function formatPacketValue(value) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
-  return lines[0] || ""
+  return lines.join(" ") || ""
+}
+
+function formatPacketList(values) {
+  const source = Array.isArray(values) ? values : values === undefined || values === null ? [] : [values]
+  return source
+    .flatMap((item) => String(item).split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^-+\s*/, "").trim())
+}
+
+function buildDelegationPacketSummaryLines(packet) {
+  const lines = []
+  if (packet?.objective) {
+    lines.push(`objective: ${formatPacketValue(packet.objective)}`)
+  }
+
+  if (packet?.deliverable) {
+    lines.push(`deliverable: ${formatPacketValue(packet.deliverable)}`)
+  }
+
+  const constraints = formatPacketList(packet?.constraints)
+  if (constraints.length > 0) {
+    lines.push("constraints:")
+    lines.push(...constraints.map((constraint) => `  - ${constraint}`))
+  }
+
+  const acceptance = formatPacketList(packet?.acceptance)
+  if (acceptance.length > 0) {
+    lines.push("acceptance:")
+    lines.push(...acceptance.map((item) => `  - ${item}`))
+  }
+
+  if (packet?.budget) {
+    lines.push(`budget: ${formatPacketValue(packet.budget)}`)
+  }
+
+  if (packet?.doneWhen) {
+    lines.push(`done when: ${formatPacketValue(packet.doneWhen)}`)
+  }
+
+  return lines
 }
 
 function formatRepoStatus(status) {
@@ -433,11 +478,8 @@ function printHandoffState(result) {
       console.log(`active agent: ${lane.owner || "(unassigned)"}`)
       console.log(`peer reviewer: ${lane.reviewer || "(unassigned)"}`)
       console.log(`mode: ${lane.reviewMode || "manual"}`)
-      if (lane.delegationPacket?.objective) {
-        console.log(`objective: ${formatPacketValue(lane.delegationPacket.objective)}`)
-      }
-      if (lane.delegationPacket?.doneWhen) {
-        console.log(`done when: ${formatPacketValue(lane.delegationPacket.doneWhen)}`)
+      for (const line of buildDelegationPacketSummaryLines(lane.delegationPacket)) {
+        console.log(line)
       }
       console.log(`locked files: ${lane.lockPaths?.length ? lane.lockPaths.join(", ") : "(none)"}`)
       console.log(`lock state: ${lane.lockState || "clear"}`)
@@ -472,11 +514,8 @@ function printHandoffState(result) {
     console.log(`active agent: ${result.current.owner || "(unassigned)"}`)
     console.log(`peer reviewer: ${result.current.reviewer || "(unassigned)"}`)
     console.log(`mode: ${result.current.reviewMode || "manual"}`)
-    if (result.current.delegationPacket?.objective) {
-      console.log(`objective: ${formatPacketValue(result.current.delegationPacket.objective)}`)
-    }
-    if (result.current.delegationPacket?.doneWhen) {
-      console.log(`done when: ${formatPacketValue(result.current.delegationPacket.doneWhen)}`)
+    for (const line of buildDelegationPacketSummaryLines(result.current.delegationPacket)) {
+      console.log(line)
     }
     console.log(`next: ${result.current.nextAction || "(none)"}`)
     if (result.current.reasonCode) {
@@ -933,6 +972,153 @@ async function run() {
     for (const lock of locks) {
       console.log(`  lane ${lock.lane}: ${lock.path} (${lock.owner}, ${lock.acquired_at})`)
     }
+    return
+  }
+
+  if (command === "go") {
+    const options = parseOptions(rest)
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const config = await readProjectConfig(repoRoot)
+    const laneConfigs = getLaneConfigs(config)
+
+    console.log("# btrain go — agent bootstrap context")
+    console.log("")
+    console.log("Read these files to understand the project and your role:")
+    console.log("")
+
+    // 1. Agent instructions
+    console.log("## Agent instructions")
+    const claudeMd = path.join(repoRoot, "CLAUDE.md")
+    const agentsMd = path.join(repoRoot, "AGENTS.md")
+    for (const filePath of [claudeMd, agentsMd]) {
+      try {
+        await fs.access(filePath)
+        console.log(`  ${path.relative(repoRoot, filePath)}`)
+      } catch {
+        // skip missing
+      }
+    }
+
+    // 2. Project config
+    console.log("")
+    console.log("## Project config")
+    console.log(`  .btrain/project.toml`)
+    if (config) {
+      const agents = config.agents?.active || []
+      console.log(`    agents: ${agents.length > 0 ? agents.join(", ") : "(none)"}`)
+      if (laneConfigs) {
+        console.log(`    lanes: ${laneConfigs.map((l) => l.id).join(", ")}`)
+      }
+    }
+
+    // 3. Handoff state (do not read HANDOFF_*.md directly — use CLI)
+    console.log("")
+    console.log("## Current handoff state")
+    console.log("  btrain handoff                # whose turn, what to do, lane guidance")
+    console.log("  btrain status --repo .        # lane overview across repos")
+    if (laneConfigs) {
+      console.log(`  ${laneConfigs.length} lanes configured (${laneConfigs.map((l) => l.id).join(", ")})`)
+    }
+    console.log("  Do NOT read .claude/collab/HANDOFF_*.md directly — always use the CLI.")
+
+    // 4. Lock registry
+    console.log("")
+    console.log("## File locks")
+    const locks = await listLocks(repoRoot)
+    if (locks.length > 0) {
+      for (const lock of locks) {
+        console.log(`  lane ${lock.lane}: ${lock.path} (${lock.owner})`)
+      }
+    } else {
+      console.log("  (no active locks)")
+    }
+
+    // 5. Skills
+    console.log("")
+    console.log("## Skills")
+    const skillsDir = path.join(repoRoot, ".claude", "skills")
+    try {
+      const entries = await fs.readdir(skillsDir)
+      const skillNames = entries.filter((e) => !e.startsWith(".")).sort()
+      if (skillNames.length > 0) {
+        console.log(`  .claude/skills/ (${skillNames.length} skills)`)
+        for (const name of skillNames) {
+          console.log(`    ${name}`)
+        }
+      } else {
+        console.log("  (no skills)")
+      }
+    } catch {
+      console.log("  (no .claude/skills/ directory)")
+    }
+
+    // 6. Settings
+    console.log("")
+    console.log("## Settings")
+    for (const name of ["settings.json", "settings.local.json"]) {
+      const settingsPath = path.join(repoRoot, ".claude", name)
+      try {
+        await fs.access(settingsPath)
+        console.log(`  .claude/${name}`)
+      } catch {
+        // skip missing
+      }
+    }
+
+    // 7. Spec-kit (if present)
+    const specifyDir = path.join(repoRoot, ".specify")
+    try {
+      await fs.access(specifyDir)
+      console.log("")
+      console.log("## Spec-kit")
+      console.log("  .specify/")
+      const constitutionPath = path.join(specifyDir, "memory", "constitution.md")
+      try {
+        await fs.access(constitutionPath)
+        console.log("  .specify/memory/constitution.md")
+      } catch {
+        // skip
+      }
+    } catch {
+      // no .specify
+    }
+
+    // 8. Memory
+    console.log("")
+    console.log("## Memory")
+    const memoryDir = path.join(repoRoot, ".claude", "projects")
+    try {
+      const memoryProjects = await fs.readdir(memoryDir)
+      let found = false
+      for (const proj of memoryProjects) {
+        const memFile = path.join(memoryDir, proj, "memory", "MEMORY.md")
+        try {
+          await fs.access(memFile)
+          console.log(`  .claude/projects/${proj}/memory/MEMORY.md`)
+          found = true
+        } catch {
+          // skip
+        }
+      }
+      if (!found) {
+        console.log("  (no MEMORY.md files)")
+      }
+    } catch {
+      console.log("  (no .claude/projects/ directory)")
+    }
+
+    // 9. Quick-start commands
+    console.log("")
+    console.log("## Quick-start commands")
+    console.log("  btrain handoff              # see whose turn it is and what to do")
+    console.log("  btrain locks                # see active file locks")
+    console.log("  btrain doctor               # check repo health")
+    if (laneConfigs) {
+      console.log("  btrain handoff claim --lane <id> --task \"...\" --owner \"...\" --reviewer \"...\" --files \"...\"")
+    } else {
+      console.log("  btrain handoff claim --task \"...\" --owner \"...\" --reviewer \"...\"")
+    }
+
     return
   }
 

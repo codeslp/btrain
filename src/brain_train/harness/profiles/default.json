@@ -1,0 +1,8 @@
+{
+  "id": "default",
+  "label": "Default",
+  "description": "Current inline loop-dispatch behavior captured as the explicit baseline harness profile.",
+  "loop": {
+    "dispatchPrompt": "bth"
+  }
+}

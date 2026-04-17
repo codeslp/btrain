@@ -4,6 +4,7 @@
 This repo uses the `btrain` collaboration workflow.
 
 - **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF_*.md` files directly.
+- Keep the lane `Delegation Packet` current for active work: `Objective`, `Deliverable`, `Constraints`, `Acceptance checks`, `Budget`, and `Done when`.
 - When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.
 - If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.
 - Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.

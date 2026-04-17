@@ -470,6 +470,18 @@ describe("installed CLI e2e", () => {
         "node -e \"process.exit(0)\"",
         "--gap",
         "Synthetic dashboard regression test only.",
+        "--objective",
+        "Render delegation packet fields in the dashboard card.",
+        "--deliverable",
+        "A dashboard payload and card layout that expose lane objective and done-when summaries.",
+        "--constraint",
+        "Keep the coverage lane synthetic and confined to src/alpha.js.",
+        "--acceptance",
+        "The dashboard API includes objective and doneWhen for the lane.",
+        "--budget",
+        "One installed-CLI regression test.",
+        "--done-when",
+        "The dashboard card and API show objective and done-when summaries for this lane.",
         "--why",
         "Need a real changes-requested status for dashboard coverage.",
         "--review-ask",
@@ -537,6 +549,15 @@ describe("installed CLI e2e", () => {
       const laneB = statusPayload.lanes.find((lane) => lane.id === "b")
       assert.equal(laneA?.status, "changes-requested", JSON.stringify(statusPayload))
       assert.equal(laneA?.hotSeat, "WriterBot", JSON.stringify(statusPayload))
+      assert.equal(laneA?.objective, "Render delegation packet fields in the dashboard card.", JSON.stringify(laneA))
+      assert.equal(
+        laneA?.doneWhen,
+        "The dashboard card and API show objective and done-when summaries for this lane.",
+        JSON.stringify(laneA),
+      )
+      assert.ok(laneA?.fullText.includes("## Delegation Packet"), laneA?.fullText)
+      assert.ok(laneA?.fullText.includes("Objective:"), laneA?.fullText)
+      assert.ok(laneA?.fullText.includes("Done when:"), laneA?.fullText)
       assert.equal(laneB?.status, "repair-needed", JSON.stringify(statusPayload))
       assert.equal(laneB?.repairOwner, "WriterBot", JSON.stringify(statusPayload))
       assert.equal(laneB?.hotSeat, "WriterBot", JSON.stringify(statusPayload))
@@ -548,6 +569,10 @@ describe("installed CLI e2e", () => {
       assert.ok(html.includes('"repair-needed":"status-repair-needed"'), html)
       assert.ok(html.includes("--repair-needed-tape: repeating-linear-gradient("), html)
       assert.ok(html.includes("return statusClassNames[status] || '';"), html)
+      assert.ok(html.includes("OBJ //"), html)
+      assert.ok(html.includes("DONE //"), html)
+      assert.ok(html.includes("lane.objective"), html)
+      assert.ok(html.includes("lane.doneWhen"), html)
       assert.ok(!html.includes("return STATUS_CLASS_NAMES[status] || '';"), html)
     } finally {
       await stopDashboardServer(server)

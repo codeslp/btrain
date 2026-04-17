@@ -1,10 +1,61 @@
 import { execFile, spawn } from "node:child_process"
 import fs from "node:fs/promises"
+import { open } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import {
+  DEFAULT_HARNESS_PROFILE_ID,
+  FALLBACK_LOOP_DISPATCH_PROMPT,
+  loadHarnessProfile,
+  normalizeHarnessProfileId,
+} from "./harness/index.mjs"
+
+// ---------------------------------------------------------------------------
+// Atomic file locking — prevents TOCTOU races on shared state files
+// ---------------------------------------------------------------------------
+
+const DEFAULT_LOCK_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+const FILE_LOCK_RETRY_MS = 50
+const FILE_LOCK_TIMEOUT_MS = 5000
+
+async function withFileLock(lockPath, fn) {
+  const deadline = Date.now() + FILE_LOCK_TIMEOUT_MS
+  let fd = null
+  while (Date.now() < deadline) {
+    try {
+      fd = await open(lockPath, "wx")
+      break
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err
+      // Check for stale lockfile (older than 30s = likely dead process)
+      try {
+        const stat = await fs.stat(lockPath)
+        if (Date.now() - stat.mtimeMs > 30_000) {
+          await fs.unlink(lockPath).catch(() => {})
+          continue
+        }
+      } catch {
+        // stat failed — file was already removed, retry
+        continue
+      }
+      await delay(FILE_LOCK_RETRY_MS)
+    }
+  }
+
+  if (!fd) {
+    throw new Error(`Timed out waiting for file lock: ${lockPath}`)
+  }
+
+  try {
+    return await fn()
+  } finally {
+    await fd.close()
+    await fs.unlink(lockPath).catch(() => {})
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Structured error class — gives blocked agents actionable remediation steps
@@ -143,7 +194,7 @@ const REVIEW_CONTEXT_PLACEHOLDER_PATTERNS = [
 const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
-const LOOP_PROMPT = "bth"
+const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
 const MAX_LOOP_LOG_OUTPUT_LINES = 40
 const CODEX_SUBCOMMANDS = new Set([
@@ -870,48 +921,56 @@ function checkLockConflicts(registry, laneId, files) {
   return conflicts
 }
 
+function getLocksLockfilePath(repoRoot) {
+  return getLocksPath(repoRoot) + ".lock"
+}
+
 async function acquireLocks(repoRoot, laneId, owner, files) {
   if (!files || files.length === 0) return []
 
-  const registry = await readLockRegistry(repoRoot)
-  const conflicts = checkLockConflicts(registry, laneId, files)
+  return withFileLock(getLocksLockfilePath(repoRoot), async () => {
+    const registry = await readLockRegistry(repoRoot)
+    const conflicts = checkLockConflicts(registry, laneId, files)
 
-  if (conflicts.length > 0) {
-    const conflictMessages = conflicts.map(
-      (c) => `  ${c.file} — locked by lane ${c.lockedBy} (${c.owner}): ${c.path}`,
-    )
-    throw new BtrainError({
-      message: "File lock conflict.",
-      reason: `Another lane already holds locks on the requested paths:\n${conflictMessages.join("\n")}`,
-      fix: `Choose different files, wait for the other lane to resolve, or force-release with \`btrain locks release-lane --lane <conflicting-lane>\`.`,
-      context: "Run `btrain locks` to see all active locks.",
-    })
-  }
+    if (conflicts.length > 0) {
+      const conflictMessages = conflicts.map(
+        (c) => `  ${c.file} — locked by lane ${c.lockedBy} (${c.owner}): ${c.path}`,
+      )
+      throw new BtrainError({
+        message: "File lock conflict.",
+        reason: `Another lane already holds locks on the requested paths:\n${conflictMessages.join("\n")}`,
+        fix: `Choose different files, wait for the other lane to resolve, or force-release with \`btrain locks release-lane --lane <conflicting-lane>\`.`,
+        context: "Run `btrain locks` to see all active locks.",
+      })
+    }
 
-  // Remove existing locks for this lane first
-  registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
+    // Remove existing locks for this lane first
+    registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
 
-  // Add new locks
-  const now = formatIsoTimestamp()
-  for (const file of files) {
-    registry.locks.push({
-      path: file,
-      lane: laneId,
-      owner,
-      acquired_at: now,
-    })
-  }
+    // Add new locks
+    const now = formatIsoTimestamp()
+    for (const file of files) {
+      registry.locks.push({
+        path: file,
+        lane: laneId,
+        owner,
+        acquired_at: now,
+      })
+    }
 
-  await writeLockRegistry(repoRoot, registry)
-  return registry.locks.filter((lock) => lock.lane === laneId)
+    await writeLockRegistry(repoRoot, registry)
+    return registry.locks.filter((lock) => lock.lane === laneId)
+  })
 }
 
 async function releaseLocks(repoRoot, laneId) {
-  const registry = await readLockRegistry(repoRoot)
-  const released = registry.locks.filter((lock) => lock.lane === laneId)
-  registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
-  await writeLockRegistry(repoRoot, registry)
-  return released
+  return withFileLock(getLocksLockfilePath(repoRoot), async () => {
+    const registry = await readLockRegistry(repoRoot)
+    const released = registry.locks.filter((lock) => lock.lane === laneId)
+    registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
+    await writeLockRegistry(repoRoot, registry)
+    return released
+  })
 }
 
 async function listLocks(repoRoot) {
@@ -920,11 +979,13 @@ async function listLocks(repoRoot) {
 }
 
 async function forceReleaseLock(repoRoot, lockPath) {
-  const registry = await readLockRegistry(repoRoot)
-  const before = registry.locks.length
-  registry.locks = registry.locks.filter((lock) => lock.path !== lockPath)
-  await writeLockRegistry(repoRoot, registry)
-  return before - registry.locks.length
+  return withFileLock(getLocksLockfilePath(repoRoot), async () => {
+    const registry = await readLockRegistry(repoRoot)
+    const before = registry.locks.length
+    registry.locks = registry.locks.filter((lock) => lock.path !== lockPath)
+    await writeLockRegistry(repoRoot, registry)
+    return before - registry.locks.length
+  })
 }
 
 function getLaneLocks(locks, laneId) {
@@ -1291,6 +1352,9 @@ const TEMPLATE_DEFAULTS = {
     'handoff_path = ".claude/collab/HANDOFF_A.md"',
     'default_review_mode = "manual"',
     'created_at = "{{timestamp}}"',
+    "",
+    "[harness]",
+    'active_profile = "default"',
     "",
     "[agents]",
     "active = {{activeAgentsToml}}",
@@ -3320,81 +3384,84 @@ async function updateHandoff(repoRoot, updates, options = {}) {
 
   // Use override handoff path for lane-specific operations
   const handoffPath = options.overrideHandoffPath || repoPaths.handoffPath
+  const handoffLockPath = handoffPath + ".lock"
 
-  if (!(await pathExists(handoffPath))) {
-    await ensureDir(path.dirname(handoffPath))
-    await writeText(handoffPath, renderHandoffTemplate(repoName))
-  }
+  return withFileLock(handoffLockPath, async () => {
+    if (!(await pathExists(handoffPath))) {
+      await ensureDir(path.dirname(handoffPath))
+      await writeText(handoffPath, renderHandoffTemplate(repoName))
+    }
 
-  const existingContent = await readText(handoffPath)
-  const existingCurrent = {
-    ...parseCurrentSection(existingContent),
-    delegationPacket: parseDelegationPacketSection(existingContent),
-  }
-  const nextCurrent = {
-    ...existingCurrent,
-    ...updates,
-  }
+    const existingContent = await readText(handoffPath)
+    const existingCurrent = {
+      ...parseCurrentSection(existingContent),
+      delegationPacket: parseDelegationPacketSection(existingContent),
+    }
+    const nextCurrent = {
+      ...existingCurrent,
+      ...updates,
+    }
 
-  if (updates.lockedFiles === undefined) {
-    nextCurrent.lockedFiles = existingCurrent.lockedFiles
-  }
+    if (updates.lockedFiles === undefined) {
+      nextCurrent.lockedFiles = existingCurrent.lockedFiles
+    }
 
-  if (!nextCurrent.lastUpdated) {
-    nextCurrent.lastUpdated = `btrain ${formatIsoTimestamp()}`
-  }
+    if (!nextCurrent.lastUpdated) {
+      nextCurrent.lastUpdated = `btrain ${formatIsoTimestamp()}`
+    }
 
-  let nextContent = replaceOrPrependSection(existingContent, "Current", buildCurrentSection(nextCurrent))
+    let nextContent = replaceOrPrependSection(existingContent, "Current", buildCurrentSection(nextCurrent))
 
-  if (options.previousHandoffEntry) {
-    nextContent = appendPreviousHandoffEntry(nextContent, options.previousHandoffEntry)
-  }
+    if (options.previousHandoffEntry) {
+      nextContent = appendPreviousHandoffEntry(nextContent, options.previousHandoffEntry)
+    }
 
-  if (options.contextSectionText) {
-    nextContent = replaceOrPrependSection(
-      nextContent,
-      /^## Context for (Reviewer|Peer Review).*$/,
-      options.contextSectionText,
-    )
-  }
+    if (options.contextSectionText) {
+      nextContent = replaceOrPrependSection(
+        nextContent,
+        /^## Context for (Reviewer|Peer Review).*$/,
+        options.contextSectionText,
+      )
+    }
 
-  if (options.delegationPacketSectionText) {
-    nextContent = replaceOrPrependSection(
-      nextContent,
-      /^## Delegation Packet.*$/,
-      options.delegationPacketSectionText,
-    )
-  }
+    if (options.delegationPacketSectionText) {
+      nextContent = replaceOrPrependSection(
+        nextContent,
+        /^## Delegation Packet.*$/,
+        options.delegationPacketSectionText,
+      )
+    }
 
-  if (options.reviewResponseText) {
-    nextContent = replaceOrPrependSection(
-      nextContent,
-      /^## Review Response.*$/,
-      options.reviewResponseText,
-    )
-  } else if (options.reviewResponseSummary) {
-    nextContent = replaceOrPrependSection(
-      nextContent,
-      /^## Review Response.*$/,
-      buildReviewResponseNote(options.reviewResponseSummary, options.actorLabel || "btrain"),
-    )
-  }
+    if (options.reviewResponseText) {
+      nextContent = replaceOrPrependSection(
+        nextContent,
+        /^## Review Response.*$/,
+        options.reviewResponseText,
+      )
+    } else if (options.reviewResponseSummary) {
+      nextContent = replaceOrPrependSection(
+        nextContent,
+        /^## Review Response.*$/,
+        buildReviewResponseNote(options.reviewResponseSummary, options.actorLabel || "btrain"),
+      )
+    }
 
-  await writeText(handoffPath, nextContent)
+    await writeText(handoffPath, nextContent)
 
-  if (options.eventType) {
-    await appendWorkflowEvent(repoRoot, config, {
-      type: options.eventType,
-      actor: options.actorLabel || "btrain",
-      laneId: options.laneId || nextCurrent._laneId || "",
-      handoffPath,
-      before: existingCurrent,
-      after: nextCurrent,
-      details: options.eventDetails || {},
-    })
-  }
+    if (options.eventType) {
+      await appendWorkflowEvent(repoRoot, config, {
+        type: options.eventType,
+        actor: options.actorLabel || "btrain",
+        laneId: options.laneId || nextCurrent._laneId || "",
+        handoffPath,
+        before: existingCurrent,
+        after: nextCurrent,
+        details: options.eventDetails || {},
+      })
+    }
 
-  return nextCurrent
+    return nextCurrent
+  })
 }
 
 async function claimHandoff(repoRoot, options) {
@@ -4444,11 +4511,63 @@ function getReviewConfig(config) {
   }
 }
 
+function getHarnessConfig(config) {
+  const harness = config?.harness && typeof config.harness === "object" ? config.harness : {}
+  return {
+    activeProfile:
+      normalizeHarnessProfileId(harness.active_profile || harness.activeProfile || harness.profile)
+      || DEFAULT_HARNESS_PROFILE_ID,
+  }
+}
+
+async function resolveActiveHarnessProfile(repoRoot, config) {
+  const harnessConfig = getHarnessConfig(config)
+
+  try {
+    const profile = await loadHarnessProfile({
+      repoRoot,
+      profileId: harnessConfig.activeProfile,
+    })
+
+    if (!profile) {
+      throw new BtrainError({
+        message: `Unknown harness profile "${harnessConfig.activeProfile}".`,
+        reason: "No repo-local or bundled harness profile matched the configured active profile.",
+        fix: `Set [harness].active_profile to "${DEFAULT_HARNESS_PROFILE_ID}" in .btrain/project.toml, or add .btrain/harness/profiles/${harnessConfig.activeProfile}.json.`,
+      })
+    }
+
+    return {
+      ...profile,
+      configuredId: harnessConfig.activeProfile,
+    }
+  } catch (error) {
+    if (error instanceof BtrainError) {
+      throw error
+    }
+
+    throw new BtrainError({
+      message: `Failed to load harness profile "${harnessConfig.activeProfile}".`,
+      reason: error?.message || "The configured harness profile could not be parsed.",
+      fix: `Fix [harness].active_profile in .btrain/project.toml or repair .btrain/harness/profiles/${harnessConfig.activeProfile}.json.`,
+    })
+  }
+}
+
 function getHandoffConfig(config) {
   const handoff = config?.handoff && typeof config.handoff === "object" ? config.handoff : {}
+  const ttl = typeof handoff.lock_ttl_hours === "number" && handoff.lock_ttl_hours > 0
+    ? handoff.lock_ttl_hours * 60 * 60 * 1000
+    : DEFAULT_LOCK_TTL_MS
   return {
     requireDiff: handoff.require_diff !== false,
+    lockTtlMs: ttl,
   }
+}
+
+function isLockExpired(lock, ttlMs) {
+  if (!lock.acquired_at) return false
+  return Date.now() - new Date(lock.acquired_at).getTime() > ttlMs
 }
 
 function getFeedbackConfig(config) {
@@ -5803,6 +5922,52 @@ function formatLoopState(current) {
   ].join(" | ")
 }
 
+function hasMeaningfulDelegationPacket(packet = {}) {
+  const normalized = normalizeDelegationPacket(packet)
+  return Boolean(
+    normalized.objective ||
+      normalized.deliverable ||
+      normalized.constraints.length > 0 ||
+      normalized.acceptance.length > 0 ||
+      normalized.budget ||
+      normalized.doneWhen,
+  )
+}
+
+function formatLoopDelegationPacketValue(value, maxLength = 160) {
+  const compact = normalizeParagraphLines(value, []).join(" ")
+  return summarizeLoopProgressText(compact, maxLength)
+}
+
+function formatLoopDelegationPacketList(values = []) {
+  const normalized = normalizeListValue(values, [])
+  if (normalized.length === 0) {
+    return ""
+  }
+
+  const firstItem = summarizeLoopProgressText(normalized[0], 120)
+  if (normalized.length === 1) {
+    return firstItem
+  }
+  return `${firstItem} (+${normalized.length - 1} more)`
+}
+
+function buildLoopDelegationPacketSummaryLines(current = {}) {
+  const packet = normalizeDelegationPacket(current?.delegationPacket)
+  if (!hasMeaningfulDelegationPacket(packet)) {
+    return []
+  }
+
+  return [
+    packet.objective ? `objective: ${formatLoopDelegationPacketValue(packet.objective)}` : "",
+    packet.deliverable ? `deliverable: ${formatLoopDelegationPacketValue(packet.deliverable)}` : "",
+    packet.constraints.length > 0 ? `constraints: ${formatLoopDelegationPacketList(packet.constraints)}` : "",
+    packet.acceptance.length > 0 ? `acceptance: ${formatLoopDelegationPacketList(packet.acceptance)}` : "",
+    packet.budget ? `budget: ${formatLoopDelegationPacketValue(packet.budget)}` : "",
+    packet.doneWhen ? `done when: ${formatLoopDelegationPacketValue(packet.doneWhen)}` : "",
+  ].filter(Boolean)
+}
+
 function emitLoopBlock(onEvent, title, lines) {
   onEvent(title)
   for (const line of lines.filter(Boolean)) {
@@ -5858,11 +6023,15 @@ function emitLoopTransition(onEvent, before, after) {
  *   the running app via its IPC, e.g. `antigravity chat --reuse-window bth`).
  * - If the runner is "notify" or unset: falls back to inbox file + macOS notification.
  */
-async function runPush(agentName, { repoRoot, prompt = LOOP_PROMPT, onEvent = () => {} } = {}) {
+async function runPush(agentName, { repoRoot, prompt, onEvent = () => {} } = {}) {
+  let dispatchPrompt = prompt || LOOP_PROMPT
+
   if (repoRoot) {
     const config = await readProjectConfig(repoRoot)
     if (config) {
-      const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt })
+      const harnessProfile = await resolveActiveHarnessProfile(repoRoot, config)
+      dispatchPrompt = prompt || harnessProfile.loop.dispatchPrompt || LOOP_PROMPT
+      const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt: dispatchPrompt })
       if (runner.type === "cli") {
         onEvent(`push: dispatching ${agentName} via CLI runner: ${runner.displayCommand}`)
         const result = await executeLoopCliRunner(agentName, runner, {
@@ -5881,7 +6050,7 @@ async function runPush(agentName, { repoRoot, prompt = LOOP_PROMPT, onEvent = ()
     }
   }
   // Fallback: inbox file + notification
-  const pushResult = await pushAgentPrompt(agentName, { prompt })
+  const pushResult = await pushAgentPrompt(agentName, { prompt: dispatchPrompt })
   return { type: "notify", ...pushResult }
 }
 
@@ -5952,6 +6121,8 @@ async function runLoop({
   )
   const history = []
   const { handoffPath } = getConfiguredRepoPaths(repoRoot, config)
+  const harnessProfile = await resolveActiveHarnessProfile(repoRoot, config)
+  const loopPrompt = harnessProfile.loop.dispatchPrompt || LOOP_PROMPT
   let current = await readCurrentState(repoRoot)
 
   onEvent(`loop start: ${repoName}`)
@@ -5962,10 +6133,11 @@ async function runLoop({
     `next action: ${current.nextAction || "(none)"}`,
   ])
   emitLoopBlock(onEvent, "loop config:", [
+    `harness profile: ${harnessProfile.configuredId}`,
     `max rounds: ${resolvedMaxRounds}`,
     `timeout per round: ${formatLoopSeconds(timeoutMs)}`,
     `poll interval: ${formatLoopSeconds(pollIntervalMs)}`,
-    `dispatch prompt: ${LOOP_PROMPT}`,
+    `dispatch prompt: ${loopPrompt}`,
   ])
   onEvent(`current handoff: ${formatLoopState(current)}`)
 
@@ -6006,17 +6178,21 @@ async function runLoop({
 
     const before = current
     const beforeFingerprint = serializeCurrentState(before)
-    const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt: LOOP_PROMPT })
+    const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt: loopPrompt })
     const roundStartedAt = Date.now()
     emitLoopBlock(onEvent, "selected agent:", [
       `${agentName}`,
       `reason: ${describeLoopAgentReason(before)}`,
       `handoff snapshot: ${formatLoopState(before)}`,
     ])
+    const delegationPacketSummaryLines = buildLoopDelegationPacketSummaryLines(before)
+    if (delegationPacketSummaryLines.length > 0) {
+      emitLoopBlock(onEvent, "delegation packet:", delegationPacketSummaryLines)
+    }
     emitLoopBlock(onEvent, "runner selection:", [
       `mode: ${runner.type}${runner.fallback ? " (fallback)" : ""}`,
       `configured value: ${runner.configuredValue || "(none)"}`,
-      `prompt: ${LOOP_PROMPT}`,
+      `prompt: ${loopPrompt}`,
       runner.type === "cli" ? `command: ${runner.displayCommand}` : "",
     ])
 
@@ -6060,7 +6236,7 @@ async function runLoop({
         const pushResult = await pushAgentPrompt(agentName, {
           repoName,
           taskDescription: current.task || "",
-          prompt: LOOP_PROMPT,
+          prompt: loopPrompt,
         })
         onEvent(
           `inbox: wrote pending prompt → ${pushResult.inboxPath}${pushResult.notified ? " (notification sent)" : ""}`,
@@ -6339,6 +6515,10 @@ function summarizeWatchdogRepair(repair) {
     return `lane ${repair.laneId}: released ${repair.releasedCount} stale lock${repair.releasedCount === 1 ? "" : "s"}`
   }
 
+  if (repair.type === "release-expired-locks") {
+    return `lane ${repair.laneId}: released ${repair.releasedCount} expired lock${repair.releasedCount === 1 ? "" : "s"}`
+  }
+
   return repair.summary || repair.type || "watchdog repair"
 }
 
@@ -6427,7 +6607,35 @@ async function applyWatchdogRepairs(repoRoot, {
       })
     }
 
-    // 2. Integrity checks (WS4)
+    // 2. TTL-based expired lock release
+    const handoffCfg = getHandoffConfig(config)
+    const laneLocks = registry.locks.filter((l) => l.lane === laneState._laneId)
+    const expiredLocks = laneLocks.filter((l) => isLockExpired(l, handoffCfg.lockTtlMs))
+    if (expiredLocks.length > 0 && laneState.lockState !== "stale") {
+      const expiredPaths = expiredLocks.map((l) => l.path)
+      await releaseLocks(repoRoot, laneState._laneId)
+      await appendWorkflowEvent(repoRoot, config, {
+        type: "watchdog-repair",
+        actor: actorLabel,
+        laneId: laneState._laneId,
+        details: {
+          repairType: "release-expired-locks",
+          releasedCount: expiredLocks.length,
+          releasedPaths: expiredPaths,
+          ttlMs: handoffCfg.lockTtlMs,
+          previousStatus: laneState.status,
+        },
+      })
+      repairs.push({
+        type: "release-expired-locks",
+        laneId: laneState._laneId,
+        releasedCount: expiredLocks.length,
+        releasedPaths: expiredPaths,
+        summary: `lane ${laneState._laneId}: released ${expiredLocks.length} expired lock${expiredLocks.length === 1 ? "" : "s"} (TTL ${Math.round(handoffCfg.lockTtlMs / 3600000)}h)`,
+      })
+    }
+
+    // 3. Integrity checks (WS4)
     const integrityIssues = await analyzeLaneIntegrity(repoRoot, config, laneState)
     if (integrityIssues.length > 0) {
       // Use the first integrity issue as the primary repair reason
@@ -6929,6 +7137,17 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
                 `Stale lock: lane ${laneState._laneId} has \`${formatLockedPaths(laneState.lockPaths)}\` locked while status is \`${laneState.status}\`. Run \`btrain locks release-lane --lane ${laneState._laneId}\` or claim the lane again.`,
               )
             }
+
+            // TTL-expired lock warning
+            const handoffCfg = getHandoffConfig(config)
+            const laneLocks = registry.locks.filter((l) => l.lane === laneState._laneId)
+            const expiredLocks = laneLocks.filter((l) => isLockExpired(l, handoffCfg.lockTtlMs))
+            if (expiredLocks.length > 0) {
+              const ttlHours = Math.round(handoffCfg.lockTtlMs / 3600000)
+              warnings.push(
+                `Lane ${laneState._laneId} has ${expiredLocks.length} lock${expiredLocks.length === 1 ? "" : "s"} older than ${ttlHours}h TTL. Run \`btrain doctor --repair\` to auto-release.`,
+              )
+            }
           }
 
           // Check for cross-lane overlapping locks
@@ -7014,6 +7233,7 @@ async function doctor({ repoRoot, repair = false, skipFeedback = false } = {}) {
 
 export {
   BtrainError,
+  DEFAULT_LOCK_TTL_MS,
   acquireLocks,
   checkHandoff,
   pushAgentPrompt,
@@ -7036,6 +7256,7 @@ export {
   installPreCommitHook,
   installPrePushHook,
   isLanesEnabled,
+  isLockExpired,
   listActiveOverrides,
   listLocks,
   listRepos,
@@ -7054,4 +7275,5 @@ export {
   runLoop,
   syncActiveAgents,
   syncTemplates,
+  withFileLock,
 }

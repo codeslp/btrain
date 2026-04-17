@@ -4,11 +4,15 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import {
+  DEFAULT_LOCK_TTL_MS,
   installGitHooks,
+  isLockExpired,
   parseCsvList,
   checkLockConflicts,
   findAvailableLane,
   getLaneConfigs,
+  runPush,
+  withFileLock,
 } from "../src/brain_train/core.mjs"
 
 // ──────────────────────────────────────────────
@@ -399,6 +403,8 @@ describe("btrain init", () => {
 
   it("project.toml has correct structure", async () => {
     const content = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(content.includes("[harness]"), "Missing [harness] section")
+    assert.ok(content.includes('active_profile = "default"'), "Missing default harness profile scaffold")
     assert.ok(content.includes("[reviews]"), "Missing [reviews] section")
     assert.ok(content.includes("default_review_mode"), "Missing default_review_mode")
     assert.ok(content.includes("active = []"), "Missing [agents].active scaffold")
@@ -824,6 +830,28 @@ describe("btrain handoff lifecycle", () => {
 
     const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
     assert.ok(handoffResult.stdout.includes("objective: Implement the structured delegation packet flow end-to-end."), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("deliverable: Reviewable core, CLI, docs, and tests for delegation metadata."),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("constraints:"), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("  - Do not widen the lock model in this slice."), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("  - Keep needs-review validation backward-compatible."), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("acceptance:"), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("  - Claim/update can write delegation metadata."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes("  - status --json exposes the packet."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "budget: One lane-scoped implementation pass plus focused regression tests.",
+      ),
+      handoffResult.stdout,
+    )
     assert.ok(handoffResult.stdout.includes("done when: The lane carries machine-readable delegation data without breaking existing handoff flows."), handoffResult.stdout)
 
     const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
@@ -850,6 +878,52 @@ describe("btrain handoff lifecycle", () => {
     ])
     assert.equal(status[0].current.delegationPacket.budget, "One lane-scoped implementation pass plus focused regression tests.")
     assert.equal(status[0].current.delegationPacket.doneWhen, "The lane carries machine-readable delegation data without breaking existing handoff flows.")
+  })
+
+  it("preserves all lines of multiline packet paragraph fields in handoff output", async () => {
+    await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--objective",
+        "Ship the delegation protocol.\nEnsure backward compatibility with existing handoff flows.",
+        "--deliverable",
+        "Updated core, CLI, and tests.\nRegression coverage for multiline fields.",
+        "--budget",
+        "One lane-scoped pass.\nNo cross-lane changes.",
+        "--done-when",
+        "All paragraph fields render in full.\nNo content is truncated.",
+        "--actor",
+        "TestBot",
+      ],
+      tmpDir,
+    )
+
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(
+      handoffResult.stdout.includes(
+        "objective: Ship the delegation protocol. Ensure backward compatibility with existing handoff flows.",
+      ),
+      `Expected full multiline objective: ${handoffResult.stdout}`,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "deliverable: Updated core, CLI, and tests. Regression coverage for multiline fields.",
+      ),
+      `Expected full multiline deliverable: ${handoffResult.stdout}`,
+    )
+    assert.ok(
+      handoffResult.stdout.includes("budget: One lane-scoped pass. No cross-lane changes."),
+      `Expected full multiline budget: ${handoffResult.stdout}`,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "done when: All paragraph fields render in full. No content is truncated.",
+      ),
+      `Expected full multiline done-when: ${handoffResult.stdout}`,
+    )
   })
 
   it("rejects needs-review while reviewer context is still placeholder-only", async () => {
@@ -2085,6 +2159,50 @@ describe("btrain sync-templates", () => {
 })
 
 // ──────────────────────────────────────────────
+// Integration tests: btrain go
+// ──────────────────────────────────────────────
+
+describe("btrain go", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("outputs bootstrap context with all expected sections", async () => {
+    const { stdout, code } = await runBtrain(["go", "--repo", tmpDir], tmpDir)
+    assert.equal(code, 0, stdout)
+    assert.ok(stdout.includes("# btrain go"), stdout)
+    assert.ok(stdout.includes("## Agent instructions"), stdout)
+    assert.ok(stdout.includes("CLAUDE.md"), stdout)
+    assert.ok(stdout.includes("AGENTS.md"), stdout)
+    assert.ok(stdout.includes("## Project config"), stdout)
+    assert.ok(stdout.includes(".btrain/project.toml"), stdout)
+    assert.ok(stdout.includes("## Current handoff state"), stdout)
+    assert.ok(stdout.includes("Do NOT read .claude/collab/HANDOFF_*.md directly"), stdout)
+    assert.ok(stdout.includes("## File locks"), stdout)
+    assert.ok(stdout.includes("## Skills"), stdout)
+    assert.ok(stdout.includes("## Quick-start commands"), stdout)
+    assert.ok(stdout.includes("btrain handoff"), stdout)
+  })
+
+  it("lists configured agents and lanes", async () => {
+    const { stdout } = await runBtrain(["go", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("agents:"), stdout)
+    assert.ok(stdout.includes("lanes:"), stdout)
+  })
+})
+
+// ──────────────────────────────────────────────
 // Integration tests: btrain review status
 // ──────────────────────────────────────────────
 
@@ -2211,9 +2329,192 @@ describe("btrain loop", () => {
     assert.ok(stdout.includes("loop context:"), stdout)
     assert.ok(stdout.includes("selected agent:"), stdout)
     assert.ok(stdout.includes("reason: handoff status is in-progress, so the active agent acts next"), stdout)
+    assert.ok(stdout.includes("harness profile: default"), stdout)
+    assert.ok(stdout.includes("dispatch prompt: bth"), stdout)
+    assert.ok(!stdout.includes("bth (+ delegation packet)"), stdout)
+    assert.ok(stdout.includes("delegation packet:"), stdout)
+    assert.ok(stdout.includes("objective: Loop dry run"), stdout)
     assert.ok(stdout.includes("prompt: bth"), stdout)
     assert.ok(stdout.includes("dry-run round 1: wait for OwnerBot (notify mode)"), stdout)
     assert.ok(stdout.includes("status: dry-run"), stdout)
+  })
+
+  it("uses the configured active harness profile prompt when a repo-local profile exists", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-custom-prompt.js")
+    const capturedPromptPath = path.join(tmpDir, "owner-custom-prompt.txt")
+    const harnessDir = path.join(tmpDir, ".btrain", "harness", "profiles")
+
+    await fs.mkdir(harnessDir, { recursive: true })
+    await fs.writeFile(
+      path.join(harnessDir, "brief.json"),
+      JSON.stringify(
+        {
+          id: "brief",
+          loop: {
+            dispatchPrompt: "brief-bth",
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+    await setActiveHarnessProfile(tmpDir, "brief")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+fs.writeFileSync(${JSON.stringify(capturedPromptPath)}, process.argv.slice(2).join("\\n"), "utf8")
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:00.000Z")
+fs.writeFileSync(handoffPath, updated)
+console.log("captured custom harness prompt")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Custom harness prompt", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "1", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.ok(stdout.includes("harness profile: brief"), stdout)
+    assert.ok(stdout.includes("dispatch prompt: brief-bth"), stdout)
+    assert.ok(stdout.includes("prompt: brief-bth"), stdout)
+
+    const capturedPrompt = await fs.readFile(capturedPromptPath, "utf8")
+    assert.equal(capturedPrompt.trim(), "brief-bth")
+  })
+
+  it("fails with a clear fix when the configured harness profile is missing", async () => {
+    await setActiveHarnessProfile(tmpDir, "missing-profile")
+
+    const { stderr, code } = await runBtrain(["loop", "--repo", tmpDir, "--dry-run"], tmpDir)
+
+    assert.equal(code, 1, stderr)
+    assert.ok(stderr.includes('Unknown harness profile "missing-profile".'), stderr)
+    assert.ok(stderr.includes('Set [harness].active_profile to "default"'), stderr)
+  })
+
+  it("surfaces malformed repo-local harness profiles with a repair hint", async () => {
+    const harnessDir = path.join(tmpDir, ".btrain", "harness", "profiles")
+
+    await fs.mkdir(harnessDir, { recursive: true })
+    await fs.writeFile(path.join(harnessDir, "broken.json"), "{\n  invalid json\n", "utf8")
+    await setActiveHarnessProfile(tmpDir, "broken")
+
+    const { stderr, code } = await runBtrain(["loop", "--repo", tmpDir, "--dry-run"], tmpDir)
+
+    assert.equal(code, 1, stderr)
+    assert.ok(stderr.includes('Failed to load harness profile "broken".'), stderr)
+    assert.ok(stderr.includes("repair .btrain/harness/profiles/broken.json"), stderr)
+  })
+
+  it("dispatches bare bth and surfaces the delegation packet through btrain handoff", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-capture-prompt.js")
+    const capturedPromptPath = path.join(tmpDir, "owner-captured-prompt.txt")
+
+    await setActiveHarnessProfile(tmpDir, "default")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const promptPath = ${JSON.stringify(capturedPromptPath)}
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+fs.writeFileSync(promptPath, process.argv.slice(2).join("\\n"), "utf8")
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:00.000Z")
+fs.writeFileSync(handoffPath, updated)
+console.log("captured prompt and resolved the handoff")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Loop prompt capture", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--objective",
+        "Ship Option A loop dispatch.",
+        "--deliverable",
+        "A dispatched prompt that trusts btrain handoff to carry the lane contract.",
+        "--constraint",
+        "Keep the handoff trigger anchored on bth.",
+        "--acceptance",
+        "The runner receives only bth in its prompt payload.",
+        "--budget",
+        "One loop-driven regression test.",
+        "--done-when",
+        "btrain handoff surfaces the full packet so dispatched prompts stay bare.",
+        "--actor",
+        "OwnerBot",
+      ],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "1", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("delegation packet:"), stdout)
+    assert.ok(stdout.includes("captured prompt and resolved the handoff"), stdout)
+    assert.ok(!stdout.includes("bth (+ delegation packet)"), stdout)
+
+    const capturedPrompt = await fs.readFile(capturedPromptPath, "utf8")
+    assert.equal(capturedPrompt.trim(), "bth")
+    assert.ok(!capturedPrompt.includes("Delegation Packet:"), capturedPrompt)
+    assert.ok(!capturedPrompt.includes("Objective:"), capturedPrompt)
+    assert.ok(!capturedPrompt.includes("Ship Option A loop dispatch."), capturedPrompt)
+
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(handoffResult.stdout.includes("objective: Ship Option A loop dispatch."), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes(
+        "deliverable: A dispatched prompt that trusts btrain handoff to carry the lane contract.",
+      ),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("constraints:"), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("  - Keep the handoff trigger anchored on bth."),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("acceptance:"), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("  - The runner receives only bth in its prompt payload."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes("budget: One loop-driven regression test."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "done when: btrain handoff surfaces the full packet so dispatched prompts stay bare.",
+      ),
+      handoffResult.stdout,
+    )
   })
 
   it("dispatches owner then reviewer and exits once the handoff resolves", async () => {
@@ -2569,6 +2870,54 @@ describe("btrain push", () => {
       output,
     )
   })
+
+  it("uses the configured active harness profile prompt for runPush", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-push-prompt.js")
+    const capturedPromptPath = path.join(tmpDir, "owner-push-prompt.txt")
+    const harnessDir = path.join(tmpDir, ".btrain", "harness", "profiles")
+    const events = []
+
+    await fs.mkdir(harnessDir, { recursive: true })
+    await fs.writeFile(
+      path.join(harnessDir, "brief.json"),
+      JSON.stringify(
+        {
+          id: "brief",
+          loop: {
+            dispatchPrompt: "brief-bth",
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+    await setActiveHarnessProfile(tmpDir, "brief")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+fs.writeFileSync(${JSON.stringify(capturedPromptPath)}, process.argv.slice(2).join("\\n"), "utf8")
+console.log("captured push prompt")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`])
+
+    const result = await runPush("OwnerBot", {
+      repoRoot: tmpDir,
+      onEvent: (line) => events.push(line),
+    })
+
+    assert.equal(result.status, "completed")
+    assert.equal(result.exitCode, 0)
+    assert.ok(events.some((line) => line.includes("push: dispatching OwnerBot via CLI runner:")), events.join("\n"))
+    assert.ok(events.includes("captured push prompt"), events.join("\n"))
+
+    const capturedPrompt = await fs.readFile(capturedPromptPath, "utf8")
+    assert.equal(capturedPrompt.trim(), "brief-bth")
+  })
 })
 
 describe("managed pre-push hook", () => {
@@ -2748,6 +3097,16 @@ async function setLaneIdsMetadata(tmpDir, laneIds) {
     const withoutIds = match.replace(/^ids\s*=.*\n?/m, "")
     return `${withoutIds.trimEnd()}\nids = [${laneIds.map((id) => `"${id}"`).join(", ")}]\n`
   })
+  await fs.writeFile(tomlPath, updated, "utf8")
+}
+
+async function setActiveHarnessProfile(tmpDir, profileId) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const profileLine = `active_profile = "${profileId}"`
+  const updated = /^active_profile\s*=.*$/m.test(toml)
+    ? toml.replace(/^active_profile\s*=.*$/m, profileLine)
+    : `${toml.trimEnd()}\n\n[harness]\n${profileLine}\n`
   await fs.writeFile(tomlPath, updated, "utf8")
 }
 
@@ -3100,6 +3459,12 @@ describe("multi-lane handoff lifecycle", () => {
     )
     assert.ok(stdout.includes("status: in-progress"), `Expected in-progress: ${stdout}`)
     assert.ok(stdout.includes("Auth work"), `Expected task name: ${stdout}`)
+    assert.ok(stdout.includes("objective: Auth work"), `Expected lane objective: ${stdout}`)
+    assert.ok(stdout.includes("constraints:"), `Expected constraint heading: ${stdout}`)
+    assert.ok(
+      stdout.includes("  - Stay within locked files unless the lane is re-scoped: src/auth/"),
+      `Expected lane constraint: ${stdout}`,
+    )
     assert.ok(stdout.includes("locked files: src/auth/"), `Expected lock summary: ${stdout}`)
     assert.ok(stdout.includes("lock state: active"), `Expected active lock state: ${stdout}`)
 
@@ -3779,5 +4144,217 @@ describe("needs-review with human-readable Base field", () => {
     // because listDiffPathsFromBase passes the full prose string to git rev-parse
     assert.equal(result.code, 0, `Expected success but got: ${result.stderr}`)
     assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+  })
+})
+
+// ──────────────────────────────────────────────
+// withFileLock — atomic file locking primitive
+// ──────────────────────────────────────────────
+
+describe("withFileLock", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("serializes concurrent operations on the same lock", async () => {
+    const lockPath = path.join(tmpDir, "test.lock")
+    const log = []
+
+    const task = async (id, delayMs) => {
+      await withFileLock(lockPath, async () => {
+        log.push(`${id}:enter`)
+        await new Promise((r) => setTimeout(r, delayMs))
+        log.push(`${id}:exit`)
+      })
+    }
+
+    // Launch two tasks concurrently — task B should wait for task A
+    await Promise.all([task("A", 100), task("B", 10)])
+
+    // A enters first, exits before B enters
+    assert.equal(log[0], "A:enter")
+    assert.equal(log[1], "A:exit")
+    assert.equal(log[2], "B:enter")
+    assert.equal(log[3], "B:exit")
+  })
+
+  it("cleans up lockfile after completion", async () => {
+    const lockPath = path.join(tmpDir, "cleanup.lock")
+    await withFileLock(lockPath, async () => {})
+
+    // Lockfile should be removed
+    const exists = await fs.access(lockPath).then(() => true, () => false)
+    assert.equal(exists, false, "Lockfile should be cleaned up after release")
+  })
+
+  it("cleans up lockfile after error", async () => {
+    const lockPath = path.join(tmpDir, "error.lock")
+    await assert.rejects(
+      withFileLock(lockPath, async () => { throw new Error("test") }),
+      { message: "test" },
+    )
+
+    const exists = await fs.access(lockPath).then(() => true, () => false)
+    assert.equal(exists, false, "Lockfile should be cleaned up after error")
+  })
+
+  it("recovers from stale lockfiles older than 30 seconds", async () => {
+    const lockPath = path.join(tmpDir, "stale.lock")
+    // Create a lockfile and backdate it
+    await fs.writeFile(lockPath, "stale")
+    const past = new Date(Date.now() - 31_000)
+    await fs.utimes(lockPath, past, past)
+
+    let entered = false
+    await withFileLock(lockPath, async () => { entered = true })
+    assert.ok(entered, "Should acquire lock after removing stale lockfile")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Lock registry atomicity
+// ──────────────────────────────────────────────
+
+describe("lock registry atomicity", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await runBtrain(["init", tmpDir, "--agent", "alice", "--agent", "bob"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("concurrent claims on different lanes do not lose locks", async () => {
+    // Both claims run concurrently; without locking, one would overwrite the other
+    const [resultA, resultB] = await Promise.all([
+      runBtrain([
+        "handoff", "claim",
+        "--lane", "a",
+        "--task", "task A",
+        "--owner", "alice",
+        "--reviewer", "bob",
+        "--files", "src/a/",
+      ], tmpDir),
+      runBtrain([
+        "handoff", "claim",
+        "--lane", "b",
+        "--task", "task B",
+        "--owner", "bob",
+        "--reviewer", "alice",
+        "--files", "src/b/",
+      ], tmpDir),
+    ])
+
+    assert.equal(resultA.code, 0, `Lane A claim failed: ${resultA.stderr}`)
+    assert.equal(resultB.code, 0, `Lane B claim failed: ${resultB.stderr}`)
+
+    // Verify both sets of locks survived
+    const locksResult = await runBtrain(["locks"], tmpDir)
+    assert.ok(locksResult.stdout.includes("src/a/"), `Lane A lock missing: ${locksResult.stdout}`)
+    assert.ok(locksResult.stdout.includes("src/b/"), `Lane B lock missing: ${locksResult.stdout}`)
+  })
+})
+
+// ──────────────────────────────────────────────
+// isLockExpired and lock TTL
+// ──────────────────────────────────────────────
+
+describe("lock TTL", () => {
+  it("isLockExpired returns false for fresh locks", () => {
+    const lock = { acquired_at: new Date().toISOString() }
+    assert.equal(isLockExpired(lock, DEFAULT_LOCK_TTL_MS), false)
+  })
+
+  it("isLockExpired returns true for locks older than TTL", () => {
+    const old = new Date(Date.now() - DEFAULT_LOCK_TTL_MS - 1000)
+    const lock = { acquired_at: old.toISOString() }
+    assert.equal(isLockExpired(lock, DEFAULT_LOCK_TTL_MS), true)
+  })
+
+  it("isLockExpired returns false for locks without acquired_at", () => {
+    assert.equal(isLockExpired({}, DEFAULT_LOCK_TTL_MS), false)
+  })
+
+  it("doctor warns about TTL-expired locks", async () => {
+    const tmpDir = await makeTmpDir()
+    try {
+      await runBtrain(["init", tmpDir, "--agent", "alice", "--agent", "bob"], tmpDir)
+
+      // Claim a lane to create locks
+      await runBtrain([
+        "handoff", "claim",
+        "--lane", "a",
+        "--task", "old task",
+        "--owner", "alice",
+        "--reviewer", "bob",
+        "--files", "src/old/",
+      ], tmpDir)
+
+      // Backdate the lock's acquired_at to exceed the 24h TTL
+      const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const expired = new Date(Date.now() - DEFAULT_LOCK_TTL_MS - 3600000)
+      for (const lock of registry.locks) {
+        lock.acquired_at = expired.toISOString()
+      }
+      await fs.writeFile(locksPath, JSON.stringify(registry, null, 2) + "\n")
+
+      // Doctor should warn about expired locks
+      const result = await runBtrain(["doctor"], tmpDir)
+      assert.ok(
+        result.stdout.includes("TTL") || result.stdout.includes("expired") || result.stdout.includes("24h"),
+        `Doctor should warn about expired locks: ${result.stdout}`,
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("doctor --repair auto-releases TTL-expired locks", async () => {
+    const tmpDir = await makeTmpDir()
+    try {
+      await runBtrain(["init", tmpDir, "--agent", "alice", "--agent", "bob"], tmpDir)
+
+      await runBtrain([
+        "handoff", "claim",
+        "--lane", "a",
+        "--task", "stale task",
+        "--owner", "alice",
+        "--reviewer", "bob",
+        "--files", "src/stale/",
+      ], tmpDir)
+
+      // Backdate locks
+      const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const expired = new Date(Date.now() - DEFAULT_LOCK_TTL_MS - 3600000)
+      for (const lock of registry.locks) {
+        lock.acquired_at = expired.toISOString()
+      }
+      await fs.writeFile(locksPath, JSON.stringify(registry, null, 2) + "\n")
+
+      // Repair should release expired locks
+      const result = await runBtrain(["doctor", "--repair"], tmpDir)
+      assert.ok(
+        result.stdout.includes("expired") || result.stdout.includes("release"),
+        `Doctor --repair should release expired locks: ${result.stdout}`,
+      )
+
+      // Verify locks are gone
+      const afterRegistry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const laneLocks = afterRegistry.locks.filter((l) => l.lane === "a")
+      assert.equal(laneLocks.length, 0, "Expired locks should be released after repair")
+    } finally {
+      await rmDir(tmpDir)
+    }
   })
 })

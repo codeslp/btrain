@@ -43,6 +43,10 @@ btrain init /path/to/repo --agent "claude" --agent "codex" --agent "gemini"
 # Launch the chat UI with all agents
 btrain-chat all /path/to/repo
 
+# Or launch a single agent
+btrain-chat codex /path/to/repo
+btrain-chat claude /path/to/repo
+
 # Claim work
 btrain handoff claim --lane a --task "Add auth middleware" \
   --owner "claude" --reviewer "codex" --files "src/auth/"
