@@ -91,6 +91,11 @@ class TestRegistryRepoField(unittest.TestCase):
         inst = list(all_inst.values())[0]
         self.assertEqual(inst["repo"], "/my/repo")
 
+    def test_get_agent_config_includes_repo(self):
+        self.reg.register("claude", repo="/my/repo")
+        cfg = self.reg.get_agent_config()
+        self.assertEqual(cfg["claude"]["repo"], "/my/repo")
+
 
 if __name__ == "__main__":
     unittest.main()

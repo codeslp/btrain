@@ -405,10 +405,16 @@ class RuntimeRegistry:
             return {n: _inst_dict(i) for n, i in self._instances.items()}
 
     def get_agent_config(self) -> dict[str, dict]:
-        """For WebSocket 'agents' message: {name: {color, label, base, state}}."""
+        """For WebSocket 'agents' message: {name: {color, label, base, state, repo}}."""
         with self._lock:
             return {
-                n: {"color": i.color, "label": i.label, "base": i.base, "state": i.state}
+                n: {
+                    "color": i.color,
+                    "label": i.label,
+                    "base": i.base,
+                    "state": i.state,
+                    "repo": i.repo,
+                }
                 for n, i in self._instances.items()
             }
 
