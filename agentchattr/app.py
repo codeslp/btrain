@@ -201,7 +201,9 @@ def _install_security_middleware(token: str, cfg: dict):
             # Static assets, index page, and uploaded images are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
+            # GET /api/roles is public (read-only role list for dashboard).
+            # POST /api/roles/{name} requires auth (mutation) — falls through.
+            if path == "/" or path.startswith(("/static/", "/uploads/")) or (path == "/api/roles" and request.method == "GET"):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -276,6 +278,20 @@ def _resolve_btrain_cmd(repo_abs: str) -> tuple[list | None, dict]:
         return cmd, env
     log.warning(f"btrain poller [{Path(repo_abs).name}]: btrain binary not found")
     return None, env
+
+
+def _repo_path_for_channel(channel: str) -> str:
+    """Extract the repo absolute path from a repo-qualified channel name.
+
+    "cgraph/agents" → looks up _btrain_repos["cgraph"]["path"]
+    "agents" or "general" → returns ""
+    """
+    if not _multi_repo or "/" not in channel:
+        return ""
+    repo_label = channel.split("/", 1)[0]
+    with _btrain_lock:
+        entry = _btrain_repos.get(repo_label)
+    return entry["path"] if entry else ""
 
 
 def _resolve_repo_agent(target: str, repo_path: str) -> str | None:
@@ -1143,19 +1159,23 @@ async def _handle_new_message(msg: dict):
     allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
 
     import presence
+    # Resolve repo context from channel name for repo-scoped agent routing
+    _channel_repo_path = _repo_path_for_channel(channel)
     for target in targets:
+        # Resolve @mention to the repo-matched instance (e.g. @claude → claude-2 for cgraph)
+        resolved_target = _resolve_repo_agent(target, _channel_repo_path) if _channel_repo_path else target
         # Skip pending instances — they haven't been named/claimed yet
         if registry:
-            inst = registry.get_instance(target)
+            inst = registry.get_instance(resolved_target)
             if inst and inst.get("state") == "pending":
                 continue
         # Session guard: suppress out-of-turn agent triggers
-        if allowed_agent and target != allowed_agent:
+        if allowed_agent and resolved_target != allowed_agent:
             continue
-        if not presence.is_online(target):
-            store.add("system", f"{target} appears offline — message queued.", msg_type="system", channel=channel)
-        if agents.is_available(target):
-            await agents.trigger(target, message=chat_msg, channel=channel, prompt=custom_prompt)
+        if not presence.is_online(resolved_target):
+            store.add("system", f"{resolved_target} appears offline — message queued.", msg_type="system", channel=channel)
+        if agents.is_available(resolved_target):
+            await agents.trigger(resolved_target, message=chat_msg, channel=channel, prompt=custom_prompt)
 
 
 # --- broadcasting ---
@@ -2223,7 +2243,12 @@ async def trigger_agent_silent(request: Request):
             )
     # Resolve to instances if multi-instance
     targets = [agent_name]
-    if registry:
+    _channel_repo_path = _repo_path_for_channel(channel)
+    if _channel_repo_path:
+        resolved = _resolve_repo_agent(agent_name, _channel_repo_path)
+        if resolved:
+            targets = [resolved]
+    elif registry:
         resolved = registry.resolve_to_instances(agent_name)
         if resolved:
             targets = resolved
@@ -2330,9 +2355,14 @@ async def post_job_message(job_id: int, request: Request):
     if job:
         channel = job.get("channel", "general")
         raw_targets = router.get_targets(sender, text, channel)
+        _channel_repo_path = _repo_path_for_channel(channel)
         targets = []
         for t in raw_targets:
-            if registry:
+            if _channel_repo_path:
+                resolved = _resolve_repo_agent(t, _channel_repo_path)
+                if resolved:
+                    targets.append(resolved)
+            elif registry:
                 targets.extend(registry.resolve_to_instances(t))
             else:
                 targets.append(t)
