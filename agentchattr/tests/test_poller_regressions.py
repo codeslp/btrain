@@ -323,5 +323,144 @@ class TestPollerTriggersAgentOnNotification(unittest.TestCase):
         self.assertEqual(len(self.agents.triggers), 1, "Should not re-trigger on same fingerprint")
 
 
+class MockRegistry:
+    """Minimal registry mock for repo-scoped resolution tests."""
+
+    def __init__(self, instances):
+        # instances: list of dicts with name, base, repo, state
+        self._instances = {i["name"]: i for i in instances}
+
+    def find_instance(self, base, repo=""):
+        for inst in self._instances.values():
+            if inst["base"] == base and inst["repo"] == repo:
+                return inst
+        return None
+
+    def get_instance(self, name):
+        return self._instances.get(name)
+
+    def get_instances_for(self, base):
+        return [i for i in self._instances.values() if i["base"] == base]
+
+    def resolve_to_instances(self, name):
+        if name in self._instances:
+            return [name]
+        members = [i["name"] for i in self._instances.values()
+                   if i["base"] == name and i.get("state") == "active"]
+        return members if members else [name]
+
+
+def _resolve_repo_agent(target, repo_path, registry):
+    """Mirror _resolve_repo_agent from app.py."""
+    if not registry:
+        return target
+
+    if repo_path:
+        inst = registry.find_instance(target, repo=repo_path)
+        if inst:
+            return inst["name"]
+        exact = registry.get_instance(target)
+        if exact:
+            return target if exact.get("repo") == repo_path else None
+        return None
+
+    inst = registry.find_instance(target, repo="")
+    if inst:
+        return inst["name"]
+    instances = registry.get_instances_for(target)
+    if instances:
+        return instances[0]["name"]
+    return target
+
+
+def _target_matches_repo(target, repo_path, registry):
+    """Mirror the final dispatch-time repo guard from app.py."""
+    if not repo_path or not registry:
+        return True
+    inst = registry.get_instance(target)
+    return bool(inst and inst.get("repo") == repo_path)
+
+
+class TestRepoScopedMentionRouting(unittest.TestCase):
+    """@mentions in repo-scoped channels must route to the repo-matched instance,
+    not fan out to all instances across repos."""
+
+    def setUp(self):
+        self.registry = MockRegistry([
+            {"name": "claude-1", "base": "claude", "repo": "/repos/btrain", "state": "active"},
+            {"name": "claude-2", "base": "claude", "repo": "/repos/cgraph", "state": "active"},
+            {"name": "codex-1", "base": "codex", "repo": "/repos/btrain", "state": "active"},
+        ])
+        self.agents = MockAgents()
+
+    def _resolve_targets(self, raw_targets, repo_path):
+        """Mirror the fixed resolution logic from _handle_new_message."""
+        targets = []
+        for t in raw_targets:
+            if repo_path:
+                resolved = _resolve_repo_agent(t, repo_path, self.registry)
+                if resolved:
+                    targets.append(resolved)
+            else:
+                targets.extend(self.registry.resolve_to_instances(t))
+        return list(dict.fromkeys(targets))
+
+    def _dispatch_targets(self, raw_targets, repo_path):
+        targets = self._resolve_targets(raw_targets, repo_path)
+        return [t for t in targets if _target_matches_repo(t, repo_path, self.registry)]
+
+    def test_repo_scoped_mention_routes_to_matched_instance(self):
+        """@claude in cgraph/agents should resolve to claude-2, not both."""
+        targets = self._resolve_targets(["claude"], "/repos/cgraph")
+        self.assertEqual(targets, ["claude-2"])
+
+    def test_repo_scoped_mention_btrain(self):
+        """@claude in btrain/agents should resolve to claude-1."""
+        targets = self._resolve_targets(["claude"], "/repos/btrain")
+        self.assertEqual(targets, ["claude-1"])
+
+    def test_non_repo_channel_fans_out_to_all_instances(self):
+        """@claude in general (no repo) should resolve to both instances."""
+        targets = self._resolve_targets(["claude"], "")
+        self.assertIn("claude-1", targets)
+        self.assertIn("claude-2", targets)
+
+    def test_repo_scoped_multiple_mentions(self):
+        """@claude @codex in btrain/agents should resolve to repo-matched instances."""
+        targets = self._resolve_targets(["claude", "codex"], "/repos/btrain")
+        self.assertEqual(targets, ["claude-1", "codex-1"])
+
+    def test_repo_scoped_missing_repo_instance_is_rejected(self):
+        """@claude in mech_ai/agents should not fall back to another repo instance."""
+        targets = self._resolve_targets(["claude"], "/repos/mech_ai")
+        self.assertEqual(targets, [])
+
+    def test_repo_scoped_explicit_local_instance_allowed(self):
+        """Exact instance mentions still work when the instance belongs to the channel repo."""
+        targets = self._dispatch_targets(["claude-1"], "/repos/btrain")
+        self.assertEqual(targets, ["claude-1"])
+
+    def test_repo_scoped_explicit_foreign_instance_is_rejected(self):
+        """Exact instance mentions from another repo must be dropped before dispatch."""
+        self.assertFalse(_target_matches_repo("claude-2", "/repos/btrain", self.registry))
+        targets = self._dispatch_targets(["claude-2"], "/repos/btrain")
+        self.assertEqual(targets, [])
+
+    def test_old_bug_expand_then_resolve_triggers_all(self):
+        """Demonstrates the old bug: resolve_to_instances expands to all instances,
+        then _resolve_repo_agent on instance names can't filter by repo."""
+        # Old behavior: expand first, then try to re-resolve
+        old_targets = []
+        for t in ["claude"]:
+            old_targets.extend(self.registry.resolve_to_instances(t))
+        # The buggy path passed those instance names straight through to dispatch,
+        # so both repos would be triggered from a repo-scoped channel.
+        self.assertEqual(old_targets, ["claude-1", "claude-2"])
+
+        # New behavior: resolve family name directly with repo context
+        new_targets = self._resolve_targets(["claude"], "/repos/cgraph")
+        self.assertEqual(new_targets, ["claude-2"], "Fixed path triggers only repo-matched instance")
+
+
 if __name__ == "__main__":
     unittest.main()

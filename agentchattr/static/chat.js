@@ -24,6 +24,7 @@ let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
 let laneChannels = [];   // lane IDs from btrain (system-managed)
 let btrainLanes = {};    // cached btrain lane state { lanes: [], repurposeReady: [] }
+let repoNames = [];      // configured repo labels for multi-repo mode
 let agentHats = {};  // { agent_name: svg_string }
 window.customRoles = [];  // saved custom roles from settings
 let colorOverrides = JSON.parse(localStorage.getItem('agentchattr-color-overrides') || '{}');
@@ -37,6 +38,7 @@ Object.defineProperty(window, 'channelList', { get() { return channelList; }, se
 Object.defineProperty(window, 'channelUnread', { get() { return channelUnread; }, set(v) { channelUnread = v; } });
 Object.defineProperty(window, 'laneChannels', { get() { return laneChannels; }, set(v) { laneChannels = v; } });
 Object.defineProperty(window, 'btrainLanes', { get() { return btrainLanes; }, set(v) { btrainLanes = v; } });
+Object.defineProperty(window, 'repoNames', { get() { return repoNames; }, set(v) { repoNames = Array.isArray(v) ? v : []; } });
 window._setActiveChannel = function(v) { activeChannel = v; };
 window._setPendingChannelSwitch = function(v) { pendingChannelSwitch = v; };
 // scrollToBottom is set after function definition (see below)
@@ -50,6 +52,77 @@ Object.defineProperty(window, '_lastMentionedAgent', {
     get() { return _lastMentionedAgent; },
     set(v) { _lastMentionedAgent = v; },
 });
+
+function getRepoNames() {
+    const seen = new Set();
+    const names = [];
+
+    for (const name of repoNames) {
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+    }
+
+    const liveRepos = Array.isArray(btrainLanes.repos) ? btrainLanes.repos : [];
+    for (const repo of liveRepos) {
+        const name = repo && repo.name;
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+    }
+
+    return names;
+}
+
+function getRepoForChannel(channelName) {
+    if (typeof channelName !== 'string' || !channelName.includes('/')) return '';
+    const repoName = channelName.split('/')[0];
+    return getRepoNames().includes(repoName) ? repoName : '';
+}
+
+function getRepoPath(repoName) {
+    if (!repoName) return '';
+    const liveRepos = Array.isArray(btrainLanes.repos) ? btrainLanes.repos : [];
+    const repo = liveRepos.find((entry) => entry && entry.name === repoName);
+    return repo ? repo.path || '' : '';
+}
+
+function isAgentInActiveRepo(cfg) {
+    const activeRepo = getRepoForChannel(activeChannel);
+    if (!activeRepo) return true;
+    const repoPath = getRepoPath(activeRepo);
+    if (!repoPath) return true;
+    return cfg.repo === repoPath;
+}
+
+function updateRepoScopeTitle() {
+    const repoEl = document.getElementById('repo-name');
+    if (!repoEl) return;
+
+    const activeRepo = getRepoForChannel(activeChannel);
+    const repos = getRepoNames();
+    if (activeRepo) {
+        repoEl.textContent = activeRepo;
+        document.title = activeRepo + ' — agentchattr';
+        return;
+    }
+
+    if (repos.length > 1) {
+        repoEl.textContent = 'MULTI_REPO';
+        document.title = 'multi-repo — agentchattr';
+        return;
+    }
+
+    if (repos.length === 1) {
+        repoEl.textContent = repos[0];
+        document.title = repos[0] + ' — agentchattr';
+    }
+}
+
+window.getRepoNames = getRepoNames;
+window.getRepoForChannel = getRepoForChannel;
+window.getRepoPath = getRepoPath;
+window.updateRepoScopeTitle = updateRepoScopeTitle;
 
 // --- Drag-scroll for overflow containers ---
 function enableDragScroll(el) {
@@ -546,6 +619,7 @@ function connectWebSocket() {
             if (raw.repos && Array.isArray(raw.repos)) {
                 const allLanes = [];
                 const allRepurpose = [];
+                repoNames = raw.repos.map((repo) => repo.name).filter(Boolean);
                 for (const repo of raw.repos) {
                     for (const lane of (repo.lanes || [])) {
                         allLanes.push({ ...lane, _repo: repo.name });
@@ -557,6 +631,9 @@ function connectWebSocket() {
                 btrainLanes = raw;
             }
             renderChannelTabs();
+            buildStatusPills();
+            buildMentionToggles();
+            updateRepoScopeTitle();
             renderLaneHeader();
             renderLanesPanel();
         } else if (event.type === 'edit') {
@@ -972,6 +1049,7 @@ function applyAgentConfig(data) {
     buildStatusPills();
     buildMentionToggles();
     buildSoundSettings();
+    if (window.renderChannelTabs) window.renderChannelTabs();
     // Re-color any messages already rendered (e.g. from a reconnect)
     recolorMessages();
     updateJobReplyTargetUI();
@@ -1153,8 +1231,10 @@ document.addEventListener('keydown', (e) => {
 
 function buildStatusPills() {
     const container = document.getElementById('agent-status');
+    if (!container) return;
     container.innerHTML = '';
     for (const [name, cfg] of Object.entries(agentConfig)) {
+        if (!isAgentInActiveRepo(cfg)) continue;
         const pill = document.createElement('div');
         pill.className = 'status-pill';
         if (cfg.state === 'pending') pill.classList.add('pending');
@@ -1752,9 +1832,11 @@ let pendingChannelSwitch = null;
 
 function applySettings(data) {
     if (data.repo_name) {
-        const repoEl = document.getElementById('repo-name');
-        if (repoEl) repoEl.textContent = data.repo_name;
-        document.title = data.repo_name + ' — agentchattr';
+        repoNames = [data.repo_name];
+    }
+    if (Array.isArray(data.repo_names)) {
+        repoNames = data.repo_names.filter(Boolean);
+        updateRepoScopeTitle();
     }
     if (data.title) {
         if (!data.repo_name) {
@@ -1810,6 +1892,7 @@ function applySettings(data) {
         laneChannels = data.lane_channels;
         renderChannelTabs();
     }
+    updateRepoScopeTitle();
 }
 
 function toggleSettings() {
@@ -2885,14 +2968,17 @@ function renderTodosPanel() {
 
 function buildMentionToggles() {
     const container = document.getElementById('mention-toggles');
+    if (!container) return;
     container.innerHTML = '';
 
     // Prune stale mentions for agents no longer in config
     for (const name of activeMentions) {
-        if (!(name in agentConfig)) activeMentions.delete(name);
+        const cfg = agentConfig[name];
+        if (!cfg || !isAgentInActiveRepo(cfg)) activeMentions.delete(name);
     }
 
     for (const [name, cfg] of Object.entries(agentConfig)) {
+        if (!isAgentInActiveRepo(cfg)) continue;
         if (cfg.state === 'pending') continue;  // skip pending instances
         const btn = document.createElement('button');
         btn.className = 'mention-toggle';
@@ -4159,7 +4245,15 @@ function renderLanesPanel() {
     const container = document.getElementById('lanes-panel-cards');
     if (!container) return;
 
-    const lanes = (btrainLanes.lanes || []);
+    const activeRepo = getRepoForChannel(activeChannel);
+    let lanes = (btrainLanes.lanes || []);
+    if (activeRepo) {
+        lanes = lanes.filter((lane) => lane._repo === activeRepo);
+    }
+    const titleEl = document.querySelector('.lanes-panel-title');
+    if (titleEl) {
+        titleEl.textContent = activeRepo ? `${activeRepo.toUpperCase()} LANES` : 'BTRAIN LANES';
+    }
     if (lanes.length === 0) {
         container.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px;">Waiting for btrain data...</div>';
         return;
@@ -4253,6 +4347,10 @@ function _renderLaneCard(lane) {
             ${detailsHtml}
         </div>`;
 }
+
+window.buildStatusPills = buildStatusPills;
+window.buildMentionToggles = buildMentionToggles;
+window.renderLanesPanel = renderLanesPanel;
 
 let _expandedLaneCards = {};
 window.toggleLaneCard = function(laneId) {

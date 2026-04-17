@@ -297,20 +297,65 @@ def _repo_path_for_channel(channel: str) -> str:
 def _resolve_repo_agent(target: str, repo_path: str) -> str | None:
     """Resolve an @mention target to the instance registered for a specific repo.
 
-    1. Registry has instance with base=target AND repo=repo_path → use it.
-    2. Else fallback to first active instance of that family (single-repo compat).
-    3. Else return target unchanged.
+    When repo_path is set (repo-scoped channel):
+      1. Find instance with base=target AND repo=repo_path → use it.
+      2. If target is an exact instance name, check its repo matches → use or reject.
+      3. No match → return None (do NOT fall back to another repo's instance).
+
+    When repo_path is empty (single-repo / unscoped channel):
+      Fall back to any instance of that family.
     """
     if not registry:
         return target
-    inst = registry.find_instance(target, repo=repo_path)
+
+    if repo_path:
+        # Try base family match for this repo
+        inst = registry.find_instance(target, repo=repo_path)
+        if inst:
+            return inst["name"]
+        # Check if target is an exact instance name (e.g. "claude-2")
+        exact = registry.get_instance(target)
+        if exact:
+            # Only allow if this instance belongs to the target repo
+            if exact.get("repo") == repo_path:
+                return target
+            # Reject cross-repo instance mentions
+            return None
+        # No instance for this repo — return None (agent offline for this repo)
+        return None
+
+    # Unscoped: fall back to any instance of this family
+    inst = registry.find_instance(target, repo="")
     if inst:
         return inst["name"]
-    # Fallback: any instance of this family
     instances = registry.get_instances_for(target)
     if instances:
         return instances[0]["name"]
     return target
+
+
+def _target_matches_repo(target: str, repo_path: str) -> bool:
+    """True when a resolved target belongs to the active repo scope."""
+    if not repo_path or not registry:
+        return True
+    inst = registry.get_instance(target)
+    return bool(inst and inst.get("repo") == repo_path)
+
+
+def _resolve_targets_for_channel(raw_targets: list[str], channel: str) -> tuple[list[str], str]:
+    """Resolve router targets to concrete instances for a channel scope."""
+    repo_path = _repo_path_for_channel(channel)
+    targets: list[str] = []
+    for target in raw_targets:
+        if repo_path and registry:
+            resolved = _resolve_repo_agent(target, repo_path)
+            if resolved:
+                targets.append(resolved)
+        elif registry:
+            targets.extend(registry.resolve_to_instances(target))
+        else:
+            targets.append(target)
+    return list(dict.fromkeys(targets)), repo_path
 
 
 def _update_lane_channels():
@@ -407,10 +452,13 @@ def _refresh_btrain_state_for_repo(repo_label: str, repo_entry: dict, env: dict)
                 store.add("btrain", notify_text, channel=agents_channel)
                 if notify_text.startswith("@") and agents:
                     target = notify_text.split()[0][1:]
-                    resolved = _resolve_repo_agent(target, repo_entry["path"])
-                    if resolved and agents.is_available(resolved):
-                        agents.trigger_sync(resolved, message=f"btrain: {notify_text}",
-                                            channel=agents_channel)
+                    targets, repo_path = _resolve_targets_for_channel([target], agents_channel)
+                    for resolved in targets:
+                        if not _target_matches_repo(resolved, repo_path):
+                            continue
+                        if agents.is_available(resolved):
+                            agents.trigger_sync(resolved, message=f"btrain: {notify_text}",
+                                                channel=agents_channel)
 
     changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
     if changed and _event_loop:
@@ -1126,15 +1174,10 @@ async def _handle_new_message(msg: dict):
             )
 
     raw_targets = router.get_targets(sender, text, channel)
-    # Resolve base family names to actual registered instances
-    # e.g. 'claude' → 'claude-prime' when slot-1 was renamed
-    targets = []
-    for t in raw_targets:
-        if registry:
-            targets.extend(registry.resolve_to_instances(t))
-        else:
-            targets.append(t)
-    targets = list(dict.fromkeys(targets))  # dedupe, preserve order
+    # Resolve repo context from channel name for repo-scoped agent routing.
+    # Must happen BEFORE instance expansion so family names route to the
+    # repo-matched instance instead of fanning out to all repos.
+    targets, _channel_repo_path = _resolve_targets_for_channel(raw_targets, channel)
 
     if router.is_paused(channel):
         # Only emit the loop guard notice once per pause
@@ -1159,16 +1202,15 @@ async def _handle_new_message(msg: dict):
     allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
 
     import presence
-    # Resolve repo context from channel name for repo-scoped agent routing
-    _channel_repo_path = _repo_path_for_channel(channel)
     for target in targets:
-        # Resolve @mention to the repo-matched instance (e.g. @claude → claude-2 for cgraph)
-        resolved_target = _resolve_repo_agent(target, _channel_repo_path) if _channel_repo_path else target
+        resolved_target = target
         # Skip pending instances — they haven't been named/claimed yet
         if registry:
             inst = registry.get_instance(resolved_target)
             if inst and inst.get("state") == "pending":
                 continue
+        if not _target_matches_repo(resolved_target, _channel_repo_path):
+            continue
         # Session guard: suppress out-of-turn agent triggers
         if allowed_agent and resolved_target != allowed_agent:
             continue
@@ -2242,20 +2284,15 @@ async def trigger_agent_silent(request: Request):
                 f"Conversion request: propose a job from the referenced message."
             )
     # Resolve to instances if multi-instance
-    targets = [agent_name]
-    _channel_repo_path = _repo_path_for_channel(channel)
-    if _channel_repo_path:
-        resolved = _resolve_repo_agent(agent_name, _channel_repo_path)
-        if resolved:
-            targets = [resolved]
-    elif registry:
-        resolved = registry.resolve_to_instances(agent_name)
-        if resolved:
-            targets = resolved
+    targets, _channel_repo_path = _resolve_targets_for_channel([agent_name], channel)
+    triggered_targets = []
     for target in targets:
+        if not _target_matches_repo(target, _channel_repo_path):
+            continue
         if agents.is_available(target):
             await agents.trigger(target, message=message, channel=channel, prompt=custom_prompt)
-    return {"ok": True, "triggered": targets}
+            triggered_targets.append(target)
+    return {"ok": True, "triggered": triggered_targets}
 
 
 @app.post("/api/jobs")
@@ -2355,18 +2392,7 @@ async def post_job_message(job_id: int, request: Request):
     if job:
         channel = job.get("channel", "general")
         raw_targets = router.get_targets(sender, text, channel)
-        _channel_repo_path = _repo_path_for_channel(channel)
-        targets = []
-        for t in raw_targets:
-            if _channel_repo_path:
-                resolved = _resolve_repo_agent(t, _channel_repo_path)
-                if resolved:
-                    targets.append(resolved)
-            elif registry:
-                targets.extend(registry.resolve_to_instances(t))
-            else:
-                targets.append(t)
-        targets = list(dict.fromkeys(targets))
+        targets, _channel_repo_path = _resolve_targets_for_channel(raw_targets, channel)
 
         import presence
         chat_msg = f"{sender}: {text}" if text else ""
@@ -2375,6 +2401,8 @@ async def post_job_message(job_id: int, request: Request):
                 inst = registry.get_instance(target)
                 if inst and inst.get("state") == "pending":
                     continue
+            if not _target_matches_repo(target, _channel_repo_path):
+                continue
             if agents.is_available(target):
                 await agents.trigger(target, message=chat_msg, channel=channel,
                                      job_id=job_id)

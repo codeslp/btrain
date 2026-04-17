@@ -86,12 +86,12 @@ start_server_if_needed() {
     fi
 
     if [ "$(uname -s)" = "Darwin" ]; then
-        osascript -e "tell app \"Terminal\" to do script \"cd '$(pwd)' && $AGENTCHATTR_VENV_PYTHON run.py\"" > /dev/null 2>&1
+        osascript -e "tell app \"Terminal\" to do script \"cd '$(pwd)' && '${AGENTCHATTR_VENV_PYTHON}' run.py\"" > /dev/null 2>&1
     else
         if command -v gnome-terminal >/dev/null 2>&1; then
-            gnome-terminal -- sh -c "cd '$(pwd)' && $AGENTCHATTR_VENV_PYTHON run.py; printf 'Press Enter to close... '; read _"
+            gnome-terminal -- sh -c "cd '$(pwd)' && '${AGENTCHATTR_VENV_PYTHON}' run.py; printf 'Press Enter to close... '; read _"
         elif command -v xterm >/dev/null 2>&1; then
-            xterm -e sh -c "cd '$(pwd)' && $AGENTCHATTR_VENV_PYTHON run.py" &
+            xterm -e sh -c "cd '$(pwd)' && '${AGENTCHATTR_VENV_PYTHON}' run.py" &
         else
             "$AGENTCHATTR_VENV_PYTHON" run.py > data/server.log 2>&1 &
         fi

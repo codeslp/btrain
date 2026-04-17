@@ -4353,17 +4353,105 @@ footer {
 
 #lane-pills-bar {
     display: flex;
-    align-items: center;
-    padding: 3px 16px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 5px 16px 8px;
     background: var(--bg-header);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow-x: hidden;
+    overflow-y: visible;
     min-height: 32px;
-    gap: 4px;
+    gap: 6px 8px;
 }
 #lane-pills-bar:empty { display: none; }
+
+.repo-tabs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+.repo-tab {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+    min-width: 104px;
+    padding: 5px 10px 6px;
+    border: 1px solid color-mix(in srgb, var(--repo-accent, var(--accent)) 28%, var(--border));
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--repo-accent, var(--accent)) 10%, var(--bg-header));
+    color: color-mix(in srgb, var(--repo-accent, var(--accent)) 52%, white);
+    cursor: pointer;
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.repo-tab:hover {
+    background: color-mix(in srgb, var(--repo-accent, var(--accent)) 15%, var(--bg-header));
+    color: var(--text);
+}
+
+.repo-tab.active {
+    background: color-mix(in srgb, var(--repo-accent, var(--accent)) 19%, var(--bg-header));
+    border-color: color-mix(in srgb, var(--repo-accent, var(--accent)) 58%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--repo-accent, var(--accent)) 32%, transparent);
+    color: var(--repo-accent, var(--accent));
+}
+
+.repo-tab-label {
+    white-space: nowrap;
+}
+
+.repo-tab-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+}
+
+.repo-tab-meta {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0;
+    color: var(--text-system);
+}
+
+.repo-tab-agents {
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.05;
+    letter-spacing: 0.2px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+}
+
+.repo-tab.active .repo-tab-meta {
+    color: color-mix(in srgb, var(--repo-accent, var(--accent)) 72%, white);
+}
+
+.repo-tab.active .repo-tab-agents {
+    color: color-mix(in srgb, var(--repo-accent, var(--accent)) 58%, white);
+}
+
+.repo-tab-all {
+    min-width: 86px;
+    background: transparent;
+    border-color: var(--border-subtle);
+    color: var(--text-dim);
+}
 
 /* ---------------------------------------------------------------------------
    Lanes panel (left side-panel)
@@ -4607,23 +4695,124 @@ footer {
 
 .lane-tabs {
     display: flex;
-    align-items: flex-end;
-    gap: 3px;
-    flex-shrink: 0;
+    align-items: flex-start;
+    gap: 6px;
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
     padding: 2px 0;
+    flex-wrap: wrap;
 }
 
 /* Mini pills (30% smaller for the pills bar) */
 .lane-tabs-mini .lane-pill {
-    width: 28px;
+    width: auto;
+    min-width: 52px;
+    background: #0a1016;
+    border-color: #233042;
 }
 .lane-tabs-mini .lane-pill .lane-box {
     height: 20px;
-    font-size: 12px;
+    padding: 0 5px;
+    font-family: var(--font-body);
+    font-size: 10px;
+    letter-spacing: 0.12px;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
 }
 .lane-tabs-mini .lane-pill-agent {
+    padding: 2px 4px 3px;
+    font-family: var(--font-body);
     font-size: 7px;
-    padding: 2px 0;
+    letter-spacing: 0.1px;
+}
+
+.lane-tabs-mini .lane-pill .lane-box.idle {
+    background-color: color-mix(in srgb, var(--idle) 76%, #081018);
+}
+
+.lane-tabs-mini .lane-pill .lane-box.in-progress {
+    background-color: color-mix(in srgb, var(--in-progress) 72%, #081018);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--in-progress-glow) 85%, transparent);
+}
+
+.lane-tabs-mini .lane-pill .lane-box.needs-review {
+    background-color: color-mix(in srgb, var(--needs-review) 72%, #081018);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--needs-review-glow) 80%, transparent);
+}
+
+.lane-tabs-mini .lane-pill .lane-box.changes-requested {
+    background-color: color-mix(in srgb, var(--changes-requested) 70%, #081018);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--changes-requested-glow) 78%, transparent);
+}
+
+.lane-tabs-mini .lane-pill .lane-box.repair-needed {
+    background: color-mix(in srgb, var(--repair-needed) 72%, #15120a);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--repair-needed-glow) 75%, transparent);
+}
+
+.lane-tabs-mini .lane-pill .lane-box.resolved {
+    background-color: color-mix(in srgb, var(--resolved) 70%, #081018);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--resolved-glow) 80%, transparent);
+}
+
+.lane-tabs-grouped {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.lane-repo-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 280px;
+    min-width: min(100%, 280px);
+    padding: 6px 7px 8px;
+    border: 1px solid color-mix(in srgb, var(--repo-accent, var(--accent)) 38%, var(--border));
+    border-radius: 12px;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--repo-accent, var(--accent)) 12%, #0a1016) 0%, #0a1016 100%);
+    box-shadow:
+        inset 0 0 0 1px color-mix(in srgb, var(--repo-accent, var(--accent)) 12%, transparent),
+        0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
+.lane-repo-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 2px;
+}
+
+.lane-repo-group-label {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--repo-accent, var(--accent)) 18%, #0f1722);
+    border: 1px solid color-mix(in srgb, var(--repo-accent, var(--accent)) 42%, transparent);
+    font-family: var(--font-heading);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.45px;
+    color: var(--repo-accent, var(--accent));
+}
+
+.lane-repo-group-meta {
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-system);
+    white-space: nowrap;
+}
+
+.lane-repo-group-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
 }
 
 .lane-pill {
@@ -4683,13 +4872,14 @@ footer {
 /* Agent label below the box */
 .lane-pill-agent {
     padding: 3px 0;
-    font-family: var(--font-heading);
+    font-family: var(--font-body);
     font-size: 9px;
     font-weight: 700;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.2px;
     color: var(--text-muted);
     text-align: center;
     width: 100%;
+    white-space: nowrap;
 }
 
 .lane-pill-unread {
