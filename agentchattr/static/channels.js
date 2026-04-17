@@ -51,7 +51,8 @@ function renderLaneHeader() {
     const lid = window.activeChannel;
     const laneData = window.btrainLanes || {};
     const lanes = laneData.lanes || [];
-    const lane = lanes.find(l => l._laneId === lid);
+    // Match by bare lane ID or repo-qualified channel ID
+    const lane = lanes.find(l => l._laneId === lid || (l._repo && l._repo + '/' + l._laneId === lid));
 
     if (!lane || lid === 'general') {
         container.classList.add('hidden');
@@ -152,7 +153,11 @@ function renderChannelTabs() {
         const laneData = window.btrainLanes || {};
         const lanes = laneData.lanes || [];
         const laneMap = {};
-        for (const l of lanes) laneMap[l._laneId] = l;
+        for (const l of lanes) {
+            laneMap[l._laneId] = l;
+            // Also key by repo-qualified ID for multi-repo lookup
+            if (l._repo) laneMap[l._repo + '/' + l._laneId] = l;
+        }
 
         if (laneChannels.length > 0) {
             for (let idx = 0; idx < laneChannels.length; idx++) {
@@ -172,7 +177,11 @@ function renderChannelTabs() {
                 // Colored lane box with letter
                 const box = document.createElement('div');
                 box.className = 'lane-box ' + status;
-                box.textContent = lid.toUpperCase();
+                // Show "REPO/A" if multi-repo, bare "A" if single
+                const bareLane = (lane._laneId || lid).toUpperCase();
+                const repoPrefix = lane._repo ? lane._repo.slice(0, 3).toUpperCase() + '/' : '';
+                box.textContent = repoPrefix + bareLane;
+                if (lane._repo) pill.title = lane._repo + ' — ' + status.toUpperCase();
                 pill.appendChild(box);
 
                 // Hot seat agent label (color-coded like dashboard)

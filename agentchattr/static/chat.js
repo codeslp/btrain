@@ -541,7 +541,21 @@ function connectWebSocket() {
                 Store.set('activeChannel', event.new_name);
             }
         } else if (event.type === 'btrain_lanes') {
-            btrainLanes = event.data || {};
+            const raw = event.data || {};
+            // Normalize multi-repo format into flat lanes array for UI compat
+            if (raw.repos && Array.isArray(raw.repos)) {
+                const allLanes = [];
+                const allRepurpose = [];
+                for (const repo of raw.repos) {
+                    for (const lane of (repo.lanes || [])) {
+                        allLanes.push({ ...lane, _repo: repo.name });
+                    }
+                    allRepurpose.push(...(repo.repurposeReady || []));
+                }
+                btrainLanes = { lanes: allLanes, repurposeReady: allRepurpose, repos: raw.repos };
+            } else {
+                btrainLanes = raw;
+            }
             renderChannelTabs();
             renderLaneHeader();
             renderLanesPanel();
@@ -4151,14 +4165,36 @@ function renderLanesPanel() {
         return;
     }
 
-    const sorted = [...lanes].sort(_compareLaneIds);
+    // Group by repo if multi-repo
+    const repos = {};
+    for (const lane of lanes) {
+        const repo = lane._repo || '';
+        if (!repos[repo]) repos[repo] = [];
+        repos[repo].push(lane);
+    }
+    const repoKeys = Object.keys(repos).sort();
+    const isMultiRepo = repoKeys.length > 1 || (repoKeys.length === 1 && repoKeys[0] !== '');
 
-    const cards = sorted.map(lane => {
+    let html = '';
+    for (const repoKey of repoKeys) {
+        const repoLanes = repos[repoKey].sort(_compareLaneIds);
+        if (isMultiRepo && repoKey) {
+            const activeCount = repoLanes.filter(l => l.status && l.status !== 'idle' && l.status !== 'resolved').length;
+            html += `<div class="lp-repo-header">${escapeHtml(repoKey.toUpperCase())} <span style="opacity:0.5;font-size:10px;">${activeCount} active</span></div>`;
+        }
+        html += repoLanes.map(lane => _renderLaneCard(lane)).join('');
+    }
+    container.innerHTML = html;
+}
+
+function _renderLaneCard(lane) {
         const status = lane.status || 'idle';
         const laneUpper = lane._laneId.toUpperCase();
+        const repoPrefix = lane._repo ? lane._repo.slice(0, 3).toUpperCase() + '/' : '';
         const statusLabel = status.toUpperCase().replace(/-/g, ' ');
         const statusCls = 'status-' + status;
-        const isActive = lane._laneId === activeChannel;
+        const channelId = lane._repo ? lane._repo + '/' + lane._laneId : lane._laneId;
+        const isActive = channelId === activeChannel || lane._laneId === activeChannel;
 
         // Hot seat
         const hotSeatName = window._resolveHotSeat ? window._resolveHotSeat(lane) : '';
@@ -4205,20 +4241,17 @@ function renderLanesPanel() {
             </div>
         ` : '';
 
-        const isExpanded = isActive && (_expandedLaneCards[lane._laneId] !== false);
+        const isExpanded = isActive && (_expandedLaneCards[channelId] !== false);
 
-        return `<div class="lp-card${isActive ? ' active' : ''}${isExpanded ? ' expanded' : ''}" data-status="${status}" data-lane="${lane._laneId}" onclick="toggleLaneCard('${lane._laneId}')">
+        return `<div class="lp-card${isActive ? ' active' : ''}${isExpanded ? ' expanded' : ''}" data-status="${status}" data-lane="${channelId}" onclick="toggleLaneCard('${channelId}')">
             ${hotSeatBadge}
             <div class="lp-card-status ${statusCls}">[${statusLabel}]</div>
-            <div class="lp-card-id">LANE ${laneUpper}</div>
+            <div class="lp-card-id">${repoPrefix}LANE ${laneUpper}</div>
             ${agents ? `<div class="lp-card-agents" style="margin-bottom: 8px;">${agents}</div>` : ''}
             <div class="lh-desc" style="font-size: 13px; margin-bottom: 6px; display: block; -webkit-line-clamp: unset;">${lane.task ? _esc(lane.task) : '(no task)'}</div>
             ${locksHtml}
             ${detailsHtml}
         </div>`;
-    }).join('');
-
-    container.innerHTML = cards;
 }
 
 let _expandedLaneCards = {};

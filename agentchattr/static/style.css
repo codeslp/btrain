@@ -4452,6 +4452,17 @@ footer {
     background: var(--accent);
 }
 
+/* --- Repo section header in lanes panel --- */
+.lp-repo-header {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    padding: 10px 12px 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+}
+
 /* --- Lane card in panel --- */
 .lp-card {
     background: linear-gradient(145deg, var(--surface) 0%, #0d1017 100%);
