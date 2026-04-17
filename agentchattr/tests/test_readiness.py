@@ -12,6 +12,56 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import readiness
 
 
+class TestPythonRuntime:
+    def test_parse_python_version(self):
+        assert readiness.parse_python_version("Python 3.12.13") == (3, 12)
+        assert readiness.parse_python_version("Python 3.11.9") == (3, 11)
+        assert readiness.parse_python_version("not-a-version") is None
+
+    def test_python_version_supported(self):
+        assert readiness.python_version_supported((3, 11)) is True
+        assert readiness.python_version_supported((3, 12)) is True
+        assert readiness.python_version_supported((3, 10)) is False
+        assert readiness.python_version_supported(None) is False
+
+    def test_runtime_python_uses_supported_venv(self):
+        with tempfile.TemporaryDirectory() as d:
+            venv_python = Path(d) / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("", "utf-8")
+            with mock.patch("readiness.check_binary", return_value={"version": "Python 3.12.13"}):
+                result = readiness.check_runtime_python(d)
+                assert result["ok"] is True
+                assert ".venv" in result["resolved"]
+
+    def test_runtime_python_rejects_old_venv(self):
+        with tempfile.TemporaryDirectory() as d:
+            venv_python = Path(d) / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("", "utf-8")
+            with mock.patch("readiness.check_binary", return_value={"version": "Python 3.9.6"}):
+                result = readiness.check_runtime_python(d)
+                assert result["ok"] is False
+                assert "unsupported Python" in result["message"]
+
+    def test_runtime_python_finds_supported_system_python(self):
+        completed = mock.Mock(stdout="Python 3.12.13\n", stderr="", returncode=0)
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("readiness.shutil.which", side_effect=lambda name: "/usr/bin/py" if name == "py" else None):
+                with mock.patch("readiness.subprocess.run", return_value=completed):
+                    result = readiness.check_runtime_python(d)
+                    assert result["ok"] is True
+                    assert "3.12.13" in result["version"]
+
+    def test_runtime_python_fails_without_supported_interpreter(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("readiness.shutil.which", return_value=None):
+                with mock.patch("readiness.subprocess.run", side_effect=FileNotFoundError):
+                    result = readiness.check_runtime_python(d)
+                    assert result["ok"] is False
+                    assert "Python 3.11+" in result["message"]
+
+
 class TestCheckBinary:
     def test_existing_binary(self):
         """python3 should always be found."""

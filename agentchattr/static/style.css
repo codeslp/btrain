@@ -4459,6 +4459,7 @@ footer {
     border-top: 3px solid var(--border);
     border-radius: 4px;
     padding: 10px 12px;
+    text-align: left;
     cursor: pointer;
     position: relative;
     transition: all 0.2s ease;

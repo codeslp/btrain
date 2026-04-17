@@ -40,3 +40,46 @@ def load_config(root: Path | None = None) -> dict:
                 print(f"  Warning: Ignoring local agent '{name}' (already defined in config.toml)")
 
     return config
+
+
+def get_repos(cfg: dict) -> list[dict]:
+    """Extract the list of monitored repos from a loaded config.
+
+    Returns list of {"label": str, "path": str, "poll_interval": int}.
+
+    Priority:
+    1. ``[[repos]]`` TOML array-of-tables.
+    2. ``[btrain].repo_path`` synthesized as a single entry (backward compat).
+    3. Empty list.
+    """
+    repos_section = cfg.get("repos")
+    if repos_section and isinstance(repos_section, list):
+        default_interval = int(cfg.get("btrain", {}).get("poll_interval", 15))
+        result = []
+        for entry in repos_section:
+            label = entry.get("label", "")
+            path = entry.get("path", "")
+            if not label or not path:
+                continue
+            result.append({
+                "label": label,
+                "path": path,
+                "poll_interval": int(entry.get("poll_interval", default_interval)),
+            })
+        return result
+
+    btrain_cfg = cfg.get("btrain", {})
+    repo_path = btrain_cfg.get("repo_path", "")
+    if repo_path:
+        return [{
+            "label": Path(repo_path).name if repo_path != ".." else "repo",
+            "path": repo_path,
+            "poll_interval": int(btrain_cfg.get("poll_interval", 15)),
+        }]
+
+    return []
+
+
+def is_multi_repo(cfg: dict) -> bool:
+    """True when more than one repo is configured."""
+    return len(get_repos(cfg)) > 1

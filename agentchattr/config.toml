@@ -55,9 +55,29 @@ temperature = 1.0
 
 [btrain]
 # Path to the btrain-managed repo (relative to agentchattr or absolute).
+# Used as fallback when [[repos]] is not defined.
 repo_path = ".."
 # Seconds between btrain status polls.
 poll_interval = 5
+
+# --- Multi-repo polling ---
+# Each [[repos]] entry defines a btrain-managed repo to monitor.
+# When present, these override [btrain].repo_path.
+
+[[repos]]
+label = "btrain"
+path = "/Users/bfaris96/btrain"
+poll_interval = 5
+
+[[repos]]
+label = "cgraph"
+path = "/Users/bfaris96/cgraph"
+poll_interval = 5
+
+[[repos]]
+label = "mech_ai"
+path = "/Users/bfaris96/mech_ai"
+poll_interval = 10
 
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.

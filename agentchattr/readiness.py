@@ -10,6 +10,24 @@ import shutil
 import subprocess
 from pathlib import Path
 
+MIN_RUNTIME_PYTHON = (3, 11)
+
+
+def parse_python_version(version_text: str) -> tuple[int, int] | None:
+    """Extract major/minor Python version from `python --version` style output."""
+    text = (version_text or "").strip()
+    for token in text.split():
+        parts = token.split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return int(parts[0]), int(parts[1])
+    return None
+
+
+def python_version_supported(version: tuple[int, int] | None, minimum: tuple[int, int] = MIN_RUNTIME_PYTHON) -> bool:
+    if version is None:
+        return False
+    return version >= minimum
+
 
 def check_binary(command: str, timeout: float = 5.0) -> dict:
     """Check that a CLI binary exists on PATH and can execute --version."""
@@ -79,6 +97,66 @@ def check_cwd(cwd_path: str) -> dict:
         "ok": True,
         "path": str(p),
         "message": f"Working directory accessible: {p}",
+    }
+
+
+def check_runtime_python(base_dir: str = ".") -> dict:
+    """Check that agentchattr can bootstrap with a Python 3.11+ runtime."""
+    base = Path(base_dir).resolve()
+    venv_candidates = [
+        base / ".venv" / "bin" / "python",
+        base / ".venv" / "Scripts" / "python.exe",
+    ]
+
+    for candidate in venv_candidates:
+        if not candidate.exists():
+            continue
+        result = check_binary(str(candidate))
+        version = parse_python_version(result.get("version", ""))
+        if python_version_supported(version):
+            return {
+                "ok": True,
+                "resolved": str(candidate),
+                "version": result.get("version", ""),
+                "message": f"Bootstrap runtime ready: {candidate}",
+            }
+        return {
+            "ok": False,
+            "resolved": str(candidate),
+            "version": result.get("version", ""),
+            "message": f"Existing virtualenv uses an unsupported Python: {result.get('version', '(unknown)')}",
+            "recovery": "Delete .venv and relaunch with Python 3.11, 3.12, or 3.13 available.",
+        }
+
+    command_candidates: list[list[str]] = []
+    if shutil.which("py"):
+        command_candidates.extend([["py", "-3.13"], ["py", "-3.12"], ["py", "-3.11"]])
+    command_candidates.extend([[name] for name in ("python3.13", "python3.12", "python3.11", "python3", "python")])
+
+    for args in command_candidates:
+        try:
+            result = subprocess.run(
+                [*args, "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (FileNotFoundError, OSError, PermissionError, subprocess.TimeoutExpired):
+            continue
+        version_text = (result.stdout or result.stderr or "").strip()
+        version = parse_python_version(version_text)
+        if python_version_supported(version):
+            return {
+                "ok": True,
+                "resolved": " ".join(args),
+                "version": version_text,
+                "message": f"Compatible bootstrap Python found: {' '.join(args)}",
+            }
+
+    return {
+        "ok": False,
+        "resolved": None,
+        "version": "",
+        "message": "No compatible Python 3.11+ runtime found for agentchattr bootstrap.",
+        "recovery": "Install Python 3.11, 3.12, or 3.13, or point AGENTCHATTR_PYTHON at a compatible interpreter before launching.",
     }
 
 
@@ -305,9 +383,18 @@ def main():
         print(f"Failed to load config: {e}")
         sys.exit(1)
 
+    runtime = check_runtime_python(str(Path(__file__).parent))
+    runtime_icon = "OK" if runtime["ok"] else "FAIL"
+    print(f"  [{runtime_icon}] runtime: {runtime['message']}")
+    if runtime.get("version"):
+        print(f"        Version: {runtime['version']}")
+    if not runtime["ok"] and runtime.get("recovery"):
+        print(f"        Fix: {runtime['recovery']}")
+    print()
+
     results = check_all_agents(cfg.get("agents", {}), str(Path(__file__).parent))
 
-    any_not_ready = False
+    any_not_ready = not runtime["ok"]
     for r in results:
         icon = "OK" if r["ready"] else "FAIL"
         print(f"  [{icon}] {r['summary']}")

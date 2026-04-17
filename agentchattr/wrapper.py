@@ -117,10 +117,10 @@ def _build_provider_launch(
     return launch_args, launch_env, inject_env
 
 
-def _register_instance(server_port: int, base: str, label: str | None = None) -> dict:
+def _register_instance(server_port: int, base: str, label: str | None = None, repo: str = "") -> dict:
     import urllib.request
 
-    reg_body = json.dumps({"base": base, "label": label}).encode()
+    reg_body = json.dumps({"base": base, "label": label, "repo": repo}).encode()
     reg_req = urllib.request.Request(
         f"http://127.0.0.1:{server_port}/api/register",
         method="POST",
@@ -361,12 +361,14 @@ def main():
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
     server_port = config.get("server", {}).get("port", 8300)
-    # Deregister any existing instances of this agent before registering
+    # Deregister any existing instances of this agent+repo before registering
     # (prevents duplicates when a wrapper restarts while the old one is still heartbeating)
     try:
         import urllib.request
+        import urllib.parse
+        repo_qs = urllib.parse.urlencode({"repo": cwd})
         dereg_req = urllib.request.Request(
-            f"http://127.0.0.1:{server_port}/api/deregister/{agent}",
+            f"http://127.0.0.1:{server_port}/api/deregister/{agent}?{repo_qs}",
             method="POST",
             headers={"Content-Type": "application/json"},
         )
@@ -375,7 +377,7 @@ def main():
         pass  # no existing instance or server not ready — fine
 
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance(server_port, agent, args.label, repo=cwd)
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")

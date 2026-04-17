@@ -79,5 +79,21 @@ class TestBtrainConflict(unittest.TestCase):
         warnings = self.validator.validate("gemini", "I am starting lane a", "general", self.lanes)
         self.assertTrue(any("Conflict" in w and "lane a" in w for w in warnings))
 
+    def test_btrain_orchestrator_not_flagged_for_progress_drift(self):
+        """btrain is the orchestrator — it posts notifications on behalf of agents.
+        It should never be flagged as drift even when it mentions lanes it doesn't own."""
+        warnings = self.validator.validate("btrain", "@codex lane a ready for review", "#a", self.lanes)
+        self.assertEqual(warnings, [], f"btrain orchestrator should not trigger drift, got: {warnings}")
+
+    def test_btrain_orchestrator_not_flagged_for_handoff_drift(self):
+        """btrain posting handoff updates should not be flagged."""
+        warnings = self.validator.validate("btrain", "btrain handoff resolve --lane b", "#b", self.lanes)
+        self.assertEqual(warnings, [], f"btrain orchestrator should not trigger drift, got: {warnings}")
+
+    def test_btrain_orchestrator_not_flagged_for_claim_conflict(self):
+        """btrain referencing a locked lane should not be flagged as a claim conflict."""
+        warnings = self.validator.validate("btrain", "I am starting lane a", "#a", self.lanes)
+        self.assertEqual(warnings, [], f"btrain orchestrator should not trigger conflict, got: {warnings}")
+
 if __name__ == "__main__":
     unittest.main()

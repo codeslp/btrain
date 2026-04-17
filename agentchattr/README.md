@@ -24,7 +24,7 @@ Agents and humans talk in a shared chat room with multiple channels — when any
 - `start_kilo.bat provider/model` — starts Kilo with a specific model (e.g. `start_kilo.bat anthropic/claude-sonnet-4-20250514`)
 - `start_minimax.bat` — starts MiniMax (requires `MINIMAX_API_KEY` env var)
 
-On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Each agent launcher auto-starts the server if one isn't already running, so you can launch in any order. Run multiple launchers for multiple agents — they share the same server.
+On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Launchers prefer Python 3.13/3.12/3.11, reject older runtimes, recreate `.venv` if it was built with an older Python, and resync packages when `requirements.txt` changes. Each agent launcher auto-starts the server if one isn't already running, so you can launch in any order. Run multiple launchers for multiple agents — they share the same server.
 
 > **Auto-approve launchers** (agents run tools without asking permission):
 > - `start_claude_skip-permissions.bat` — Claude with `--dangerously-skip-permissions`
@@ -61,7 +61,7 @@ Open a terminal in the `macos-linux` folder (right-click → "Open Terminal Here
 - `sh start_kilo.sh provider/model` — starts Kilo with a specific model (e.g. `sh start_kilo.sh anthropic/claude-sonnet-4-20250514`)
 - `sh start_minimax.sh` — starts MiniMax (requires `MINIMAX_API_KEY` env var)
 
-On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t agentchattr-claude`.
+On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Launchers prefer Python 3.13/3.12/3.11, reject older runtimes, recreate `.venv` if it was built with an older Python, and resync packages when `requirements.txt` changes. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t agentchattr-claude`.
 
 > **Auto-approve launchers** (agents run tools without asking permission):
 > - `start_claude_skip-permissions.sh` — Claude with `--dangerously-skip-permissions`
@@ -531,12 +531,12 @@ Available models: `MiniMax-M2.7` (default), `MiniMax-M2.7-highspeed` (faster), `
 
 ## Requirements
 
-- **Python 3.11+** (uses `tomllib`)
+- **Python 3.11+** (uses `tomllib`; launchers prefer 3.13/3.12/3.11 and reject older runtimes)
 - At least one CLI agent installed (Claude Code, Codex, etc.)
 - **Windows**: no extra dependencies
 - **Mac/Linux**: `tmux` (for auto-trigger — `brew install tmux` or `apt install tmux`)
 
-Python package dependencies (`fastapi`, `uvicorn`, `mcp`) are listed in `requirements.txt`. The quickstart scripts automatically create a virtual environment and install these on first launch — no manual `pip install` needed.
+Python package dependencies (`fastapi`, `uvicorn`, `python-multipart`) are pinned in `requirements.txt`. The quickstart scripts automatically create a virtual environment, recreate it if it was built with an older Python, and resync packages when `requirements.txt` changes — no manual `pip install` needed.
 
 ## Platform notes
 

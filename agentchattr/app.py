@@ -12,7 +12,7 @@ import uuid
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.requests import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -62,15 +62,14 @@ room_settings: dict = {
     "custom_roles": [],
 }
 
-# Channel validation
-_CHANNEL_NAME_RE = _re.compile(r'^[a-z0-9][a-z0-9\-]{0,19}$')
+# Channel validation — allow '/' for repo-qualified channels (e.g. "cgraph/agents")
+_CHANNEL_NAME_RE = _re.compile(r'^[a-z0-9][a-z0-9\-/]{0,29}$')
 MAX_CHANNELS = 8
 
-# btrain lane state cache (populated by background poller)
+# btrain lane state cache (populated by background pollers)
 _btrain_lock = threading.Lock()
-_btrain_cache: dict = {}  # raw JSON from `btrain status --json`
-_btrain_prev_tasks: dict[str, str] = {}  # lane_id -> last known task (for change detection)
-_btrain_prev_statuses: dict[str, str] = {}  # lane_id -> last known status (for handoff notifications)
+_btrain_repos: dict[str, dict] = {}  # keyed by repo label; value: {label, path, cache, prev_tasks, prev_statuses, btrain_cmd, env, interval}
+_multi_repo: bool = False
 btrain_validator = None
 
 # Agent hats (persisted to data/hats.json)
@@ -245,6 +244,161 @@ def _install_security_middleware(token: str, cfg: dict):
             return await call_next(request)
 
     app.add_middleware(SecurityMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# btrain multi-repo helpers (used by configure() and background threads)
+# ---------------------------------------------------------------------------
+
+def _resolve_btrain_cmd(repo_abs: str) -> tuple[list | None, dict]:
+    """Resolve btrain binary for a given repo path.
+
+    Returns (command_list, env_dict). command_list is None if btrain not found.
+    """
+    import shutil as _shutil
+    _extra_path = ":".join([
+        str(Path.home() / ".npm-global" / "bin"),
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ])
+    env = {**os.environ, "PATH": _extra_path + ":" + os.environ.get("PATH", "")}
+    found = _shutil.which("btrain", path=env["PATH"])
+    if found:
+        cmd = [found, "status", "--repo", repo_abs, "--json"]
+        log.info(f"btrain poller [{Path(repo_abs).name}]: using {found}")
+        return cmd, env
+    # Fallback: run cli.mjs directly via node
+    cli_mjs = Path(repo_abs) / "src" / "brain_train" / "cli.mjs"
+    node = _shutil.which("node", path=env["PATH"])
+    if node and cli_mjs.exists():
+        cmd = [node, str(cli_mjs), "status", "--repo", repo_abs, "--json"]
+        log.info(f"btrain poller [{Path(repo_abs).name}]: using node fallback")
+        return cmd, env
+    log.warning(f"btrain poller [{Path(repo_abs).name}]: btrain binary not found")
+    return None, env
+
+
+def _resolve_repo_agent(target: str, repo_path: str) -> str | None:
+    """Resolve an @mention target to the instance registered for a specific repo.
+
+    1. Registry has instance with base=target AND repo=repo_path → use it.
+    2. Else fallback to first active instance of that family (single-repo compat).
+    3. Else return target unchanged.
+    """
+    if not registry:
+        return target
+    inst = registry.find_instance(target, repo=repo_path)
+    if inst:
+        return inst["name"]
+    # Fallback: any instance of this family
+    instances = registry.get_instances_for(target)
+    if instances:
+        return instances[0]["name"]
+    return target
+
+
+def _update_lane_channels():
+    """Rebuild room_settings['lane_channels'] from all repo caches."""
+    all_lane_ids = []
+    with _btrain_lock:
+        for label, entry in _btrain_repos.items():
+            for lane in entry["cache"].get("lanes", []):
+                lid = lane.get("_laneId", "")
+                if lid:
+                    all_lane_ids.append(f"{label}/{lid}" if _multi_repo else lid)
+    existing = room_settings.get("lane_channels")
+    if all_lane_ids and existing != all_lane_ids:
+        room_settings["lane_channels"] = all_lane_ids
+        _save_settings()
+        if _event_loop:
+            asyncio.run_coroutine_threadsafe(broadcast_settings(), _event_loop)
+
+
+def _refresh_btrain_state_for_repo(repo_label: str, repo_entry: dict, env: dict):
+    """Poll btrain status for one repo and process lane transitions."""
+    btrain_cmd = repo_entry["btrain_cmd"]
+    if not btrain_cmd:
+        return
+
+    result = subprocess.run(
+        btrain_cmd,
+        capture_output=True, text=True, timeout=10,
+        env=env,
+    )
+    if result.returncode != 0:
+        log.warning(f"btrain poller [{repo_label}]: exit {result.returncode}, stderr: {result.stderr[:200]}")
+        return
+
+    parsed = json.loads(result.stdout)
+    if not parsed or not isinstance(parsed, list):
+        return
+
+    repo_status = parsed[0]
+    lanes = repo_status.get("lanes", [])
+
+    with _btrain_lock:
+        old_cache = repo_entry["cache"].copy()
+        repo_entry["cache"].clear()
+        repo_entry["cache"].update(repo_status)
+
+    _update_lane_channels()
+
+    for lane in lanes:
+        lid = lane.get("_laneId", "")
+        new_task = lane.get("task", "")
+        old_task = repo_entry["prev_tasks"].get(lid, "")
+        lane_channel = f"{repo_label}/{lid}" if _multi_repo else lid
+        agents_channel = f"{repo_label}/agents" if _multi_repo else "agents"
+
+        if old_task and new_task and old_task != new_task and store:
+            lane_msgs = store.get_recent(count=999_999_999, channel=lane_channel)
+            if lane_msgs:
+                try:
+                    zip_bytes = _build_lane_archive(store, lane_channel)
+                    archive_dir = Path(config.get("server", {}).get("data_dir", "./data")) / "lane_archives"
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    ts = _time_mod.strftime("%Y%m%d-%H%M%S")
+                    archive_name = f"{repo_label}_{lid}_{ts}.zip" if _multi_repo else f"{lid}_{ts}.zip"
+                    archive_path = archive_dir / archive_name
+                    archive_path.write_bytes(zip_bytes)
+                except Exception:
+                    log.exception(f"Failed to archive lane {lane_channel}")
+            store.clear(channel=lane_channel)
+            store.add("system", f"Lane {lid} task changed. Previous messages archived.",
+                       msg_type="system", channel=lane_channel)
+
+        repo_entry["prev_tasks"][lid] = new_task
+
+        new_status = lane.get("status", "")
+        old_status = repo_entry["prev_statuses"].get(lid, "")
+        repo_entry["prev_statuses"][lid] = new_status
+
+        notify_text = build_btrain_notification_text(
+            lane,
+            previous_status=old_status,
+            agents_cfg=config.get("agents", {}),
+            registry=registry,
+        )
+
+        if notify_text and store:
+            recent = store.get_recent(count=30, channel=agents_channel)
+            lane_fingerprint = notify_text.rsplit("#", 1)[-1]
+            exists = any(
+                m.get("sender") == "btrain" and f"#{lane_fingerprint}" in m.get("text", "")
+                for m in recent
+            )
+            if not exists:
+                store.add("btrain", notify_text, channel=agents_channel)
+                if notify_text.startswith("@") and agents:
+                    target = notify_text.split()[0][1:]
+                    resolved = _resolve_repo_agent(target, repo_entry["path"])
+                    if resolved and agents.is_available(resolved):
+                        agents.trigger_sync(resolved, message=f"btrain: {notify_text}",
+                                            channel=agents_channel)
+
+    changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
+    if changed and _event_loop:
+        asyncio.run_coroutine_threadsafe(_broadcast_btrain_lanes(), _event_loop)
 
 
 def configure(cfg: dict, session_token: str = ""):
@@ -506,148 +660,75 @@ def configure(cfg: dict, session_token: str = ""):
     threading.Thread(target=_schedule_runner, daemon=True).start()
 
     # --- btrain lane state poller ---
-    btrain_cfg = cfg.get("btrain", {})
-    btrain_repo = os.environ.get("BTRAIN_CHAT_REPO") or btrain_cfg.get("repo_path", "")
-    btrain_interval = int(btrain_cfg.get("poll_interval", 15))
+    # --- btrain multi-repo pollers ---
+    from config_loader import get_repos, is_multi_repo as _is_multi_repo
+    global _multi_repo
 
-    if btrain_repo:
-        # Resolve repo_path relative to agentchattr dir (where config.toml lives)
-        _agentchattr_root = Path(__file__).parent
-        btrain_repo_abs = str((_agentchattr_root / btrain_repo).resolve())
+    # BTRAIN_CHAT_REPO env var overrides config for single-repo backward compat
+    env_repo = os.environ.get("BTRAIN_CHAT_REPO", "")
+    repos_cfg = get_repos(cfg)
+    if env_repo and not repos_cfg:
+        repos_cfg = [{"label": Path(env_repo).name, "path": env_repo,
+                       "poll_interval": int(cfg.get("btrain", {}).get("poll_interval", 15))}]
+    _multi_repo = len(repos_cfg) > 1
 
-        # Set repo name in settings so the UI can display it
-        room_settings["repo_name"] = Path(btrain_repo_abs).name
+    _agentchattr_root = Path(__file__).parent
 
-        # Resolve btrain binary — check PATH, npm global bin, and fallback to node + cli.mjs
-        import shutil as _shutil
-        _btrain_cmd = None
-        _extra_path = ":".join([
-            str(Path.home() / ".npm-global" / "bin"),
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-        ])
-        _env_with_npm = {**os.environ, "PATH": _extra_path + ":" + os.environ.get("PATH", "")}
-        _found = _shutil.which("btrain", path=_env_with_npm["PATH"])
-        if _found:
-            _btrain_cmd = [_found, "status", "--repo", btrain_repo_abs, "--json"]
-            log.info(f"btrain poller: using {_found}")
+    if len(repos_cfg) == 1:
+        room_settings["repo_name"] = repos_cfg[0]["label"]
+    elif repos_cfg:
+        room_settings["repo_names"] = [r["label"] for r in repos_cfg]
+
+    for repo_cfg in repos_cfg:
+        label = repo_cfg["label"]
+        raw_path = repo_cfg["path"]
+        interval = int(repo_cfg.get("poll_interval", 15))
+
+        if Path(raw_path).is_absolute():
+            repo_abs = str(Path(raw_path).resolve())
         else:
-            # Fallback: run cli.mjs directly via node
-            _cli_mjs = Path(btrain_repo_abs) / "src" / "brain_train" / "cli.mjs"
-            _node = _shutil.which("node", path=_env_with_npm["PATH"])
-            if _node and _cli_mjs.exists():
-                _btrain_cmd = [_node, str(_cli_mjs), "status", "--repo", btrain_repo_abs, "--json"]
-                log.info(f"btrain poller: using node fallback ({_cli_mjs})")
-            else:
-                log.warning("btrain poller: btrain binary not found, lane features disabled")
+            repo_abs = str((_agentchattr_root / raw_path).resolve())
 
-        def _refresh_btrain_state():
-            result = subprocess.run(
-                _btrain_cmd,
-                capture_output=True, text=True, timeout=10,
-                env=_env_with_npm,
-            )
-            if result.returncode != 0:
-                log.warning(f"btrain poller: exit code {result.returncode}, stderr: {result.stderr[:200]}")
-                return
+        btrain_cmd, env = _resolve_btrain_cmd(repo_abs)
 
-            parsed = json.loads(result.stdout)
-            if not parsed or not isinstance(parsed, list):
-                return
+        repo_entry = {
+            "label": label,
+            "path": repo_abs,
+            "cache": {},
+            "prev_tasks": {},
+            "prev_statuses": {},
+            "btrain_cmd": btrain_cmd,
+            "env": env,
+            "interval": interval,
+        }
 
-            repo_status = parsed[0]
-            lanes = repo_status.get("lanes", [])
-            lane_ids = [lane.get("_laneId", "") for lane in lanes if lane.get("_laneId")]
+        with _btrain_lock:
+            _btrain_repos[label] = repo_entry
 
-            with _btrain_lock:
-                old_cache = _btrain_cache.copy()
-                _btrain_cache.clear()
-                _btrain_cache.update(repo_status)
-
-            existing_lane_channels = room_settings.get("lane_channels")
-            if lane_ids and existing_lane_channels != lane_ids:
-                room_settings["lane_channels"] = lane_ids
-                _save_settings()
-                if _event_loop:
-                    asyncio.run_coroutine_threadsafe(broadcast_settings(), _event_loop)
-
-            # Detect task changes per lane → archive old messages
-            for lane in lanes:
-                lid = lane.get("_laneId", "")
-                new_task = lane.get("task", "")
-                old_task = _btrain_prev_tasks.get(lid, "")
-
-                if old_task and new_task and old_task != new_task and store:
-                    # Archive the lane channel's messages
-                    lane_msgs = store.get_recent(count=999_999_999, channel=lid)
-                    if lane_msgs:
-                        try:
-                            zip_bytes = _build_lane_archive(store, lid)
-                            archive_dir = Path(data_dir) / "lane_archives"
-                            archive_dir.mkdir(parents=True, exist_ok=True)
-                            ts = _time_mod.strftime("%Y%m%d-%H%M%S")
-                            archive_path = archive_dir / f"{lid}_{ts}.zip"
-                            archive_path.write_bytes(zip_bytes)
-                        except Exception:
-                            log.exception(f"Failed to archive lane {lid}")
-
-                    store.clear(channel=lid)
-                    store.add(
-                        "system",
-                        f"Lane {lid} task changed. Previous messages archived.",
-                        msg_type="system",
-                        channel=lid,
-                    )
-
-                _btrain_prev_tasks[lid] = new_task
-
-                # Auto-notify: if a lane needs action, ensure the right @mention exists in #agents
-                new_status = lane.get("status", "")
-                old_status = _btrain_prev_statuses.get(lid, "")
-                _btrain_prev_statuses[lid] = new_status
-
-                notify_text = build_btrain_notification_text(
-                    lane,
-                    previous_status=old_status,
-                    agents_cfg=config.get("agents", {}),
-                    registry=registry,
-                )
-
-                if notify_text and store:
-                    recent = store.get_recent(count=30, channel="agents")
-                    lane_fingerprint = notify_text.rsplit("#", 1)[-1]
-                    exists = any(m.get("sender") == "btrain" and f"#{lane_fingerprint}" in m.get("text", "") for m in recent)
-                    if not exists:
-                        store.add("btrain", notify_text, channel="agents")
-
-            # Broadcast lane state to WebSocket clients on any change
-            changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
-            if changed and _event_loop:
-                asyncio.run_coroutine_threadsafe(_broadcast_btrain_lanes(), _event_loop)
-
-        def _btrain_poller():
-            if not _btrain_cmd:
-                log.warning("btrain poller: no command, exiting thread")
-                return
-
-            log.info(f"btrain poller: started, interval={btrain_interval}s")
-            while True:
-                try:
-                    _refresh_btrain_state()
-                except subprocess.TimeoutExpired:
-                    log.warning("btrain status poll timed out")
-                except Exception:
-                    log.warning("btrain poller error", exc_info=True)
-                _time_mod.sleep(btrain_interval)
-
-        if _btrain_cmd:
+        if btrain_cmd:
             try:
-                _refresh_btrain_state()
+                _refresh_btrain_state_for_repo(label, repo_entry, env)
             except subprocess.TimeoutExpired:
-                log.warning("btrain initial status poll timed out")
+                log.warning(f"btrain initial poll [{label}] timed out")
             except Exception:
-                log.warning("btrain initial poller error", exc_info=True)
-        threading.Thread(target=_btrain_poller, daemon=True).start()
+                log.warning(f"btrain initial poll [{label}] error", exc_info=True)
+
+        def _make_poller(lbl, entry, _env, _interval):
+            def _poller():
+                if not entry["btrain_cmd"]:
+                    return
+                log.info(f"btrain poller [{lbl}]: started, interval={_interval}s")
+                while True:
+                    try:
+                        _refresh_btrain_state_for_repo(lbl, entry, _env)
+                    except subprocess.TimeoutExpired:
+                        log.warning(f"btrain poller [{lbl}] timed out")
+                    except Exception:
+                        log.warning(f"btrain poller [{lbl}] error", exc_info=True)
+                    _time_mod.sleep(_interval)
+            return _poller
+
+        threading.Thread(target=_make_poller(label, repo_entry, env, interval), daemon=True).start()
 
     # --- Periodic cleanup: trim chat logs + run btrain doctor --repair ---
     cleanup_interval = 300  # every 5 minutes
@@ -677,23 +758,24 @@ def configure(cfg: dict, session_token: str = ""):
                 log.debug("cleanup: chat trim error", exc_info=True)
 
             try:
-                # Run btrain doctor --repair if btrain is available
-                if btrain_repo and _btrain_cmd:
-                    repair_cmd = list(_btrain_cmd)
-                    # Replace "status" with "doctor --repair"
-                    idx = repair_cmd.index("status") if "status" in repair_cmd else -1
-                    if idx >= 0:
-                        repair_cmd[idx] = "doctor"
-                        repair_cmd.insert(idx + 1, "--repair")
-                        # Remove --json if present
-                        repair_cmd = [c for c in repair_cmd if c != "--json"]
-                        result = subprocess.run(
-                            repair_cmd,
-                            capture_output=True, text=True, timeout=15,
-                            env=_env_with_npm,
-                        )
-                        if result.returncode == 0 and "repair" in result.stdout.lower():
-                            log.info(f"cleanup: btrain doctor repairs applied")
+                # Run btrain doctor --repair for each configured repo
+                with _btrain_lock:
+                    repo_entries = list(_btrain_repos.values())
+                for entry in repo_entries:
+                    if entry.get("btrain_cmd"):
+                        repair_cmd = list(entry["btrain_cmd"])
+                        idx = repair_cmd.index("status") if "status" in repair_cmd else -1
+                        if idx >= 0:
+                            repair_cmd[idx] = "doctor"
+                            repair_cmd.insert(idx + 1, "--repair")
+                            repair_cmd = [c for c in repair_cmd if c != "--json"]
+                            result = subprocess.run(
+                                repair_cmd,
+                                capture_output=True, text=True, timeout=15,
+                                env=entry.get("env", {}),
+                            )
+                            if result.returncode == 0 and "repair" in result.stdout.lower():
+                                log.info(f"cleanup: btrain doctor [{entry['label']}] repairs applied")
             except Exception:
                 log.debug("cleanup: btrain doctor error", exc_info=True)
 
@@ -903,7 +985,16 @@ async def _handle_new_message(msg: dict):
     # btrain Conflict Detection (Workstream 6)
     if btrain_validator:
         with _btrain_lock:
-            lanes = list(_btrain_cache.get("lanes", []))
+            if _multi_repo and "/" in channel:
+                repo_label = channel.split("/")[0]
+                if repo_label in _btrain_repos:
+                    lanes = list(_btrain_repos[repo_label]["cache"].get("lanes", []))
+                else:
+                    lanes = []
+            else:
+                lanes = []
+                for entry in _btrain_repos.values():
+                    lanes.extend(entry["cache"].get("lanes", []))
         warnings = btrain_validator.validate(sender, text, channel, lanes)
         for w in warnings:
             store.add("system", w, channel=channel)
@@ -1131,9 +1222,23 @@ async def broadcast_clear(channel: str | None = None):
 
 async def _broadcast_btrain_lanes():
     with _btrain_lock:
-        lanes = _btrain_cache.get("lanes", [])
-        repurpose = _btrain_cache.get("repurposeReady", [])
-    data = json.dumps({"type": "btrain_lanes", "data": {"lanes": lanes, "repurposeReady": repurpose}})
+        if _multi_repo:
+            repos_data = []
+            for label, entry in _btrain_repos.items():
+                repos_data.append({
+                    "name": label,
+                    "path": entry["path"],
+                    "lanes": entry["cache"].get("lanes", []),
+                    "repurposeReady": entry["cache"].get("repurposeReady", []),
+                })
+            data_payload = {"repos": repos_data}
+        else:
+            entry = next(iter(_btrain_repos.values()), {"cache": {}})
+            data_payload = {
+                "lanes": entry["cache"].get("lanes", []),
+                "repurposeReady": entry["cache"].get("repurposeReady", []),
+            }
+    data = json.dumps({"type": "btrain_lanes", "data": data_payload})
     dead = set()
     for client in list(ws_clients):
         try:
@@ -1298,13 +1403,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Send current btrain lane snapshot so fresh page loads don't wait for the next poll tick
     with _btrain_lock:
-        await websocket.send_text(json.dumps({
-            "type": "btrain_lanes",
-            "data": {
-                "lanes": _btrain_cache.get("lanes", []),
-                "repurposeReady": _btrain_cache.get("repurposeReady", []),
-            },
-        }))
+        if _multi_repo:
+            repos_data = []
+            for label, entry in _btrain_repos.items():
+                repos_data.append({
+                    "name": label,
+                    "path": entry["path"],
+                    "lanes": entry["cache"].get("lanes", []),
+                    "repurposeReady": entry["cache"].get("repurposeReady", []),
+                })
+            btrain_snapshot = {"repos": repos_data}
+        else:
+            entry = next(iter(_btrain_repos.values()), {"cache": {}})
+            btrain_snapshot = {
+                "lanes": entry["cache"].get("lanes", []),
+                "repurposeReady": entry["cache"].get("repurposeReady", []),
+            }
+        await websocket.send_text(json.dumps({"type": "btrain_lanes", "data": btrain_snapshot}))
 
     # Send registered instances (used for pills/mentions)
     agent_cfg = registry.get_agent_config() if registry else {}
@@ -2394,16 +2509,37 @@ async def write_summary(request: Request):
 async def get_btrain_lanes():
     """Return cached btrain lane states."""
     with _btrain_lock:
-        lanes = _btrain_cache.get("lanes", [])
-        repurpose = _btrain_cache.get("repurposeReady", [])
+        if _multi_repo:
+            repos_data = []
+            for label, entry in _btrain_repos.items():
+                repos_data.append({
+                    "name": label,
+                    "path": entry["path"],
+                    "lanes": entry["cache"].get("lanes", []),
+                    "repurposeReady": entry["cache"].get("repurposeReady", []),
+                })
+            return JSONResponse({"repos": repos_data})
+        entry = next(iter(_btrain_repos.values()), {"cache": {}})
+        lanes = entry["cache"].get("lanes", [])
+        repurpose = entry["cache"].get("repurposeReady", [])
     return JSONResponse({"lanes": lanes, "repurposeReady": repurpose})
 
 
 @app.get("/api/btrain/lanes/{lane_id}")
-async def get_btrain_lane(lane_id: str):
+async def get_btrain_lane(lane_id: str, repo: str = Query(default="")):
     """Return a single lane's cached state."""
     with _btrain_lock:
-        lanes = _btrain_cache.get("lanes", [])
+        if repo and repo in _btrain_repos:
+            lanes = _btrain_repos[repo]["cache"].get("lanes", [])
+        elif not _multi_repo:
+            entry = next(iter(_btrain_repos.values()), {"cache": {}})
+            lanes = entry["cache"].get("lanes", [])
+        else:
+            for entry in _btrain_repos.values():
+                for lane in entry["cache"].get("lanes", []):
+                    if lane.get("_laneId") == lane_id:
+                        return JSONResponse(lane)
+            return JSONResponse({"error": f"lane {lane_id} not found"}, status_code=404)
     for lane in lanes:
         if lane.get("_laneId") == lane_id:
             return JSONResponse(lane)
@@ -2463,9 +2599,10 @@ async def register_agent(request: Request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
     base = body.get("base", "")
     label = body.get("label")
+    repo = body.get("repo", "")
     if not base:
         return JSONResponse({"error": "base is required"}, status_code=400)
-    result = registry.register(base, label)
+    result = registry.register(base, label, repo=repo)
     if result is None:
         return JSONResponse({"error": f"unknown base: {base}"}, status_code=400)
     # Touch presence so the instance doesn't immediately time out
@@ -2498,7 +2635,7 @@ async def register_agent(request: Request):
 
 
 @app.post("/api/deregister/{name}")
-async def deregister_agent(name: str, request: Request):
+async def deregister_agent(name: str, request: Request, repo: str = Query(default="")):
     """Wrapper calls this on shutdown to remove its instance."""
     auth_inst = _resolve_authenticated_agent(request)
     presented_token = _extract_agent_token(request)
@@ -2506,16 +2643,23 @@ async def deregister_agent(name: str, request: Request):
         return JSONResponse({"error": "stale_session"}, status_code=409)
     if auth_inst:
         name = auth_inst["name"]
+        result = registry.deregister(name)
+    elif repo:
+        # Pre-registration cleanup: no auth token, but repo-scoped.
+        # Only removes instances matching both family AND repo.
+        result = registry.deregister(name, repo=repo)
     elif registry and registry.is_agent_family(name):
         return JSONResponse({"error": "authenticated agent session required"}, status_code=403)
-
-    result = registry.deregister(name)
+    else:
+        result = registry.deregister(name)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    # Use the resolved instance name (may differ from URL param for repo-scoped deregister)
+    resolved_name = result.get("name", name)
     # Clean up runtime state (presence, activity, cursors, rename chains)
     import presence
-    presence.purge_identity(name)
-    registry.clean_renames_for(name)
+    presence.purge_identity(resolved_name)
+    registry.clean_renames_for(resolved_name)
     # If the remaining instance was renamed back (e.g. "claude-1" → "claude"), migrate state
     renamed = result.pop("_renamed_back", None)
     if renamed:

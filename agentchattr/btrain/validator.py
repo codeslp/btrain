@@ -31,6 +31,11 @@ class btrainValidator:
         warnings = []
         sender_lower = sender.lower()
 
+        # The btrain orchestrator posts notifications on behalf of agents.
+        # It is never a rogue actor — exempt it from all drift checks.
+        if sender_lower == "btrain":
+            return []
+
         lane_id = self._extract_lane_id(text, channel)
         if not lane_id:
             return []

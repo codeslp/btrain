@@ -544,6 +544,7 @@ function connectWebSocket() {
             btrainLanes = event.data || {};
             renderChannelTabs();
             renderLaneHeader();
+            renderLanesPanel();
         } else if (event.type === 'edit') {
             // A message was edited/demoted — re-render it in place
             const updatedMsg = event.message;
@@ -4123,15 +4124,22 @@ function initHelpTour() {
 // Lane header
 // ---------------------------------------------------------------------------
 
-// Status priority for sorting lane cards (active lanes first)
-const _STATUS_PRIORITY = {
-    'in-progress': 0,
-    'needs-review': 1,
-    'changes-requested': 2,
-    'repair-needed': 3,
-    'resolved': 4,
-    'idle': 5,
-};
+function _compareLaneIds(a, b) {
+    return String(a?._laneId ?? '').localeCompare(String(b?._laneId ?? ''), undefined, {
+        numeric: true,
+        sensitivity: 'base',
+    });
+}
+
+function _esc(value) {
+    return escapeHtml(value ?? '');
+}
+
+function _truncate(value, maxLen) {
+    const text = String(value ?? '');
+    if (text.length <= maxLen) return text;
+    return text.slice(0, Math.max(0, maxLen - 1)) + '…';
+}
 
 function renderLanesPanel() {
     const container = document.getElementById('lanes-panel-cards');
@@ -4143,10 +4151,7 @@ function renderLanesPanel() {
         return;
     }
 
-    // Sort by status priority
-    const sorted = [...lanes].sort((a, b) =>
-        (_STATUS_PRIORITY[a.status] ?? 5) - (_STATUS_PRIORITY[b.status] ?? 5)
-    );
+    const sorted = [...lanes].sort(_compareLaneIds);
 
     const cards = sorted.map(lane => {
         const status = lane.status || 'idle';

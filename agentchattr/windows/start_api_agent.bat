@@ -20,24 +20,10 @@ if "%AGENT_NAME%"=="" (
     exit /b 1
 )
 
-REM Auto-create venv and install deps on first run
-if not exist ".venv" (
-    python -m venv .venv
-    .venv\Scripts\pip install -q -r requirements.txt >nul 2>nul
-)
-call .venv\Scripts\activate.bat
+call windows\bootstrap_python.bat ensure-venv
+if %errorlevel% neq 0 exit /b %errorlevel%
+call windows\bootstrap_python.bat start-server-if-needed
+if %errorlevel% neq 0 exit /b %errorlevel%
 
-REM Start server if not already running, then wait for it
-netstat -ano | findstr :8300 | findstr LISTENING >nul 2>&1
-if %errorlevel% neq 0 (
-    start "agentchattr server" cmd /c "python run.py"
-)
-:wait_server
-netstat -ano | findstr :8300 | findstr LISTENING >nul 2>&1
-if %errorlevel% neq 0 (
-    timeout /t 1 /nobreak >nul
-    goto :wait_server
-)
-
-python wrapper_api.py %AGENT_NAME%
+"%AGENTCHATTR_VENV_PYTHON%" wrapper_api.py %AGENT_NAME%
 pause

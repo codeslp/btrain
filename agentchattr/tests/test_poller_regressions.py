@@ -231,5 +231,97 @@ class TestCleanupRetention(unittest.TestCase):
         self.assertEqual(len(agents_after), 50, "agents channel should be untouched")
 
 
+class MockAgents:
+    """Track trigger_sync calls."""
+
+    def __init__(self):
+        self.triggers = []
+
+    def trigger_sync(self, agent_name, message="", channel="general", **kwargs):
+        self.triggers.append({"agent": agent_name, "message": message, "channel": channel})
+
+    def is_available(self, name):
+        return True
+
+
+class TestPollerTriggersAgentOnNotification(unittest.TestCase):
+    """btrain poller must trigger agents when it writes @mention notifications."""
+
+    def setUp(self):
+        self.store = MockStore()
+        self.agents = MockAgents()
+        self.prev_statuses = {}
+
+    def _notify_and_trigger(self, lane):
+        """Mirror the notification + trigger logic that should exist in the poller."""
+        lid = lane["_laneId"]
+        new_status = lane["status"]
+        old_status = self.prev_statuses.get(lid, "")
+        self.prev_statuses[lid] = new_status
+
+        notify_text = build_btrain_notification_text(
+            lane,
+            previous_status=old_status,
+            agents_cfg={"claude": {"label": "Claude"}, "codex": {"label": "Codex"}},
+        )
+
+        if notify_text and self.store:
+            recent = self.store.get_recent(count=30, channel="agents")
+            lane_fingerprint = notify_text.rsplit("#", 1)[-1]
+            exists = any(
+                m.get("sender") == "btrain" and ("#%s" % lane_fingerprint) in m.get("text", "")
+                for m in recent
+            )
+            if not exists:
+                self.store.add("btrain", notify_text, channel="agents")
+                # Extract @mentioned agent and trigger
+                if notify_text.startswith("@"):
+                    target = notify_text.split()[0][1:]  # strip @
+                    if self.agents.is_available(target):
+                        self.agents.trigger_sync(
+                            target,
+                            message="btrain: %s" % notify_text,
+                            channel="agents",
+                        )
+
+    def test_needs_review_triggers_reviewer(self):
+        self.prev_statuses["a"] = "in-progress"
+        self._notify_and_trigger({
+            "_laneId": "a", "status": "needs-review",
+            "owner": "claude", "reviewer": "codex",
+        })
+        self.assertEqual(len(self.agents.triggers), 1)
+        self.assertEqual(self.agents.triggers[0]["agent"], "codex")
+
+    def test_in_progress_triggers_owner(self):
+        self.prev_statuses["b"] = "resolved"
+        self._notify_and_trigger({
+            "_laneId": "b", "status": "in-progress",
+            "owner": "claude", "reviewer": "codex",
+        })
+        self.assertEqual(len(self.agents.triggers), 1)
+        self.assertEqual(self.agents.triggers[0]["agent"], "claude")
+
+    def test_no_trigger_on_first_poll(self):
+        self._notify_and_trigger({
+            "_laneId": "c", "status": "needs-review",
+            "owner": "claude", "reviewer": "codex",
+        })
+        self.assertEqual(len(self.agents.triggers), 0)
+
+    def test_no_duplicate_trigger_on_repoll(self):
+        self.prev_statuses["a"] = "in-progress"
+        self._notify_and_trigger({
+            "_laneId": "a", "status": "needs-review",
+            "owner": "claude", "reviewer": "codex",
+        })
+        # Second poll with same state
+        self._notify_and_trigger({
+            "_laneId": "a", "status": "needs-review",
+            "owner": "claude", "reviewer": "codex",
+        })
+        self.assertEqual(len(self.agents.triggers), 1, "Should not re-trigger on same fingerprint")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,7 @@ class Instance:
     epoch: int = 1
     state: str = "pending"   # "pending" | "active"
     registered_at: float = field(default_factory=time.time)
+    repo: str = ""  # absolute path to repo root, or "" if unscoped
 
 
 class RuntimeRegistry:
@@ -90,11 +91,14 @@ class RuntimeRegistry:
 
     # --- Registration ---
 
-    def register(self, base: str, label: str | None = None) -> dict | None:
+    def register(self, base: str, label: str | None = None, repo: str = "") -> dict | None:
         """Register a new instance of `base`. Returns slot info or None if unknown base.
 
         When a 2nd instance registers, slot 1 is renamed from 'base' to 'base-1'
         to prevent identity ambiguity. The rename info is returned as '_renamed_slot1'.
+
+        ``repo`` is the absolute path to the repo root this instance serves.
+        Used for repo-scoped trigger routing and deregistration.
         """
         with self._lock:
             if base not in self._bases:
@@ -146,7 +150,7 @@ class RuntimeRegistry:
             # recovery/reclaim still uses chat_claim, but normal startup should
             # not block on a manual confirmation step.
             state = "active"
-            inst = Instance(name=name, base=base, slot=slot, label=lbl, color=color, state=state)
+            inst = Instance(name=name, base=base, slot=slot, label=lbl, color=color, state=state, repo=repo)
             self._instances[name] = inst
             result = _inst_dict(inst, include_token=True)
             if renamed_slot1:
@@ -156,13 +160,26 @@ class RuntimeRegistry:
         self._save_renames()
         return result
 
-    def deregister(self, name: str) -> dict | None:
+    def deregister(self, name: str, repo: str | None = None) -> dict | None:
         """Remove an instance. Name is reserved for GRACE_PERIOD seconds.
 
         Returns result dict with 'ok' and optional '_renamed_back' info,
         or None if instance not found.
+
+        When ``repo`` is provided, find the instance matching both base
+        family AND repo path, then deregister it.  This allows
+        repo-scoped cleanup without knowing the exact instance name.
         """
         with self._lock:
+            if repo is not None:
+                target = None
+                for inst in self._instances.values():
+                    if inst.base == name and inst.repo == repo:
+                        target = inst.name
+                        break
+                if not target:
+                    return None
+                name = target
             if name not in self._instances:
                 return None
             base = self._instances[name].base
@@ -189,7 +206,7 @@ class RuntimeRegistry:
 
         self._notify()
         self._save_renames()
-        result = {"ok": True}
+        result = {"ok": True, "name": name}
         if renamed_back:
             result["_renamed_back"] = renamed_back
         return result
@@ -407,6 +424,19 @@ class RuntimeRegistry:
         with self._lock:
             return [_inst_dict(i) for i in self._instances.values() if i.base == base]
 
+    def find_instance(self, base: str, repo: str = "") -> dict | None:
+        """Find a specific instance by base family and repo path."""
+        with self._lock:
+            for inst in self._instances.values():
+                if inst.base == base and inst.repo == repo:
+                    return _inst_dict(inst)
+        return None
+
+    def get_instances_for_repo(self, repo: str) -> list[dict]:
+        """All instances registered for a specific repo."""
+        with self._lock:
+            return [_inst_dict(i) for i in self._instances.values() if i.repo == repo]
+
     def get_bases(self) -> dict[str, dict]:
         with self._lock:
             return dict(self._bases)
@@ -571,6 +601,7 @@ def _inst_dict(inst: Instance, include_token: bool = False) -> dict:
         "label": inst.label, "color": inst.color, "state": inst.state,
         "epoch": inst.epoch,
         "registered_at": inst.registered_at,
+        "repo": inst.repo,
     }
     if include_token:
         d["token"] = inst.token
