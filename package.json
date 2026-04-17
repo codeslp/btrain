@@ -4,7 +4,8 @@
   "private": true,
   "bin": {
     "btrain": "./src/brain_train/cli.mjs",
-    "btrain-chat": "./chat"
+    "btrain-chat": "./chat",
+    "bth": "./bth"
   },
   "scripts": {
     "test": "node --test 'test/**/*.test.mjs'",
