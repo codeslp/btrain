@@ -5,7 +5,8 @@ import re
 
 class Router:
     def __init__(self, agent_names: list[str], default_mention: str = "both",
-                 max_hops: int = 4, online_checker=None, card_lookup=None):
+                 max_hops: int = 4, online_checker=None, card_lookup=None,
+                 trace_emitter=None):
         self.agent_names = set(n.lower() for n in agent_names)
         self.default_mention = default_mention
         self.max_hops = max_hops
@@ -14,6 +15,9 @@ class Router:
         # for the instance. Used by describe_target and routing introspection;
         # does not alter get_targets decisions.
         self._card_lookup = card_lookup
+        # Optional best-effort emitter: called with a payload dict after each
+        # get_targets decision. Never raises; failures must not affect routing.
+        self._trace_emitter = trace_emitter
         # Per-channel state: { channel: { hop_count, paused, guard_emitted } }
         self._channels: dict[str, dict] = {}
         self._build_pattern()
@@ -56,6 +60,8 @@ class Router:
         """Determine which agents should receive this message."""
         ch = self._get_ch(channel)
         mentions = self.parse_mentions(text)
+        targets: list[str] = []
+        reason = ""
 
         if not self._is_agent(sender):
             # Human message resets hop counter and unpauses
@@ -64,24 +70,54 @@ class Router:
             ch["guard_emitted"] = False
             if not mentions:
                 if self.default_mention in ("both", "all"):
-                    return list(self.agent_names)
+                    targets = list(self.agent_names)
                 elif self.default_mention == "none":
-                    return []
-                return [self.default_mention]
-            return mentions
+                    targets = []
+                else:
+                    targets = [self.default_mention]
+                reason = "human-no-mentions"
+            else:
+                targets = mentions
+                reason = "human-mentions"
         else:
             # Agent message: blocked while loop guard is active
             if ch["paused"]:
-                return []
-            # Only route if explicit @mention
-            if not mentions:
-                return []
-            ch["hop_count"] += 1
-            if ch["hop_count"] > self.max_hops:
-                ch["paused"] = True
-                return []
-            # Don't route back to self
-            return [m for m in mentions if m != sender]
+                targets = []
+                reason = "agent-paused"
+            elif not mentions:
+                # Only route if explicit @mention
+                targets = []
+                reason = "agent-no-mentions"
+            else:
+                ch["hop_count"] += 1
+                if ch["hop_count"] > self.max_hops:
+                    ch["paused"] = True
+                    targets = []
+                    reason = "hop-guard"
+                else:
+                    # Don't route back to self
+                    targets = [m for m in mentions if m != sender]
+                    reason = "agent-mentions"
+
+        self._emit_trace(
+            sender=sender,
+            channel=channel,
+            mentions=mentions,
+            targets=targets,
+            reason=reason,
+            hop_count=ch["hop_count"],
+            paused=ch["paused"],
+        )
+        return targets
+
+    def _emit_trace(self, **payload) -> None:
+        if not self._trace_emitter:
+            return
+        try:
+            self._trace_emitter(payload)
+        except Exception:
+            # Best-effort: tracing must never break routing.
+            pass
 
     def continue_routing(self, channel: str = "general"):
         """Resume after loop guard pause."""
