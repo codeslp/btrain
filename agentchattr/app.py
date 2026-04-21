@@ -24,6 +24,7 @@ from jobs import JobStore
 from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
 from agents import AgentTrigger
+from btrain.trace_emitter import emit_routing_decision
 from btrain.notifications import (
     acknowledge_btrain_delivery,
     advance_btrain_deliveries,
@@ -589,12 +590,41 @@ def configure(cfg: dict, session_token: str = ""):
     # Router starts with base agent names (backward compat for direct API users),
     # registry.on_change updates it dynamically when instances register/deregister
     agent_names = list(cfg.get("agents", {}).keys())
+
+    # Resolve the primary btrain repo for trace emission. Multi-repo setups
+    # pick the first entry; routing decisions are global per agentchattr
+    # instance, so a single trace target is sufficient. Trace emission is
+    # best-effort — a missing or unresolvable repo disables it silently.
+    from config_loader import get_repos
+    _repos_for_tracing = get_repos(cfg)
+    _trace_repo_root: str | None = None
+    if _repos_for_tracing:
+        try:
+            _trace_repo_root = str(Path(_repos_for_tracing[0]["path"]).resolve())
+        except Exception:
+            _trace_repo_root = None
+
+    def _route_trace(payload: dict) -> None:
+        if _trace_repo_root is None:
+            return
+        emit_routing_decision(
+            _trace_repo_root,
+            sender=payload.get("sender", ""),
+            channel=payload.get("channel", ""),
+            mentions=payload.get("mentions") or [],
+            targets=payload.get("targets") or [],
+            reason=payload.get("reason", ""),
+            hop_count=payload.get("hop_count"),
+            paused=payload.get("paused"),
+        )
+
     router = Router(
         agent_names=agent_names,
         default_mention=cfg.get("routing", {}).get("default", "none"),
         max_hops=max_hops,
         online_checker=lambda: set(registry.get_active_names()) if registry else set(),
         card_lookup=registry.get_card,
+        trace_emitter=_route_trace,
     )
     agents = AgentTrigger(registry, data_dir=data_dir)
 
