@@ -17,6 +17,21 @@ from pathlib import Path
 
 
 @dataclass
+class AgentCard:
+    """Compact repo-local capability card for a registered instance.
+
+    Populated after registration via ``set_card``. All fields optional so
+    unset cards stay cheap. Intended for routing hints, context summaries,
+    and readiness-aware dispatch — not for external protocol compatibility.
+    """
+    runner: str = ""                     # underlying model or runtime, e.g. "claude", "codex"
+    role: str = ""                       # typical workflow role, e.g. "writer", "reviewer"
+    lane_affinity: str = ""              # lane id this instance typically claims
+    capabilities: tuple[str, ...] = ()   # e.g. ("review", "test-author")
+    readiness: str = ""                  # e.g. "ready", "starting", "blocked"
+
+
+@dataclass
 class Instance:
     """A live agent instance."""
     name: str       # canonical ID: "gemini", "gemini-2"
@@ -30,6 +45,7 @@ class Instance:
     state: str = "pending"   # "pending" | "active"
     registered_at: float = field(default_factory=time.time)
     repo: str = ""  # absolute path to repo root, or "" if unscoped
+    card: AgentCard = field(default_factory=AgentCard)
 
 
 class RuntimeRegistry:
@@ -418,6 +434,29 @@ class RuntimeRegistry:
                 for n, i in self._instances.items()
             }
 
+    # --- Agent Cards ---
+
+    def set_card(self, name: str, card) -> bool:
+        """Replace the agent card for ``name``. Returns True if the instance exists."""
+        with self._lock:
+            inst = self._instances.get(name)
+            if not inst:
+                return False
+            inst.card = _coerce_card(card)
+        self._notify()
+        return True
+
+    def get_card(self, name: str) -> dict | None:
+        """Return the agent card for ``name``, or None if not registered."""
+        with self._lock:
+            inst = self._instances.get(name)
+            return _card_dict(inst.card) if inst else None
+
+    def get_agent_cards(self) -> dict[str, dict]:
+        """All registered instances as ``{name: card_dict}``."""
+        with self._lock:
+            return {n: _card_dict(i.card) for n, i in self._instances.items()}
+
     def get_all_names(self) -> list[str]:
         with self._lock:
             return list(self._instances.keys())
@@ -608,10 +647,53 @@ def _inst_dict(inst: Instance, include_token: bool = False) -> dict:
         "epoch": inst.epoch,
         "registered_at": inst.registered_at,
         "repo": inst.repo,
+        "card": _card_dict(inst.card),
     }
     if include_token:
         d["token"] = inst.token
     return d
+
+
+def _card_dict(card: AgentCard) -> dict:
+    return {
+        "runner": card.runner,
+        "role": card.role,
+        "lane_affinity": card.lane_affinity,
+        "capabilities": list(card.capabilities),
+        "readiness": card.readiness,
+    }
+
+
+def _coerce_card(card) -> AgentCard:
+    """Accept AgentCard instances or partial dicts; coerce missing fields to defaults."""
+    if isinstance(card, AgentCard):
+        return card
+    if not isinstance(card, dict):
+        return AgentCard()
+    return AgentCard(
+        runner=str(card.get("runner", "") or ""),
+        role=str(card.get("role", "") or ""),
+        lane_affinity=str(card.get("lane_affinity", "") or ""),
+        capabilities=_coerce_capabilities(card.get("capabilities")),
+        readiness=str(card.get("readiness", "") or ""),
+    )
+
+
+def _coerce_capabilities(value) -> tuple[str, ...]:
+    """Normalize capability input to a tuple of strings.
+
+    A scalar string like ``"review"`` must stay a single capability, not be
+    iterated into one-character tokens. Non-iterable values fall back to the
+    empty tuple.
+    """
+    if value is None or value == "":
+        return ()
+    if isinstance(value, (str, bytes)):
+        text = value.decode() if isinstance(value, bytes) else value
+        return (text,) if text else ()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(str(c) for c in value if str(c))
+    return (str(value),)
 
 
 def _derive_color(base_hex: str, slot: int) -> str:

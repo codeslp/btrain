@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "diffless-research-evidence",
+  "category": "diffless-evidence",
+  "label": "Diffless research path with artifact-based evidence",
+  "description": "An agent completes a research task that produces no source diff and closes the lane with artifact references instead.",
+  "purpose": "Ensure valid diffless work is not mis-scored just because `has diff` is false; artifact-based completion proofs count.",
+  "profileRefs": ["default"],
+  "tags": ["diffless", "research", "artifact-evidence"],
+  "expectedPrimaryOutcome": "pass",
+  "hardFailureCategories": [
+    "artifact-missing",
+    "insufficient-context"
+  ],
+  "requiresDiff": false,
+  "requiresDelegationAcknowledgement": false,
+  "artifactRefs": [
+    {
+      "kind": "research",
+      "label": "A2A / LangGraph / LangSmith evaluation",
+      "path": "research/a2a-langgraph-langsmith-evaluation.md",
+      "note": "Example of a diffless research output that must score as valid completion."
+    }
+  ]
+}

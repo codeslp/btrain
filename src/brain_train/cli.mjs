@@ -9,10 +9,12 @@ import {
   compactHandoffHistory,
   consumeOverride,
   doctor,
+  extractSpillPathFromNextAction,
   forceReleaseLock,
   getBrainTrainHome,
   getLaneConfigs,
   getReviewStatus,
+  getStartupSnapshot,
   getStatus,
   grantOverride,
   initRepo,
@@ -22,6 +24,7 @@ import {
   listRepos,
   patchHandoff,
   readProjectConfig,
+  readSpilledNextActionBody,
   registerRepo,
   releaseLocks,
   requestChangesHandoff,
@@ -32,6 +35,21 @@ import {
   syncActiveAgents,
   syncTemplates,
 } from "./core.mjs"
+import {
+  getConfiguredHarnessProfileId,
+  inspectHarnessProfile,
+  listHarnessProfiles,
+} from "./harness/index.mjs"
+import {
+  HARNESS_TRACE_FAILURE_CATEGORIES,
+  HARNESS_TRACE_OUTCOMES,
+  listTraceBundles,
+  readTraceBundleSummary,
+} from "./harness/trace-bundle.mjs"
+import {
+  inspectBenchmarkScenario,
+  listBenchmarkScenarios,
+} from "./harness/benchmark-registry.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -41,13 +59,20 @@ Usage:
                                                                               Bootstrap a repo, local dashboard, and agentchattr (--hooks installs managed git guards)
   btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
-  btrain handoff [--repo <path>]                                                 Check whose turn it is and what to do
+  btrain handoff [--repo <path>] [--since <hash>]                               Check whose turn it is and what to do (--since short-circuits when state is unchanged)
+  btrain handoff show-next [--lane <id>] [--repo <path>]                         Print the full Next Action body, expanding any .btrain/handoff-notes/ pointer
   btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [options]
                                                                               Claim a new task
   btrain handoff update [options]                                                Update the current handoff state
   btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
                                                                               Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
+  btrain harness list [--repo <path>]                                            List bundled and repo-local harness profiles
+  btrain harness inspect [--repo <path>] [--profile <name>]                      Inspect one harness profile (defaults to active)
+  btrain harness trace list [--repo <path>] [--limit <n>]                        List harness trace bundles under .btrain/harness/runs
+  btrain harness trace show --run-id <id> [--repo <path>]                        Show one harness trace bundle summary
+  btrain harness eval list [--repo <path>] [--category <name>]                   List bundled and repo-local benchmark scenarios
+  btrain harness eval inspect --scenario <id> [--repo <path>]                    Inspect one benchmark scenario manifest
   btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
@@ -62,6 +87,7 @@ Usage:
   btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
   btrain repos                                                                   List registered repos
+  btrain startup [--repo <path>]                                                Print a compact repo/bootstrap snapshot for a newly launched agent
   btrain go [--repo <path>]                                                      Bootstrap context: files an agent must read to work correctly
   btrain hcleanup [--repo <path>] [--keep <n>]                                   Trim handoff history, archive old entries
 
@@ -442,6 +468,398 @@ function formatLoopResult(result) {
   ].join("\n")
 }
 
+function formatPathForDisplay(repoRoot, targetPath) {
+  if (!targetPath) {
+    return "(none)"
+  }
+
+  if (!path.isAbsolute(targetPath)) {
+    return targetPath
+  }
+
+  if (!repoRoot) {
+    return targetPath
+  }
+
+  const relativePath = path.relative(repoRoot, targetPath)
+  if (!relativePath) {
+    return "."
+  }
+
+  return relativePath.startsWith("..") ? targetPath : relativePath
+}
+
+function formatCompactPathList(values, repoRoot, limit = 5) {
+  const normalized = (values || []).filter(Boolean).map((value) => formatPathForDisplay(repoRoot, value))
+  if (normalized.length === 0) {
+    return "(none)"
+  }
+
+  if (normalized.length <= limit) {
+    return normalized.join(", ")
+  }
+
+  return `${normalized.slice(0, limit).join(", ")} (+${normalized.length - limit} more)`
+}
+
+function appendHarnessRegistryMetadata(lines, result, { expandedCommands = false, expandedDocs = false } = {}) {
+  lines.push("registry sources:")
+  lines.push(`  bundled: ${formatPathForDisplay(result.repoRoot, result.registryPaths?.bundled)}`)
+  lines.push(`  repo-local: ${formatPathForDisplay(result.repoRoot, result.registryPaths?.repoLocal)}`)
+
+  if (result.commands?.length > 0) {
+    if (expandedCommands) {
+      lines.push("supported commands:")
+      for (const command of result.commands) {
+        lines.push(`  - ${command}`)
+      }
+    } else {
+      lines.push(`commands: ${result.commands.join(" | ")}`)
+    }
+  }
+
+  if (Object.keys(result.schemas || {}).length > 0) {
+    lines.push("schemas:")
+    for (const [name, schema] of Object.entries(result.schemas)) {
+      lines.push(`  ${name}: ${schema}`)
+    }
+  }
+
+  if (result.authoringDocs?.length > 0) {
+    if (expandedDocs) {
+      lines.push("authoring docs:")
+      for (const doc of result.authoringDocs) {
+        lines.push(`  - ${doc}`)
+      }
+    } else {
+      lines.push(`authoring docs: ${result.authoringDocs.join(" | ")}`)
+    }
+  }
+}
+
+function formatHarnessProfileTagText(profile) {
+  const tags = []
+  if (profile.active) {
+    tags.push("active")
+  }
+  if (profile.source) {
+    tags.push(profile.source)
+  }
+  if (!profile.exists) {
+    tags.push("missing")
+  }
+  if (profile.error) {
+    tags.push("invalid")
+  }
+
+  return tags.length > 0 ? ` [${tags.join(", ")}]` : ""
+}
+
+function formatHarnessListResult(result) {
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+    `active profile: ${result.activeProfileId}`,
+    `registry version: ${result.version}`,
+  ]
+
+  appendHarnessRegistryMetadata(lines, result)
+
+  lines.push("profiles:")
+  if (result.profiles.length === 0) {
+    lines.push("  (none)")
+    return lines.join("\n")
+  }
+
+  for (const profile of result.profiles) {
+    const labelText = profile.label ? ` — ${profile.label}` : ""
+    lines.push(`  - ${profile.id}${formatHarnessProfileTagText(profile)}${labelText}`)
+    if (profile.description) {
+      lines.push(`    ${profile.description}`)
+    }
+    if (profile.purpose) {
+      lines.push(`    purpose: ${profile.purpose}`)
+    }
+    lines.push(`    path: ${formatPathForDisplay(result.repoRoot, profile.profilePath)}`)
+    lines.push(`    dispatch: ${profile.loop?.dispatchPrompt || "(none)"}`)
+    if (profile.error) {
+      lines.push(`    error: ${profile.error}`)
+    }
+  }
+
+  return lines.join("\n")
+}
+
+function formatHarnessInspectResult(result) {
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+    `active profile: ${result.activeProfileId}`,
+    `profile: ${result.profile.id}`,
+    `state: ${result.profile.active ? "active" : "inactive"}`,
+    `source: ${result.profile.source || "unknown"}`,
+    `path: ${formatPathForDisplay(result.repoRoot, result.profile.sourcePath || result.profile.profilePath)}`,
+    `label: ${result.profile.label || "(none)"}`,
+  ]
+
+  if (result.profile.description) {
+    lines.push(`description: ${result.profile.description}`)
+  }
+  if (result.profile.purpose) {
+    lines.push(`purpose: ${result.profile.purpose}`)
+  }
+  if (result.profile.surfaces?.length > 0) {
+    lines.push(`surfaces: ${result.profile.surfaces.join(", ")}`)
+  }
+
+  lines.push(`dispatch prompt: ${result.profile.loop?.dispatchPrompt || "(none)"}`)
+  lines.push(`registered: ${result.profile.registered ? "yes" : "discovered-by-convention"}`)
+
+  appendHarnessRegistryMetadata(lines, result, { expandedCommands: true, expandedDocs: true })
+
+  return lines.join("\n")
+}
+
+function formatHarnessTraceListResult(result) {
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+    `harness dir: ${formatPathForDisplay(result.repoRoot, result.harnessDir)}`,
+    `index: ${formatPathForDisplay(result.repoRoot, result.indexPath)}`,
+    `total runs: ${result.total}`,
+    `outcomes: ${HARNESS_TRACE_OUTCOMES.join(" | ")}`,
+    `failure categories: ${HARNESS_TRACE_FAILURE_CATEGORIES.join(" | ")}`,
+  ]
+
+  lines.push("runs:")
+  if (!result.runs || result.runs.length === 0) {
+    lines.push("  (none)")
+    return lines.join("\n")
+  }
+
+  for (const run of result.runs) {
+    const tagParts = [run.outcome || "(pending)"]
+    if (run.failureCategory) tagParts.push(run.failureCategory)
+    const tag = tagParts.filter(Boolean).join(", ")
+    const scenarioText = run.scenarioId ? ` scenario=${run.scenarioId}` : ""
+    const profileText = run.profileId ? ` profile=${run.profileId}` : ""
+    lines.push(`  - ${run.runId} [${tag}]${profileText}${scenarioText}`)
+    if (run.startedAt || run.endedAt) {
+      lines.push(`    started: ${run.startedAt || "(unknown)"}  ended: ${run.endedAt || "(open)"}`)
+    }
+    if (run.summary) {
+      lines.push(`    ${run.summary}`)
+    }
+  }
+
+  return lines.join("\n")
+}
+
+function formatHarnessTraceShowResult(result) {
+  const summary = result.summary || {}
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+    `run id: ${result.runId}`,
+    `bundle dir: ${formatPathForDisplay(result.repoRoot, result.bundleDir)}`,
+    `kind: ${summary.kind || "harness-run"}`,
+    `profile: ${summary.profileId || "(none)"}`,
+    `scenario: ${summary.scenarioId || "(none)"}`,
+    `outcome: ${summary.outcome || "(pending)"}`,
+  ]
+
+  if (summary.failureCategory) {
+    lines.push(`failure category: ${summary.failureCategory}`)
+  }
+  lines.push(`started: ${summary.startedAt || "(unknown)"}`)
+  lines.push(`ended: ${summary.endedAt || "(open)"}`)
+  lines.push(`events: ${result.eventCount}`)
+  lines.push(`artifacts: ${result.artifactCount} file(s), ${result.artifactDirCount} subdir(s)`)
+
+  if (summary.summary) {
+    lines.push("summary:")
+    lines.push(`  ${summary.summary}`)
+  }
+
+  const metricEntries = Object.entries(summary.metrics || {})
+  if (metricEntries.length > 0) {
+    lines.push("metrics:")
+    for (const [name, value] of metricEntries) {
+      lines.push(`  ${name}: ${value}`)
+    }
+  }
+
+  if (Array.isArray(summary.artifactRefs) && summary.artifactRefs.length > 0) {
+    lines.push("artifact refs:")
+    for (const ref of summary.artifactRefs) {
+      lines.push(`  - ${ref}`)
+    }
+  }
+
+  const contextEntries = Object.entries(summary.context || {})
+  if (contextEntries.length > 0) {
+    lines.push("context:")
+    for (const [name, value] of contextEntries) {
+      lines.push(`  ${name}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    }
+  }
+
+  return lines.join("\n")
+}
+
+function formatHarnessEvalListResult(result) {
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+    `benchmark version: ${result.version}`,
+  ]
+  lines.push(`bundled dir: ${formatPathForDisplay(result.repoRoot, result.scenariosDirs.bundled)}`)
+  lines.push(
+    `repo-local dir: ${
+      result.scenariosDirs.repoLocal
+        ? formatPathForDisplay(result.repoRoot, result.scenariosDirs.repoLocal)
+        : "(none)"
+    }`,
+  )
+  lines.push(`categories: ${result.categories.join(" | ")}`)
+  if (result.filterCategory) {
+    lines.push(`filter: category=${result.filterCategory}`)
+  }
+  lines.push(`total scenarios: ${result.scenarios.length}`)
+
+  lines.push("scenarios:")
+  if (result.scenarios.length === 0) {
+    lines.push("  (none)")
+    return lines.join("\n")
+  }
+
+  for (const scenario of result.scenarios) {
+    const tagParts = [scenario.source || "unknown"]
+    if (scenario.category) tagParts.push(scenario.category)
+    if (!scenario.requiresDiff) tagParts.push("diffless")
+    const tag = tagParts.filter(Boolean).join(", ")
+    const labelText = scenario.label ? ` — ${scenario.label}` : ""
+    lines.push(`  - ${scenario.id} [${tag}]${labelText}`)
+    if (scenario.description) lines.push(`    ${scenario.description}`)
+    if (scenario.profileRefs.length > 0) {
+      lines.push(`    profiles: ${scenario.profileRefs.join(", ")}`)
+    }
+    if (scenario.hardFailureCategories.length > 0) {
+      lines.push(`    hard failures: ${scenario.hardFailureCategories.join(", ")}`)
+    }
+    lines.push(`    path: ${formatPathForDisplay(result.repoRoot, scenario.sourcePath)}`)
+  }
+
+  return lines.join("\n")
+}
+
+function formatHarnessEvalInspectResult(result) {
+  const scenario = result.scenario
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+    `scenario: ${scenario.id}`,
+    `source: ${scenario.source || "unknown"}`,
+    `path: ${formatPathForDisplay(result.repoRoot, scenario.sourcePath)}`,
+    `category: ${scenario.category}`,
+    `label: ${scenario.label || "(none)"}`,
+  ]
+  if (scenario.description) lines.push(`description: ${scenario.description}`)
+  if (scenario.purpose) lines.push(`purpose: ${scenario.purpose}`)
+  lines.push(`expected primary outcome: ${scenario.expectedPrimaryOutcome}`)
+  lines.push(`requires diff: ${scenario.requiresDiff ? "yes" : "no"}`)
+  lines.push(
+    `requires delegation acknowledgement: ${scenario.requiresDelegationAcknowledgement ? "yes" : "no"}`,
+  )
+  lines.push(
+    `profiles: ${scenario.profileRefs.length > 0 ? scenario.profileRefs.join(", ") : "(none)"}`,
+  )
+  lines.push(
+    `hard failures: ${
+      scenario.hardFailureCategories.length > 0 ? scenario.hardFailureCategories.join(", ") : "(none)"
+    }`,
+  )
+  if (scenario.tags.length > 0) lines.push(`tags: ${scenario.tags.join(", ")}`)
+
+  if (scenario.artifactRefs.length > 0) {
+    lines.push("artifact refs:")
+    for (const ref of scenario.artifactRefs) {
+      const headParts = [ref.kind || "artifact"]
+      if (ref.label) headParts.push(ref.label)
+      lines.push(`  - ${headParts.join(": ")}`)
+      if (ref.path) lines.push(`    path: ${ref.path}`)
+      if (ref.note) lines.push(`    note: ${ref.note}`)
+    }
+  }
+
+  lines.push(`categories: ${result.categories.join(" | ")}`)
+  lines.push(`outcomes: ${result.outcomes.join(" | ")}`)
+  lines.push(`hard failure vocabulary: ${result.hardFailureCategories.join(" | ")}`)
+  return lines.join("\n")
+}
+
+function formatStartupResult(result) {
+  const lines = [
+    `repo: ${result.repoName}`,
+    `path: ${result.repoRoot}`,
+  ]
+
+  const agentCheckLine = formatAgentCheck(result.agentCheck)
+  if (agentCheckLine) {
+    lines.push(agentCheckLine)
+  }
+
+  lines.push(`branch: ${result.branch || "(unknown)"}`)
+  lines.push(`dirty files: ${formatCompactPathList(result.dirtyPaths, result.repoRoot)}`)
+  lines.push(`agents: ${result.activeAgents?.length ? result.activeAgents.join(", ") : "(none)"}`)
+  if (result.laneIds?.length > 0) {
+    lines.push(`lanes: ${result.laneIds.join(", ")}`)
+  }
+
+  lines.push(`active profile: ${result.harness?.activeProfile || "(none)"}`)
+  if (result.harness?.dispatchPrompt) {
+    lines.push(`dispatch prompt: ${result.harness.dispatchPrompt}`)
+  }
+  if (result.harness?.error) {
+    lines.push(`harness warning: ${summarizeError(result.harness.error)}`)
+  }
+
+  lines.push("read first:")
+  if (result.readFirstPaths?.length > 0) {
+    for (const relativePath of result.readFirstPaths) {
+      lines.push(`  - ${relativePath}`)
+    }
+  } else {
+    lines.push("  - (no repo guidance files found)")
+  }
+
+  lines.push("focus:")
+  if (result.focusLanes?.length > 0) {
+    for (const lane of result.focusLanes) {
+      const roleText = lane.role ? ` [${lane.role}]` : ""
+      lines.push(`  - lane ${lane.laneId || "?"}${roleText}: ${lane.status} — ${lane.task || "(none)"}`)
+      lines.push(`    owner=${lane.owner || "(unassigned)"} reviewer=${lane.reviewer || "(unassigned)"}`)
+      lines.push(`    locks: ${formatCompactPathList(lane.lockPaths, result.repoRoot, 3)}`)
+      if (lane.nextAction) {
+        lines.push(`    next: ${lane.nextAction}`)
+      }
+    }
+  } else {
+    lines.push("  - board is clear; no active in-progress or review lanes")
+  }
+
+  lines.push("commands:")
+  for (const command of result.commands || []) {
+    lines.push(`  - ${command}`)
+  }
+
+  if (result.note) {
+    lines.push(`note: ${result.note}`)
+  }
+
+  return lines.join("\n")
+}
+
 function formatAgentCheck(agentCheck) {
   if (!agentCheck) {
     return ""
@@ -459,6 +877,65 @@ function formatAgentCheck(agentCheck) {
     default:
       return ""
   }
+}
+
+function normalizeActorName(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : ""
+}
+
+function computeActorRoleOnLane(lane, normalizedActor) {
+  const ownerMatch = normalizeActorName(lane?.owner) === normalizedActor
+  const reviewerMatch = normalizeActorName(lane?.reviewer) === normalizedActor
+  if (ownerMatch && reviewerMatch) return "owner+reviewer"
+  if (ownerMatch) return "owner"
+  if (reviewerMatch) return "reviewer"
+  return ""
+}
+
+function truncateTaskText(task, limit = 120) {
+  const text = typeof task === "string" ? task.trim() : ""
+  if (!text) return ""
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+}
+
+export function resolveReminderActor(options, result) {
+  const explicit = typeof options?.actor === "string" ? options.actor.trim() : ""
+  if (explicit) return explicit
+  const detected = result?.agentCheck?.agentName
+  return typeof detected === "string" ? detected.trim() : ""
+}
+
+export function buildAssignedWorkReminderLines(result, actor) {
+  const normalizedActor = normalizeActorName(actor)
+  if (!normalizedActor) return []
+  if (!Array.isArray(result?.lanes)) return []
+
+  const matches = []
+  for (const lane of result.lanes) {
+    if (!lane || lane.status === "resolved") continue
+    const role = computeActorRoleOnLane(lane, normalizedActor)
+    if (!role) continue
+    matches.push({ lane, role })
+  }
+
+  if (matches.length === 0) return []
+
+  matches.sort((left, right) => {
+    const leftId = String(left.lane._laneId || "")
+    const rightId = String(right.lane._laneId || "")
+    return leftId.localeCompare(rightId)
+  })
+
+  const actorDisplay = typeof actor === "string" ? actor.trim() : ""
+  const countLabel = matches.length === 1 ? "1 other lane" : `${matches.length} other lanes`
+  const header = `reminder (${actorDisplay || normalizedActor}): ${countLabel} still assigned to you`
+  const lines = [header]
+  for (const { lane, role } of matches) {
+    const laneId = lane._laneId || "(unknown)"
+    const task = truncateTaskText(lane.task) || "(no task)"
+    lines.push(`  - lane ${laneId}: ${lane.status} — ${task} (${role})`)
+  }
+  return lines
 }
 
 function printHandoffState(result) {
@@ -547,6 +1024,9 @@ function printHandoffState(result) {
   }
   console.log("")
   console.log(`handoff file: ${result.handoffPath}`)
+  if (result.stateHash) {
+    console.log(`state hash: ${result.stateHash}`)
+  }
 }
 
 function printHookInstallResult(label, result) {
@@ -564,6 +1044,61 @@ function printHookInstallResult(label, result) {
   if (result.reason === "not-a-git-repo") {
     console.log(`${label}: skipped (not a git repo)`)
   }
+}
+
+async function runHandoffShowNext(repoRoot, options) {
+  const result = await checkHandoff(repoRoot)
+  let nextAction = ""
+  let laneLabel = ""
+  if (result.lanes) {
+    const requestedLane = typeof options.lane === "string" ? options.lane.trim() : ""
+    if (!requestedLane) {
+      throw new BtrainError({
+        message: "`btrain handoff show-next` requires --lane when [lanes] is enabled.",
+        reason: "Multi-lane repos need an explicit lane so btrain knows which Next Action to expand.",
+        fix: `btrain handoff show-next --lane <id>`,
+        context: `Available lanes: ${result.lanes.map((lane) => lane._laneId).join(", ")}`,
+      })
+    }
+    const lane = result.lanes.find((entry) => entry._laneId === requestedLane)
+    if (!lane) {
+      throw new BtrainError({
+        message: `Unknown lane "${requestedLane}".`,
+        reason: "No lane with that id is configured.",
+        fix: `Pick one of: ${result.lanes.map((entry) => entry._laneId).join(", ")}`,
+      })
+    }
+    nextAction = lane.nextAction || ""
+    laneLabel = `lane ${requestedLane}`
+  } else {
+    nextAction = result.current?.nextAction || ""
+    laneLabel = "current"
+  }
+
+  if (!nextAction) {
+    console.log(`${laneLabel}: no next action set.`)
+    return
+  }
+
+  const spillPath = extractSpillPathFromNextAction(nextAction)
+  if (!spillPath) {
+    console.log(`${laneLabel} (inline):`)
+    console.log(nextAction)
+    return
+  }
+
+  const spill = await readSpilledNextActionBody(repoRoot, nextAction)
+  if (!spill || spill.missing) {
+    console.log(`${laneLabel} (pointer, spill file missing):`)
+    console.log(nextAction)
+    if (spill?.path) {
+      console.log(`expected: ${spill.path}`)
+    }
+    return
+  }
+
+  console.log(`${laneLabel} (spilled from ${spillPath}):`)
+  console.log(spill.body)
 }
 
 async function runHcleanup(repoRoot, keep) {
@@ -680,7 +1215,7 @@ async function run() {
   }
 
   if (command === "handoff") {
-    const subcommand = ["claim", "update", "request-changes", "resolve"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
 
     if (options.help || options.h) {
@@ -689,6 +1224,11 @@ async function run() {
     }
 
     const repoRoot = await resolveRepoRoot(options.repo)
+
+    if (subcommand === "show-next") {
+      await runHandoffShowNext(repoRoot, options)
+      return
+    }
 
     if (subcommand === "claim") {
       await claimHandoff(repoRoot, options)
@@ -708,6 +1248,14 @@ async function run() {
       await resolveHandoff(repoRoot, options)
       const result = await checkHandoff(repoRoot)
       printHandoffState(result)
+      const reminderActor = resolveReminderActor(options, result)
+      const reminderLines = buildAssignedWorkReminderLines(result, reminderActor)
+      if (reminderLines.length > 0) {
+        console.log("")
+        for (const line of reminderLines) {
+          console.log(line)
+        }
+      }
       return
     }
 
@@ -719,7 +1267,173 @@ async function run() {
     }
 
     const result = await checkHandoff(repoRoot)
+    const sinceHash = typeof options.since === "string" ? options.since.trim() : ""
+    if (sinceHash && result.stateHash && sinceHash === result.stateHash) {
+      console.log("unchanged")
+      console.log(`state hash: ${result.stateHash}`)
+      return
+    }
     printHandoffState(result)
+    return
+  }
+
+  if (command === "harness") {
+    const subcommand = ["list", "inspect", "trace", "eval"].includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new BtrainError({
+        message: "`btrain harness` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain harness list --repo .",
+        context: "Available subcommands: list, inspect, trace, eval.",
+      })
+    }
+
+    if (subcommand === "trace") {
+      const traceSubcommand = ["list", "show"].includes(rest[1]) ? rest[1] : null
+      if (!traceSubcommand) {
+        throw new BtrainError({
+          message: "`btrain harness trace` requires a subcommand.",
+          reason: "No trace subcommand was provided.",
+          fix: "btrain harness trace list --repo .",
+          context: "Available subcommands: list, show.",
+        })
+      }
+
+      const options = parseOptions(rest.slice(2))
+      const repoRoot = await resolveRepoRoot(options.repo)
+      const config = await readProjectConfig(repoRoot)
+      const repoName = config?.project?.name || path.basename(repoRoot)
+
+      if (traceSubcommand === "list") {
+        const limit = Number.parseInt(options.limit, 10)
+        const result = await listTraceBundles({
+          repoRoot,
+          limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+        })
+        console.log(
+          formatHarnessTraceListResult({
+            ...result,
+            repoName,
+            repoRoot,
+          }),
+        )
+        return
+      }
+
+      const runId = options["run-id"] || options.runId || options._[0]
+      if (!runId || runId === true) {
+        throw new BtrainError({
+          message: "`btrain harness trace show` requires --run-id <id>.",
+          reason: "No run id was provided.",
+          fix: "btrain harness trace show --run-id <id> --repo .",
+        })
+      }
+
+      const bundle = await readTraceBundleSummary({ repoRoot, runId })
+      console.log(
+        formatHarnessTraceShowResult({
+          ...bundle,
+          repoName,
+          repoRoot,
+        }),
+      )
+      return
+    }
+
+    if (subcommand === "eval") {
+      const evalSubcommand = ["list", "inspect"].includes(rest[1]) ? rest[1] : null
+      if (!evalSubcommand) {
+        throw new BtrainError({
+          message: "`btrain harness eval` requires a subcommand.",
+          reason: "No eval subcommand was provided.",
+          fix: "btrain harness eval list --repo .",
+          context: "Available subcommands: list, inspect.",
+        })
+      }
+
+      const options = parseOptions(rest.slice(2))
+      const repoRoot = await resolveRepoRoot(options.repo)
+      const config = await readProjectConfig(repoRoot)
+      const repoName = config?.project?.name || path.basename(repoRoot)
+
+      if (evalSubcommand === "list") {
+        const result = await listBenchmarkScenarios({
+          repoRoot,
+          category: options.category,
+        })
+        console.log(
+          formatHarnessEvalListResult({
+            ...result,
+            repoName,
+            repoRoot,
+          }),
+        )
+        return
+      }
+
+      const scenarioId = options.scenario || options._[0]
+      if (!scenarioId || scenarioId === true) {
+        throw new BtrainError({
+          message: "`btrain harness eval inspect` requires --scenario <id>.",
+          reason: "No scenario id was provided.",
+          fix: "btrain harness eval inspect --scenario <id> --repo .",
+        })
+      }
+
+      const result = await inspectBenchmarkScenario({ repoRoot, scenarioId })
+      console.log(
+        formatHarnessEvalInspectResult({
+          ...result,
+          repoName,
+          repoRoot,
+        }),
+      )
+      return
+    }
+
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const config = await readProjectConfig(repoRoot)
+    const activeProfileId = getConfiguredHarnessProfileId(config)
+    const repoName = config?.project?.name || path.basename(repoRoot)
+
+    if (subcommand === "list") {
+      const result = await listHarnessProfiles({
+        repoRoot,
+        activeProfileId,
+      })
+      console.log(
+        formatHarnessListResult({
+          ...result,
+          repoName,
+          repoRoot,
+        }),
+      )
+      return
+    }
+
+    const result = await inspectHarnessProfile({
+      repoRoot,
+      profileId: options.profile,
+      activeProfileId,
+    })
+
+    if (!result?.profile) {
+      const requestedProfile = options.profile || activeProfileId
+      throw new BtrainError({
+        message: `Unknown harness profile "${requestedProfile}".`,
+        reason: "No repo-local or bundled harness profile matched the requested id.",
+        fix: "Run `btrain harness list --repo .` to see available profiles.",
+      })
+    }
+
+    console.log(
+      formatHarnessInspectResult({
+        ...result,
+        repoName,
+        repoRoot,
+      }),
+    )
     return
   }
 
@@ -922,6 +1636,14 @@ async function run() {
     for (const repo of repos) {
       console.log(`- ${repo.name}: ${repo.path}`)
     }
+    return
+  }
+
+  if (command === "startup") {
+    const options = parseOptions(rest)
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const result = await getStartupSnapshot(repoRoot)
+    console.log(formatStartupResult(result))
     return
   }
 

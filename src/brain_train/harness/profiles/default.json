@@ -1,7 +1,11 @@
 {
   "id": "default",
   "label": "Default",
+  "purpose": "Stable baseline for the current repo-local dispatch behavior.",
   "description": "Current inline loop-dispatch behavior captured as the explicit baseline harness profile.",
+  "surfaces": [
+    "loop.dispatchPrompt"
+  ],
   "loop": {
     "dispatchPrompt": "bth"
   }

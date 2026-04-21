@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "label": "Bundled btrain harness registry",
+  "description": "Canonical local index for bundled harness profiles and probe-first inspection commands.",
+  "commands": [
+    "btrain harness list",
+    "btrain harness inspect --profile <name>"
+  ],
+  "schemas": {
+    "registry": "brain-train/harness-registry@v1",
+    "profile": "brain-train/harness-profile@v1"
+  },
+  "authoringDocs": [
+    "README.md#harness-discovery"
+  ],
+  "profiles": [
+    {
+      "id": "default",
+      "path": "profiles/default.json",
+      "source": "bundled"
+    }
+  ]
+}

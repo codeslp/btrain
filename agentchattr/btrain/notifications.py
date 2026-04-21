@@ -3,6 +3,8 @@
 import hashlib
 import json
 import re
+import time
+import uuid
 
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
@@ -11,6 +13,9 @@ _RUNTIME_ALIASES = {
     "codex": ("codex", "gpt", "openai"),
     "gemini": ("gemini", "google"),
 }
+_ACTIVE_DELIVERY_STATUSES = {"queued", "retrying"}
+DEFAULT_BTRAIN_DELIVERY_ACK_TIMEOUT_SEC = 15
+DEFAULT_BTRAIN_DELIVERY_MAX_ATTEMPTS = 2
 
 
 def build_btrain_notification_text(lane, previous_status="", agents_cfg=None, registry=None):
@@ -109,6 +114,141 @@ def resolve_btrain_agent_handle(raw_name, agents_cfg=None, registry=None):
             return _resolve_single_active_instance(base_name, registry) or base_name
 
     return normalized
+
+
+def create_btrain_delivery(
+    lane,
+    *,
+    notify_text,
+    target,
+    channel="agents",
+    now=None,
+    ack_timeout_sec=DEFAULT_BTRAIN_DELIVERY_ACK_TIMEOUT_SEC,
+    max_attempts=DEFAULT_BTRAIN_DELIVERY_MAX_ATTEMPTS,
+):
+    """Create an in-memory delivery record for a delegated wakeup."""
+    created_at = float(time.time() if now is None else now)
+    attempts = max(1, int(max_attempts or DEFAULT_BTRAIN_DELIVERY_MAX_ATTEMPTS))
+    lane_id = lane.get("_laneId") or lane.get("_lane_id") or "?"
+    fingerprint = _lane_fingerprint(lane)
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "laneId": lane_id,
+        "fingerprint": fingerprint,
+        "notifyText": notify_text,
+        "target": target,
+        "channel": channel or "agents",
+        "status": "queued",
+        "attempts": 1,
+        "maxAttempts": attempts,
+        "ackTimeoutSec": max(1, int(ack_timeout_sec or DEFAULT_BTRAIN_DELIVERY_ACK_TIMEOUT_SEC)),
+        "createdAt": created_at,
+        "lastAttemptAt": created_at,
+        "acknowledgedAt": None,
+        "failureReason": "",
+    }
+
+
+def acknowledge_btrain_delivery(deliveries, delivery_id, *, agent_name="", now=None):
+    """Mark a queued/retrying wakeup as acknowledged by the wrapper."""
+    delivery = (deliveries or {}).get(delivery_id)
+    if not delivery:
+        return None
+
+    if delivery.get("status") not in _ACTIVE_DELIVERY_STATUSES:
+        return delivery
+
+    normalized_target = _normalize_token(delivery.get("target"))
+    normalized_agent = _normalize_token(agent_name)
+    if normalized_target and normalized_agent and normalized_target != normalized_agent:
+        return None
+
+    delivery["status"] = "acknowledged"
+    delivery["acknowledgedAt"] = float(time.time() if now is None else now)
+    if agent_name:
+        delivery["acknowledgedBy"] = agent_name
+    delivery["failureReason"] = ""
+    return delivery
+
+
+def advance_btrain_deliveries(deliveries, *, lanes=None, now=None):
+    """Advance queued wakeups to retry/failed/superseded states as needed."""
+    actions = {"retry": [], "failed": [], "superseded": []}
+    if not deliveries:
+        return actions
+
+    current_time = float(time.time() if now is None else now)
+    lane_fingerprints = {}
+    for lane in lanes or []:
+        lane_id = lane.get("_laneId") or lane.get("_lane_id")
+        if lane_id:
+            lane_fingerprints[str(lane_id)] = _lane_fingerprint(lane)
+
+    for delivery in deliveries.values():
+        if delivery.get("status") not in _ACTIVE_DELIVERY_STATUSES:
+            continue
+
+        lane_id = str(delivery.get("laneId") or "")
+        current_fingerprint = lane_fingerprints.get(lane_id)
+        if current_fingerprint and current_fingerprint != delivery.get("fingerprint"):
+            delivery["status"] = "superseded"
+            delivery["supersededAt"] = current_time
+            actions["superseded"].append(dict(delivery))
+            continue
+
+        last_attempt = delivery.get("lastAttemptAt")
+        if last_attempt is None:
+            last_attempt = delivery.get("createdAt")
+        if last_attempt is None:
+            last_attempt = current_time
+        last_attempt = float(last_attempt)
+        ack_timeout_sec = max(
+            1,
+            int(delivery.get("ackTimeoutSec") or DEFAULT_BTRAIN_DELIVERY_ACK_TIMEOUT_SEC),
+        )
+        if current_time - last_attempt < ack_timeout_sec:
+            continue
+
+        attempts = max(1, int(delivery.get("attempts") or 1))
+        max_attempts = max(attempts, int(delivery.get("maxAttempts") or DEFAULT_BTRAIN_DELIVERY_MAX_ATTEMPTS))
+        if attempts < max_attempts:
+            delivery["status"] = "retrying"
+            delivery["attempts"] = attempts + 1
+            delivery["lastAttemptAt"] = current_time
+            actions["retry"].append(dict(delivery))
+            continue
+
+        delivery["status"] = "failed"
+        delivery["failedAt"] = current_time
+        delivery["failureReason"] = delivery.get("failureReason") or "ack-timeout"
+        actions["failed"].append(dict(delivery))
+
+    return actions
+
+
+def build_btrain_delivery_retry_text(delivery):
+    lane_id = delivery.get("laneId") or "?"
+    target = delivery.get("target") or "unknown"
+    attempts = delivery.get("attempts") or 1
+    max_attempts = delivery.get("maxAttempts") or attempts
+    fingerprint = delivery.get("fingerprint") or "unknown"
+    return (
+        f"btrain delivery retry for lane {lane_id} -> @{target}: "
+        f"no acknowledgement yet; retrying ({attempts}/{max_attempts}). #{fingerprint}"
+    )
+
+
+def build_btrain_delivery_failure_text(delivery):
+    lane_id = delivery.get("laneId") or "?"
+    target = delivery.get("target") or "unknown"
+    fingerprint = delivery.get("fingerprint") or "unknown"
+    reason = delivery.get("failureReason") or "delivery-failed"
+    attempts = delivery.get("attempts") or 0
+    attempt_suffix = f" after {attempts} attempt" if attempts == 1 else f" after {attempts} attempts"
+    return (
+        f"btrain delivery failed for lane {lane_id} -> @{target}: "
+        f"{reason}{attempt_suffix}. #{fingerprint}"
+    )
 
 
 def _collect_agent_aliases(agents_cfg=None, registry=None):

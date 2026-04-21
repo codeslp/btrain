@@ -1,29 +1,32 @@
 # Plan: Implement Meta-Harness Optimization for btrain
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.2.0
 **Author**: btrain
-**Date**: 2026-04-15
+**Date**: 2026-04-19
 
 ## Summary
 
-This plan turns the Meta-Harness spec into an implementation sequence that keeps the first release narrow and measurable.
+This plan turns the Meta-Harness spec into an implementation sequence that keeps the first release narrow, local-first, and immediately useful inside `btrain`.
 
-The plan follows one rule throughout: do not start with autonomous search. First make the harness explicit, then capture traces, then build evals, then add constrained search over a small allowlist.
+The plan follows one rule throughout: do not start with hosted observability or autonomous search. First make the local harness explicit, then improve startup/context and delivery reliability, then capture local traces, then build local evals and comparison, then consider follow-on work.
 
 Primary input:
 
 - [specs/009-meta-harness-for-btrain.md](/Users/bfaris96/btrain/specs/009-meta-harness-for-btrain.md)
+- [research/a2a-langgraph-langsmith-evaluation.md](/Users/bfaris96/btrain/research/a2a-langgraph-langsmith-evaluation.md)
 
 ## Review Goals
 
 Review this plan for:
 
+- whether the useful-now local scope is sharp enough
 - missing dependencies between bootstrap context, traces, and evals
 - places where the plan leaks beyond harness code into unrelated repo code
 - missing rollback points
 - missing benchmark coverage for workflow-specific regressions
 - any step that would make candidate comparison unfair or irreproducible
+- whether LangSmith and other external integrations are deferred cleanly enough
 
 ## Repo-Local Grounding
 
@@ -39,6 +42,8 @@ This plan is grounded in the repo-local material currently present in this check
 ## Implementation Principles
 
 - `btrain` stays authoritative for workflow state and lane lifecycle.
+- Prefer repo-local capability cards, task/artifact envelopes, and file-backed traces before adding external protocol or SaaS integrations.
+- Prefer a canonical local harness registry, authoring guide, and inspection surface before adding marketplace or packaging concepts.
 - Harness changes must be versioned, attributable, and benchmarked.
 - Compare candidates on end-to-end workflow outcomes before efficiency metrics.
 - Store raw trace artifacts so failures can be diagnosed from evidence.
@@ -46,16 +51,29 @@ This plan is grounded in the repo-local material currently present in this check
 - Default harness behavior must remain readable and manually editable.
 - Do not assume all valid work ends in a source diff.
 - Do not assume workflow adoption is perfect; design nudges, acknowledgement, and recovery paths explicitly.
+- LangSmith is optional follow-on observability, not the source of truth for the first implementation.
 
 ## First-Version Decisions
 
-### Search starts last
+### Local-first immediate scope
 
-The first milestone ends with traceable, benchmarkable harness profiles. Search is a follow-on milestone, not the entry point.
+The immediate milestone stops at repo-local capability structures, startup/bootstrap improvements, delivery acknowledgement, local traces, local evals, and local comparison.
+
+### Search starts after comparison
+
+The first milestone ends with traceable, benchmarkable, comparable harness profiles. Search is a follow-on milestone, not the entry point.
 
 ### Baseline before variation
 
 The first step is to capture current inline behavior as an explicit `default` harness profile. Alternative profiles should be compared against that frozen baseline, not against moving inline code.
+
+### Local capability and task structures first
+
+The first version should define compact repo-local Agent Card and task/artifact envelope structures before any external protocol compatibility work.
+
+### Registry and authoring contract first
+
+The first version should also define a canonical local harness registry, authoring guide, and directory contract so harness work is discoverable and consistent instead of being encoded only in source spelunking.
 
 ### Bounded bootstrap
 
@@ -77,6 +95,10 @@ Delegation transport is not considered successful just because a command was iss
 
 Trace bundles and candidate metadata live under `.btrain/harness/` so the system remains local and auditable.
 
+### LangSmith deferred
+
+Hosted observability and eval backends are explicitly deferred. LangSmith may become a later exporter or mirror, but it is not part of the first implementation milestone.
+
 ### File-backed persistence only
 
 The first version uses files only:
@@ -93,32 +115,34 @@ Candidate selection may be automated, but activation of a new default harness re
 
 ## Planned CLI Surface
 
-The workstreams below assume a small, explicit CLI surface of this shape:
+The immediate workstreams below assume a small, explicit CLI surface of this shape:
 
+- `btrain harness list`
+- `btrain harness inspect`
 - `btrain startup`
 - `btrain harness eval`
 - `btrain harness compare`
-- `btrain harness promote`
-- `btrain harness rollback`
 
-Exact flag details may change, but the implementation sequence assumes separate commands for orientation, benchmarking, comparison, and activation.
+If later follow-on work adds local search or profile promotion, then `btrain harness promote` and `btrain harness rollback` can be added as a second-stage CLI surface.
 
 ## Dependency Diagram
 
 ```mermaid
 flowchart TD
-    A["1. Factor Harness Surfaces"] --> B["2. Bootstrap Context"]
-    A --> C["3. Startup + Delegation Reliability"]
-    A --> D["4. Trace Bundle Storage"]
-    B --> E["5. Benchmark Scenarios"]
-    C --> E
-    C --> D
+    A["1. Registry + Agent Cards + Task Envelopes"] --> B["2. Factor Harness Surfaces"]
+    B --> C["3. Bootstrap Context"]
+    B --> D["4. Startup + Delegation Reliability"]
+    A --> D
+    B --> E["5. Trace Bundle Storage"]
+    A --> F["6. Benchmark Scenarios"]
+    C --> F
+    D --> F
     D --> E
-    E --> F["6. Candidate Comparison CLI"]
-    F --> G["7. Constrained Search"]
-    D --> G
-    E --> G
-    G --> H["8. Promotion + Rollback"]
+    E --> F
+    F --> G["7. Candidate Comparison CLI"]
+    G --> H["8. Deferred Search"]
+    H --> I["9. Deferred Promotion + Rollback"]
+    G --> J["Deferred LangSmith Export"]
 ```
 
 ## Proposed Harness Artifact Layout
@@ -127,8 +151,12 @@ The first file-backed version should converge on a structure close to:
 
 ```text
 .btrain/harness/
+├── registry.json
 ├── profiles/
 │   └── default/
+├── schemas/
+├── templates/
+├── benchmarks/
 ├── candidates/
 │   └── cand_<id>.json
 ├── index.jsonl
@@ -144,7 +172,42 @@ The exact filenames can change, but the separation between profiles, candidate m
 
 ## Workstreams
 
-### Workstream 1: Factor explicit harness surfaces
+### Workstream 1: Registry, local agent cards, and task/artifact envelope
+
+**Goal**: add compact repo-local structures that improve routing, context hygiene, diffless evidence handling, and harness discoverability without adopting an external protocol.
+
+**Primary changes**
+
+- define a canonical local harness registry with profile metadata, supported commands, schema versions, and benchmark fixture references
+- define a canonical harness authoring guide that explains how to add or modify profiles, schemas, startup packets, trace fields, and benchmark fixtures
+- define a repo-local Agent Card schema for registered agent instances
+- surface readiness, role, runner, repo, lane-affinity, and routing-relevant metadata through that schema
+- define a compact task/artifact envelope for lane work, reviews, repairs, delegated wakeups, and diffless outputs
+- make harness profiles self-describing enough for list and inspect commands
+- prefer task/artifact references over replaying raw history where possible
+- make the envelope usable by bootstrap, tracing, and benchmark flows
+
+**Likely files**
+
+- [README.md](/Users/bfaris96/btrain/README.md)
+- [agentchattr/registry.py](/Users/bfaris96/btrain/agentchattr/registry.py)
+- [agentchattr/router.py](/Users/bfaris96/btrain/agentchattr/router.py)
+- [agentchattr/btrain/context.py](/Users/bfaris96/btrain/agentchattr/btrain/context.py)
+- [src/brain_train/core.mjs](/Users/bfaris96/btrain/src/brain_train/core.mjs)
+- [src/brain_train/harness/index.mjs](/Users/bfaris96/btrain/src/brain_train/harness/index.mjs)
+- new repo-local schema or helper files under `.btrain/` or `src/brain_train/`
+
+**Tests**
+
+- registry parsing and fallback coverage
+- list/inspect metadata coverage
+- card schema parsing and fallback coverage
+- routing metadata coverage
+- task/artifact envelope serialization coverage
+- compact artifact-reference rendering coverage
+- authoring-guide path/discovery coverage if surfaced in CLI output
+
+### Workstream 2: Factor explicit harness surfaces
 
 **Goal**: move the important harness behavior behind explicit profile/config/template seams.
 
@@ -152,6 +215,7 @@ The exact filenames can change, but the separation between profiles, candidate m
 
 - define a harness profile schema
 - capture current inline behavior as the `default` harness profile before adding variants
+- ensure each profile carries self-describing metadata suitable for registry/list/inspect output
 - extract or centralize loop-dispatch prompt construction
 - extract lane-context and bootstrap formatting configuration
 - extract startup/init prompt construction
@@ -171,15 +235,17 @@ The exact filenames can change, but the separation between profiles, candidate m
 
 - default profile parity coverage
 - profile loading and fallback behavior
+- self-describing profile metadata coverage
 - active-profile metadata written to run output
 
-### Workstream 2: Add compact bootstrap context
+### Workstream 3: Add compact bootstrap context
 
 **Goal**: eliminate common first-turn exploration waste without hiding important lane state.
 
 **Primary changes**
 
 - generate a compact bootstrap block from repo and lane state
+- include agent card and task/artifact references when they are cheaper than raw history
 - inject the block on first dispatch when enabled by profile
 - enforce truncation and redaction rules
 - keep delegation packet summary integrated with bootstrap output
@@ -199,13 +265,14 @@ The exact filenames can change, but the separation between profiles, candidate m
 - stable formatting for identical state
 - redaction or omission coverage for noisy inputs
 
-### Workstream 3: Startup and delegation reliability
+### Workstream 4: Startup and delegation reliability
 
 **Goal**: make cold-start behavior and delegated wakeups reliable enough to benchmark and improve.
 
 **Primary changes**
 
 - add an explicit repo-startup command for newly launched agents
+- add probe-first harness list and inspect commands so agents can orient before mutation or comparison
 - add first-touch reminders when an agent responds without recent `btrain` context
 - trace delegation delivery, acknowledgement, and retry behavior
 - make delegation-trigger failures visible in summaries instead of silent
@@ -221,11 +288,12 @@ The exact filenames can change, but the separation between profiles, candidate m
 **Tests**
 
 - startup/init output coverage
+- harness list and inspect coverage
 - first-touch reminder coverage
 - delegated wakeup acknowledgement coverage
 - retry or surfaced-failure coverage when delivery fails
 
-### Workstream 4: Add harness trace bundles
+### Workstream 5: Add harness trace bundles
 
 **Goal**: persist enough information to compare and diagnose harness runs.
 
@@ -233,6 +301,7 @@ The exact filenames can change, but the separation between profiles, candidate m
 
 - add a trace bundle directory under `.btrain/harness/`
 - write run summaries plus raw artifacts
+- capture agent card and task/artifact references alongside prompt/context inputs
 - capture prompt/context inputs, review outputs, timing, and outcome labels
 - define stable failure categories
 - keep the persistence layer file-backed and rebuildable from artifacts
@@ -252,13 +321,14 @@ The exact filenames can change, but the separation between profiles, candidate m
 - summary index consistency coverage
 - failure classification coverage
 
-### Workstream 5: Build the harness benchmark
+### Workstream 6: Build the harness benchmark
 
 **Goal**: create a repeatable eval harness for `btrain` workflow quality.
 
 **Primary changes**
 
 - define benchmark scenarios and fixtures
+- define benchmark fixture manifests so scenarios are discoverable without reading implementation internals
 - support multiple harness profiles per eval run
 - report per-scenario and aggregate results
 - link each scored scenario back to a trace bundle
@@ -286,13 +356,14 @@ The exact filenames can change, but the separation between profiles, candidate m
 **Tests**
 
 - scenario registration coverage
+- benchmark fixture manifest parsing coverage
 - aggregate score calculation coverage
 - held-out-scenario selection coverage
 - item-to-trace linking coverage
 - diffless completion-proof coverage
 - delegation acknowledgement scoring coverage
 
-### Workstream 6: Add candidate comparison commands
+### Workstream 7: Add candidate comparison commands
 
 **Goal**: make harness comparison usable before automated search exists.
 
@@ -313,7 +384,7 @@ The exact filenames can change, but the separation between profiles, candidate m
 - candidate sorting and tie-breaking
 - missing-artifact handling
 
-### Workstream 7: Implement constrained harness search
+### Workstream 8: Deferred follow-on search
 
 **Goal**: add an outer loop that proposes new harness variants using prior evidence.
 
@@ -329,7 +400,7 @@ The exact filenames can change, but the separation between profiles, candidate m
 **Likely files**
 
 - new search orchestration module under `src/brain_train/`
-- harness template/config files from workstream 1
+- harness template/config files from workstream 2
 - trace and comparison helpers from earlier workstreams
 
 **Tests**
@@ -339,7 +410,7 @@ The exact filenames can change, but the separation between profiles, candidate m
 - candidate benchmark execution
 - rejection of unscored or failed candidates
 
-### Workstream 8: Promotion, rollback, and docs
+### Workstream 9: Deferred promotion, rollback, and docs
 
 **Goal**: make winning harnesses safe to adopt and easy to revert.
 
@@ -361,27 +432,55 @@ The exact filenames can change, but the separation between profiles, candidate m
 - rollback restores prior default profile
 - active profile is visible in subsequent runs
 
+### Deferred external follow-on: Optional LangSmith export
+
+**Goal**: optionally mirror local trace/eval artifacts into LangSmith after the repo-local model already exists and proves useful.
+
+**Primary changes**
+
+- map local trace bundles and benchmark results into LangSmith-compatible upload/export shapes
+- keep local files as the source of truth
+- make export opt-in through config or environment variables
+- avoid making the hosted backend a prerequisite for startup, tracing, or comparison
+
+**Likely files**
+
+- new export helper under `src/brain_train/`
+- CLI wiring under [src/brain_train/cli.mjs](/Users/bfaris96/btrain/src/brain_train/cli.mjs)
+- optional docs updates in [README.md](/Users/bfaris96/btrain/README.md)
+
+**Tests**
+
+- export payload generation coverage
+- local-first fallback coverage when export is disabled or unavailable
+- no-source-of-truth regression coverage
+
 ## Rollout Sequence
 
 ### Slice 1
 
-- workstreams 1 and 2
-- outcome: explicit harness surfaces plus compact bootstrap context
+- workstreams 1, 2, and 3
+- outcome: local capability/task structures plus explicit harness surfaces and compact bootstrap context
 
 ### Slice 2
 
-- workstreams 3 and 4
+- workstreams 4 and 5
 - outcome: reliable startup/delegation behavior plus trace bundles
 
 ### Slice 3
 
-- workstreams 5 and 6
+- workstreams 6 and 7
 - outcome: benchmarkable eval loop plus candidate comparison
 
 ### Slice 4
 
-- workstreams 7 and 8
+- deferred workstreams 8 and 9
 - outcome: constrained search and human-gated promotion
+
+### Slice 5
+
+- deferred external follow-on
+- outcome: optional LangSmith export or mirroring without changing the local source of truth
 
 ## Risks and Controls
 
@@ -456,13 +555,32 @@ Control:
 - lineage metadata
 - hard rejection for edits outside approved surfaces
 
+### Risk: Harness structure sprawls into hidden conventions
+
+Control:
+
+- canonical local registry
+- canonical harness authoring guide
+- list/inspect commands that expose the active structure directly
+- stable homes for profiles, schemas, templates, and benchmark fixtures
+
+### Risk: External observability or protocol work distorts the local core
+
+Control:
+
+- keep LangSmith export optional and delayed
+- keep local files authoritative
+- adopt A2A- or LangGraph-like ideas without introducing them as required runtime dependencies
+
 ## Exit Criteria
 
 The first end-to-end milestone is complete when:
 
+- `btrain` can surface compact repo-local Agent Cards and task/artifact envelopes where they improve routing or context loading
+- `btrain` has a canonical local harness registry plus probe-first list/inspect commands
 - `btrain` can run at least two named harness profiles
 - first-turn bootstrap context is profile-controlled and bounded
 - a newly launched agent can run a dedicated startup/init command to orient itself in the repo
 - eval runs emit trace bundles with stable metadata
 - benchmark output compares profiles on hard failures, workflow outcomes, and advisory efficiency metrics
-- the repo can support constrained candidate search without editing arbitrary project code
+- no hosted backend is required for startup, tracing, evals, or comparison

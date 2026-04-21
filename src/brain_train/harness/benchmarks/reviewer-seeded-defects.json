@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "reviewer-seeded-defects",
+  "category": "reviewer-path",
+  "label": "Reviewer catches seeded defects",
+  "description": "A reviewer inspects a lane with injected defects (empty diff, stale packet, missing verification) and flags the right subset before resolving.",
+  "purpose": "Prove the reviewer path catches the defects the handoff gate is supposed to prevent, and does not silently approve no-op lanes.",
+  "profileRefs": ["default"],
+  "tags": ["reviewer", "seeded-defects", "pre-handoff"],
+  "expectedPrimaryOutcome": "pass",
+  "hardFailureCategories": [
+    "review-miss",
+    "workflow-violation",
+    "insufficient-context"
+  ],
+  "requiresDiff": false,
+  "requiresDelegationAcknowledgement": false,
+  "artifactRefs": [
+    {
+      "kind": "skill",
+      "label": "pre-handoff skill",
+      "path": ".claude/skills/pre-handoff/SKILL.md",
+      "note": "Quality gate for needs-review transitions."
+    }
+  ]
+}

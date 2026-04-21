@@ -5,11 +5,15 @@ import re
 
 class Router:
     def __init__(self, agent_names: list[str], default_mention: str = "both",
-                 max_hops: int = 4, online_checker=None):
+                 max_hops: int = 4, online_checker=None, card_lookup=None):
         self.agent_names = set(n.lower() for n in agent_names)
         self.default_mention = default_mention
         self.max_hops = max_hops
         self._online_checker = online_checker  # callable() -> set of online agent names
+        # Optional callable(name: str) -> dict | None, returning an Agent Card
+        # for the instance. Used by describe_target and routing introspection;
+        # does not alter get_targets decisions.
+        self._card_lookup = card_lookup
         # Per-channel state: { channel: { hop_count, paused, guard_emitted } }
         self._channels: dict[str, dict] = {}
         self._build_pattern()
@@ -99,3 +103,21 @@ class Router:
         """Replace the agent name set and rebuild the mention regex."""
         self.agent_names = set(n.lower() for n in names)
         self._build_pattern()
+
+    def set_card_lookup(self, lookup):
+        """Install or replace the card lookup callable after construction."""
+        self._card_lookup = lookup
+
+    def describe_target(self, name: str) -> dict | None:
+        """Return the Agent Card for a target, if a card_lookup was configured.
+
+        Read-only consumption point: never raises, never changes routing.
+        Callers can use the returned card for downstream routing hints,
+        context summaries, or readiness gates without the router enforcing them.
+        """
+        if not self._card_lookup:
+            return None
+        try:
+            return self._card_lookup(name)
+        except Exception:
+            return None

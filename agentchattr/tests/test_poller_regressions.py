@@ -8,16 +8,26 @@ Avoids importing app.py and store.py (Python 3.9 union-type compat issue)
 by exercising the logic against a minimal in-memory mock.
 """
 
+import json
+import tempfile
 import threading
 import unittest
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from btrain.notifications import build_btrain_notification_text
+from btrain.notifications import (
+    acknowledge_btrain_delivery,
+    advance_btrain_deliveries,
+    build_btrain_notification_text,
+    create_btrain_delivery,
+)
+from agents import AgentTrigger
+from wrapper import _extract_delivery_ids, _queue_watcher, _report_btrain_delivery_ack
 
 
 class MockStore:
@@ -238,7 +248,7 @@ class MockAgents:
         self.triggers = []
 
     def trigger_sync(self, agent_name, message="", channel="general", **kwargs):
-        self.triggers.append({"agent": agent_name, "message": message, "channel": channel})
+        self.triggers.append({"agent": agent_name, "message": message, "channel": channel, "kwargs": kwargs})
 
     def is_available(self, name):
         return True
@@ -251,6 +261,7 @@ class TestPollerTriggersAgentOnNotification(unittest.TestCase):
         self.store = MockStore()
         self.agents = MockAgents()
         self.prev_statuses = {}
+        self.deliveries = {}
 
     def _notify_and_trigger(self, lane):
         """Mirror the notification + trigger logic that should exist in the poller."""
@@ -278,10 +289,19 @@ class TestPollerTriggersAgentOnNotification(unittest.TestCase):
                 if notify_text.startswith("@"):
                     target = notify_text.split()[0][1:]  # strip @
                     if self.agents.is_available(target):
+                        delivery = create_btrain_delivery(
+                            lane,
+                            notify_text=notify_text,
+                            target=target,
+                            channel="agents",
+                            now=0,
+                        )
+                        self.deliveries[delivery["id"]] = delivery
                         self.agents.trigger_sync(
                             target,
                             message="btrain: %s" % notify_text,
                             channel="agents",
+                            delivery_id=delivery["id"],
                         )
 
     def test_needs_review_triggers_reviewer(self):
@@ -292,6 +312,9 @@ class TestPollerTriggersAgentOnNotification(unittest.TestCase):
         })
         self.assertEqual(len(self.agents.triggers), 1)
         self.assertEqual(self.agents.triggers[0]["agent"], "codex")
+        delivery_id = self.agents.triggers[0]["kwargs"].get("delivery_id", "")
+        self.assertTrue(delivery_id)
+        self.assertIn(delivery_id, self.deliveries)
 
     def test_in_progress_triggers_owner(self):
         self.prev_statuses["b"] = "resolved"
@@ -321,6 +344,150 @@ class TestPollerTriggersAgentOnNotification(unittest.TestCase):
             "owner": "claude", "reviewer": "codex",
         })
         self.assertEqual(len(self.agents.triggers), 1, "Should not re-trigger on same fingerprint")
+        self.assertEqual(len(self.deliveries), 1, "Should not create duplicate delivery records")
+
+
+class TestBtrainDeliveryTracking(unittest.TestCase):
+    def test_matching_wrapper_acknowledges_delivery(self):
+        lane = {"_laneId": "a", "status": "needs-review", "owner": "claude", "reviewer": "codex"}
+        delivery = create_btrain_delivery(lane, notify_text="@codex lane a ready for review. btrain handoff --lane a #abc", target="codex", now=10)
+        deliveries = {delivery["id"]: delivery}
+
+        acknowledged = acknowledge_btrain_delivery(deliveries, delivery["id"], agent_name="codex", now=12)
+
+        self.assertIsNotNone(acknowledged)
+        self.assertEqual(acknowledged["status"], "acknowledged")
+        self.assertEqual(acknowledged["acknowledgedAt"], 12)
+
+    def test_unacknowledged_delivery_retries_then_fails(self):
+        lane = {"_laneId": "a", "status": "needs-review", "owner": "claude", "reviewer": "codex"}
+        delivery = create_btrain_delivery(
+            lane,
+            notify_text="@codex lane a ready for review. btrain handoff --lane a #abc",
+            target="codex",
+            now=0,
+            ack_timeout_sec=5,
+            max_attempts=2,
+        )
+        deliveries = {delivery["id"]: delivery}
+
+        retry_actions = advance_btrain_deliveries(deliveries, lanes=[lane], now=6)
+        self.assertEqual(len(retry_actions["retry"]), 1)
+        self.assertEqual(deliveries[delivery["id"]]["status"], "retrying")
+        self.assertEqual(deliveries[delivery["id"]]["attempts"], 2)
+
+        failure_actions = advance_btrain_deliveries(deliveries, lanes=[lane], now=12)
+        self.assertEqual(len(failure_actions["failed"]), 1)
+        self.assertEqual(deliveries[delivery["id"]]["status"], "failed")
+        self.assertEqual(deliveries[delivery["id"]]["failureReason"], "ack-timeout")
+
+    def test_lane_change_supersedes_pending_delivery(self):
+        original_lane = {"_laneId": "a", "status": "needs-review", "owner": "claude", "reviewer": "codex"}
+        updated_lane = {"_laneId": "a", "status": "resolved", "owner": "claude", "reviewer": "codex"}
+        delivery = create_btrain_delivery(
+            original_lane,
+            notify_text="@codex lane a ready for review. btrain handoff --lane a #abc",
+            target="codex",
+            now=0,
+            ack_timeout_sec=5,
+            max_attempts=2,
+        )
+        deliveries = {delivery["id"]: delivery}
+
+        actions = advance_btrain_deliveries(deliveries, lanes=[updated_lane], now=6)
+
+        self.assertEqual(len(actions["superseded"]), 1)
+        self.assertEqual(deliveries[delivery["id"]]["status"], "superseded")
+
+
+class TestWrapperDeliveryAckHelpers(unittest.TestCase):
+    def test_extract_delivery_ids_deduplicates(self):
+        lines = [
+            json.dumps({"delivery_id": "abc123", "channel": "agents"}),
+            json.dumps({"delivery_id": "abc123", "channel": "agents"}),
+            "not-json",
+            json.dumps({"delivery_id": "def456", "channel": "agents"}),
+        ]
+
+        delivery_ids = _extract_delivery_ids(lines)
+
+        self.assertEqual(delivery_ids, ["abc123", "def456"])
+
+    @patch("urllib.request.urlopen")
+    def test_report_btrain_delivery_ack_posts_expected_payload(self, mock_urlopen):
+        _report_btrain_delivery_ack(8300, "codex", ["abc123", "def456"], token="test-token")
+
+        request = mock_urlopen.call_args[0][0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8300/api/btrain/delivery-ack")
+        self.assertEqual(json.loads(request.data.decode("utf-8")), {"agent": "codex", "delivery_ids": ["abc123", "def456"]})
+        headers = dict(request.header_items())
+        self.assertEqual(headers.get("Authorization"), "Bearer test-token")
+
+
+class TestQueueWatcherFirstTouchReminder(unittest.TestCase):
+    def test_queue_watcher_injects_reminder_when_btrain_context_is_missing(self):
+        injected = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "data").mkdir()
+            queue_file = tmp_path / "codex_queue.jsonl"
+            queue_file.write_text(json.dumps({"channel": "agents"}) + "\n", "utf-8")
+
+            def fake_sleep(seconds):
+                if seconds == 1:
+                    raise KeyboardInterrupt()
+
+            with patch("wrapper.ROOT", tmp_path), \
+                    patch("wrapper._fetch_recent_messages", return_value="  user: ping"), \
+                    patch("wrapper._fetch_role", return_value=""), \
+                    patch("wrapper._fetch_active_rules", return_value=None), \
+                    patch("wrapper._resolve_repo_root", return_value="/tmp/repo"), \
+                    patch("wrapper._fetch_btrain_context", return_value=""), \
+                    patch("wrapper.time.sleep", side_effect=fake_sleep):
+                with self.assertRaises(KeyboardInterrupt):
+                    _queue_watcher(
+                        lambda: ("codex", queue_file),
+                        injected.append,
+                        agent_name="codex",
+                        get_token_fn=lambda: "",
+                        cwd=tmpdir,
+                    )
+
+        self.assertEqual(len(injected), 1)
+        self.assertIn("Run btrain handoff.", injected[0])
+        self.assertIn("REMINDER: No recent btrain context was found for this repo.", injected[0])
+        self.assertIn("btrain startup --repo /tmp/repo", injected[0])
+
+
+class TestDeliveryIdComposition(unittest.TestCase):
+    def test_delivery_id_round_trips_from_trigger_to_ack(self):
+        lane = {"_laneId": "a", "status": "needs-review", "owner": "claude", "reviewer": "codex"}
+        delivery = create_btrain_delivery(
+            lane,
+            notify_text="@codex lane a ready for review. btrain handoff --lane a #abc",
+            target="codex",
+            now=0,
+        )
+        deliveries = {delivery["id"]: delivery}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trigger = AgentTrigger(registry=object(), data_dir=tmpdir)
+            trigger.trigger_sync(
+                "codex",
+                message="btrain: @codex lane a ready for review. btrain handoff --lane a #abc",
+                channel="agents",
+                delivery_id=delivery["id"],
+            )
+
+            queue_file = Path(tmpdir) / "codex_queue.jsonl"
+            queue_lines = queue_file.read_text("utf-8").splitlines()
+
+        self.assertEqual(_extract_delivery_ids(queue_lines), [delivery["id"]])
+
+        acknowledged = acknowledge_btrain_delivery(deliveries, delivery["id"], agent_name="codex", now=3)
+        self.assertIsNotNone(acknowledged)
+        self.assertEqual(acknowledged["status"], "acknowledged")
 
 
 class MockRegistry:

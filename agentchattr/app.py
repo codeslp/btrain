@@ -24,7 +24,14 @@ from jobs import JobStore
 from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
 from agents import AgentTrigger
-from btrain.notifications import build_btrain_notification_text
+from btrain.notifications import (
+    acknowledge_btrain_delivery,
+    advance_btrain_deliveries,
+    build_btrain_delivery_failure_text,
+    build_btrain_delivery_retry_text,
+    build_btrain_notification_text,
+    create_btrain_delivery,
+)
 from btrain.validator import btrainValidator
 from registry import RuntimeRegistry
 from session_store import SessionStore, validate_session_template
@@ -68,7 +75,7 @@ MAX_CHANNELS = 8
 
 # btrain lane state cache (populated by background pollers)
 _btrain_lock = threading.Lock()
-_btrain_repos: dict[str, dict] = {}  # keyed by repo label; value: {label, path, cache, prev_tasks, prev_statuses, btrain_cmd, env, interval}
+_btrain_repos: dict[str, dict] = {}  # keyed by repo label; value: {label, path, cache, prev_tasks, prev_statuses, deliveries, btrain_cmd, env, interval}
 _multi_repo: bool = False
 btrain_validator = None
 
@@ -404,12 +411,15 @@ def _refresh_btrain_state_for_repo(repo_label: str, repo_entry: dict, env: dict)
 
     _update_lane_channels()
 
+    current_time = _time_mod.time()
+    default_agents_channel = f"{repo_label}/agents" if _multi_repo else "agents"
+
     for lane in lanes:
         lid = lane.get("_laneId", "")
         new_task = lane.get("task", "")
         old_task = repo_entry["prev_tasks"].get(lid, "")
         lane_channel = f"{repo_label}/{lid}" if _multi_repo else lid
-        agents_channel = f"{repo_label}/agents" if _multi_repo else "agents"
+        agents_channel = default_agents_channel
 
         if old_task and new_task and old_task != new_task and store:
             lane_msgs = store.get_recent(count=999_999_999, channel=lane_channel)
@@ -453,12 +463,74 @@ def _refresh_btrain_state_for_repo(repo_label: str, repo_entry: dict, env: dict)
                 if notify_text.startswith("@") and agents:
                     target = notify_text.split()[0][1:]
                     targets, repo_path = _resolve_targets_for_channel([target], agents_channel)
+                    delivered = False
                     for resolved in targets:
                         if not _target_matches_repo(resolved, repo_path):
                             continue
                         if agents.is_available(resolved):
-                            agents.trigger_sync(resolved, message=f"btrain: {notify_text}",
-                                                channel=agents_channel)
+                            delivery = create_btrain_delivery(
+                                lane,
+                                notify_text=notify_text,
+                                target=resolved,
+                                channel=agents_channel,
+                                now=current_time,
+                            )
+                            repo_entry["deliveries"][delivery["id"]] = delivery
+                            agents.trigger_sync(
+                                resolved,
+                                message=f"btrain: {notify_text}",
+                                channel=agents_channel,
+                                delivery_id=delivery["id"],
+                            )
+                            delivered = True
+                    if not delivered:
+                        store.add(
+                            "system",
+                            f"btrain delivery failed for lane {lid}: no available repo-matched target for {target}.",
+                            msg_type="system",
+                            channel=agents_channel,
+                        )
+
+    delivery_actions = advance_btrain_deliveries(
+        repo_entry["deliveries"],
+        lanes=lanes,
+        now=current_time,
+    )
+    if agents and store:
+        for delivery in delivery_actions["retry"]:
+            target = delivery.get("target")
+            if not target or not agents.is_available(target):
+                failed = repo_entry["deliveries"].get(delivery.get("id"))
+                if failed:
+                    failed["status"] = "failed"
+                    failed["failedAt"] = current_time
+                    failed["failureReason"] = "target-unavailable"
+                    store.add(
+                        "system",
+                        build_btrain_delivery_failure_text(failed),
+                        msg_type="system",
+                channel=failed.get("channel") or "agents",
+                    )
+                continue
+            agents.trigger_sync(
+                target,
+                message=f"btrain: {delivery.get('notifyText', '')}",
+                channel=delivery.get("channel") or default_agents_channel,
+                delivery_id=delivery.get("id"),
+            )
+            store.add(
+                "system",
+                build_btrain_delivery_retry_text(delivery),
+                msg_type="system",
+                channel=delivery.get("channel") or default_agents_channel,
+            )
+        for delivery in delivery_actions["failed"]:
+            store.add(
+                "system",
+                build_btrain_delivery_failure_text(delivery),
+                msg_type="system",
+                channel=delivery.get("channel") or default_agents_channel,
+            )
 
     changed = old_cache.get("lanes") != repo_status.get("lanes") if old_cache else True
     if changed and _event_loop:
@@ -522,6 +594,7 @@ def configure(cfg: dict, session_token: str = ""):
         default_mention=cfg.get("routing", {}).get("default", "none"),
         max_hops=max_hops,
         online_checker=lambda: set(registry.get_active_names()) if registry else set(),
+        card_lookup=registry.get_card,
     )
     agents = AgentTrigger(registry, data_dir=data_dir)
 
@@ -761,6 +834,7 @@ def configure(cfg: dict, session_token: str = ""):
             "cache": {},
             "prev_tasks": {},
             "prev_statuses": {},
+            "deliveries": {},
             "btrain_cmd": btrain_cmd,
             "env": env,
             "interval": interval,
@@ -2529,6 +2603,38 @@ async def get_rules_freshness():
     return JSONResponse(rules.agent_freshness())
 
 
+@app.post("/api/btrain/delivery-ack")
+async def acknowledge_btrain_delivery_api(request: Request):
+    """Record that a wrapper consumed and acknowledged one or more btrain wakeups."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    raw_ids = body.get("delivery_ids")
+    if not isinstance(raw_ids, list):
+        return JSONResponse({"error": "delivery_ids must be a list"}, status_code=400)
+
+    agent_name = str(body.get("agent", "")).strip()
+    acknowledged = []
+    with _btrain_lock:
+        for raw_id in raw_ids:
+            delivery_id = str(raw_id or "").strip()
+            if not delivery_id:
+                continue
+            for entry in _btrain_repos.values():
+                delivery = acknowledge_btrain_delivery(
+                    entry.get("deliveries", {}),
+                    delivery_id,
+                    agent_name=agent_name,
+                )
+                if delivery:
+                    acknowledged.append(delivery_id)
+                    break
+
+    return JSONResponse({"ok": True, "acknowledged": acknowledged})
+
+
 @app.get("/api/summaries")
 async def get_summaries(channel: str = ""):
     """Get persisted shared summaries. If channel is provided, return that channel only."""
@@ -2566,6 +2672,7 @@ async def write_summary(request: Request):
 @app.get("/api/btrain/lanes")
 async def get_btrain_lanes():
     """Return cached btrain lane states."""
+    agent_cards = registry.get_agent_cards() if registry else {}
     with _btrain_lock:
         if _multi_repo:
             repos_data = []
@@ -2576,11 +2683,11 @@ async def get_btrain_lanes():
                     "lanes": entry["cache"].get("lanes", []),
                     "repurposeReady": entry["cache"].get("repurposeReady", []),
                 })
-            return JSONResponse({"repos": repos_data})
+            return JSONResponse({"repos": repos_data, "agentCards": agent_cards})
         entry = next(iter(_btrain_repos.values()), {"cache": {}})
         lanes = entry["cache"].get("lanes", [])
         repurpose = entry["cache"].get("repurposeReady", [])
-    return JSONResponse({"lanes": lanes, "repurposeReady": repurpose})
+    return JSONResponse({"lanes": lanes, "repurposeReady": repurpose, "agentCards": agent_cards})
 
 
 @app.get("/api/btrain/lanes/{lane_id}")

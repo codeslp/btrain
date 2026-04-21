@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import { open } from "node:fs/promises"
 import os from "node:os"
@@ -12,6 +13,12 @@ import {
   loadHarnessProfile,
   normalizeHarnessProfileId,
 } from "./harness/index.mjs"
+import {
+  TASK_ARTIFACT_ENVELOPE_VERSION,
+  buildTaskArtifactEnvelope,
+  createEmptyTaskArtifactEnvelope,
+  normalizeTaskArtifactEnvelope,
+} from "./harness/task-envelope.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -97,6 +104,14 @@ const DEFAULT_CURRENT = {
   base: "",
   lastUpdated: "",
 }
+
+// Token-efficiency knobs for `btrain handoff`: long reviewer prose in the
+// `Next Action` field is spilled to .btrain/handoff-notes/ so the default
+// handoff dump stays compact. Threshold 0 disables spill entirely.
+const DEFAULT_SPILL_NEXT_CHARS = 400
+const SPILL_PREVIEW_CHARS = 180
+const HANDOFF_NOTES_DIRNAME = "handoff-notes"
+const SPILL_MARKER_RE = /\[spilled:\s*([^,\]]+?)\s*,\s*(\d+)B\]/
 
 function createEmptyDelegationPacket() {
   return {
@@ -1126,6 +1141,7 @@ function getRepoPaths(repoRoot) {
     overridesDir: path.join(repoRoot, ".btrain", "overrides"),
     projectTomlPath: path.join(repoRoot, ".btrain", "project.toml"),
     reviewsDir: path.join(repoRoot, ".btrain", "reviews"),
+    handoffNotesDir: path.join(repoRoot, ".btrain", HANDOFF_NOTES_DIRNAME),
     locksPath: path.join(repoRoot, ".btrain", LOCKS_FILENAME),
     handoffPath: path.resolve(repoRoot, DEFAULT_HANDOFF_RELATIVE_PATH),
     agentsPath: path.join(repoRoot, "AGENTS.md"),
@@ -3377,6 +3393,186 @@ async function compactHandoffHistory(repoRoot, { config: providedConfig, laneId 
   ]
 }
 
+function resolveSpillThreshold(config) {
+  const raw =
+    config?.handoff?.spill_next_chars ??
+    config?.handoff?.spillNextChars ??
+    config?.handoff?.spill_next_action_chars
+  if (raw === undefined || raw === null || raw === "") {
+    return DEFAULT_SPILL_NEXT_CHARS
+  }
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_SPILL_NEXT_CHARS
+  }
+  return parsed
+}
+
+function buildSpillFilename({ laneId, actorLabel }) {
+  const lanePart = laneId ? `lane-${laneId}` : "repo"
+  const tsSafe = formatIsoTimestamp().replace(/[:.]/g, "-")
+  const actorSafe = (actorLabel || "btrain")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 32) || "btrain"
+  return `${lanePart}-next-${tsSafe}-${actorSafe}.md`
+}
+
+function extractSpillPathFromNextAction(nextAction) {
+  if (typeof nextAction !== "string") {
+    return null
+  }
+  const match = SPILL_MARKER_RE.exec(nextAction)
+  if (!match) {
+    return null
+  }
+  return match[1].trim()
+}
+
+function buildSpillPointerValue({ body, relativePath }) {
+  const trimmed = body.trim()
+  const preview = trimmed.length > SPILL_PREVIEW_CHARS
+    ? `${trimmed.slice(0, SPILL_PREVIEW_CHARS).trimEnd()}…`
+    : trimmed
+  const bytes = Buffer.byteLength(body, "utf8")
+  // Keep pointer on a single line — parseCurrentSection splits on \n.
+  const singleLinePreview = preview.replace(/\s+/g, " ").trim()
+  return `${singleLinePreview} [spilled: ${relativePath}, ${bytes}B]`
+}
+
+async function maybeSpillNextAction({
+  repoRoot,
+  config,
+  laneId,
+  value,
+  actorLabel,
+}) {
+  if (typeof value !== "string" || !value) {
+    return value
+  }
+  if (SPILL_MARKER_RE.test(value)) {
+    // Caller already handed us a pointer (e.g. replay); leave it alone.
+    return value
+  }
+  const threshold = resolveSpillThreshold(config)
+  if (threshold <= 0 || value.length <= threshold) {
+    return value
+  }
+  const repoPaths = getRepoPaths(repoRoot)
+  const filename = buildSpillFilename({ laneId, actorLabel })
+  const absolutePath = path.join(repoPaths.handoffNotesDir, filename)
+  const relativePath = path.posix.join(".btrain", HANDOFF_NOTES_DIRNAME, filename)
+
+  const header = [
+    "---",
+    `lane: ${laneId || ""}`,
+    `actor: ${actorLabel || "btrain"}`,
+    `written_at: ${formatIsoTimestamp()}`,
+    `source: handoff Next Action`,
+    "---",
+    "",
+  ].join("\n")
+  await writeText(absolutePath, header + value + (value.endsWith("\n") ? "" : "\n"))
+  return buildSpillPointerValue({ body: value, relativePath })
+}
+
+async function readSpilledNextActionBody(repoRoot, nextAction) {
+  const relativePath = extractSpillPathFromNextAction(nextAction)
+  if (!relativePath) {
+    return null
+  }
+  const normalized = relativePath.startsWith(".btrain/")
+    ? relativePath
+    : relativePath
+  const absolute = path.resolve(repoRoot, normalized)
+  if (!(await pathExists(absolute))) {
+    return { path: absolute, body: null, missing: true }
+  }
+  const body = await readText(absolute)
+  return { path: absolute, body, missing: false }
+}
+
+function canonicalizeForHash(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeForHash)
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort()
+    const out = {}
+    for (const key of keys) {
+      out[key] = canonicalizeForHash(value[key])
+    }
+    return out
+  }
+  return value
+}
+
+function pickHashFieldsFromCurrent(current) {
+  if (!current || typeof current !== "object") {
+    return {}
+  }
+  return {
+    task: current.task || "",
+    owner: current.owner || "",
+    reviewer: current.reviewer || "",
+    status: current.status || "",
+    reasonCode: current.reasonCode || "",
+    reasonTags: Array.isArray(current.reasonTags) ? [...current.reasonTags].sort() : [],
+    repairOwner: current.repairOwner || "",
+    repairEscalation: current.repairEscalation || "",
+    repairAttempts: Number(current.repairAttempts) || 0,
+    reviewMode: current.reviewMode || "",
+    lockedFiles: Array.isArray(current.lockedFiles) ? [...current.lockedFiles].sort() : [],
+    nextAction: current.nextAction || "",
+    base: current.base || "",
+    lastUpdated: current.lastUpdated || "",
+    _laneId: current._laneId || "",
+  }
+}
+
+function computeHandoffStateHash(result) {
+  if (!result || typeof result !== "object") {
+    return ""
+  }
+  const lanes = Array.isArray(result.lanes)
+    ? [...result.lanes]
+        .map((lane) => pickHashFieldsFromCurrent(lane))
+        .sort((a, b) => (a._laneId || "").localeCompare(b._laneId || ""))
+    : null
+  const locks = Array.isArray(result.locks)
+    ? [...result.locks]
+        .map((lock) => ({
+          lane: lock.lane || "",
+          path: lock.path || "",
+          owner: lock.owner || "",
+        }))
+        .sort((a, b) =>
+          (a.lane + a.path).localeCompare(b.lane + b.path),
+        )
+    : []
+  const overrides = Array.isArray(result.overrides)
+    ? [...result.overrides]
+        .map((override) => ({
+          id: override.id || "",
+          action: override.action || "",
+          scope: override.scope || "",
+          laneId: override.laneId || "",
+          requestedBy: override.requestedBy || "",
+          confirmedBy: override.confirmedBy || "",
+        }))
+        .sort((a, b) => (a.id || "").localeCompare(b.id || ""))
+    : []
+
+  const canonical = canonicalizeForHash({
+    v: 1,
+    current: lanes ? null : pickHashFieldsFromCurrent(result.current),
+    lanes,
+    locks,
+    overrides,
+  })
+  return createHash("sha1").update(JSON.stringify(canonical)).digest("hex").slice(0, 16)
+}
+
 async function updateHandoff(repoRoot, updates, options = {}) {
   const config = options.config || (await readProjectConfig(repoRoot))
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
@@ -3408,6 +3604,22 @@ async function updateHandoff(repoRoot, updates, options = {}) {
 
     if (!nextCurrent.lastUpdated) {
       nextCurrent.lastUpdated = `btrain ${formatIsoTimestamp()}`
+    }
+
+    // Spill long Next Action bodies to .btrain/handoff-notes/ so `btrain handoff`
+    // output stays compact. The in-file value becomes a short preview + pointer.
+    // No-op when the value is short, already a pointer, or spill is disabled.
+    if (
+      typeof nextCurrent.nextAction === "string" &&
+      nextCurrent.nextAction !== existingCurrent.nextAction
+    ) {
+      nextCurrent.nextAction = await maybeSpillNextAction({
+        repoRoot,
+        config,
+        laneId: options.laneId || nextCurrent._laneId || "",
+        value: nextCurrent.nextAction,
+        actorLabel: options.actorLabel || "btrain",
+      })
     }
 
     let nextContent = replaceOrPrependSection(existingContent, "Current", buildCurrentSection(nextCurrent))
@@ -4258,7 +4470,7 @@ async function checkHandoff(repoRoot) {
       guidance += `\n\nActive overrides:\n${overrides.map((record) => `  ${record.id}: ${formatOverrideSummary(record)}`).join("\n")}`
     }
 
-    return {
+    const multiResult = {
       repoName,
       repoRoot,
       handoffPath: repoPaths.handoffPath,
@@ -4269,6 +4481,8 @@ async function checkHandoff(repoRoot) {
       agentCheck,
       guidance,
     }
+    multiResult.stateHash = computeHandoffStateHash(multiResult)
+    return multiResult
   }
 
   // Single-lane mode (backward compatible)
@@ -4359,7 +4573,7 @@ async function checkHandoff(repoRoot) {
     }
   }
 
-  return {
+  const singleResult = {
     repoName,
     repoRoot,
     handoffPath: repoPaths.handoffPath,
@@ -4368,6 +4582,8 @@ async function checkHandoff(repoRoot) {
     agentCheck,
     guidance,
   }
+  singleResult.stateHash = computeHandoffStateHash(singleResult)
+  return singleResult
 }
 
 function parseTomlString(rawValue) {
@@ -6915,6 +7131,210 @@ async function getRepoStatus(repoRoot) {
   return status
 }
 
+async function getGitBranchName(repoRoot) {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: repoRoot,
+      maxBuffer: 1024 * 1024,
+    })
+    return stdout.trim()
+  } catch {
+    return ""
+  }
+}
+
+async function collectStartupReadFirstPaths(repoRoot) {
+  const results = []
+  const candidates = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".btrain/project.toml",
+    "README.md",
+    "docs/architecture.md",
+    "research/implementation_plan.md",
+  ]
+
+  for (const relativePath of candidates) {
+    if (results.length >= 5) {
+      break
+    }
+
+    if (await pathExists(path.join(repoRoot, relativePath))) {
+      results.push(relativePath)
+    }
+  }
+
+  const memoryDir = path.join(repoRoot, ".claude", "projects")
+  if (results.length < 5 && (await pathExists(memoryDir))) {
+    try {
+      const entries = (await fs.readdir(memoryDir)).filter(Boolean).sort()
+      for (const entry of entries) {
+        const memoryPath = path.join(memoryDir, entry, "memory", "MEMORY.md")
+        if (await pathExists(memoryPath)) {
+          results.push(path.relative(repoRoot, memoryPath))
+          break
+        }
+      }
+    } catch {
+      // Ignore missing or unreadable project memory directories.
+    }
+  }
+
+  return results
+}
+
+function getStartupLaneRole(lane, agentName) {
+  const normalizedAgent = String(agentName || "").trim().toLowerCase()
+  if (!normalizedAgent) {
+    return ""
+  }
+
+  const owner = String(lane?.owner || "").trim().toLowerCase()
+  const reviewer = String(lane?.reviewer || "").trim().toLowerCase()
+  const status = String(lane?.status || "").trim().toLowerCase()
+  const activeOwnerStatuses = new Set(["in-progress", "changes-requested", "repair-needed"])
+
+  if (owner === normalizedAgent && activeOwnerStatuses.has(status)) {
+    return "writer"
+  }
+  if (reviewer === normalizedAgent && status === "needs-review") {
+    return "reviewer"
+  }
+  if (owner === normalizedAgent && status === "needs-review") {
+    return "writer-waiting"
+  }
+
+  return ""
+}
+
+function summarizeStartupLane(lane, role = "") {
+  const lockPaths = Array.isArray(lane?.lockPaths)
+    ? lane.lockPaths
+    : Array.isArray(lane?.lockedFiles)
+      ? lane.lockedFiles
+      : []
+
+  return {
+    laneId: lane?._laneId || "",
+    task: lane?.task || "(none)",
+    status: lane?.status || "unknown",
+    owner: lane?.owner || "",
+    reviewer: lane?.reviewer || "",
+    role: role || "",
+    nextAction: lane?.nextAction || "",
+    lockPaths: lockPaths.filter(Boolean),
+  }
+}
+
+function buildStartupFocusLanes(handoff) {
+  const lanes = Array.isArray(handoff?.lanes)
+    ? handoff.lanes
+    : handoff?.current
+      ? [{ ...handoff.current, _laneId: handoff.current._laneId || "" }]
+      : []
+
+  const agentName = handoff?.agentCheck?.status === "verified" ? handoff.agentCheck.agentName : ""
+  const roleMatched = lanes
+    .map((lane) => {
+      const role = getStartupLaneRole(lane, agentName)
+      return role ? summarizeStartupLane(lane, role) : null
+    })
+    .filter(Boolean)
+
+  if (roleMatched.length > 0) {
+    return roleMatched.slice(0, 3)
+  }
+
+  const activeStatuses = new Set(["in-progress", "needs-review", "changes-requested", "repair-needed"])
+  const activeLanes = lanes
+    .filter((lane) => activeStatuses.has(String(lane?.status || "").trim().toLowerCase()))
+    .map((lane) => summarizeStartupLane(lane, "shared"))
+
+  return activeLanes.slice(0, 3)
+}
+
+function buildStartupCommands(handoff, focusLanes) {
+  const commands = []
+  const primaryLane = focusLanes[0]
+
+  if (primaryLane?.role === "writer" && primaryLane.laneId && primaryLane.owner) {
+    commands.push(
+      `btrain handoff update --lane ${primaryLane.laneId} --status needs-review --actor "${primaryLane.owner}"`,
+    )
+  } else if (primaryLane?.role === "reviewer" && primaryLane.laneId) {
+    const reviewer = primaryLane.reviewer || "<reviewer>"
+    commands.push(`btrain handoff resolve --lane ${primaryLane.laneId} --summary "..." --actor "${reviewer}"`)
+  } else if (focusLanes.length === 0) {
+    if (Array.isArray(handoff?.lanes) && handoff.lanes.length > 0) {
+      commands.push('btrain handoff claim --lane <id> --task "..." --owner "..." --reviewer "..." --files "..."')
+    } else {
+      commands.push('btrain handoff claim --task "..." --owner "..." --reviewer "..."')
+    }
+  }
+
+  commands.push(
+    "btrain handoff",
+    "btrain locks",
+    "btrain harness list",
+    "btrain go",
+    "btrain doctor",
+  )
+
+  return commands
+}
+
+async function resolveStartupHarnessSummary(repoRoot, config) {
+  const harnessConfig = getHarnessConfig(config)
+
+  try {
+    const profile = await resolveActiveHarnessProfile(repoRoot, config)
+    return {
+      activeProfile: harnessConfig.activeProfile,
+      dispatchPrompt: profile.loop?.dispatchPrompt || FALLBACK_LOOP_DISPATCH_PROMPT,
+      error: "",
+    }
+  } catch (error) {
+    return {
+      activeProfile: harnessConfig.activeProfile,
+      dispatchPrompt: "",
+      error: error?.message || "Harness profile could not be loaded.",
+    }
+  }
+}
+
+async function getStartupSnapshot(repoRoot) {
+  const config = await readProjectConfig(repoRoot)
+  if (!config) {
+    throw new BtrainError({
+      message: "Repo is not bootstrapped enough for `btrain startup`.",
+      reason: "Missing `.btrain/project.toml`.",
+      fix: "Run `btrain init .` or pass --repo to a bootstrapped repo.",
+    })
+  }
+
+  const handoff = await checkHandoff(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+  const activeAgents = Array.isArray(config?.agents?.active) ? config.agents.active : []
+  const dirtyPaths = await listGitStatusPaths(repoRoot)
+  const harness = await resolveStartupHarnessSummary(repoRoot, config)
+  const focusLanes = buildStartupFocusLanes(handoff)
+
+  return {
+    repoName: handoff.repoName,
+    repoRoot,
+    agentCheck: handoff.agentCheck,
+    activeAgents,
+    laneIds: laneConfigs ? laneConfigs.map((lane) => lane.id) : [],
+    branch: await getGitBranchName(repoRoot),
+    dirtyPaths,
+    harness,
+    readFirstPaths: await collectStartupReadFirstPaths(repoRoot),
+    focusLanes,
+    commands: buildStartupCommands(handoff, focusLanes),
+    note: "Do not read .claude/collab/HANDOFF_*.md directly — always use the CLI.",
+  }
+}
+
 async function getStatus({ repoRoot } = {}) {
   if (repoRoot) {
     return [await getRepoStatus(repoRoot)]
@@ -7234,13 +7654,22 @@ async function doctor({ repoRoot, repair = false, skipFeedback = false } = {}) {
 export {
   BtrainError,
   DEFAULT_LOCK_TTL_MS,
+  DEFAULT_SPILL_NEXT_CHARS,
+  HANDOFF_NOTES_DIRNAME,
+  TASK_ARTIFACT_ENVELOPE_VERSION,
   acquireLocks,
+  buildTaskArtifactEnvelope,
   checkHandoff,
+  computeHandoffStateHash,
+  extractSpillPathFromNextAction,
+  readSpilledNextActionBody,
+  resolveSpillThreshold,
   pushAgentPrompt,
   checkLockConflicts,
   claimHandoff,
   compactHandoffHistory,
   consumeOverride,
+  createEmptyTaskArtifactEnvelope,
   doctor,
   findAvailableLane,
   findRepoRoot,
@@ -7249,6 +7678,7 @@ export {
   getLaneConfigs,
   getRepoPaths,
   getReviewStatus,
+  getStartupSnapshot,
   getStatus,
   grantOverride,
   initRepo,
@@ -7260,6 +7690,7 @@ export {
   listActiveOverrides,
   listLocks,
   listRepos,
+  normalizeTaskArtifactEnvelope,
   parseCsvList,
   readAllLaneStates,
   readLockRegistry,

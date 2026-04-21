@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "writer-lane-discipline",
+  "category": "writer-path",
+  "label": "Writer path with correct lane discipline",
+  "description": "A writer claims a lane, stays within locked files, and hands off with a filled reviewer context before review.",
+  "purpose": "Catch regressions where the writer edits outside locked files, skips the delegation packet, or hands off an empty diff as needs-review.",
+  "profileRefs": ["default"],
+  "tags": ["writer", "lane-discipline", "delegation-packet"],
+  "expectedPrimaryOutcome": "pass",
+  "hardFailureCategories": [
+    "workflow-violation",
+    "routing-error",
+    "insufficient-context"
+  ],
+  "requiresDiff": true,
+  "requiresDelegationAcknowledgement": false,
+  "artifactRefs": [
+    {
+      "kind": "spec",
+      "label": "Meta-harness implementation plan",
+      "path": "specs/010-meta-harness-for-btrain-implementation-plan.md",
+      "note": "Workstream 6: writer path with correct lane discipline."
+    }
+  ]
+}

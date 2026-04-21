@@ -40,12 +40,14 @@ def fetch_btrain_context(
         url = f"http://127.0.0.1:{server_port}/api/btrain/lanes"
         with urllib.request.urlopen(url, timeout=2) as response:
             lane_data = json.loads(response.read())
+        lanes, agent_cards = _extract_rest_lane_payload(lane_data, repo_root)
         return _select_lane_context(
-            lane_data.get("lanes", []),
+            lanes,
             agent_name,
             owner_key="owner",
             reviewer_key="reviewer",
             formatter=format_lane_context_from_json,
+            agent_cards=agent_cards,
         )
     except Exception:
         pass
@@ -109,7 +111,9 @@ def split_lane_blocks(output: str) -> list[dict]:
     return blocks
 
 
-def format_lane_context_from_json(lane: dict, role: str = "writer") -> str:
+def format_lane_context_from_json(
+    lane: dict, role: str = "writer", *, agent_card: dict | None = None
+) -> str:
     """Format a compact btrain lane context block from JSON state."""
     return _render_lane_context(
         lane_id=lane.get("_laneId", "?"),
@@ -119,10 +123,13 @@ def format_lane_context_from_json(lane: dict, role: str = "writer") -> str:
         reviewer=lane.get("reviewer", "(unassigned)"),
         locked=", ".join(lane.get("lockedFiles", [])) or "(none)",
         role=role,
+        card_summary=format_agent_card_summary(agent_card),
     )
 
 
-def format_lane_context(lane: dict, role: str = "writer") -> str:
+def format_lane_context(
+    lane: dict, role: str = "writer", *, agent_card: dict | None = None
+) -> str:
     """Format a compact btrain lane context block parsed from CLI text."""
     return _render_lane_context(
         lane_id=lane.get("_lane_id", "?"),
@@ -132,7 +139,54 @@ def format_lane_context(lane: dict, role: str = "writer") -> str:
         reviewer=lane.get("peer reviewer", "(unassigned)"),
         locked=lane.get("locked files", "(none)"),
         role=role,
+        card_summary=format_agent_card_summary(agent_card),
     )
+
+
+def format_agent_card_summary(card: dict | None) -> str:
+    """Return a compact one-line Agent Card summary, or '' when nothing useful is set.
+
+    Read-only renderer: empty fields are skipped so an unset card contributes
+    nothing to lane context and nothing to callers that inject it elsewhere.
+    """
+    if not card:
+        return ""
+    parts: list[str] = []
+    runner = card.get("runner") or ""
+    role = card.get("role") or ""
+    lane_affinity = card.get("lane_affinity") or ""
+    readiness = card.get("readiness") or ""
+    caps = _normalize_capability_list(card.get("capabilities"))
+    if runner:
+        parts.append(f"runner={runner}")
+    if role:
+        parts.append(f"role={role}")
+    if lane_affinity:
+        parts.append(f"lane={lane_affinity}")
+    if caps:
+        parts.append("caps=" + ",".join(caps))
+    if readiness:
+        parts.append(f"readiness={readiness}")
+    if not parts:
+        return ""
+    return "CARD " + " ".join(parts)
+
+
+def _normalize_capability_list(value) -> list[str]:
+    """Normalize capability input for display.
+
+    A scalar string like ``"review"`` must stay a single capability, not be
+    iterated into one-character tokens. Falsy or non-iterable values render
+    as an empty list.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, (str, bytes)):
+        text = value.decode() if isinstance(value, bytes) else value
+        return [text] if text else []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [str(c) for c in value if str(c)]
+    return [str(value)]
 
 
 def _select_lane_context(
@@ -142,25 +196,70 @@ def _select_lane_context(
     owner_key: str,
     reviewer_key: str,
     formatter,
+    agent_cards: dict[str, dict] | None = None,
 ) -> str:
     if not lanes:
         return ""
 
     agent_lower = agent_name.lower()
+    agent_card = _resolve_agent_card(agent_cards, agent_name)
 
     for lane in lanes:
         if lane.get(owner_key, "").lower() == agent_lower and lane.get("status", "") in _ACTIVE_OWNER_STATUSES:
-            return formatter(lane, "writer")
+            return formatter(lane, "writer", agent_card=agent_card)
 
     for lane in lanes:
         if lane.get(reviewer_key, "").lower() == agent_lower and lane.get("status", "") == "needs-review":
-            return formatter(lane, "reviewer")
+            return formatter(lane, "reviewer", agent_card=agent_card)
 
     for lane in lanes:
         if lane.get(owner_key, "").lower() == agent_lower and lane.get("status", "") == "needs-review":
-            return formatter(lane, "writer-waiting")
+            return formatter(lane, "writer-waiting", agent_card=agent_card)
 
     return ""
+
+
+def _extract_rest_lane_payload(payload: dict, repo_root: str) -> tuple[list[dict], dict[str, dict]]:
+    """Normalize single-repo and multi-repo lane API payloads.
+
+    The live wrapper already knows its repo root, so use it to select the right
+    lane set when the dashboard is aggregating multiple repos.
+    """
+    agent_cards = payload.get("agentCards", {})
+    repos = payload.get("repos")
+    if isinstance(repos, list):
+        target_repo = _normalize_repo_path(repo_root)
+        for entry in repos:
+            if _normalize_repo_path(entry.get("path", "")) == target_repo:
+                return entry.get("lanes", []), agent_cards
+        if len(repos) == 1:
+            return repos[0].get("lanes", []), agent_cards
+        return [], agent_cards
+    return payload.get("lanes", []), agent_cards
+
+
+def _resolve_agent_card(agent_cards: dict[str, dict] | None, agent_name: str) -> dict | None:
+    """Resolve an Agent Card by exact or case-insensitive instance name."""
+    if not agent_cards:
+        return None
+    if agent_name in agent_cards:
+        return agent_cards[agent_name]
+
+    agent_lower = agent_name.lower()
+    if agent_lower in agent_cards:
+        return agent_cards[agent_lower]
+
+    for name, card in agent_cards.items():
+        if str(name).lower() == agent_lower:
+            return card
+    return None
+
+
+def _normalize_repo_path(repo_root: str) -> str:
+    try:
+        return str(Path(repo_root).resolve())
+    except Exception:
+        return repo_root
 
 
 def _render_lane_context(
@@ -172,12 +271,15 @@ def _render_lane_context(
     reviewer: str,
     locked: str,
     role: str,
+    card_summary: str = "",
 ) -> str:
     parts = [
         f"LANE {lane_id}: {status} | {task}",
         f"W={owner} R={reviewer} lock={locked}",
         _build_role_note(role, lane_id, owner, reviewer),
     ]
+    if card_summary:
+        parts.append(card_summary)
     return " ".join(parts)
 
 

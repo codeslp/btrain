@@ -1,7 +1,7 @@
-"""Unit tests for btrain lane context injection (Workstream 6).
+"""Unit tests for btrain lane context injection helpers.
 
-Tests _parse_btrain_output, _format_lane_context, _fetch_btrain_context,
-and _resolve_repo_root from wrapper.py.
+Tests parsing, formatting, repo resolution, first-touch reminders,
+and btrain context fetching from wrapper.py.
 """
 
 import sys
@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from wrapper import (
+    _apply_btrain_context_or_reminder,
+    _build_btrain_first_touch_reminder,
     _parse_btrain_output,
     _format_lane_context,
     _fetch_btrain_context,
@@ -193,11 +195,86 @@ class TestResolveRepoRoot(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestFirstTouchReminder(unittest.TestCase):
+
+    def test_builds_handoff_and_startup_reminder(self):
+        reminder = _build_btrain_first_touch_reminder("/tmp/repo")
+
+        self.assertIn("REMINDER:", reminder)
+        self.assertIn("btrain handoff --repo /tmp/repo", reminder)
+        self.assertIn("btrain startup --repo /tmp/repo", reminder)
+
+    def test_missing_context_appends_reminder_once(self):
+        prompt, reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "",
+            False,
+        )
+
+        self.assertTrue(reminder_sent)
+        self.assertIn("Message in #agents:", prompt)
+        self.assertIn("REMINDER:", prompt)
+
+    def test_second_missing_context_does_not_repeat_reminder(self):
+        first_prompt, reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "",
+            False,
+        )
+        second_prompt, second_reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "",
+            reminder_sent,
+        )
+
+        self.assertIn("REMINDER:", first_prompt)
+        self.assertNotIn("REMINDER:", second_prompt)
+        self.assertTrue(second_reminder_sent)
+
+    def test_present_context_appends_lane_context_and_resets_state(self):
+        prompt, reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "LANE a | writer | Fix auth bug",
+            True,
+        )
+
+        self.assertFalse(reminder_sent)
+        self.assertIn("LANE a | writer | Fix auth bug", prompt)
+        self.assertNotIn("REMINDER:", prompt)
+
+    def test_context_rearms_reminder_for_future_missing_context(self):
+        _prompt, reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "",
+            False,
+        )
+        _prompt, reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "LANE a | writer | Fix auth bug",
+            reminder_sent,
+        )
+        prompt, reminder_sent = _apply_btrain_context_or_reminder(
+            "Message in #agents:",
+            "/tmp/repo",
+            "",
+            reminder_sent,
+        )
+
+        self.assertTrue(reminder_sent)
+        self.assertIn("REMINDER:", prompt)
+
+
 class TestFetchBtrainContext(unittest.TestCase):
 
     @patch("wrapper.subprocess.run")
     @patch("urllib.request.urlopen")
-    def test_prefers_rest_api_writer_context(self, mock_urlopen, mock_run):
+    def test_prefers_rest_api_writer_context_with_agent_card(self, mock_urlopen, mock_run):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({
             "lanes": [
@@ -210,6 +287,13 @@ class TestFetchBtrainContext(unittest.TestCase):
                     "lockedFiles": ["src/auth.py", "src/utils.py"],
                 },
             ],
+            "agentCards": {
+                "claude": {
+                    "runner": "claude-opus",
+                    "role": "writer",
+                    "capabilities": ["review"],
+                }
+            },
         }).encode("utf-8")
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
@@ -217,6 +301,7 @@ class TestFetchBtrainContext(unittest.TestCase):
 
         self.assertIn("LANE a", result)
         self.assertIn("writer", result.lower())
+        self.assertIn("CARD runner=claude-opus role=writer caps=review", result)
         mock_run.assert_not_called()
 
     @patch("wrapper.subprocess.run")
@@ -241,6 +326,84 @@ class TestFetchBtrainContext(unittest.TestCase):
 
         self.assertIn("LANE b", result)
         self.assertIn("reviewer", result.lower())
+        mock_run.assert_not_called()
+
+    @patch("wrapper.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_rest_api_without_agent_cards_preserves_existing_output(self, mock_urlopen, mock_run):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "lanes": [
+                {
+                    "_laneId": "a",
+                    "task": "Fix auth bug in login flow",
+                    "status": "in-progress",
+                    "owner": "claude",
+                    "reviewer": "codex",
+                    "lockedFiles": ["src/auth.py"],
+                },
+            ],
+        }).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
+
+        self.assertIn("LANE a", result)
+        self.assertNotIn("CARD ", result)
+        mock_run.assert_not_called()
+
+    @patch("wrapper.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_prefers_matching_repo_from_multi_repo_payload(self, mock_urlopen, mock_run):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "repos": [
+                {
+                    "name": "other",
+                    "path": "/other/repo",
+                    "lanes": [
+                        {
+                            "_laneId": "z",
+                            "task": "Other repo task",
+                            "status": "in-progress",
+                            "owner": "claude",
+                            "reviewer": "codex",
+                            "lockedFiles": ["elsewhere.txt"],
+                        },
+                    ],
+                    "repurposeReady": [],
+                },
+                {
+                    "name": "target",
+                    "path": "/some/repo",
+                    "lanes": [
+                        {
+                            "_laneId": "b",
+                            "task": "Review dashboard rendering",
+                            "status": "needs-review",
+                            "owner": "codex",
+                            "reviewer": "claude",
+                            "lockedFiles": ["scripts/serve-dashboard.js"],
+                        },
+                    ],
+                    "repurposeReady": [],
+                },
+            ],
+            "agentCards": {
+                "claude": {
+                    "runner": "claude-opus",
+                    "role": "reviewer",
+                    "lane_affinity": "b",
+                }
+            },
+        }).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        result = _fetch_btrain_context(8300, "Claude", "/some/repo")
+
+        self.assertIn("LANE b", result)
+        self.assertNotIn("LANE z", result)
+        self.assertIn("CARD runner=claude-opus role=reviewer lane=b", result)
         mock_run.assert_not_called()
 
     @patch("wrapper.shutil.which", return_value=None)

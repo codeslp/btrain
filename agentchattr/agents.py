@@ -45,6 +45,9 @@ class AgentTrigger:
         custom_prompt = kwargs.get("prompt", "")
         if isinstance(custom_prompt, str) and custom_prompt.strip():
             entry["prompt"] = custom_prompt.strip()
+        delivery_id = str(kwargs.get("delivery_id", "")).strip()
+        if delivery_id:
+            entry["delivery_id"] = delivery_id
         if job_id is not None:
             entry["job_id"] = job_id
 
@@ -69,6 +72,9 @@ class AgentTrigger:
         custom_prompt = kwargs.get("prompt", "")
         if isinstance(custom_prompt, str) and custom_prompt.strip():
             entry["prompt"] = custom_prompt.strip()
+        delivery_id = str(kwargs.get("delivery_id", "")).strip()
+        if delivery_id:
+            entry["delivery_id"] = delivery_id
         if job_id is not None:
             entry["job_id"] = job_id
 

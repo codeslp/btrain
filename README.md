@@ -85,9 +85,38 @@ btrain handoff request-changes --lane a \
 | `btrain status [--json]` | Show all lane states (JSON output for integrations) |
 | `btrain doctor [--repair] [--skip-feedback]` | Health check; `--repair` fixes stale locks and workflow integrity |
 | `btrain locks` | List active file locks across lanes |
+| `btrain harness list` | List bundled and repo-local harness profiles plus the configured active profile |
+| `btrain harness inspect` | Inspect one harness profile, its source path, and its probe-first metadata |
+| `btrain startup` | Print a compact repo/bootstrap snapshot for a newly launched agent |
 | `btrain hooks` | Install managed pre-commit + pre-push guards |
 | `btrain override grant` | Human-confirmed override for blocked actions |
 | `btrain hcleanup` | Trim handoff history |
+
+## Harness Discovery
+
+Use the probe-first harness commands before changing workflow prompts or context wiring:
+
+```bash
+btrain harness list --repo .
+btrain harness inspect --repo . --profile default
+```
+
+`btrain harness list` shows the configured active profile and every bundled or repo-local profile the loader can see. `btrain harness inspect` shows the selected profile's description, purpose, dispatch prompt, source path, and the registry/schema metadata behind it.
+
+Repo-local overrides live under `.btrain/harness/`:
+
+```text
+.btrain/harness/
+├── registry.json
+└── profiles/
+    └── <profile>.json
+```
+
+## Startup vs Go
+
+Use `btrain startup --repo .` for a compact first-turn packet: current branch and dirty summary, active agents/lanes, active harness profile, the most relevant lane focus, and the next commands to run.
+
+Use `btrain go --repo .` when you need the broader bootstrap inventory of files and directories to read. `startup` is the quick orientation surface; `go` is the deeper file-reading checklist.
 
 ### Console Dashboard
 

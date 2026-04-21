@@ -85,6 +85,31 @@ def _fetch_btrain_context(server_port: int, agent_name: str, repo_root: str, tim
     )
 
 
+def _build_btrain_first_touch_reminder(repo_root: str) -> str:
+    """Return a bounded reminder for agents that answer without fresh btrain context."""
+    return (
+        "REMINDER: No recent btrain context was found for this repo. "
+        f"Before substantive work, run `btrain handoff --repo {repo_root}`. "
+        f"If you need a compact repo/bootstrap packet first, run `btrain startup --repo {repo_root}`."
+    )
+
+
+def _apply_btrain_context_or_reminder(
+    prompt: str,
+    repo_root: str | None,
+    btrain_ctx: str,
+    reminder_sent_without_context: bool,
+) -> tuple[str, bool]:
+    """Append lane context when present, otherwise emit a one-time first-touch reminder."""
+    if btrain_ctx:
+        return f"{prompt}\n\n{btrain_ctx}", False
+
+    if repo_root and not reminder_sent_without_context:
+        return f"{prompt}\n\n{_build_btrain_first_touch_reminder(repo_root)}", True
+
+    return prompt, reminder_sent_without_context
+
+
 def _parse_btrain_output(output: str, agent_name: str) -> str:
     return _btrain_parse_btrain_output(output, agent_name)
 
@@ -202,12 +227,54 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
         pass
 
 
+def _extract_delivery_ids(lines: list[str]) -> list[str]:
+    """Extract unique btrain delivery ids from queued trigger records."""
+    delivery_ids = []
+    seen = set()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        delivery_id = str((data or {}).get("delivery_id", "")).strip()
+        if delivery_id and delivery_id not in seen:
+            delivery_ids.append(delivery_id)
+            seen.add(delivery_id)
+    return delivery_ids
+
+
+def _report_btrain_delivery_ack(server_port: int, agent_name: str, delivery_ids: list[str], token: str = ""):
+    """Report that the wrapper consumed and injected queued btrain wakeups."""
+    if not delivery_ids:
+        return
+    try:
+        import urllib.request
+
+        body = json.dumps({"agent": agent_name, "delivery_ids": delivery_ids}).encode()
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server_port}/api/btrain/delivery-ack",
+            method="POST",
+            data=body,
+            headers=headers,
+        )
+        urllib.request.urlopen(req, timeout=3)
+    except Exception:
+        pass
+
+
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", base_name: str = "",
                    get_token_fn=None,
                    refresh_interval: int = 10, cwd: str = ".", channel_holder=None):
     """Poll queue file and inject a context prompt when triggered."""
     first_mention = True
+    reminder_sent_without_context = False
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
     while True:
@@ -235,6 +302,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                             channel_holder[0] = channel
 
                 if has_trigger:
+                    delivery_ids = _extract_delivery_ids(lines)
                     # Write channel state file so agentchattr-say picks up context
                     try:
                         chan_file = ROOT / "data" / f".agentchattr_channel_{agent_name}"
@@ -312,10 +380,15 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 
                     # btrain lane context injection (FR-5, FR-6)
                     repo_root = _resolve_repo_root(cwd)
+                    btrain_ctx = ""
                     if repo_root:
                         btrain_ctx = _fetch_btrain_context(server_port, current_name, repo_root)
-                        if btrain_ctx:
-                            prompt += f"\n\n{btrain_ctx}"
+                    prompt, reminder_sent_without_context = _apply_btrain_context_or_reminder(
+                        prompt,
+                        repo_root,
+                        btrain_ctx,
+                        reminder_sent_without_context,
+                    )
 
                     if first_mention and is_multi_instance:
                         prompt += _IDENTITY_HINT
@@ -324,6 +397,8 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     # detection in CLIs (Claude Code shows "[Pasted text +N]")
                     # which can break injection of long session prompts
                     inject_fn(prompt.replace("\n", " "))
+                    if delivery_ids:
+                        _report_btrain_delivery_ack(server_port, current_name, delivery_ids, _token)
         except Exception:
             pass
 
