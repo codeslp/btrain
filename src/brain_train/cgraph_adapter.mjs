@@ -206,7 +206,8 @@ async function execCommand(binPath, args, kind, opts = {}) {
       // stdout wasn't valid JSON
     }
 
-    const ok = payload?.ok !== false
+    // Malformed stdout (no parseable JSON) is a failure, not ok
+    const ok = payload !== null && payload.ok !== false
     return {
       ok,
       kind,
@@ -227,12 +228,15 @@ async function execCommand(binPath, args, kind, opts = {}) {
       try { payload = JSON.parse(error.stdout) } catch { /* ignore */ }
     }
 
+    // unavailable = binary not found (ENOENT) or spawn failure, NOT a non-zero exit
+    // Non-zero exit with valid JSON payload is a normal command failure (e.g. audit hard violations)
+    const isSpawnFailure = error.code === "ENOENT" || error.code === "EACCES"
     return {
       ok: false,
       kind,
       payload,
       timed_out: timedOut,
-      unavailable: !timedOut,
+      unavailable: isSpawnFailure,
       stderr_summary: (error.stderr || error.message || "").slice(0, STDERR_MAX_CHARS),
       latency_ms: latency,
       source: "subprocess",

@@ -141,18 +141,16 @@ describe("cgraph_adapter", () => {
       assert.equal(typeof result.latency_ms, "number")
     })
 
-    it("handles malformed JSON gracefully", async () => {
+    it("treats malformed JSON as failure", async () => {
       const binPath = await writeFakeBinary(tmpDir, {
         stdout: "this is not json\n",
       })
 
       const result = await execCommand(binPath, ["audit"], "audit", { skipDaemon: true })
-      // ok is false because payload is null (payload?.ok !== false → true for null, but we check !== false)
-      // Actually: null?.ok → undefined, undefined !== false → true, so ok=true
-      // Hmm, let me check the logic... payload?.ok !== false → for null payload, undefined !== false = true
-      // That's a bug in the adapter logic for malformed output. But the test should reflect current behavior.
+      assert.equal(result.ok, false, "malformed stdout must be ok=false")
       assert.equal(result.payload, null)
       assert.equal(result.timed_out, false)
+      assert.equal(result.unavailable, false, "malformed JSON is not an availability problem")
       assert.equal(result.source, "subprocess")
     })
 
@@ -184,7 +182,7 @@ describe("cgraph_adapter", () => {
       assert.match(result.stderr_summary, /KùzuDB/)
     })
 
-    it("handles non-zero exit with JSON payload", async () => {
+    it("handles non-zero exit with JSON payload as command failure, not unavailable", async () => {
       const payload = { ok: false, kind: "audit", error: "hard violations found", counts: { warn: 0, hard: 2 }, hard_zero: false }
       const binPath = await writeFakeBinary(tmpDir, {
         stdout: JSON.stringify(payload) + "\n",
@@ -194,7 +192,15 @@ describe("cgraph_adapter", () => {
       const result = await execCommand(binPath, ["audit", "--require-hard-zero"], "audit", { skipDaemon: true })
       assert.equal(result.ok, false)
       assert.deepEqual(result.payload, payload)
-      assert.equal(result.unavailable, true) // non-zero exit + no timeout = unavailable
+      assert.equal(result.unavailable, false, "non-zero exit with valid JSON is a command failure, not unavailability")
+      assert.equal(result.timed_out, false)
+    })
+
+    it("marks ENOENT as unavailable", async () => {
+      const result = await execCommand("/nonexistent/kkg", ["audit"], "audit", { skipDaemon: true })
+      assert.equal(result.ok, false)
+      assert.equal(result.unavailable, true, "missing binary should be unavailable")
+      assert.equal(result.payload, null)
     })
   })
 
