@@ -247,16 +247,19 @@ describe("cgraph_adapter", () => {
   })
 
   describe("CgraphAdapter", () => {
-    let tmpDir, binPath
+    let tmpDir, binPath, logPath
 
     before(async () => {
       tmpDir = await makeTmpDir()
+      logPath = path.join(tmpDir, "kkg-calls.jsonl")
       // Create a fake binary that responds to different commands
       binPath = path.join(tmpDir, "kkg")
       const script = [
         "#!/usr/bin/env node",
+        `const fs = require("fs");`,
         `const args = process.argv.slice(2);`,
         `const cmd = args[0];`,
+        `fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ cmd, argv: args.slice(1) }) + "\\n");`,
         `if (cmd === "manifest") {`,
         `  process.stdout.write(JSON.stringify(${JSON.stringify(fakeManifestWithCommands())}));`,
         `} else if (cmd === "blast-radius") {`,
@@ -270,7 +273,9 @@ describe("cgraph_adapter", () => {
         `  process.stdout.write(JSON.stringify({`,
         `    ok: true, kind: "audit", schema_version: "1.0",`,
         `    standards_evaluated: 20, advisories: [{ kind: "test", severity: "warn", standard_id: "C01", offenders: [] }],`,
-        `    counts: { warn: 1, hard: 0 }, hard_zero: true`,
+        `    counts: { warn: 1, hard: 0 }, hard_zero: true,`,
+        `    scope_source: args.includes("--files") ? "explicit_files" : "git",`,
+        `    files_requested: args.includes("--files") ? args[args.indexOf("--files") + 1].split(",").filter(Boolean).length : 0`,
         `  }));`,
         `} else if (cmd === "health") {`,
         `  process.stdout.write(JSON.stringify({`,
@@ -297,10 +302,45 @@ describe("cgraph_adapter", () => {
 
     it("audit returns parsed result", async () => {
       const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
-      const result = await adapter.audit({ scope: "lane" })
+      const result = await adapter.audit({ scope: "lane", files: ["src/foo.py", "src/bar.py"] })
       assert.equal(result.ok, true)
       assert.equal(result.payload.counts.warn, 1)
       assert.equal(result.payload.counts.hard, 0)
+      assert.equal(result.payload.scope_source, "explicit_files")
+      assert.equal(result.payload.files_requested, 2)
+
+      const calls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      const auditCalls = calls.filter((entry) => entry.cmd === "audit")
+      const auditCall = auditCalls[auditCalls.length - 1]
+      assert.deepEqual(auditCall?.argv, ["--format", "json", "--scope", "lane", "--files", "src/foo.py,src/bar.py"])
+    })
+
+    it("audit omits --files when given an empty file list", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const beforeCalls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean).length
+
+      const result = await adapter.audit({ scope: "all", files: [] })
+      assert.equal(result.ok, true)
+      assert.equal(result.payload.scope_source, "git")
+      assert.equal(result.payload.files_requested, 0)
+
+      const calls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      const auditCalls = calls.filter((entry) => entry.cmd === "audit")
+      assert.ok(auditCalls.length >= 2)
+      const auditCall = auditCalls[auditCalls.length - 1]
+      assert.equal(calls.length, beforeCalls + 1)
+      assert.deepEqual(auditCall.argv, ["--format", "json", "--scope", "all"])
     })
 
     it("buildEventMetadata produces correct shape", async () => {

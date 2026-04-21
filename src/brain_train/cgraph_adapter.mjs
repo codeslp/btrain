@@ -286,17 +286,18 @@ class CgraphAdapter {
 
   // ---- Core commands ----
 
-  async blastRadius(files, laneId) {
+  async blastRadius(files, laneId, locksJson = null) {
     const args = ["blast-radius", "--files", files.join(",")]
     if (laneId) args.push("--lane", laneId)
-    args.push("--format", "json")
+    if (locksJson) args.push("--locks-json", JSON.stringify(locksJson))
     return this._exec(args, "blast_radius")
   }
 
   async reviewPacket(opts = {}) {
-    const args = ["review-packet", "--format", "json"]
+    const args = ["review-packet"]
     if (opts.base) args.push("--base", opts.base)
-    if (opts.files) args.push("--files", opts.files.join(","))
+    if (opts.head) args.push("--head", opts.head)
+    if (opts.files?.length) args.push("--files", opts.files.join(","))
     if (opts.maxNodes) args.push("--max-nodes", String(opts.maxNodes))
     if (opts.project) args.push("--project", opts.project)
     return this._exec(args, "review_packet")
@@ -304,8 +305,8 @@ class CgraphAdapter {
 
   async audit(opts = {}) {
     const args = ["audit", "--format", "json"]
-    if (opts.files) args.push("--files", opts.files.join(","))
     if (opts.scope) args.push("--scope", opts.scope)
+    if (opts.files?.length) args.push("--files", opts.files.join(","))
     if (opts.profile) args.push("--profile", opts.profile)
     if (opts.requireHardZero) args.push("--require-hard-zero")
     if (opts.project) args.push("--project", opts.project)
@@ -325,7 +326,7 @@ class CgraphAdapter {
   }
 
   async health() {
-    return this._exec(["health", "--format", "json"], "health")
+    return this._exec(["health"], "health")
   }
 
   // ---- Artifact persistence ----
@@ -418,6 +419,17 @@ class CgraphAdapter {
 
     info.push(`cgraph binary: ${this.binPath}`)
     info.push(`commands: ${this.manifest.total_commands}`)
+    if (this.cgraphConfig.project) {
+      info.push(`project: ${this.cgraphConfig.project}`)
+    }
+    if (this.cgraphConfig.source_checkout) {
+      try {
+        await fs.access(this.cgraphConfig.source_checkout)
+        info.push(`source checkout: ${this.cgraphConfig.source_checkout}`)
+      } catch {
+        issues.push(`source checkout missing: ${this.cgraphConfig.source_checkout}`)
+      }
+    }
 
     // Check daemon reachability
     const daemonResult = await tryDaemon(this._socketPath, "ping", [])

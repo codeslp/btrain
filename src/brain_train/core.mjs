@@ -19,6 +19,12 @@ import {
   createEmptyTaskArtifactEnvelope,
   normalizeTaskArtifactEnvelope,
 } from "./harness/task-envelope.mjs"
+import {
+  createAdapter,
+  failOpen,
+  probeManifest,
+  resolveBinary,
+} from "./cgraph_adapter.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -27,6 +33,7 @@ import {
 const DEFAULT_LOCK_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const FILE_LOCK_RETRY_MS = 50
 const FILE_LOCK_TIMEOUT_MS = 5000
+const DEFAULT_CGRAPH_GRAPH_MODE = "shared-working"
 
 async function withFileLock(lockPath, fn) {
   const deadline = Date.now() + FILE_LOCK_TIMEOUT_MS
@@ -3171,6 +3178,238 @@ function resolveCurrentStateFromWorkflowEvents(current, events) {
   }
 }
 
+function hasCgraphConfig(config) {
+  return Boolean(config?.cgraph && typeof config.cgraph === "object" && Object.keys(config.cgraph).length > 0)
+}
+
+function createUnavailableCgraphAdapterResult(kind, reason = "") {
+  return {
+    ok: false,
+    kind,
+    payload: null,
+    timed_out: false,
+    unavailable: true,
+    stderr_summary: reason,
+    latency_ms: 0,
+    source: "subprocess",
+  }
+}
+
+function createDegradedCgraphMetadata(reason, graphMode = DEFAULT_CGRAPH_GRAPH_MODE) {
+  return {
+    status: "degraded",
+    degraded_reason: reason,
+    graph_mode: graphMode,
+    latency_ms: {},
+  }
+}
+
+function buildLaneLockMap(locks = []) {
+  const byLane = {}
+  for (const lock of locks) {
+    if (!lock?.lane || !lock?.path) {
+      continue
+    }
+    if (!byLane[lock.lane]) {
+      byLane[lock.lane] = []
+    }
+    byLane[lock.lane].push(lock.path)
+  }
+
+  return Object.fromEntries(
+    Object.entries(byLane).map(([laneId, paths]) => [laneId, normalizePathList(paths)]),
+  )
+}
+
+function extractLatestCgraphMetadata(events) {
+  if (!Array.isArray(events)) {
+    return null
+  }
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.details?.cgraph && typeof event.details.cgraph === "object") {
+      return {
+        ...event.details.cgraph,
+        recorded_at: event.recordedAt || "",
+        event_type: event.type || "",
+      }
+    }
+  }
+
+  return null
+}
+
+function shouldAttachCgraphMetadata(state) {
+  const status = String(state?.status || "").trim().toLowerCase()
+  return status !== "idle" && status !== "resolved"
+}
+
+async function attachLatestCgraphMetadataToState(repoRoot, config, state, laneId = "") {
+  if (!shouldAttachCgraphMetadata(state)) {
+    return state
+  }
+
+  const events = await readWorkflowEvents(repoRoot, config, laneId)
+  const cgraph = extractLatestCgraphMetadata(events)
+  return cgraph ? { ...state, cgraph } : state
+}
+
+async function attachLatestCgraphMetadataToStates(repoRoot, config, states) {
+  return Promise.all(
+    (states || []).map(async (state) => {
+      const laneId = typeof state?._laneId === "string" ? state._laneId : ""
+      return attachLatestCgraphMetadataToState(repoRoot, config, state, laneId)
+    }),
+  )
+}
+
+async function getCgraphAdapter(repoRoot, config) {
+  return failOpen(() => createAdapter(repoRoot, config))
+}
+
+async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files = [] } = {}) {
+  if (!Array.isArray(files) || files.length === 0) {
+    return null
+  }
+
+  const adapter = await getCgraphAdapter(repoRoot, config)
+  if (!adapter || !adapter.supports("blast-radius")) {
+    return hasCgraphConfig(config)
+      ? createDegradedCgraphMetadata("blast-radius unavailable", DEFAULT_CGRAPH_GRAPH_MODE)
+      : null
+  }
+
+  const locks = await listLocks(repoRoot)
+  const blastRadius =
+    await failOpen(() => adapter.blastRadius(files, laneId, buildLaneLockMap(locks)))
+    || createUnavailableCgraphAdapterResult("blast_radius", "blast-radius unavailable")
+  const metadata = adapter.buildEventMetadata({ blastRadius }, DEFAULT_CGRAPH_GRAPH_MODE)
+  if (!blastRadius.ok) {
+    metadata.status = "degraded"
+    metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
+  }
+  return metadata
+}
+
+async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
+  laneId = "",
+  files = [],
+  base = "",
+} = {}) {
+  const adapter = await getCgraphAdapter(repoRoot, config)
+  if (!adapter) {
+    return hasCgraphConfig(config)
+      ? createDegradedCgraphMetadata("cgraph unavailable", DEFAULT_CGRAPH_GRAPH_MODE)
+      : null
+  }
+
+  const artifactLaneId = laneId || "repo"
+  const results = {}
+
+  if (adapter.supports("review-packet")) {
+    const reviewPacket =
+      await failOpen(() => adapter.reviewPacket({ base, files }))
+      || createUnavailableCgraphAdapterResult("review_packet", "review-packet unavailable")
+    results.reviewPacket = reviewPacket
+    if (reviewPacket.ok && reviewPacket.payload) {
+      results.reviewPacketArtifact =
+        await failOpen(() => adapter.persistReviewPacket(artifactLaneId, reviewPacket.payload))
+    }
+  }
+
+  if (adapter.supports("audit")) {
+    const auditScope = laneId ? "lane" : "all"
+    const audit =
+      await failOpen(() => adapter.audit({ scope: auditScope, files }))
+      || createUnavailableCgraphAdapterResult("audit", "audit unavailable")
+    results.audit = audit
+    if (audit.ok && audit.payload) {
+      results.auditArtifact =
+        await failOpen(() => adapter.persistAuditSummary(artifactLaneId, audit.payload))
+    }
+  }
+
+  if (Object.keys(results).length === 0) {
+    return hasCgraphConfig(config)
+      ? createDegradedCgraphMetadata("no supported cgraph commands detected", DEFAULT_CGRAPH_GRAPH_MODE)
+      : null
+  }
+
+  return adapter.buildEventMetadata(results, DEFAULT_CGRAPH_GRAPH_MODE)
+}
+
+async function getDoctorCgraphSummary(repoRoot, config) {
+  if (config?.cgraph?.enabled === false) {
+    return {
+      status: "disabled",
+      info: ["cgraph explicitly disabled in .btrain/project.toml"],
+      issues: [],
+    }
+  }
+
+  const binPath = await failOpen(() => resolveBinary(config))
+  if (!binPath) {
+    return hasCgraphConfig(config)
+      ? {
+          status: "unavailable",
+          info: [`cgraph binary: ${config?.cgraph?.bin_path || "(not found on PATH)"}`],
+          issues: ["cgraph binary is unavailable"],
+        }
+      : null
+  }
+
+  const manifestResult = await failOpen(() => probeManifest(binPath, config?.cgraph?.project))
+  if (!manifestResult?.ok) {
+    return {
+      status: "unavailable",
+      info: [`cgraph binary: ${binPath}`],
+      issues: ["cgraph manifest probe failed"],
+    }
+  }
+
+  const adapter = await getCgraphAdapter(repoRoot, config)
+  if (!adapter) {
+    return {
+      status: "unavailable",
+      info: [`cgraph binary: ${binPath}`],
+      issues: ["cgraph adapter could not be created"],
+    }
+  }
+
+  const summary = await failOpen(() => adapter.doctorSummary())
+  return {
+    status: summary?.ok === false ? "degraded" : "ok",
+    info: summary?.info || [],
+    issues: summary?.issues || [],
+  }
+}
+
+async function getStartupCgraphSummary(repoRoot, config) {
+  const adapter = await getCgraphAdapter(repoRoot, config)
+  if (!adapter) {
+    return hasCgraphConfig(config)
+      ? {
+          status: "unavailable",
+          lines: ["cgraph unavailable"],
+        }
+      : null
+  }
+
+  const lines = await failOpen(() => adapter.startupSummary())
+  if (Array.isArray(lines) && lines.length > 0) {
+    return {
+      status: "ok",
+      lines,
+    }
+  }
+
+  return {
+    status: "ok",
+    lines: ["cgraph available"],
+  }
+}
+
 function getCanonicalWorkflowActor(events) {
   const workflowEvents = (events || []).filter((event) =>
     ["claim", "update", "request-changes", "resolve"].includes(event.type),
@@ -3527,6 +3766,7 @@ function pickHashFieldsFromCurrent(current) {
     base: current.base || "",
     lastUpdated: current.lastUpdated || "",
     _laneId: current._laneId || "",
+    cgraph: current.cgraph && typeof current.cgraph === "object" ? current.cgraph : null,
   }
 }
 
@@ -3771,6 +4011,11 @@ async function claimHandoff(repoRoot, options) {
     updates.lane = laneId
   }
 
+  const cgraphMetadata = await buildClaimCgraphMetadata(repoRoot, config, {
+    laneId: laneId || "",
+    files,
+  })
+
   // If lanes enabled, write to lane-specific handoff file
   if (laneConfigs && laneId) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
@@ -3791,6 +4036,7 @@ async function claimHandoff(repoRoot, options) {
         eventDetails: {
           task: options.task,
           lockedFiles: files,
+          ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
         overrideHandoffPath: handoffPath,
       },
@@ -3814,6 +4060,7 @@ async function claimHandoff(repoRoot, options) {
       eventDetails: {
         task: options.task,
         lockedFiles: files,
+        ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
       },
     },
   )
@@ -4032,6 +4279,14 @@ async function patchHandoff(repoRoot, options) {
       if (delegationPacketUpdated) {
         updates.delegationPacket = nextDelegationPacket
       }
+      const cgraphMetadata =
+        nextStatus === "needs-review"
+          ? await buildNeedsReviewCgraphMetadata(repoRoot, config, {
+              laneId,
+              files: effectiveFiles,
+              base: baseForReview || "",
+            })
+          : null
 
       return updateHandoff(repoRoot, updates, {
         actorLabel: resolvedActor || effectiveOwner,
@@ -4054,6 +4309,7 @@ async function patchHandoff(repoRoot, options) {
           repairOwner: updates.repairOwner || "",
           repairEscalation: updates.repairEscalation || "",
           repairAttempts: updates.repairAttempts || 0,
+          ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
       })
     }
@@ -4173,6 +4429,13 @@ async function patchHandoff(repoRoot, options) {
   if (delegationPacketUpdated) {
     updates.delegationPacket = nextDelegationPacket
   }
+  const cgraphMetadata =
+    nextStatus === "needs-review"
+      ? await buildNeedsReviewCgraphMetadata(repoRoot, config, {
+          files: updates.lockedFiles ?? existingCurrent.lockedFiles,
+          base: options.base !== undefined ? options.base : existingCurrent.base,
+        })
+      : null
 
   return updateHandoff(repoRoot, updates, {
     actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
@@ -4193,6 +4456,7 @@ async function patchHandoff(repoRoot, options) {
       repairOwner: updates.repairOwner || "",
       repairEscalation: updates.repairEscalation || "",
       repairAttempts: updates.repairAttempts || 0,
+      ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
   })
 }
@@ -4455,7 +4719,11 @@ async function checkHandoff(repoRoot) {
   // Multi-lane mode
   if (laneConfigs) {
     const locks = await listLocks(repoRoot)
-    const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), locks)
+    const laneStates = await attachLatestCgraphMetadataToStates(
+      repoRoot,
+      config,
+      decorateLaneStates(await readAllLaneStates(repoRoot, config), locks),
+    )
     const overrides = await listActiveOverrides(repoRoot)
     const laneGuidances = laneStates.map((state) => buildLaneGuidance(state._laneId, state))
 
@@ -4486,7 +4754,7 @@ async function checkHandoff(repoRoot) {
   }
 
   // Single-lane mode (backward compatible)
-  const current = await readCurrentState(repoRoot)
+  const current = await attachLatestCgraphMetadataToState(repoRoot, config, await readCurrentState(repoRoot))
   const overrides = await listActiveOverrides(repoRoot)
 
   let guidance
@@ -7084,7 +7352,7 @@ async function listRepos() {
 async function getRepoStatus(repoRoot) {
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
-  const current = await readCurrentState(repoRoot)
+  const current = await attachLatestCgraphMetadataToState(repoRoot, config, await readCurrentState(repoRoot))
   const repoName = config?.name || normalizeRepoName(repoRoot)
   const handoffContent = (await pathExists(repoPaths.handoffPath))
     ? await readText(repoPaths.handoffPath)
@@ -7109,7 +7377,11 @@ async function getRepoStatus(repoRoot) {
   const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
     status.locks = await listLocks(repoRoot)
-    status.lanes = decorateLaneStates(await readAllLaneStates(repoRoot, config), status.locks)
+    status.lanes = await attachLatestCgraphMetadataToStates(
+      repoRoot,
+      config,
+      decorateLaneStates(await readAllLaneStates(repoRoot, config), status.locks),
+    )
     status.current = getMostRecentlyUpdatedState(status.lanes, status.current)
     status.staleness = parseStaleness(status.current.lastUpdated)
     status.repurposeReady = status.lanes
@@ -7317,6 +7589,7 @@ async function getStartupSnapshot(repoRoot) {
   const activeAgents = Array.isArray(config?.agents?.active) ? config.agents.active : []
   const dirtyPaths = await listGitStatusPaths(repoRoot)
   const harness = await resolveStartupHarnessSummary(repoRoot, config)
+  const cgraph = await getStartupCgraphSummary(repoRoot, config)
   const focusLanes = buildStartupFocusLanes(handoff)
 
   return {
@@ -7328,6 +7601,7 @@ async function getStartupSnapshot(repoRoot) {
     branch: await getGitBranchName(repoRoot),
     dirtyPaths,
     harness,
+    cgraph,
     readFirstPaths: await collectStartupReadFirstPaths(repoRoot),
     focusLanes,
     commands: buildStartupCommands(handoff, focusLanes),
@@ -7416,6 +7690,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const overrides = await listActiveOverrides(repoRoot)
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
+  const cgraph = await getDoctorCgraphSummary(repoRoot, config)
 
   if (!(await pathExists(repoRoot))) {
     issues.push(`Repo path is missing: ${repoRoot}`)
@@ -7620,6 +7895,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
     healthy: issues.length === 0,
     issues,
     warnings,
+    cgraph,
     repurposeReady,
     overrides,
     repairs,
