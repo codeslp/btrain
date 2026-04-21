@@ -75,6 +75,8 @@ function fakeManifestWithCommands() {
     { name: "audit", summary: "Run code audit", project_aware: true, touches_kuzu: true, output_modes: ["json", "summary"], server: false, prereqs: ["KUZUDB_PATH"] },
     { name: "blast-radius", summary: "Blast radius analysis", project_aware: true, touches_kuzu: true, output_modes: ["json"], server: false, prereqs: ["KUZUDB_PATH"] },
     { name: "advise", summary: "Situational tip", project_aware: false, touches_kuzu: false, output_modes: ["json"], server: false, prereqs: [] },
+    { name: "drift-check", summary: "Drift detection", project_aware: true, touches_kuzu: true, output_modes: ["json"], server: false, prereqs: ["KUZUDB_PATH"] },
+    { name: "sync-check", summary: "Fork sync status", project_aware: false, touches_kuzu: false, output_modes: ["json"], server: false, prereqs: [] },
     { name: "health", summary: "Graph health", project_aware: true, touches_kuzu: true, output_modes: ["json"], server: false, prereqs: ["KUZUDB_PATH"] },
   ])
 }
@@ -277,6 +279,27 @@ describe("cgraph_adapter", () => {
         `    scope_source: args.includes("--files") ? "explicit_files" : "git",`,
         `    files_requested: args.includes("--files") ? args[args.indexOf("--files") + 1].split(",").filter(Boolean).length : 0`,
         `  }));`,
+        `} else if (cmd === "advise") {`,
+        `  process.stdout.write(JSON.stringify({`,
+        `    situation: args[1],`,
+        `    advisory_id: "adv_test_123",`,
+        `    suggestion: "Run kkg drift-check --lane a",`,
+        `    rationale: "test rationale",`,
+        `  }));`,
+        `} else if (cmd === "drift-check") {`,
+        `  process.stdout.write(JSON.stringify({`,
+        `    ok: true, kind: "drift_check", schema_version: "1.0",`,
+        `    since: args.includes("--since") ? args[args.indexOf("--since") + 1] : "",`,
+        `    drifted: [{ uid: "n1" }, { uid: "n2" }],`,
+        `    neighbor_files: ["src/dependency.py"],`,
+        `    advisories: []`,
+        `  }));`,
+        `} else if (cmd === "sync-check") {`,
+        `  process.stdout.write(JSON.stringify({`,
+        `    upstream: "CodeGraphContext/CodeGraphContext",`,
+        `    behind_by: 2,`,
+        `    new_commits: [{ sha: "abc", subject: "Test commit" }, { sha: "def", subject: "Another commit" }],`,
+        `  }));`,
         `} else if (cmd === "health") {`,
         `  process.stdout.write(JSON.stringify({`,
         `    ok: true, kind: "health", schema_version: "1.0",`,
@@ -341,6 +364,54 @@ describe("cgraph_adapter", () => {
       const auditCall = auditCalls[auditCalls.length - 1]
       assert.equal(calls.length, beforeCalls + 1)
       assert.deepEqual(auditCall.argv, ["--format", "json", "--scope", "all"])
+    })
+
+    it("advise uses positional situation and optional context", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const result = await adapter.advise("lock_overlap", "a", { files: "src/foo.py" })
+      assert.equal(result.ok, true)
+      assert.equal(result.payload.situation, "lock_overlap")
+
+      const calls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      const adviseCalls = calls.filter((entry) => entry.cmd === "advise")
+      const adviseCall = adviseCalls[adviseCalls.length - 1]
+      assert.deepEqual(adviseCall.argv, ["lock_overlap", "--context", "{\"files\":\"src/foo.py\"}", "--lane", "a"])
+    })
+
+    it("driftCheck passes the since cursor through to cgraph", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const result = await adapter.driftCheck(["src/foo.py"], "a", "2026-04-20T00:00:00.000Z")
+      assert.equal(result.ok, true)
+      assert.equal(result.payload.since, "2026-04-20T00:00:00.000Z")
+
+      const calls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      const driftCalls = calls.filter((entry) => entry.cmd === "drift-check")
+      const driftCall = driftCalls[driftCalls.length - 1]
+      assert.deepEqual(driftCall.argv, ["--files", "src/foo.py", "--since", "2026-04-20T00:00:00.000Z", "--lane", "a"])
+    })
+
+    it("syncCheck returns parsed result", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, source_checkout: "/tmp/cgraph" } })
+      const result = await adapter.syncCheck({ sourceDir: "/tmp/cgraph" })
+      assert.equal(result.ok, true)
+      assert.equal(result.payload.behind_by, 2)
+
+      const calls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      const syncCalls = calls.filter((entry) => entry.cmd === "sync-check")
+      const syncCall = syncCalls[syncCalls.length - 1]
+      assert.deepEqual(syncCall.argv, ["--source-dir", "/tmp/cgraph"])
     })
 
     it("buildEventMetadata produces correct shape", async () => {
@@ -414,6 +485,14 @@ describe("cgraph_adapter", () => {
       assert.ok(summary.info.some((l) => l.includes("cgraph binary:")))
       assert.ok(summary.info.some((l) => l.includes("daemon:")))
       assert.ok(summary.info.some((l) => l.includes("artifact dir:")))
+    })
+
+    it("startupSummary includes sync-check state when available", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, source_checkout: "/tmp/cgraph" } })
+      const summary = await adapter.startupSummary()
+
+      assert.ok(summary.some((line) => line.includes("graph health: B")))
+      assert.ok(summary.some((line) => line.includes("sync-check: 2 commits behind CodeGraphContext/CodeGraphContext")))
     })
   })
 

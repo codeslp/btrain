@@ -58,9 +58,12 @@ async function writeFakeKkgBinary(dir, logPath) {
       { name: "review-packet" },
       { name: "audit" },
       { name: "blast-radius" },
+      { name: "advise" },
+      { name: "drift-check" },
+      { name: "sync-check" },
       { name: "health" },
     ],
-    total_commands: 4,
+    total_commands: 7,
   }
 
   const script = [
@@ -95,7 +98,29 @@ async function writeFakeKkgBinary(dir, logPath) {
     "  process.stdout.write(JSON.stringify({",
     "    ok: true,",
     "    kind: 'blast_radius',",
-    "    summary: { files_requested: 1, nodes_in_scope: 4, transitive_callers: 2, transitive_callees: 1, lock_overlaps: 0 }",
+    "    summary: { files_requested: 1, nodes_in_scope: 4, transitive_callers: 2, transitive_callees: 1, lock_overlaps: 1 }",
+    "  }))",
+    "} else if (cmd === 'advise') {",
+    "  process.stdout.write(JSON.stringify({",
+    "    situation: args[1],",
+    "    advisory_id: `adv_${args[1]}` ,",
+    "    suggestion: args[1] === 'drift' ? 'Run `kkg drift-check --lane a` to inspect upstream movement.' : 'Run `kkg blast-radius --files src/ --lane a` to inspect overlap.',",
+    "    rationale: 'test rationale'",
+    "  }))",
+    "} else if (cmd === 'drift-check') {",
+    "  process.stdout.write(JSON.stringify({",
+    "    ok: true,",
+    "    kind: 'drift_check',",
+    "    since: args.includes('--since') ? args[args.indexOf('--since') + 1] : '',",
+    "    drifted: [{ uid: 'n3', file: 'src/dependency.js' }, { uid: 'n4', file: 'src/worker.js' }],",
+    "    neighbor_files: ['src/dependency.js', 'src/worker.js'],",
+    "    advisories: []",
+    "  }))",
+    "} else if (cmd === 'sync-check') {",
+    "  process.stdout.write(JSON.stringify({",
+    "    upstream: 'CodeGraphContext/CodeGraphContext',",
+    "    behind_by: 3,",
+    "    new_commits: [{ sha: 'abc', subject: 'One' }, { sha: 'def', subject: 'Two' }, { sha: 'ghi', subject: 'Three' }]",
     "  }))",
     "} else if (cmd === 'review-packet') {",
     "  process.stdout.write(JSON.stringify({",
@@ -177,6 +202,7 @@ describe("cgraph adapter wiring", () => {
     assert.equal(startup.code, 0, startup.stderr)
     assert.match(startup.stdout, /cgraph:/)
     assert.match(startup.stdout, /graph health: A/)
+    assert.match(startup.stdout, /sync-check: 3 commits behind CodeGraphContext\/CodeGraphContext/)
 
     const doctor = await runCli(["doctor", "--repo", tmpDir], tmpDir)
     assert.equal(doctor.code, 0, doctor.stderr)
@@ -229,12 +255,17 @@ describe("cgraph adapter wiring", () => {
     assert.equal(status.code, 0, status.stderr)
     assert.match(status.stdout, /review packet:/)
     assert.match(status.stdout, /audit:/)
+    assert.match(status.stdout, /drift: 2 changed nodes, 2 neighbor files/)
+    assert.match(status.stdout, /advisory: drift — 2 neighbor nodes changed outside lane scope since claim\./)
+    assert.match(status.stdout, /advisory: lock_overlap — 1 overlapping lane detected for the claimed lock set\./)
     assert.match(status.stdout, /graph mode: shared-working/)
 
     const handoff = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "claude" })
     assert.equal(handoff.code, 0, handoff.stderr)
     assert.match(handoff.stdout, /review packet:/)
     assert.match(handoff.stdout, /audit:/)
+    assert.match(handoff.stdout, /drift: 2 changed nodes, 2 neighbor files/)
+    assert.match(handoff.stdout, /advice: Run `kkg drift-check --lane a` to inspect upstream movement\./)
     assert.match(handoff.stdout, /\.btrain\/artifacts\/cgraph\/review-packets\/lane-a\//)
 
     const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
@@ -274,9 +305,13 @@ describe("cgraph adapter wiring", () => {
 
     const calls = await readJsonLines(logPath)
     assert.ok(calls.some((entry) => entry.cmd === "health"), "startup should probe kkg health")
+    assert.ok(calls.some((entry) => entry.cmd === "sync-check"), "startup should probe sync-check")
     assert.ok(calls.some((entry) => entry.cmd === "blast-radius"), "claim should run blast-radius")
     assert.ok(calls.some((entry) => entry.cmd === "review-packet"), "needs-review should run review-packet")
     assert.ok(calls.some((entry) => entry.cmd === "audit"), "needs-review should run audit")
+    assert.ok(calls.some((entry) => entry.cmd === "drift-check"), "status/handoff should run drift-check")
+    assert.ok(calls.some((entry) => entry.cmd === "advise" && entry.argv[0] === "drift"), "status/handoff should run drift advice")
+    assert.ok(calls.some((entry) => entry.cmd === "advise" && entry.argv[0] === "lock_overlap"), "status/handoff should run overlap advice")
     const auditCall = calls.find((entry) => entry.cmd === "audit")
     assert.ok(auditCall?.argv.includes("--files"), "needs-review audit should use the locked-file set")
     assert.ok(auditCall?.argv.includes("src/"), "needs-review audit should pass the claimed lane file scope")

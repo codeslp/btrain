@@ -44,10 +44,17 @@ import {
 const DEFAULT_LOCK_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const FILE_LOCK_RETRY_MS = 50
 const FILE_LOCK_TIMEOUT_MS = 5000
+const CGRAPH_ADVISORY_LOCK_TIMEOUT_MS = 500
+const CGRAPH_STATUS_CACHE_TTL_MS = 2000
 const DEFAULT_CGRAPH_GRAPH_MODE = "shared-working"
+const DEFAULT_CGRAPH_ADVISE_ON = ["lock_overlap", "drift", "packet_truncated"]
+const cgraphProducerCache = new Map()
 
-async function withFileLock(lockPath, fn) {
-  const deadline = Date.now() + FILE_LOCK_TIMEOUT_MS
+async function withFileLock(lockPath, fn, {
+  retryMs = FILE_LOCK_RETRY_MS,
+  timeoutMs = FILE_LOCK_TIMEOUT_MS,
+} = {}) {
+  const deadline = Date.now() + timeoutMs
   let fd = null
   while (Date.now() < deadline) {
     try {
@@ -66,7 +73,7 @@ async function withFileLock(lockPath, fn) {
         // stat failed — file was already removed, retry
         continue
       }
-      await delay(FILE_LOCK_RETRY_MS)
+      await delay(retryMs)
     }
   }
 
@@ -3192,6 +3199,36 @@ function hasCgraphConfig(config) {
   return Boolean(config?.cgraph && typeof config.cgraph === "object" && Object.keys(config.cgraph).length > 0)
 }
 
+function isCgraphEnabled(config) {
+  return hasCgraphConfig(config) && config?.cgraph?.enabled !== false
+}
+
+function getCgraphLaneConfig(config, laneId = "") {
+  if (!laneId) {
+    return {}
+  }
+  return config?.cgraph?.lanes?.[laneId] || {}
+}
+
+function getConfiguredCgraphAdviceKinds(config, laneId = "") {
+  if (!isCgraphEnabled(config)) {
+    return new Set()
+  }
+
+  const laneConfig = getCgraphLaneConfig(config, laneId)
+  if (laneConfig.disable_advise) {
+    return new Set()
+  }
+
+  const laneKinds = Array.isArray(laneConfig.advise_on) ? laneConfig.advise_on : null
+  const globalKinds = Array.isArray(config?.cgraph?.advise_on) ? config.cgraph.advise_on : DEFAULT_CGRAPH_ADVISE_ON
+  return new Set(
+    (laneKinds || globalKinds)
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  )
+}
+
 function createUnavailableCgraphAdapterResult(kind, reason = "") {
   return {
     ok: false,
@@ -3236,18 +3273,388 @@ function extractLatestCgraphMetadata(events) {
     return null
   }
 
+  let merged = null
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event?.details?.cgraph && typeof event.details.cgraph === "object") {
-      return {
-        ...event.details.cgraph,
-        recorded_at: event.recordedAt || "",
-        event_type: event.type || "",
+      merged = mergeCgraphMetadata(
+        event.details.cgraph,
+        merged,
+      ) || merged
+      if (merged) {
+        merged.recorded_at = merged.recorded_at || event.recordedAt || ""
+        merged.event_type = merged.event_type || event.type || ""
       }
     }
   }
 
-  return null
+  return merged
+}
+
+function extractLatestClaimTimestamp(events) {
+  if (!Array.isArray(events)) {
+    return ""
+  }
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type === "claim" && typeof event.recordedAt === "string" && event.recordedAt.trim()) {
+      return event.recordedAt.trim()
+    }
+  }
+
+  return ""
+}
+
+function mergeCgraphMetadata(base, next) {
+  if (!base) {
+    return next || null
+  }
+  if (!next) {
+    return base
+  }
+
+  const merged = {
+    ...base,
+    ...next,
+    latency_ms: {
+      ...(base.latency_ms || {}),
+      ...(next.latency_ms || {}),
+    },
+  }
+
+  if (base.advisories || next.advisories) {
+    merged.advisories = dedupeCgraphAdvisories([
+      ...(Array.isArray(base.advisories) ? base.advisories : []),
+      ...(Array.isArray(next.advisories) ? next.advisories : []),
+    ])
+  }
+
+  return merged
+}
+
+function normalizeCgraphStringList(values) {
+  if (!Array.isArray(values)) {
+    return []
+  }
+
+  return values
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .sort()
+}
+
+function buildCgraphAdvisoryEntry({
+  kind = "",
+  level = "",
+  detail = "",
+  suggestion = "",
+  rationale = "",
+  advisoryId = "",
+  contextHash = "",
+  otherLaneIds = [],
+  overlappingNodeIds = [],
+  changedNodeIds = [],
+  staleFilePaths = [],
+  truncatedNodeIds = [],
+  handoffId = "",
+} = {}) {
+  return {
+    kind: String(kind || "").trim() || "unknown",
+    level: String(level || "").trim() || "warn",
+    detail: String(detail || "").trim(),
+    suggestion: String(suggestion || "").trim(),
+    rationale: String(rationale || "").trim(),
+    advisory_id: String(advisoryId || "").trim(),
+    context_hash: String(contextHash || "").trim(),
+    other_lane_ids: normalizeCgraphStringList(otherLaneIds),
+    overlapping_node_ids: normalizeCgraphStringList(overlappingNodeIds),
+    changed_node_ids: normalizeCgraphStringList(changedNodeIds),
+    stale_file_paths: normalizeCgraphStringList(staleFilePaths),
+    truncated_node_ids: normalizeCgraphStringList(truncatedNodeIds),
+    handoff_id: String(handoffId || "").trim(),
+  }
+}
+
+function dedupeCgraphAdvisories(advisories = []) {
+  const deduped = []
+  const seen = new Set()
+
+  for (const advisory of advisories) {
+    if (!advisory || typeof advisory !== "object") {
+      continue
+    }
+    const normalized = buildCgraphAdvisoryEntry(advisory)
+    const key = [
+      normalized.kind,
+      normalized.level,
+      normalized.detail,
+      normalized.suggestion,
+      normalized.rationale,
+      normalized.advisory_id,
+      normalized.context_hash,
+      normalized.other_lane_ids.join(","),
+      normalized.overlapping_node_ids.join(","),
+      normalized.changed_node_ids.join(","),
+      normalized.stale_file_paths.join(","),
+      normalized.truncated_node_ids.join(","),
+      normalized.handoff_id,
+    ].join("\u0000")
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    deduped.push(normalized)
+  }
+
+  return deduped
+}
+
+function getCgraphAdvisoryStatePath(repoRoot) {
+  return path.join(repoRoot, ".btrain", "cgraph-advisory-state.jsonl")
+}
+
+function getCgraphAdvisoryLockPath(repoRoot) {
+  return `${getCgraphAdvisoryStatePath(repoRoot)}.lock`
+}
+
+function getCgraphAdvisoryTelemetryPath(repoRoot) {
+  return path.join(repoRoot, ".btrain", "logs", "cgraph-advisories.jsonl")
+}
+
+async function withCgraphAdvisoryLock(repoRoot, fn) {
+  const statePath = getCgraphAdvisoryStatePath(repoRoot)
+  await fs.mkdir(path.dirname(statePath), { recursive: true })
+  return withFileLock(
+    getCgraphAdvisoryLockPath(repoRoot),
+    fn,
+    { timeoutMs: CGRAPH_ADVISORY_LOCK_TIMEOUT_MS },
+  )
+}
+
+async function readJsonLinesSnapshot(filePath) {
+  if (!(await pathExists(filePath))) {
+    return []
+  }
+
+  const content = await readText(filePath)
+  return content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
+async function writeJsonLinesSnapshot(filePath, rows) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const tmpPath = `${filePath}.tmp`
+  const content = rows.length > 0
+    ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
+    : ""
+  await fs.writeFile(tmpPath, content, "utf8")
+  await fs.rename(tmpPath, filePath)
+}
+
+async function appendCgraphTelemetryRows(repoRoot, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return
+  }
+
+  const telemetryPath = getCgraphAdvisoryTelemetryPath(repoRoot)
+  await fs.mkdir(path.dirname(telemetryPath), { recursive: true })
+  const content = rows.map((row) => JSON.stringify(row)).join("\n")
+  await fs.appendFile(telemetryPath, `${content}\n`, "utf8")
+}
+
+function hashCgraphAdvisoryContext(laneId, advisory) {
+  if (advisory.context_hash) {
+    return advisory.context_hash
+  }
+
+  const kind = advisory.kind || "unknown"
+  let raw = ""
+  switch (kind) {
+    case "lock_overlap":
+      raw = [
+        advisory.other_lane_ids.join("\n"),
+        advisory.overlapping_node_ids.join("\n"),
+      ].join("\n---\n")
+      break
+    case "drift":
+      raw = advisory.changed_node_ids.join("\n")
+      break
+    case "stale_index":
+      raw = advisory.stale_file_paths.join("\n")
+      break
+    case "packet_truncated":
+      raw = [
+        advisory.handoff_id,
+        advisory.truncated_node_ids.join("\n"),
+      ].join("\n---\n")
+      break
+    default:
+      raw = [
+        laneId,
+        kind,
+        advisory.handoff_id,
+        advisory.detail,
+        advisory.suggestion,
+      ].join("\n---\n")
+      break
+  }
+
+  return createHash("sha256").update(raw).digest("hex").slice(0, 12)
+}
+
+function buildResolvedCgraphAdvisoryEntry(activeEntry) {
+  return buildCgraphAdvisoryEntry({
+    kind: activeEntry.kind,
+    detail: activeEntry.detail,
+    suggestion: activeEntry.suggestion,
+    advisoryId: activeEntry.advisory_id,
+    contextHash: activeEntry.context_hash,
+  })
+}
+
+async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false } = {}) {
+  const now = new Date().toISOString()
+  const current = dedupeCgraphAdvisories(advisories)
+
+  try {
+    return await withCgraphAdvisoryLock(repoRoot, async () => {
+      const statePath = getCgraphAdvisoryStatePath(repoRoot)
+      const activeEntries = await readJsonLinesSnapshot(statePath)
+      const nextActiveEntries = []
+      const surfaced = []
+      const resolved = []
+      const telemetryRows = []
+      const seenCurrentKeys = new Set()
+
+      for (const advisory of current) {
+        const contextHash = hashCgraphAdvisoryContext(laneId, advisory)
+        const key = `${laneId}\u0000${advisory.kind}\u0000${contextHash}`
+        seenCurrentKeys.add(key)
+        const existing = activeEntries.find((entry) =>
+          entry.lane === laneId
+          && entry.kind === advisory.kind
+          && entry.context_hash === contextHash,
+        )
+
+        if (existing) {
+          nextActiveEntries.push(existing)
+          continue
+        }
+
+        const activeEntry = {
+          lane: laneId,
+          kind: advisory.kind,
+          context_hash: contextHash,
+          first_seen: now,
+          last_surfaced: now,
+          resolved_at: null,
+          detail: advisory.detail,
+          suggestion: advisory.suggestion,
+          advisory_id: advisory.advisory_id || "",
+        }
+        nextActiveEntries.push(activeEntry)
+        surfaced.push(buildCgraphAdvisoryEntry({
+          ...advisory,
+          contextHash,
+        }))
+        telemetryRows.push({
+          event: "surfaced",
+          recorded_at: now,
+          lane: laneId,
+          kind: advisory.kind,
+          context_hash: contextHash,
+          detail: advisory.detail,
+          suggestion: advisory.suggestion,
+          advisory_id: advisory.advisory_id || "",
+        })
+      }
+
+      for (const activeEntry of activeEntries) {
+        if (activeEntry.lane !== laneId) {
+          nextActiveEntries.push(activeEntry)
+          continue
+        }
+
+        const key = `${activeEntry.lane}\u0000${activeEntry.kind}\u0000${activeEntry.context_hash}`
+        if (!clearLane && seenCurrentKeys.has(key)) {
+          continue
+        }
+
+        telemetryRows.push({
+          event: "resolved",
+          recorded_at: now,
+          lane: activeEntry.lane,
+          kind: activeEntry.kind,
+          context_hash: activeEntry.context_hash,
+          detail: activeEntry.detail || "",
+          suggestion: activeEntry.suggestion || "",
+          advisory_id: activeEntry.advisory_id || "",
+        })
+        if (adviseOnResolution) {
+          resolved.push(buildResolvedCgraphAdvisoryEntry(activeEntry))
+        }
+      }
+
+      await writeJsonLinesSnapshot(statePath, nextActiveEntries)
+      await appendCgraphTelemetryRows(repoRoot, telemetryRows)
+      return { surfaced, resolved }
+    })
+  } catch {
+    return {
+      surfaced: current,
+      resolved: [],
+    }
+  }
+}
+
+function buildCgraphProducerCacheKey(kind, repoRoot, laneId, input) {
+  return [
+    kind,
+    repoRoot,
+    laneId,
+    JSON.stringify(input || {}),
+  ].join("\u0000")
+}
+
+async function runCachedCgraphProducer(kind, repoRoot, laneId, input, producer) {
+  const key = buildCgraphProducerCacheKey(kind, repoRoot, laneId, input)
+  const cached = cgraphProducerCache.get(key)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value
+  }
+
+  const value = await producer()
+  cgraphProducerCache.set(key, {
+    value,
+    expiresAt: Date.now() + CGRAPH_STATUS_CACHE_TTL_MS,
+  })
+  return value
+}
+
+function normalizePayloadAdvisories(payload = {}, fallbackKind = "") {
+  return dedupeCgraphAdvisories(
+    (Array.isArray(payload.advisories) ? payload.advisories : []).map((advisory) =>
+      buildCgraphAdvisoryEntry({
+        kind: advisory.kind || fallbackKind,
+        level: advisory.level || advisory.severity || "warn",
+        detail: advisory.detail || advisory.summary || "",
+        suggestion: advisory.suggestion || "",
+        rationale: advisory.rationale || "",
+        advisoryId: advisory.advisory_id || "",
+        contextHash: advisory.context_hash || "",
+        otherLaneIds: advisory.other_lane_ids || advisory.other_lanes || [],
+        overlappingNodeIds: advisory.overlapping_node_ids || advisory.overlapping_nodes || advisory.node_ids || [],
+        changedNodeIds: advisory.changed_node_ids || advisory.drifted_node_ids || [],
+        staleFilePaths: advisory.stale_file_paths || [],
+        truncatedNodeIds: advisory.truncated_node_ids || [],
+        handoffId: advisory.handoff_id || "",
+      }),
+    ),
+  )
 }
 
 function shouldAttachCgraphMetadata(state) {
@@ -3255,17 +3662,181 @@ function shouldAttachCgraphMetadata(state) {
   return status !== "idle" && status !== "resolved"
 }
 
+async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", events = []) {
+  if (!isCgraphEnabled(config) || !shouldAttachCgraphMetadata(state)) {
+    return null
+  }
+
+  const persisted = extractLatestCgraphMetadata(events)
+  const lockedFiles = normalizePathList(state?.lockedFiles)
+  const adapter = await getCgraphAdapter(repoRoot, config)
+  if (!adapter) {
+    return mergeCgraphMetadata(
+      persisted,
+      createDegradedCgraphMetadata("cgraph unavailable", persisted?.graph_mode || DEFAULT_CGRAPH_GRAPH_MODE),
+    )
+  }
+
+  const metadata = persisted
+    ? {
+        ...persisted,
+        latency_ms: { ...(persisted.latency_ms || {}) },
+      }
+    : {
+        status: "ok",
+        graph_mode: DEFAULT_CGRAPH_GRAPH_MODE,
+        latency_ms: {},
+      }
+  const claimTimestamp = extractLatestClaimTimestamp(events)
+  const adviseKinds = getConfiguredCgraphAdviceKinds(config, laneId)
+  const liveAdvisories = []
+
+  if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
+    const locks = await listLocks(repoRoot)
+    const blastRadius =
+      await runCachedCgraphProducer(
+        "blast-radius",
+        repoRoot,
+        laneId,
+        { files: lockedFiles, locks: buildLaneLockMap(locks) },
+        async () =>
+          failOpen(() => adapter.blastRadius(lockedFiles, laneId, buildLaneLockMap(locks)))
+          || createUnavailableCgraphAdapterResult("blast_radius", "blast-radius unavailable"),
+      )
+    metadata.latency_ms.blast_radius = blastRadius.latency_ms
+
+    if (blastRadius.ok && blastRadius.payload?.summary) {
+      metadata.blast_radius = {
+        nodes_in_scope: blastRadius.payload.summary.nodes_in_scope || 0,
+        transitive_callers: blastRadius.payload.summary.transitive_callers || 0,
+        transitive_callees: blastRadius.payload.summary.transitive_callees || 0,
+        lock_overlaps: blastRadius.payload.summary.lock_overlaps || 0,
+      }
+
+      liveAdvisories.push(...normalizePayloadAdvisories(blastRadius.payload, "lock_overlap"))
+      if (
+        liveAdvisories.filter((entry) => entry.kind === "lock_overlap").length === 0
+        && Number(blastRadius.payload.summary.lock_overlaps) > 0
+      ) {
+        liveAdvisories.push(buildCgraphAdvisoryEntry({
+          kind: "lock_overlap",
+          detail: `${Number(blastRadius.payload.summary.lock_overlaps)} overlapping lane${Number(blastRadius.payload.summary.lock_overlaps) === 1 ? "" : "s"} detected for the claimed lock set.`,
+        }))
+      }
+    } else if (metadata.status === "ok") {
+      metadata.status = "degraded"
+      metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
+    }
+  }
+
+  if (lockedFiles.length > 0 && adapter.supports("drift-check")) {
+    const driftResult =
+      await runCachedCgraphProducer(
+        "drift-check",
+        repoRoot,
+        laneId,
+        { files: lockedFiles, since: claimTimestamp || "" },
+        async () =>
+          failOpen(() => adapter.driftCheck({ files: lockedFiles, laneId, since: claimTimestamp || "" }))
+          || createUnavailableCgraphAdapterResult("drift_check", "drift-check unavailable"),
+      )
+    metadata.latency_ms.drift_check = driftResult.latency_ms
+
+    if (driftResult.ok && driftResult.payload) {
+      const driftedNodes =
+        Array.isArray(driftResult.payload.drifted)
+          ? driftResult.payload.drifted.length
+          : Array.isArray(driftResult.payload.changed_node_ids)
+            ? driftResult.payload.changed_node_ids.length
+            : 0
+      const neighborFiles = Array.isArray(driftResult.payload.neighbor_files) ? driftResult.payload.neighbor_files.length : 0
+      metadata.drift = {
+        since: driftResult.payload.since || claimTimestamp,
+        drifted_nodes: driftedNodes,
+        neighbor_files: neighborFiles,
+      }
+
+      liveAdvisories.push(...normalizePayloadAdvisories(driftResult.payload, "drift"))
+      if (liveAdvisories.filter((entry) => entry.kind === "drift").length === 0 && driftedNodes > 0) {
+        liveAdvisories.push(buildCgraphAdvisoryEntry({
+          kind: "drift",
+          detail:
+            `${driftedNodes} neighbor node${driftedNodes === 1 ? "" : "s"} changed `
+            + `outside lane scope${claimTimestamp ? " since claim" : ""}.`,
+          changedNodeIds: driftResult.payload.changed_node_ids || driftResult.payload.drifted_node_ids || [],
+        }))
+      }
+    } else if (metadata.status === "ok") {
+      metadata.status = "degraded"
+      metadata.degraded_reason = driftResult.timed_out ? "drift-check timed out" : "drift-check unavailable"
+    }
+  }
+
+  let currentAdvisories = dedupeCgraphAdvisories(
+    liveAdvisories.filter((advisory) => adviseKinds.has(advisory.kind)),
+  )
+
+  if (currentAdvisories.length > 0 && adapter.supports("advise")) {
+    currentAdvisories = await Promise.all(currentAdvisories.map(async (advisory) => {
+      const adviseResult =
+        await failOpen(() => adapter.advise(advisory.kind, {
+          laneId,
+          context: { files: lockedFiles },
+        }))
+        || createUnavailableCgraphAdapterResult("advise", "advise unavailable")
+      metadata.latency_ms[`advise_${advisory.kind}`] = adviseResult.latency_ms
+
+      if (!adviseResult.ok || !adviseResult.payload) {
+        return advisory
+      }
+
+      return buildCgraphAdvisoryEntry({
+        ...advisory,
+        suggestion: adviseResult.payload.suggestion || advisory.suggestion,
+        rationale: adviseResult.payload.rationale || advisory.rationale,
+        advisoryId: adviseResult.payload.advisory_id || advisory.advisory_id,
+      })
+    }))
+  }
+
+  const laneKey = laneId || "repo"
+  const { surfaced, resolved } = await reconcileCgraphAdvisories(repoRoot, laneKey, currentAdvisories, {
+    adviseOnResolution: config?.cgraph?.advise_on_resolution === true || getCgraphLaneConfig(config, laneId).advise_on_resolution === true,
+  })
+
+  if (currentAdvisories.length > 0) {
+    metadata.advisories = currentAdvisories
+  } else {
+    delete metadata.advisories
+  }
+  if (surfaced.length > 0) {
+    metadata.fresh_advisories = surfaced
+  } else {
+    delete metadata.fresh_advisories
+  }
+  if (resolved.length > 0) {
+    metadata.resolved_advisories = resolved
+  } else {
+    delete metadata.resolved_advisories
+  }
+
+  return metadata
+}
+
 async function attachLatestCgraphMetadataToState(repoRoot, config, state, laneId = "") {
-  if (!shouldAttachCgraphMetadata(state)) {
+  if (!isCgraphEnabled(config) || !shouldAttachCgraphMetadata(state)) {
     return state
   }
 
   const events = await readWorkflowEvents(repoRoot, config, laneId)
-  const cgraph = extractLatestCgraphMetadata(events)
+  const cgraph = await buildLiveCgraphMetadata(repoRoot, config, state, laneId, events)
   return cgraph ? { ...state, cgraph } : state
 }
 
 async function attachLatestCgraphMetadataToStates(repoRoot, config, states) {
+  if (!isCgraphEnabled(config)) {
+    return states
+  }
   return Promise.all(
     (states || []).map(async (state) => {
       const laneId = typeof state?._laneId === "string" ? state._laneId : ""
@@ -3275,10 +3846,16 @@ async function attachLatestCgraphMetadataToStates(repoRoot, config, states) {
 }
 
 async function getCgraphAdapter(repoRoot, config) {
+  if (!isCgraphEnabled(config)) {
+    return null
+  }
   return failOpen(() => createAdapter(repoRoot, config))
 }
 
 async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files = [] } = {}) {
+  if (!isCgraphEnabled(config)) {
+    return null
+  }
   if (!Array.isArray(files) || files.length === 0) {
     return null
   }
@@ -3307,6 +3884,9 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
   files = [],
   base = "",
 } = {}) {
+  if (!isCgraphEnabled(config)) {
+    return null
+  }
   const adapter = await getCgraphAdapter(repoRoot, config)
   if (!adapter) {
     return hasCgraphConfig(config)
@@ -3350,12 +3930,8 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
 }
 
 async function getDoctorCgraphSummary(repoRoot, config) {
-  if (config?.cgraph?.enabled === false) {
-    return {
-      status: "disabled",
-      info: ["cgraph explicitly disabled in .btrain/project.toml"],
-      issues: [],
-    }
+  if (!isCgraphEnabled(config)) {
+    return null
   }
 
   const binPath = await failOpen(() => resolveBinary(config))
@@ -3396,14 +3972,15 @@ async function getDoctorCgraphSummary(repoRoot, config) {
 }
 
 async function getStartupCgraphSummary(repoRoot, config) {
+  if (!isCgraphEnabled(config)) {
+    return null
+  }
   const adapter = await getCgraphAdapter(repoRoot, config)
   if (!adapter) {
-    return hasCgraphConfig(config)
-      ? {
-          status: "unavailable",
-          lines: ["cgraph unavailable"],
-        }
-      : null
+    return {
+      status: "unavailable",
+      lines: ["cgraph unavailable"],
+    }
   }
 
   const lines = await failOpen(() => adapter.startupSummary())
@@ -4607,6 +5184,12 @@ async function resolveHandoff(repoRoot, options) {
   // Release locks for this lane
   if (laneId) {
     await releaseLocks(repoRoot, laneId)
+    if (isCgraphEnabled(config)) {
+      await reconcileCgraphAdvisories(repoRoot, laneId, [], {
+        adviseOnResolution: false,
+        clearLane: true,
+      })
+    }
   }
 
   const result = await updateHandoff(
@@ -7077,12 +7660,12 @@ async function listRepos() {
 async function getRepoStatus(repoRoot) {
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
-  const current = await attachLatestCgraphMetadataToState(repoRoot, config, await readCurrentState(repoRoot))
+  const currentState = await readCurrentState(repoRoot)
   const repoName = config?.name || normalizeRepoName(repoRoot)
   const handoffContent = (await pathExists(repoPaths.handoffPath))
     ? await readText(repoPaths.handoffPath)
     : ""
-  const staleness = parseStaleness(current.lastUpdated)
+  const staleness = parseStaleness(currentState.lastUpdated)
   const previousHandoffs = countPreviousHandoffs(handoffContent)
   const templateDrift = await detectTemplateDrift(repoRoot)
   const overrides = await listActiveOverrides(repoRoot)
@@ -7090,7 +7673,7 @@ async function getRepoStatus(repoRoot) {
   const status = {
     name: repoName,
     path: repoRoot,
-    current,
+    current: currentState,
     staleness,
     previousHandoffs,
     templateDrift,
@@ -7116,7 +7699,8 @@ async function getRepoStatus(repoRoot) {
         reason: lane.repurposeReason,
       }))
   } else {
-    const repurpose = classifyRepurposeReady(current)
+    status.current = await attachLatestCgraphMetadataToState(repoRoot, config, currentState)
+    const repurpose = classifyRepurposeReady(status.current)
     if (repurpose.ready) {
       status.repurposeReady.push({
         laneId: null,

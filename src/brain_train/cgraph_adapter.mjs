@@ -1,13 +1,13 @@
 /**
  * cgraph_adapter.mjs — btrain ↔ cgraph integration adapter
  *
- * Single integration point between btrain lane workflows and KeplerKG (kkg)
- * graph analysis. CLI-first, fail-open, optional.
+ * Single integration point between btrain lane workflows and cgraph.
+ * CLI-first, fail-open, optional.
  *
  * Design constraints (from Spec 005):
  *   - btrain owns all lane state and workflow-state writes
  *   - cgraph is a pure analysis service, never parses HANDOFF_*.md
- *   - If kkg is missing, slow, or broken, btrain continues with degraded messaging
+ *   - If cgraph is missing, slow, or broken, btrain continues with degraded messaging
  *   - Daemon is an optimization, not a prerequisite
  */
 
@@ -24,12 +24,12 @@ const execFileAsync = promisify(execFile)
 // ---------------------------------------------------------------------------
 const TIMEOUTS = {
   manifest:       3_000,
-  blast_radius:   8_000,
-  review_packet: 15_000,
+  blast_radius:   2_000,
+  review_packet:  5_000,
   audit:         15_000,
-  advise:         3_000,
-  drift_check:    8_000,
-  sync_check:     8_000,
+  advise:           200,
+  drift_check:    2_000,
+  sync_check:     5_000,
   health:         5_000,
 }
 const DEFAULT_TIMEOUT = 10_000
@@ -42,10 +42,10 @@ const MAX_BUFFER = 10 * 1024 * 1024 // 10 MB
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the kkg binary path.
+ * Resolve the cgraph binary path.
  *   1. [cgraph].bin_path from project config
- *   2. "kkg" on PATH
- *   3. Compatibility fallbacks: "cgc", "codegraphcontext"
+ *   2. "cgc" on PATH
+ *   3. Compatibility fallbacks: "cgraph", "kkg", "codegraphcontext"
  */
 async function resolveBinary(config) {
   const cgraphConfig = config?.cgraph || {}
@@ -57,7 +57,7 @@ async function resolveBinary(config) {
     return null
   }
 
-  for (const name of ["kkg", "cgc", "codegraphcontext"]) {
+  for (const name of ["cgc", "cgraph", "kkg", "codegraphcontext"]) {
     const resolved = await whichBinary(name)
     if (resolved) return resolved
   }
@@ -154,9 +154,9 @@ async function tryDaemon(socketPath, command, args) {
 // ---------------------------------------------------------------------------
 
 /**
- * Execute a kkg command. Tries daemon first, falls back to subprocess.
+ * Execute a cgraph command. Tries daemon first, falls back to subprocess.
  *
- * @param {string} binPath - Resolved kkg binary path
+ * @param {string} binPath - Resolved cgraph binary path
  * @param {string[]} args - CLI arguments (e.g. ["audit", "--scope", "lane"])
  * @param {string} kind - Command kind for timeout lookup
  * @param {object} [opts]
@@ -222,7 +222,7 @@ async function execCommand(binPath, args, kind, opts = {}) {
     const latency = Date.now() - start
     const timedOut = error.killed || /timed out/i.test(error.message || "")
 
-    // Try to parse stdout even on non-zero exit (kkg returns JSON on audit failures)
+    // Try to parse stdout even on non-zero exit (cgraph returns JSON on command failures)
     let payload = null
     if (error.stdout) {
       try { payload = JSON.parse(error.stdout) } catch { /* ignore */ }
@@ -313,16 +313,30 @@ class CgraphAdapter {
     return this._exec(args, "audit")
   }
 
-  async advise(situation, laneId) {
-    const args = ["advise", "--situation", situation]
+  async advise(situation, laneId, context = null) {
+    const args = ["advise", situation]
+    if (context && typeof context === "object" && !Array.isArray(context) && Object.keys(context).length > 0) {
+      args.push("--context", JSON.stringify(context))
+    }
     if (laneId) args.push("--lane", laneId)
     return this._exec(args, "advise")
   }
 
-  async driftCheck(files, laneId) {
-    const args = ["drift-check", "--files", files.join(",")]
-    if (laneId) args.push("--lane", laneId)
+  async driftCheck(opts = {}, legacyLaneId = "", legacySince = "") {
+    const normalized = Array.isArray(opts)
+      ? { files: opts, laneId: legacyLaneId, since: legacySince }
+      : (opts || {})
+    const args = ["drift-check"]
+    if (normalized.files?.length) args.push("--files", normalized.files.join(","))
+    if (normalized.since) args.push("--since", normalized.since)
+    if (normalized.laneId) args.push("--lane", normalized.laneId)
     return this._exec(args, "drift_check")
+  }
+
+  async syncCheck(opts = {}) {
+    const args = ["sync-check"]
+    if (opts.sourceDir) args.push("--source-dir", String(opts.sourceDir))
+    return this._exec(args, "sync_check")
   }
 
   async health() {
@@ -402,6 +416,14 @@ class CgraphAdapter {
       meta.latency_ms.blast_radius = b.latency_ms
     }
 
+    if (Array.isArray(results.freshAdvisories) && results.freshAdvisories.length > 0) {
+      meta.fresh_advisories = results.freshAdvisories
+    }
+
+    if (Array.isArray(results.resolvedAdvisories) && results.resolvedAdvisories.length > 0) {
+      meta.resolved_advisories = results.resolvedAdvisories
+    }
+
     if (graphMode) meta.graph_mode = graphMode
 
     return meta
@@ -448,6 +470,25 @@ class CgraphAdapter {
       issues.push(`artifact dir not writable: ${artifactRoot}`)
     }
 
+    if (this.supports("sync-check")) {
+      const syncResult = await this.syncCheck({ sourceDir: this.cgraphConfig.source_checkout })
+      if (syncResult.ok && syncResult.payload) {
+        if (syncResult.payload.skipped) {
+          info.push(`sync-check: skipped (${syncResult.payload.reason || "not applicable"})`)
+        } else {
+          info.push(`upstream lag: ${Number(syncResult.payload.behind_by) || 0} commit(s)`)
+          if (Array.isArray(syncResult.payload.new_commits) && syncResult.payload.new_commits.length > 0) {
+            const latestCommit = syncResult.payload.new_commits[0]
+            info.push(`latest upstream commit: ${latestCommit.subject || latestCommit.sha || "(unknown)"}`)
+          }
+        }
+      } else if (syncResult.timed_out) {
+        issues.push("sync-check timed out")
+      } else if (!syncResult.unavailable) {
+        issues.push("sync-check failed")
+      }
+    }
+
     return { ok: issues.length === 0, issues, info }
   }
 
@@ -461,12 +502,31 @@ class CgraphAdapter {
     const lines = []
 
     // Quick health check
-    const healthResult = await this.health()
-    if (healthResult.ok && healthResult.payload) {
+    const healthResult = this.supports("health") ? await this.health() : null
+    if (healthResult?.ok && healthResult.payload) {
       const grade = healthResult.payload.grade
       if (grade) lines.push(`graph health: ${grade}`)
       if (healthResult.payload.stale_index) {
         lines.push("⚠ graph index may be stale")
+      }
+    }
+
+    if (this.supports("sync-check")) {
+      const syncResult = await this.syncCheck({ sourceDir: this.cgraphConfig.source_checkout })
+      if (syncResult?.ok && syncResult.payload) {
+        if (syncResult.payload.skipped) {
+          lines.push(`sync-check: skipped (${syncResult.payload.reason || "not applicable"})`)
+        } else {
+          const behindBy = Number(syncResult.payload.behind_by) || 0
+          const upstream = syncResult.payload.upstream || "upstream"
+          lines.push(
+            behindBy > 0
+              ? `sync-check: ${behindBy} commit${behindBy === 1 ? "" : "s"} behind ${upstream}`
+              : `sync-check: up to date with ${upstream}`,
+          )
+        }
+      } else if (syncResult && !syncResult.ok) {
+        lines.push("sync-check: unavailable")
       }
     }
 

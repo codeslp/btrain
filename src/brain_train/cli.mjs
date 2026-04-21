@@ -251,6 +251,18 @@ function buildCgraphSummaryLines(cgraph, indent = "") {
     return []
   }
 
+  const hasSubstantiveContent =
+    cgraph.blast_radius
+    || cgraph.review_packet
+    || cgraph.audit
+    || cgraph.degraded_reason
+    || (Array.isArray(cgraph.fresh_advisories) && cgraph.fresh_advisories.length > 0)
+    || (Array.isArray(cgraph.resolved_advisories) && cgraph.resolved_advisories.length > 0)
+
+  if (!hasSubstantiveContent) {
+    return []
+  }
+
   const lines = [`${indent}cgraph: ${cgraph.status || "ok"}`]
 
   if (cgraph.blast_radius) {
@@ -284,12 +296,41 @@ function buildCgraphSummaryLines(cgraph, indent = "") {
     }
   }
 
+  if (cgraph.drift) {
+    lines.push(
+      `${indent}drift: ${cgraph.drift.drifted_nodes || 0} changed node${cgraph.drift.drifted_nodes === 1 ? "" : "s"}, `
+        + `${cgraph.drift.neighbor_files || 0} neighbor file${cgraph.drift.neighbor_files === 1 ? "" : "s"}`,
+    )
+  }
+
+  const advisories = Array.isArray(cgraph.advisories) ? cgraph.advisories : []
+  for (const advisory of advisories.slice(0, 2)) {
+    const detail = advisory.detail ? ` — ${advisory.detail}` : ""
+    lines.push(`${indent}advisory: ${advisory.kind || "unknown"}${detail}`)
+    if (advisory.suggestion) {
+      lines.push(`${indent}advice: ${advisory.suggestion}`)
+    }
+  }
+  if (advisories.length > 2) {
+    lines.push(`${indent}advisories: +${advisories.length - 2} more`)
+  }
+
   if (cgraph.graph_mode) {
     lines.push(`${indent}graph mode: ${cgraph.graph_mode}`)
   }
 
   if (cgraph.degraded_reason) {
     lines.push(`${indent}degraded: ${cgraph.degraded_reason}`)
+  }
+
+  for (const advisory of cgraph.fresh_advisories || []) {
+    const message = advisory.suggestion || advisory.detail || advisory.kind || "advisory"
+    lines.push(`${indent}tip: ${message}`)
+  }
+
+  for (const advisory of cgraph.resolved_advisories || []) {
+    const message = advisory.detail || advisory.kind || "advisory"
+    lines.push(`${indent}resolved: ${message}`)
   }
 
   return lines
