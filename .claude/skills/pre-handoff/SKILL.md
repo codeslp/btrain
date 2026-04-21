@@ -30,12 +30,13 @@ Block bad review handoffs before they reach the reviewer.
    - `--gap` bullets for anything still unverified, or an explicit statement that no known gaps remain
 6. If the change spans multiple files, confirm you ran the repo's `code-simplifier` skill on the modified scope when available. Treat a missing simplification pass as a warning to fix before handoff, not a hard block.
 7. Confirm at least one real verification command was run and record what remains unverified.
-8. Prefer repeatable `btrain` flags over one large prose blob:
+8. If this repo has `[cgraph]` enabled, run `btrain status` once before handoff and account for any fresh cgraph tips. Capture unresolved cgraph warnings in `--gap` or turn them into explicit `--review-ask` items.
+9. Prefer repeatable `btrain` flags over one large prose blob:
    - one `--changed` per file or logical file group
    - one `--verification` per command
    - one `--gap` per remaining risk
    - one `--review-ask` per concrete reviewer check
-9. Only then run `btrain handoff update --status needs-review`.
+10. Only then run `btrain handoff update --status needs-review`.
 
 ## Constraints
 

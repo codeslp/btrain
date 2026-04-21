@@ -5184,12 +5184,12 @@ async function resolveHandoff(repoRoot, options) {
   // Release locks for this lane
   if (laneId) {
     await releaseLocks(repoRoot, laneId)
-    if (isCgraphEnabled(config)) {
-      await reconcileCgraphAdvisories(repoRoot, laneId, [], {
-        adviseOnResolution: false,
-        clearLane: true,
-      })
-    }
+  }
+  if (isCgraphEnabled(config)) {
+    await reconcileCgraphAdvisories(repoRoot, laneId || "repo", [], {
+      adviseOnResolution: false,
+      clearLane: true,
+    })
   }
 
   const result = await updateHandoff(
