@@ -50,6 +50,10 @@ import {
   inspectBenchmarkScenario,
   listBenchmarkScenarios,
 } from "./harness/benchmark-registry.mjs"
+import {
+  listTraces,
+  showTrace,
+} from "./harness/trace-discovery.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -242,6 +246,55 @@ function buildDelegationPacketSummaryLines(packet) {
   return lines
 }
 
+function buildCgraphSummaryLines(cgraph, indent = "") {
+  if (!cgraph || typeof cgraph !== "object") {
+    return []
+  }
+
+  const lines = [`${indent}cgraph: ${cgraph.status || "ok"}`]
+
+  if (cgraph.blast_radius) {
+    lines.push(
+      `${indent}blast radius: ${cgraph.blast_radius.nodes_in_scope || 0} in scope, `
+        + `${cgraph.blast_radius.transitive_callers || 0} callers, `
+        + `${cgraph.blast_radius.transitive_callees || 0} callees, `
+        + `${cgraph.blast_radius.lock_overlaps || 0} overlaps`,
+    )
+  }
+
+  if (cgraph.review_packet) {
+    lines.push(
+      `${indent}review packet: ${cgraph.review_packet.source || "unknown"}, `
+        + `${cgraph.review_packet.touched_nodes || 0} touched nodes, `
+        + `${cgraph.review_packet.advisory_count || 0} advisories`,
+    )
+    if (cgraph.review_packet.path) {
+      lines.push(`${indent}review packet path: ${cgraph.review_packet.path}`)
+    }
+  }
+
+  if (cgraph.audit) {
+    lines.push(
+      `${indent}audit: ${cgraph.audit.warn || 0} warn, `
+        + `${cgraph.audit.hard || 0} hard, `
+        + `${cgraph.audit.standards_evaluated || 0} rules`,
+    )
+    if (cgraph.audit.path) {
+      lines.push(`${indent}audit path: ${cgraph.audit.path}`)
+    }
+  }
+
+  if (cgraph.graph_mode) {
+    lines.push(`${indent}graph mode: ${cgraph.graph_mode}`)
+  }
+
+  if (cgraph.degraded_reason) {
+    lines.push(`${indent}degraded: ${cgraph.degraded_reason}`)
+  }
+
+  return lines
+}
+
 function formatRepoStatus(status) {
   const updatedLine = status.staleness
     ? `${status.current.lastUpdated || "(unknown)"} ${status.staleness.label}`
@@ -277,6 +330,7 @@ function formatRepoStatus(status) {
       if (lane.repairEscalation) {
         lines.push(`    repair escalation: ${lane.repairEscalation}`)
       }
+      lines.push(...buildCgraphSummaryLines(lane.cgraph, "    "))
     }
     if (status.locks && status.locks.length > 0) {
       lines.push(`  locks: ${status.locks.map((l) => `${l.lane}:${l.path}`).join(", ")}`)
@@ -306,6 +360,7 @@ function formatRepoStatus(status) {
     if (status.current.repairEscalation) {
       lines.push(`  repair escalation: ${status.current.repairEscalation}`)
     }
+    lines.push(...buildCgraphSummaryLines(status.current.cgraph, "  "))
   }
 
   lines.push(`  updated: ${updatedLine}`)
@@ -351,6 +406,15 @@ function formatDoctorResult(result) {
   }
   if (result.repairs?.length > 0) {
     lines.push(`  repairs: ${result.repairs.map((repair) => repair.summary || repair.type).join(" | ")}`)
+  }
+  if (result.cgraph) {
+    lines.push(`  cgraph: ${result.cgraph.status}`)
+    for (const info of result.cgraph.info || []) {
+      lines.push(`    ${info}`)
+    }
+    for (const issue of result.cgraph.issues || []) {
+      lines.push(`    issue: ${issue}`)
+    }
   }
 
   if (result.issues.length === 0 && result.warnings.length === 0) {
@@ -707,6 +771,67 @@ function formatHarnessTraceShowResult(result) {
   return lines.join("\n")
 }
 
+function formatTracesListResult(result) {
+  const { total, returned, records, sources } = result
+  const lines = [
+    `traces: ${total} total, showing ${returned}`,
+    `  handoff events: ${sources.eventsDir}`,
+    `  harness bundles: ${sources.harnessRunsDir}`,
+    `  agentchattr index: ${sources.tracesIndexPath}`,
+  ]
+
+  if (records.length === 0) {
+    lines.push("(no records match)")
+    return lines.join("\n")
+  }
+
+  lines.push("")
+  for (const r of records) {
+    const when = r.ts ? r.ts.slice(0, 19).replace("T", " ") : "(no ts)"
+    const lane = r.lane ? ` [${r.lane}]` : ""
+    const actor = r.actor ? ` ${r.actor}` : ""
+    const outcome = r.outcome ? ` (${r.outcome})` : ""
+    lines.push(`${when}  ${r.kind}${lane}${actor}${outcome}`)
+    lines.push(`  id: ${r.id}`)
+    lines.push(`  ${r.summary}`)
+  }
+  return lines.join("\n")
+}
+
+function formatTracesShowResult(result) {
+  const { kind, detail } = result
+  if (kind === "harness") {
+    return formatHarnessTraceShowResult({
+      repoName: "(resolved)",
+      repoRoot: "",
+      runId: detail.runId,
+      bundleDir: detail.bundleDir,
+      summary: detail.summary,
+      eventCount: detail.eventCount,
+      artifactCount: detail.artifactCount,
+      artifactDirCount: detail.artifactDirCount,
+    })
+  }
+
+  const rec = detail.record
+  const lines = [
+    `kind: ${kind}`,
+    `id: ${rec.id}`,
+    `ts: ${rec.ts || "(no ts)"}`,
+  ]
+  if (rec.lane) lines.push(`lane: ${rec.lane}`)
+  if (rec.actor) lines.push(`actor: ${rec.actor}`)
+  if (rec.outcome) lines.push(`outcome: ${rec.outcome}`)
+  lines.push(`summary: ${rec.summary}`)
+  lines.push(`source: ${rec.sourcePath}`)
+  if (detail.raw) {
+    lines.push("")
+    lines.push("raw:")
+    lines.push(JSON.stringify(detail.raw, null, 2))
+  }
+  return lines.join("\n")
+}
+
 function formatHarnessEvalListResult(result) {
   const lines = [
     `repo: ${result.repoName}`,
@@ -822,6 +947,12 @@ function formatStartupResult(result) {
   }
   if (result.harness?.error) {
     lines.push(`harness warning: ${summarizeError(result.harness.error)}`)
+  }
+  if (result.cgraph) {
+    lines.push(`cgraph: ${result.cgraph.status}`)
+    for (const line of result.cgraph.lines || []) {
+      lines.push(`  - ${line}`)
+    }
   }
 
   lines.push("read first:")
@@ -976,6 +1107,9 @@ function printHandoffState(result) {
       if (lane.repairEscalation) {
         console.log(`repair escalation: ${lane.repairEscalation}`)
       }
+      for (const line of buildCgraphSummaryLines(lane.cgraph)) {
+        console.log(line)
+      }
     }
     if (result.locks && result.locks.length > 0) {
       console.log("")
@@ -1009,6 +1143,9 @@ function printHandoffState(result) {
     }
     if (result.current.repairEscalation) {
       console.log(`repair escalation: ${result.current.repairEscalation}`)
+    }
+    for (const line of buildCgraphSummaryLines(result.current.cgraph)) {
+      console.log(line)
     }
   }
 
@@ -1434,6 +1571,47 @@ async function run() {
         repoRoot,
       }),
     )
+    return
+  }
+
+  if (command === "traces") {
+    const subcommand = ["list", "show"].includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new BtrainError({
+        message: "`btrain traces` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain traces list --repo .",
+        context: "Available subcommands: list, show.",
+      })
+    }
+
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+
+    if (subcommand === "list") {
+      const limit = Number.parseInt(options.limit, 10)
+      const result = await listTraces({
+        repoRoot,
+        kind: options.kind,
+        lane: options.lane,
+        since: options.since,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : 50,
+      })
+      console.log(formatTracesListResult(result))
+      return
+    }
+
+    // show
+    const id = options.id || options._[0]
+    if (!id || id === true) {
+      throw new BtrainError({
+        message: "`btrain traces show` requires an id.",
+        reason: "No trace id was provided.",
+        fix: "btrain traces show <id> --repo . (ids come from `btrain traces list`)",
+      })
+    }
+    const result = await showTrace({ repoRoot, id })
+    console.log(formatTracesShowResult(result))
     return
   }
 

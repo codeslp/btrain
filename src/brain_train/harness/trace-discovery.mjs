@@ -78,7 +78,8 @@ function summarizeHandoffEvent(event) {
   const lane = event.laneId || before.lane || after.lane || ""
   const actor = event.actor || ""
   const type = event.type || "event"
-  const task = after.task || before.task || ""
+  const rawTask = after.task || before.task || ""
+  const task = typeof rawTask === "string" ? rawTask : ""
   const taskSnippet = task ? task.slice(0, 80) : ""
   switch (type) {
     case "claim":
