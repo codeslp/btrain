@@ -4,6 +4,7 @@ node_modules/
 .btrain/*
 !.btrain/project.toml
 .claude/settings.local.json
+.claude/worktrees/
 
 .claude/collab/HANDOFF*.md
 .claude/collab/.handoff-history-state.json
