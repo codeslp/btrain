@@ -138,15 +138,15 @@ The CLI delegates entirely to the discovery library. No new state.
 - Phase B CLI `btrain traces list` produces the same records as direct library calls.
 - All existing tests remain green. New tests (Phase B) cover: empty-repo list, multi-source merge, since-filter, kind-filter, show dispatch per kind, emitter failure tolerance.
 
-## Runtime adapter pins (separate, parallel)
+## Runtime adapter pins
 
-Orthogonal to trace discovery but triggered by the same Pi lesson ("one integration test per provider to catch contract drift"). Tracked separately:
+Triggered by the same Pi lesson ("one integration test per provider to catch contract drift"). Landed alongside trace discovery:
 
-- `test/adapters/runner-claude.pin.test.mjs` — exercises the `claude` runtime's real contract surface.
-- `test/adapters/runner-codex.pin.test.mjs` — same for `codex`.
-- Each pin: given a known handoff state, invoke the runtime's read path and assert the expected envelope shape. Drift fails loudly in CI.
+- `src/brain_train/runners/stream-observers.mjs` — extracted the Claude and Codex stream observers from core.mjs (which was locked by another lane) so they have an importable surface. When core.mjs becomes editable again, drop the inline duplicates and import from here.
+- `test/runners/claude-stream-observer.pin.test.mjs` — 12 pin tests freezing the Claude `claude-stream-json` contract: assistant text, tool use, tool result (stdout/stderr/interrupted/completed fallbacks), result dispatch (success vs. duplicate suppression vs. error), chunked streaming, malformed JSON handling, flush, stderr capture.
+- `test/runners/codex-stream-observer.pin.test.mjs` — 13 pin tests freezing the Codex `codex-json` contract: command started/finished/result, exit-code messages, `-lc '...'` unwrap, agent_message, error, multi-event chunks, split-line chunks, malformed JSON, flush, unknown event types.
 
-Also blocked on codex unlocking `test/`.
+If a runtime changes its stream JSON shape, these tests fail first. Updates require touching both the observer and the fixture, forcing explicit acknowledgment of the contract change.
 
 ## Why this shape
 
