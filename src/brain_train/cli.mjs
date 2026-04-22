@@ -1192,6 +1192,11 @@ function printHandoffState(result) {
 
   console.log("")
   console.log(result.guidance)
+  console.log("")
+  console.log("ACT NOW — do not ask permission, do not summarize the next step and stop.")
+  console.log("  needs-review (you are reviewer): do the review now, then `btrain handoff resolve --lane <id> --summary \"...\"`.")
+  console.log("  in-progress (you are owner): keep working the task; only flip to needs-review after real completed work + filled reviewer context + `pre-handoff` skill.")
+  console.log("  resolved/idle: `btrain handoff claim --lane <id> --task \"...\" --owner \"...\" --reviewer \"...\"` and start immediately.")
   if (result.overrides?.length > 0) {
     console.log("")
     console.log("active overrides:")

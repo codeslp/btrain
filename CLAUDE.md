@@ -52,8 +52,20 @@ Project knowledge lives in the research docs. Read them; don't duplicate conclus
 - No hardcoded API keys or paths — use env vars.
 - Edit over create. Don't touch `.claude/settings*.json` unless asked.
 - Research-first: ground recommendations in the docs above.
-- `bth` in agent chat → run `btrain handoff` and **act on what it says**; don't just print status.
 - Runtime alias: collaborator `GPT` → Codex runtime via `[agents.runners]` in `.btrain/project.toml`.
+
+## Proactivity
+
+When the user or a workflow signal (handoff, lane status, delegation packet, review request) names a concrete next step, **do it**. Do not summarize the step as a "next actionable item" and stop to ask permission. Ask only when the request is genuinely ambiguous, destructive, or out of scope.
+
+## After `btrain handoff` (and `bth`)
+
+`btrain handoff` tells you whose turn it is. Execute — don't just print the status.
+
+- **needs-review, you are reviewer** → do the review now, then `btrain handoff resolve --lane <id> --summary "..." --actor "..."`.
+- **in-progress, you are owner** → keep working on the task. Only flip to `needs-review` after real completed work exists, reviewer context is filled in, and the `pre-handoff` skill has run.
+- **resolved or idle** → `btrain handoff claim --lane <id> --task "..." --owner "..." --reviewer "..."` and start working immediately.
+- `bth` in agent chat means the same thing: run `btrain handoff`, then do the work it points to. Never print status and stop.
 
 ## Handoff Gate
 
