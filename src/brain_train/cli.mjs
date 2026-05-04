@@ -66,9 +66,9 @@ Usage:
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>] [--since <hash>]                               Check whose turn it is and what to do (--since short-circuits when state is unchanged)
   btrain handoff show-next [--lane <id>] [--repo <path>]                         Print the full Next Action body, expanding any .btrain/handoff-notes/ pointer
-  btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [options]
-                                                                              Claim a new task
-  btrain handoff update [options]                                                Update the current handoff state
+  btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [--pr <number|url>] [options]
+                                                                              Claim a new task. --pr links a GH PR; surfaces in needs-review/changes-requested guidance so reviewers consult the PR instead of the local working tree.
+  btrain handoff update [--pr <number|url>] [options]                            Update the current handoff state. Use --pr to link or relink the PR after the lane is claimed.
   btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
                                                                               Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
