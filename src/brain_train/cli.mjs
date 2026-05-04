@@ -54,6 +54,7 @@ import {
   listTraces,
   showTrace,
 } from "./harness/trace-discovery.mjs"
+import { pullPrComments } from "./handoff/pr-comments.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -65,12 +66,13 @@ Usage:
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>] [--since <hash>]                               Check whose turn it is and what to do (--since short-circuits when state is unchanged)
   btrain handoff show-next [--lane <id>] [--repo <path>]                         Print the full Next Action body, expanding any .btrain/handoff-notes/ pointer
-  btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [options]
-                                                                              Claim a new task
-  btrain handoff update [options]                                                Update the current handoff state
+  btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [--pr <number|url>] [options]
+                                                                              Claim a new task. --pr links a GH PR; surfaces in needs-review/changes-requested guidance so reviewers consult the PR instead of the local working tree.
+  btrain handoff update [--pr <number|url>] [options]                            Update the current handoff state. Use --pr to link or relink the PR after the lane is claimed.
   btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
                                                                               Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
+  btrain handoff pull-pr --lane <id> --pr <number> [--show] [--acknowledge]     Fetch GH PR comments (issue, review, inline) into .btrain/pr-comments/ JSONL log
   btrain harness list [--repo <path>]                                            List bundled and repo-local harness profiles
   btrain harness inspect [--repo <path>] [--profile <name>]                      Inspect one harness profile (defaults to active)
   btrain harness trace list [--repo <path>] [--limit <n>]                        List harness trace bundles under .btrain/harness/runs
@@ -1398,7 +1400,7 @@ async function run() {
   }
 
   if (command === "handoff") {
-    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next", "pull-pr"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
 
     if (options.help || options.h) {
@@ -1446,6 +1448,11 @@ async function run() {
       await requestChangesHandoff(repoRoot, options)
       const result = await checkHandoff(repoRoot)
       printHandoffState(result)
+      return
+    }
+
+    if (subcommand === "pull-pr") {
+      await pullPrComments(repoRoot, options)
       return
     }
 

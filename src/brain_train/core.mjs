@@ -127,6 +127,7 @@ const DEFAULT_CURRENT = {
   lockedFiles: [],
   nextAction: "",
   base: "",
+  prNumber: "",
   lastUpdated: "",
 }
 
@@ -401,6 +402,17 @@ function parseCsvList(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function normalizePrNumber(value) {
+  if (value === null || value === undefined) return ""
+  const raw = String(value).trim()
+  if (!raw) return ""
+  const stripped = raw.startsWith("#") ? raw.slice(1) : raw
+  const urlMatch = /\/pulls?\/(\d+)(?:[/?#].*)?$/.exec(stripped)
+  const candidate = urlMatch ? urlMatch[1] : stripped
+  if (!/^\d+$/.test(candidate)) return ""
+  return candidate
 }
 
 function normalizeStringList(value) {
@@ -2361,8 +2373,13 @@ function buildCurrentSection(current) {
     `Locked Files: ${lockedFiles}`,
     `Next Action: ${merged.nextAction || ""}`,
     `Base: ${merged.base || ""}`,
-    `Last Updated: ${merged.lastUpdated || ""}`,
   )
+
+  if (merged.prNumber) {
+    lines.push(`PR: ${merged.prNumber}`)
+  }
+
+  lines.push(`Last Updated: ${merged.lastUpdated || ""}`)
 
   if (laneId) {
     lines.splice(2, 0, `Lane: ${laneId}`)
@@ -2970,6 +2987,8 @@ function parseCurrentSection(content) {
     "locked files": "lockedFiles",
     "next action": "nextAction",
     base: "base",
+    pr: "prNumber",
+    "pr number": "prNumber",
     "last updated": "lastUpdated",
     lane: "lane",
   }
@@ -4586,6 +4605,7 @@ async function claimHandoff(repoRoot, options) {
     nextAction:
       options.next || "Work within the locked files, keep the lane in-progress, and hand off for review when ready.",
     base: options.base || "",
+    prNumber: normalizePrNumber(options.pr),
     lastUpdated: `${options.owner} ${formatIsoTimestamp()}`,
     delegationPacket: buildDelegationPacketValue(createEmptyDelegationPacket(), options, {
       task: options.task,
@@ -4696,6 +4716,9 @@ async function patchHandoff(repoRoot, options) {
   }
   if (options.base !== undefined) {
     updates.base = options.base
+  }
+  if (options.pr !== undefined) {
+    updates.prNumber = normalizePrNumber(options.pr)
   }
 
   updates.lastUpdated = `${resolvedActor || "btrain"} ${formatIsoTimestamp()}`
@@ -5235,6 +5258,9 @@ function buildLaneGuidance(laneId, current) {
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
       const reviewMode = normalizeReviewMode(current.reviewMode) || "manual"
+      const prLine = current.prNumber
+        ? `Review the PR — the diff lives there, not in the local working tree: \`gh pr view ${current.prNumber}\` / \`gh pr diff ${current.prNumber}\`.`
+        : `No PR linked. If a PR exists for this lane, run \`btrain handoff update --lane ${laneId} --pr <number> --actor "${owner}"\` so the reviewer can find it.`
       const reviewerInstruction =
         reviewMode === "parallel" || reviewMode === "hybrid"
           ? `${reviewer}: run \`btrain review run\`, then \`btrain handoff resolve --lane ${laneId} --summary "..."\`.`
@@ -5242,6 +5268,7 @@ function buildLaneGuidance(laneId, current) {
       return [
         `${prefix}Waiting on peer review from ${reviewer}.`,
         lockLine,
+        prLine,
         reviewerInstruction,
         `${owner}: work on your other lane while waiting.`,
       ].join("\n")
@@ -5249,9 +5276,13 @@ function buildLaneGuidance(laneId, current) {
     case "changes-requested": {
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
+      const prLine = current.prNumber
+        ? `Linked PR: \`gh pr view ${current.prNumber}\` / \`gh pr diff ${current.prNumber}\`. Reviewer should evaluate the PR diff, not the local working tree.`
+        : `No PR linked. If a PR exists for this lane, run \`btrain handoff update --lane ${laneId} --pr <number> --actor "${owner}"\` so the next reviewer pass can find it.`
       return [
         `${prefix}Changes requested by ${reviewer}.`,
         lockLine,
+        prLine,
         current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
         current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
         `${owner}: address the reviewer findings in the same lane, then \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
@@ -8243,7 +8274,11 @@ export {
   HANDOFF_NOTES_DIRNAME,
   TASK_ARTIFACT_ENVELOPE_VERSION,
   acquireLocks,
+  buildCurrentSection,
+  buildLaneGuidance,
   buildTaskArtifactEnvelope,
+  normalizePrNumber,
+  parseCurrentSection,
   checkHandoff,
   computeHandoffStateHash,
   extractSpillPathFromNextAction,
