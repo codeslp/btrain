@@ -82,13 +82,13 @@ const ENV_DERIVATIONS = [
   /env\.var\b/,
 ]
 
-// new-dependency: file paths to flag and their relevant header markers.
+// new-dependency: dependency manifest files and whether every added line counts.
 const DEPENDENCY_FILES = [
-  { name: "package.json", inDepBlockRegex: /^\s*"(?:dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:/ },
-  { name: "requirements.txt", inDepBlockRegex: null }, // every non-comment added line counts
-  { name: "pyproject.toml", inDepBlockRegex: /^\[(?:tool\.poetry\.dependencies|project|tool\.poetry\.dev-dependencies)\]/ },
-  { name: "Cargo.toml", inDepBlockRegex: /^\[dependencies\]/ },
-  { name: "go.mod", inDepBlockRegex: /^require\s*\(/ },
+  { name: "package.json", everyAddedLine: false },
+  { name: "requirements.txt", everyAddedLine: true },
+  { name: "pyproject.toml", everyAddedLine: false },
+  { name: "Cargo.toml", everyAddedLine: false },
+  { name: "go.mod", everyAddedLine: false },
 ]
 
 // ---- diff parsing ----
@@ -365,7 +365,7 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
 
   // For files where every added line counts as a dep (requirements.txt), flag
   // every non-comment, non-empty added line.
-  if (!config.inDepBlockRegex) {
+  if (config.everyAddedLine) {
     for (const { line, text } of addedLines) {
       const trimmed = text.trim()
       if (!trimmed || trimmed.startsWith("#")) continue
