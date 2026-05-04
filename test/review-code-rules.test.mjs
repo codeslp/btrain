@@ -556,6 +556,38 @@ describe("reviewCode lane scoping", () => {
       await fs.rm(repo, { recursive: true, force: true })
     }
   })
+
+  it("reads dependency manifest context from the worktree for --head without --base", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-head-deps-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await fs.writeFile(path.join(repo, "package.json"), ["{", "  \"scripts\": {}", "}"].join("\n"))
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      await fs.writeFile(
+        path.join(repo, "package.json"),
+        [
+          "{",
+          "  \"scripts\": {},",
+          "  \"dependencies\": {",
+          "    \"lodash\": \"^4.17.0\"",
+          "  }",
+          "}",
+        ].join("\n"),
+      )
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "add dependency"])
+
+      const result = await reviewCode(repo, { head: "HEAD~1" })
+      assert.equal(result.summary.warn, 1)
+      assert.equal(result.violations[0].rule, "new-dependency")
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("scanDiff aggregation", () => {

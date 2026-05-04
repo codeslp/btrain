@@ -635,6 +635,11 @@ async function readDependencyFileContents(repoRoot, diff, head) {
   return contents
 }
 
+function getDependencyContentRef({ base, head }) {
+  if (base && head) return head
+  return null
+}
+
 // ---- formatting ----
 
 export function formatSummary(result) {
@@ -662,7 +667,11 @@ export async function reviewCode(repoRoot, options = {}) {
     head: options.head,
     lane: options.lane,
   })
-  const fileContentsByPath = await readDependencyFileContents(repoRoot, diff, options.head)
+  const fileContentsByPath = await readDependencyFileContents(
+    repoRoot,
+    diff,
+    getDependencyContentRef(options),
+  )
   const result = scanDiff(diff, { fileContentsByPath })
   return result
 }
