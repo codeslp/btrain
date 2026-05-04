@@ -6501,6 +6501,13 @@ function getLoopActorForState(current) {
   if (current.status === "needs-review") {
     return current.reviewer || ""
   }
+  if (
+    current.status === "ready-for-pr"
+    || current.status === "pr-review"
+    || current.status === "ready-to-merge"
+  ) {
+    return current.owner || ""
+  }
   return ""
 }
 

@@ -570,6 +570,15 @@ export async function runPrCreate(repoRoot, options = {}) {
   if (!lane) {
     throw new Error(`Unknown lane: ${laneId}`)
   }
+  if (lane.status !== "ready-for-pr") {
+    const laneLabel = laneId || "(single)"
+    const reviewerHint = lane.reviewer ? ` --actor "${lane.reviewer}"` : ""
+    throw new Error(
+      `\`btrain pr create\` requires lane ${laneLabel} to be in \`ready-for-pr\` (local peer review approved). Current status: \`${lane.status}\`. `
+        + `Run \`btrain handoff resolve --lane ${laneLabel}${reviewerHint}\` after the local review passes; PR-flow repos route that to ready-for-pr. `
+        + `To relink an existing PR without re-running create, use \`btrain handoff update --lane ${laneLabel} --status pr-review --pr <number> --actor "${lane.owner || "owner"}"\`.`,
+    )
+  }
 
   const branch = await gitText(["branch", "--show-current"], repoRoot)
   if (!branch || ["main", "master"].includes(branch)) {

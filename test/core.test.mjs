@@ -1211,6 +1211,68 @@ describe("btrain PR flow handoff lifecycle", () => {
     assert.ok(locks.locks.some((lock) => lock.lane === "a" && lock.path === "README.md"), JSON.stringify(locks))
   })
 
+  it("rejects btrain pr create when the lane has not been locally approved", async () => {
+    await fs.writeFile(path.join(tmpDir, "bypass.md"), "# bypass\n", "utf8")
+    const claim = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "b",
+        "--task",
+        "Bypass attempt",
+        "--owner",
+        "TestBot",
+        "--reviewer",
+        "ReviewBot",
+        "--files",
+        "bypass.md",
+      ],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const created = await runBtrain(
+      ["pr", "create", "--repo", tmpDir, "--lane", "b", "--base", "main", "--no-push"],
+      tmpDir,
+    )
+
+    assert.notEqual(created.code, 0, created.stdout)
+    assert.match(created.stderr, /requires lane b to be in `ready-for-pr`/)
+    assert.match(created.stderr, /Current status: `in-progress`/)
+  })
+
+  it("btrain loop dispatches the lane owner from ready-for-pr", async () => {
+    const ownerScript = path.join(tmpDir, "owner-ready-for-pr.js")
+    await writeExecutable(
+      ownerScript,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const path = require("node:path")
+fs.writeFileSync(path.join(process.cwd(), "ready-for-pr-loop.txt"), "owner ran for ready-for-pr", "utf8")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content.replace("Status: ready-for-pr", "Status: resolved")
+fs.writeFileSync(handoffPath, updated)
+console.log("ready-for-pr owner ran")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"TestBot" = "${ownerScript}"`, '"ReviewBot" = "notify"'])
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.match(stdout, /selected agent:\s+TestBot/)
+    assert.match(stdout, /reason: handoff status is ready-for-pr/)
+    assert.match(stdout, /dispatch TestBot:/)
+  })
+
   it("final resolve releases locks after the PR phase completes", async () => {
     const resolved = await runBtrain(
       [
