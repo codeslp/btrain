@@ -19,8 +19,16 @@
 // Markers may appear at end of the violating line or on the line above.
 
 import { execFile } from "node:child_process"
+import fs from "node:fs/promises"
 import { promisify } from "node:util"
 import path from "node:path"
+import {
+  BtrainError,
+  getLaneConfigs,
+  readAllLaneStates,
+  readLockRegistry,
+  readProjectConfig,
+} from "../core.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -85,20 +93,22 @@ const DEPENDENCY_FILES = [
 
 // ---- diff parsing ----
 
-// Parse a unified diff into per-file blocks of added lines with line numbers.
-// Returns: [{ file: "src/foo.ts", added: [{ line: 42, text: "..." }, ...] }]
+// Parse a unified diff into per-file blocks of hunk lines with line numbers.
+// Returns: [{ file: "src/foo.ts", added: [{ line: 42, text: "..." }, ...], lines: [...] }]
 export function parseUnifiedDiff(diff) {
   const files = []
   let currentFile = null
   let newLineNum = 0
+  let inHunk = false
 
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff --git ")) {
       // start a new file
       const match = /\sb\/(.+)$/.exec(raw)
-      currentFile = { file: match ? match[1] : "", added: [] }
+      currentFile = { file: match ? match[1] : "", added: [], lines: [] }
       files.push(currentFile)
       newLineNum = 0
+      inHunk = false
       continue
     }
     if (!currentFile) continue
@@ -106,15 +116,20 @@ export function parseUnifiedDiff(diff) {
       // @@ -a,b +c,d @@  →  pull c
       const match = /\+(\d+)(?:,\d+)?/.exec(raw)
       if (match) newLineNum = Number.parseInt(match[1], 10)
+      inHunk = true
       continue
     }
-    if (raw.startsWith("+++") || raw.startsWith("---")) continue
+    if (!inHunk) continue
+    if (raw.startsWith("\\ No newline at end of file")) continue
     if (raw.startsWith("+")) {
-      currentFile.added.push({ line: newLineNum, text: raw.slice(1) })
+      const entry = { line: newLineNum, text: raw.slice(1), kind: "added" }
+      currentFile.lines.push(entry)
+      currentFile.added.push({ line: entry.line, text: entry.text })
       newLineNum++
     } else if (raw.startsWith("-")) {
       // removed; line numbers in the new file don't advance
     } else if (raw.startsWith(" ")) {
+      currentFile.lines.push({ line: newLineNum, text: raw.slice(1), kind: "context" })
       newLineNum++
     }
   }
@@ -241,11 +256,112 @@ function scanUnprotectedRoute(file, addedLines) {
   return out
 }
 
-function scanNewDependency(file, addedLines) {
+function countJsonBraceDelta(text) {
+  let delta = 0
+  let inString = false
+  let escaped = false
+  for (const ch of text) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === "\\") {
+      escaped = true
+      continue
+    }
+    if (ch === "\"") {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (ch === "{") delta++
+    if (ch === "}") delta--
+  }
+  return delta
+}
+
+const PACKAGE_DEPENDENCY_SECTION = /^\s*"(?:dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:\s*\{/
+const PACKAGE_ENTRY = /^\s*"([^"]+)"\s*:\s*"[^"]*"\s*,?\s*(?:\/\/.*)?$/
+
+function collectPackageJsonDependencyLinesFromText(content) {
+  const lineNumbers = new Set()
+  let inDependencySection = false
+  let dependencyDepth = 0
+  const lines = String(content || "").split("\n")
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]
+    const lineNumber = index + 1
+    if (!inDependencySection && PACKAGE_DEPENDENCY_SECTION.test(line)) {
+      inDependencySection = true
+      dependencyDepth = Math.max(0, countJsonBraceDelta(line))
+      if (dependencyDepth <= 0) {
+        inDependencySection = false
+      }
+      continue
+    }
+
+    if (!inDependencySection) continue
+    if (dependencyDepth > 0 && PACKAGE_ENTRY.test(line)) {
+      lineNumbers.add(lineNumber)
+    }
+    dependencyDepth += countJsonBraceDelta(line)
+    if (dependencyDepth <= 0) {
+      inDependencySection = false
+      dependencyDepth = 0
+    }
+  }
+
+  return lineNumbers
+}
+
+function collectPackageJsonDependencyLinesFromDiff(lines) {
+  const lineNumbers = new Set()
+  let inDependencySection = false
+  let dependencyDepth = 0
+
+  for (const entry of lines || []) {
+    const text = entry.text || ""
+    if (!inDependencySection && PACKAGE_DEPENDENCY_SECTION.test(text)) {
+      inDependencySection = true
+      dependencyDepth = Math.max(0, countJsonBraceDelta(text))
+      if (dependencyDepth <= 0) {
+        inDependencySection = false
+      }
+      continue
+    }
+
+    if (!inDependencySection) continue
+    if (dependencyDepth > 0 && entry.kind === "added" && PACKAGE_ENTRY.test(text)) {
+      lineNumbers.add(entry.line)
+    }
+    dependencyDepth += countJsonBraceDelta(text)
+    if (dependencyDepth <= 0) {
+      inDependencySection = false
+      dependencyDepth = 0
+    }
+  }
+
+  return lineNumbers
+}
+
+function getPackageJsonDependencyLines(file, lines, fileContentsByPath) {
+  const content = fileContentsByPath?.[file]
+  if (typeof content === "string") {
+    return collectPackageJsonDependencyLinesFromText(content)
+  }
+  return collectPackageJsonDependencyLinesFromDiff(lines)
+}
+
+function scanNewDependency(file, addedLines, lines, options = {}) {
   const out = []
   const base = path.basename(file)
   const config = DEPENDENCY_FILES.find((d) => d.name === base)
   if (!config) return out
+  const packageJsonDependencyLines =
+    base === "package.json"
+      ? getPackageJsonDependencyLines(file, lines, options.fileContentsByPath)
+      : null
 
   // For files where every added line counts as a dep (requirements.txt), flag
   // every non-comment, non-empty added line.
@@ -276,13 +392,12 @@ function scanNewDependency(file, addedLines) {
     if (lineHasAllow(text, "new-dependency")) continue
 
     if (base === "package.json") {
-      // "name": "version" — look for a string-string pair
-      if (!/^"[^"]+"\s*:\s*"[^"]*"\s*,?$/.test(trimmed)) continue
+      if (!PACKAGE_ENTRY.test(text) || !packageJsonDependencyLines.has(line)) continue
     } else if (base === "Cargo.toml" || base === "pyproject.toml") {
       // name = "version"
       if (!/^[A-Za-z0-9_.-]+\s*=\s*['"`{]/.test(trimmed)) continue
     } else if (base === "go.mod") {
-      if (!/^[A-Za-z0-9./_-]+\s+v\d/.test(trimmed)) continue
+      if (!/^(?:require\s+)?[A-Za-z0-9./_-]+\s+v\d/.test(trimmed)) continue
     } else {
       continue
     }
@@ -301,16 +416,16 @@ function scanNewDependency(file, addedLines) {
 
 // ---- public scan entry ----
 
-export function scanDiff(diff) {
+export function scanDiff(diff, options = {}) {
   const files = parseUnifiedDiff(diff)
   const violations = []
-  for (const { file, added } of files) {
+  for (const { file, added, lines } of files) {
     if (added.length === 0) continue
     violations.push(...scanHardcodedSecret(file, added))
     violations.push(...scanCorsWildcard(file, added))
     violations.push(...scanEnvVarRequired(file, added))
     violations.push(...scanUnprotectedRoute(file, added))
-    violations.push(...scanNewDependency(file, added))
+    violations.push(...scanNewDependency(file, added, lines, options))
   }
   // Stable sort: by file, then line, then rule.
   violations.sort((a, b) => {
@@ -329,16 +444,101 @@ export function scanDiff(diff) {
 
 // ---- diff fetching ----
 
-async function getLaneDiff(repoRoot, { base, head }) {
+function normalizePathspecList(paths) {
+  return [...new Set(
+    (paths || [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  )].sort()
+}
+
+async function getLanePathspecs(repoRoot, laneId) {
+  if (!laneId) return []
+  const normalizedLaneId = String(laneId).trim().toLowerCase()
+  const config = await readProjectConfig(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+  if (!laneConfigs) {
+    throw new BtrainError({
+      message: "`btrain review code --lane` requires lanes to be enabled.",
+      reason: "The repo does not have [lanes] enabled in .btrain/project.toml.",
+      fix: "Run without --lane, or enable lanes with `btrain init`.",
+    })
+  }
+  if (!laneConfigs.some((lane) => lane.id === normalizedLaneId)) {
+    throw new BtrainError({
+      message: `Unknown lane "${laneId}".`,
+      reason: "No configured lane has that id.",
+      fix: `Pick one of: ${laneConfigs.map((lane) => lane.id).join(", ")}`,
+    })
+  }
+
+  const registry = await readLockRegistry(repoRoot)
+  const lockPaths = normalizePathspecList(
+    registry.locks
+      ?.filter((lock) => lock.lane === normalizedLaneId)
+      .map((lock) => lock.path),
+  )
+  if (lockPaths.length > 0) return lockPaths
+
+  const laneStates = await readAllLaneStates(repoRoot, config)
+  const laneState = laneStates?.find((entry) => entry._laneId === normalizedLaneId)
+  const statePaths = normalizePathspecList(laneState?.lockedFiles)
+  if (statePaths.length > 0) return statePaths
+
+  throw new BtrainError({
+    message: `Lane "${laneId}" has no locked files to review.`,
+    reason: "Lane-scoped review needs the lane's file locks so unrelated lane diffs are excluded.",
+    fix: `Run \`btrain handoff update --lane ${normalizedLaneId} --files "path/" --actor "<owner>"\`, then retry.`,
+  })
+}
+
+async function getLaneDiff(repoRoot, { base, head, lane }) {
   // If both base and head are provided, diff between them.
   // Otherwise, diff the working tree (uncommitted changes) for fast feedback
   // during local development.
-  const args = ["diff", "--unified=0"]
+  const args = ["diff", "--unified=3"]
   if (base) {
     args.push(`${base}${head ? `..${head}` : ""}`)
   }
+  const pathspecs = await getLanePathspecs(repoRoot, lane)
+  if (pathspecs.length > 0) {
+    args.push("--", ...pathspecs)
+  }
   const { stdout } = await execFileAsync("git", args, { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
   return stdout
+}
+
+async function readFileForReview(repoRoot, file, head) {
+  if (head) {
+    try {
+      const { stdout } = await execFileAsync("git", ["show", `${head}:${file}`], {
+        cwd: repoRoot,
+        maxBuffer: DIFF_MAX_BUFFER,
+      })
+      return stdout
+    } catch {
+      return null
+    }
+  }
+
+  try {
+    return await fs.readFile(path.join(repoRoot, file), "utf8")
+  } catch {
+    return null
+  }
+}
+
+async function readDependencyFileContents(repoRoot, diff, head) {
+  const files = parseUnifiedDiff(diff)
+  const contents = {}
+  for (const { file } of files) {
+    if (!DEPENDENCY_FILES.some((entry) => entry.name === path.basename(file))) continue
+    const content = await readFileForReview(repoRoot, file, head)
+    if (typeof content === "string") {
+      contents[file] = content
+    }
+  }
+  return contents
 }
 
 // ---- formatting ----
@@ -366,7 +566,9 @@ export async function reviewCode(repoRoot, options = {}) {
   const diff = await getLaneDiff(repoRoot, {
     base: options.base,
     head: options.head,
+    lane: options.lane,
   })
-  const result = scanDiff(diff)
+  const fileContentsByPath = await readDependencyFileContents(repoRoot, diff, options.head)
+  const result = scanDiff(diff, { fileContentsByPath })
   return result
 }

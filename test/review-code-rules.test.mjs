@@ -1,11 +1,19 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { promisify } from "node:util"
 import {
   parseUnifiedDiff,
   lineHasAllow,
   scanDiff,
   formatSummary,
+  reviewCode,
 } from "../src/brain_train/review/code-rules.mjs"
+
+const execFileAsync = promisify(execFile)
 
 // Synthetic secret-like strings, built at runtime so they aren't literal in
 // the source (avoids github secret-scanning false positives in CI).
@@ -21,15 +29,19 @@ const FAKE = {
 
 // Synthesize a minimal unified-diff snippet for one file with the given
 // added lines (line numbers start at 1).
-function makeDiff(filePath, addedLines) {
+function makeDiff(filePath, addedLines, { startLine = 1 } = {}) {
   const header = [
     `diff --git a/${filePath} b/${filePath}`,
     `--- a/${filePath}`,
     `+++ b/${filePath}`,
-    `@@ -0,0 +1,${addedLines.length} @@`,
+    `@@ -0,0 +${startLine},${addedLines.length} @@`,
   ].join("\n")
   const body = addedLines.map((line) => `+${line}`).join("\n")
   return `${header}\n${body}\n`
+}
+
+async function git(cwd, args) {
+  return execFileAsync("git", args, { cwd })
 }
 
 describe("parseUnifiedDiff", () => {
@@ -69,6 +81,25 @@ describe("parseUnifiedDiff", () => {
     const out = parseUnifiedDiff(diff)
     assert.equal(out[0].added.length, 1)
     assert.equal(out[0].added[0].line, 11) // 10 + 1 context line = 11
+  })
+
+  it("keeps added source lines that start with diff header-like text", () => {
+    const diff = [
+      "diff --git a/x b/x",
+      "--- a/x",
+      "+++ b/x",
+      "@@ -1,2 +1,3 @@",
+      " context-line",
+      "++++ literal-plus-prefix",
+      "+--- literal-minus-prefix",
+      "+after",
+    ].join("\n")
+    const out = parseUnifiedDiff(diff)
+    assert.deepEqual(out[0].added, [
+      { line: 2, text: "+++ literal-plus-prefix" },
+      { line: 3, text: "--- literal-minus-prefix" },
+      { line: 4, text: "after" },
+    ])
   })
 })
 
@@ -278,10 +309,53 @@ describe("unprotected-route rule", () => {
 
 describe("new-dependency rule", () => {
   it("flags an added line in package.json dependencies", () => {
-    const diff = makeDiff("package.json", ['  "lodash": "^4.17.0",'])
-    const { violations, summary } = scanDiff(diff)
+    const diff = makeDiff("package.json", ['    "lodash": "^4.17.0",'], { startLine: 3 })
+    const { violations, summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "package.json": [
+          "{",
+          '  "dependencies": {',
+          '    "lodash": "^4.17.0",',
+          "  }",
+          "}",
+        ].join("\n"),
+      },
+    })
     assert.equal(summary.warn, 1)
     assert.equal(violations[0].rule, "new-dependency")
+  })
+
+  it("does not flag package.json string pairs outside dependency sections", () => {
+    const diff = makeDiff("package.json", ['    "lint": "eslint ."'], { startLine: 3 })
+    const { summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "package.json": [
+          "{",
+          '  "scripts": {',
+          '    "lint": "eslint ."',
+          "  }",
+          "}",
+        ].join("\n"),
+      },
+    })
+    assert.equal(summary.warn, 0)
+  })
+
+  it("does not let an empty package.json dependency section bleed into scripts", () => {
+    const diff = makeDiff("package.json", ['    "lint": "eslint ."'], { startLine: 4 })
+    const { summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "package.json": [
+          "{",
+          '  "dependencies": {},',
+          '  "scripts": {',
+          '    "lint": "eslint ."',
+          "  }",
+          "}",
+        ].join("\n"),
+      },
+    })
+    assert.equal(summary.warn, 0)
   })
 
   it("flags an added line in requirements.txt", () => {
@@ -302,6 +376,12 @@ describe("new-dependency rule", () => {
     assert.equal(summary.warn, 1)
   })
 
+  it("flags a single-line go.mod require directive", () => {
+    const diff = makeDiff("go.mod", ["require github.com/foo/bar v1.2.3"])
+    const { summary } = scanDiff(diff)
+    assert.equal(summary.warn, 1)
+  })
+
   it("ignores comment-only added lines in requirements.txt", () => {
     const diff = makeDiff("requirements.txt", ["# pinned for security"])
     const { summary } = scanDiff(diff)
@@ -315,9 +395,63 @@ describe("new-dependency rule", () => {
   })
 
   it("respects // btrain-allow: new-dependency", () => {
-    const diff = makeDiff("package.json", ['  "lodash": "^4.17.0", // btrain-allow: new-dependency'])
-    const { summary } = scanDiff(diff)
+    const diff = makeDiff("package.json", ['    "lodash": "^4.17.0", // btrain-allow: new-dependency'], { startLine: 3 })
+    const { summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "package.json": [
+          "{",
+          '  "dependencies": {',
+          '    "lodash": "^4.17.0", // btrain-allow: new-dependency',
+          "  }",
+          "}",
+        ].join("\n"),
+      },
+    })
     assert.equal(summary.warn, 0)
+  })
+})
+
+describe("reviewCode lane scoping", () => {
+  it("limits the scanned diff to files locked by the requested lane", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await fs.mkdir(path.join(repo, ".btrain"), { recursive: true })
+      await fs.mkdir(path.join(repo, "src"), { recursive: true })
+      await fs.writeFile(
+        path.join(repo, ".btrain", "project.toml"),
+        [
+          "[project]",
+          'name = "review-code-test"',
+          "",
+          "[lanes]",
+          "enabled = true",
+          'ids = ["e"]',
+        ].join("\n"),
+      )
+      await fs.writeFile(
+        path.join(repo, ".btrain", "locks.json"),
+        JSON.stringify({
+          version: 1,
+          locks: [{ path: "src/lane.js", lane: "e", owner: "codex", acquired_at: "2026-05-04T00:00:00.000Z" }],
+        }),
+      )
+      await fs.writeFile(path.join(repo, "src", "lane.js"), "export const lane = 1\n")
+      await fs.writeFile(path.join(repo, "src", "other.js"), "export const other = 1\n")
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      await fs.writeFile(path.join(repo, "src", "lane.js"), "export const lane = 2\n")
+      await fs.writeFile(path.join(repo, "src", "other.js"), `export const leaked = "${FAKE.aws}"\n`)
+
+      const scoped = await reviewCode(repo, { base: "HEAD", lane: "e" })
+      assert.deepEqual(scoped.summary, { hard: 0, warn: 0 })
+      assert.deepEqual(scoped.violations, [])
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
   })
 })
 

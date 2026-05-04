@@ -83,7 +83,7 @@ Usage:
   btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
-  btrain review code [--repo <path>] [--base <ref>] [--head <ref>] [--format json|summary]
+  btrain review code --lane <id> [--repo <path>] [--base <ref>] [--head <ref>] [--format json|summary]
                                                                                 Run deterministic code-review rules (hardcoded-secret, cors-wildcard, unprotected-route, env-var-required, new-dependency) against the lane diff. Exit 2 if any hard violation. Per-line "// btrain-allow: <rule-id>" suppresses.
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
@@ -1702,7 +1702,7 @@ async function run() {
         message: "`btrain review` requires a subcommand.",
         reason: "No subcommand was provided.",
         fix: "btrain review run --repo . --mode parallel",
-        context: "Available subcommands: run, status.",
+        context: "Available subcommands: run, status, code.",
       })
     }
 
@@ -1724,7 +1724,7 @@ async function run() {
     }
 
     if (subcommand === "code") {
-      const result = await reviewCode(repoRoot, { base: options.base, head: options.head })
+      const result = await reviewCode(repoRoot, { base: options.base, head: options.head, lane: options.lane })
       if (options.format === "json") {
         console.log(JSON.stringify(result, null, 2))
       } else {
