@@ -16,11 +16,21 @@ Block bad review handoffs before they reach the reviewer.
 1. Run `btrain handoff` and confirm the lane is yours, still `in-progress`, and the locked files match the work you actually did.
 2. If needed, run `btrain locks` or `btrain status` to confirm lane and lock state. Do not read `HANDOFF_*.md` directly.
 3. Check the locked-file diff with `git diff -- <locked files>`. If the diff is empty, whitespace-only, or superseded by a priority change, do not hand it off. Mark it stale or keep working.
-4. Scan the handoff context you are about to submit. Block the handoff if it still contains placeholders like:
+4. **Context check (Unblocked)** — surface prior PRs, open issues, and prior decisions that touch this lane so the reviewer doesn't have to dig. Use the shared helper, which always emits a JSON object (even when the CLI is missing or unauthed):
+   ```
+   .claude/scripts/unblocked-context.sh research \
+     "<lane task title> <one or two locked file paths>" \
+     --effort low --limit 5
+   ```
+   - For each relevant prior PR or open issue in the result, add a `--review-ask` like `Confirm this doesn't conflict with <title> (<url>)`.
+   - If a source surfaces design rationale or a rejected alternative, fold it into `--why` and cite the URL.
+   - If the JSON contains a `_skipped` field (CLI missing / unauthed / errored), record one `--gap` noting `Unblocked context check skipped: <reason>` and proceed. Do not block the handoff on it.
+   - For deeper synthesis on novel or risky changes, escalate to `--effort medium`. Skip on routine work — `low` is the default budget.
+5. Scan the handoff context you are about to submit. Block the handoff if it still contains placeholders like:
    - `Fill this in before handoff`
    - `None yet`
    - empty changed-files, verification, gaps, or review-ask sections
-5. Confirm the full `btrain` reviewer-context set is present:
+6. Confirm the full `btrain` reviewer-context set is present:
    - `--base` or an explicit `Base`
    - `--preflight`
    - one or more `--changed` bullets
@@ -28,15 +38,15 @@ Block bad review handoffs before they reach the reviewer.
    - `--why`
    - one or more `--review-ask` bullets
    - `--gap` bullets for anything still unverified, or an explicit statement that no known gaps remain
-6. If the change spans multiple files, confirm you ran the repo's `code-simplifier` skill on the modified scope when available. Treat a missing simplification pass as a warning to fix before handoff, not a hard block.
-7. Confirm at least one real verification command was run and record what remains unverified.
-8. If this repo has `[cgraph]` enabled, run `btrain status` once before handoff and account for any fresh cgraph tips. Capture unresolved cgraph warnings in `--gap` or turn them into explicit `--review-ask` items.
-9. Prefer repeatable `btrain` flags over one large prose blob:
-   - one `--changed` per file or logical file group
-   - one `--verification` per command
-   - one `--gap` per remaining risk
-   - one `--review-ask` per concrete reviewer check
-10. Only then run `btrain handoff update --status needs-review`.
+7. If the change spans multiple files, confirm you ran the repo's `code-simplifier` skill on the modified scope when available. Treat a missing simplification pass as a warning to fix before handoff, not a hard block.
+8. Confirm at least one real verification command was run and record what remains unverified.
+9. If this repo has `[cgraph]` enabled, run `btrain status` once before handoff and account for any fresh cgraph tips. Capture unresolved cgraph warnings in `--gap` or turn them into explicit `--review-ask` items.
+10. Prefer repeatable `btrain` flags over one large prose blob:
+    - one `--changed` per file or logical file group
+    - one `--verification` per command
+    - one `--gap` per remaining risk
+    - one `--review-ask` per concrete reviewer check
+11. Only then run `btrain handoff update --status needs-review`.
 
 ## Constraints
 
@@ -52,6 +62,7 @@ Block bad review handoffs before they reach the reviewer.
 
 - Base
 - Pre-flight review
+- Context check (Unblocked sources cited, or skip reason)
 - Changed files
 - Verification run
 - Remaining gaps
