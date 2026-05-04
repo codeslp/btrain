@@ -371,6 +371,10 @@ describe("btrain init", () => {
       "handoff history watch registration helper should exist",
     )
     await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "scripts", "unblocked-context.sh")),
+      "Unblocked context helper should exist",
+    )
+    await assert.doesNotReject(
       fs.access(path.join(tmpDir, "agentchattr", "run.py")),
       "agentchattr runner should exist",
     )
@@ -426,6 +430,10 @@ describe("btrain init", () => {
       await assert.rejects(
         fs.access(path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
         "bundled skills should be skipped in core-only mode",
+      )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")),
+        "Unblocked context helper should be skipped in core-only mode",
       )
       await assert.rejects(
         fs.access(path.join(localTmpDir, "scripts", "serve-dashboard.js")),
@@ -485,10 +493,12 @@ describe("btrain init", () => {
       const preservedConfigPath = path.join(localTmpDir, "agentchattr", "config.toml")
       const restoredDashboardPath = path.join(localTmpDir, "scripts", "serve-dashboard.js")
       const restoredAgentAssetPath = path.join(localTmpDir, "agentchattr", "open_chat.html")
+      const restoredUnblockedHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
 
       await fs.writeFile(preservedConfigPath, "custom agentchattr config\n", "utf8")
       await fs.rm(restoredDashboardPath)
       await fs.rm(restoredAgentAssetPath)
+      await fs.rm(restoredUnblockedHelperPath)
 
       result = await runBtrain(["init", localTmpDir], localTmpDir)
       assert.equal(result.code, 0, result.stderr)
@@ -496,6 +506,10 @@ describe("btrain init", () => {
       assert.equal(await fs.readFile(preservedConfigPath, "utf8"), "custom agentchattr config\n")
       await assert.doesNotReject(fs.access(restoredDashboardPath), "missing dashboard file should be restored")
       await assert.doesNotReject(fs.access(restoredAgentAssetPath), "missing agentchattr asset should be restored")
+      await assert.doesNotReject(
+        fs.access(restoredUnblockedHelperPath),
+        "missing Unblocked helper should be restored",
+      )
     } finally {
       await rmDir(localTmpDir)
     }
