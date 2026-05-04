@@ -175,6 +175,49 @@ describe("PR review flow classification", () => {
     assert.equal(status.bots.find((bot) => bot.id === "codex").state, "clear")
   })
 
+  it("treats inline comments auto-anchored by GitHub to a new HEAD as stale, not current-head feedback", () => {
+    const oldHead = "84e9bc6ba23cb233b7feab954e0b6fdb331895d9"
+    const newHead = "0fac59295ce98ebd540cee314251671cf588acd5"
+    const status = classifyPrReviewState({
+      pr: {
+        number: 12,
+        state: "OPEN",
+        headRefOid: newHead,
+      },
+      prFlowConfig,
+      rawComments: {
+        reviewComments: [
+          {
+            id: 1,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: "**P1** Old finding GitHub re-anchored to the new head",
+            commit_id: newHead,
+            original_commit_id: oldHead,
+            path: "src/brain_train/pr-flow.mjs",
+            line: 610,
+            original_line: 601,
+            created_at: "2026-05-04T23:17:13Z",
+          },
+        ],
+        reviews: [
+          {
+            id: 10,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: "### 💡 Codex Review",
+            state: "COMMENTED",
+            commit_id: oldHead,
+            submitted_at: "2026-05-04T23:17:12Z",
+          },
+        ],
+      },
+    })
+
+    const codexState = status.bots.find((bot) => bot.id === "codex")
+    assert.equal(codexState.state, "waiting")
+    assert.equal(codexState.feedbackCount, 0)
+    assert.equal(codexState.staleFeedbackCount, 1)
+  })
+
   it("classifies merged PRs as merged regardless of outstanding old feedback", () => {
     const status = classifyPrReviewState({
       pr: {

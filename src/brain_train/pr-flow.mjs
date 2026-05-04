@@ -55,6 +55,10 @@ function reviewCommit(review) {
   return review?.commit_id || review?.commit?.oid || extractReviewedCommit(review?.body)
 }
 
+function inlineReviewedCommit(comment) {
+  return comment?.original_commit_id || comment?.commit_id || ""
+}
+
 function parseBtrainReviewMarker(body) {
   const match = /<!--\s*btrain-pr-review\s+([^>]*)-->/i.exec(String(body || ""))
   if (!match) return null
@@ -140,11 +144,11 @@ export function classifyBotReview({
 }) {
   const botInline = (reviewComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
   const botReviews = (reviews || []).filter((review) => loginMatches(bot, review.user?.login))
-  const currentInline = botInline.filter((comment) => commitMatches(comment.commit_id, headSha))
+  const currentInline = botInline.filter((comment) => commitMatches(inlineReviewedCommit(comment), headSha))
   const currentReviews = botReviews.filter((review) => commitMatches(reviewCommit(review), headSha))
   const latestCurrentReview = newest(currentReviews)
   const latestActivity = newest([...botInline, ...botReviews])
-  const staleInline = botInline.filter((comment) => !commitMatches(comment.commit_id, headSha))
+  const staleInline = botInline.filter((comment) => !commitMatches(inlineReviewedCommit(comment), headSha))
   const clearReaction = newest((issueComments || []).filter((comment) => (
     isMarkedReviewRequest(comment, bot, headSha)
     && hasPositiveBotReaction(comment, bot, issueCommentReactions)
