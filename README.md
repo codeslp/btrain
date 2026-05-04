@@ -2,7 +2,7 @@
 
 **A Kanban board with mandatory peer review gates and mechanical integrity enforcement, designed for concurrent AI agents.**
 
-btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. Lanes are WIP-limited work items moving through status columns (`idle` -> `in-progress` -> `needs-review` -> `resolved`), with feedback loops (`changes-requested`, `repair-needed`) that route work back to the writer or escalate to a human. Work is pulled, not pushed — agents claim lanes when capacity opens. File locks provide branch-level isolation without actual git branches, because AI agents share a single worktree. A watchdog auto-detects invalid state transitions, every active lane carries a structured delegation packet, and every handoff requires structured reviewer context (files changed, verification run, review asks) — essentially a PR description plus a worker contract built into the workflow.
+btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. Lanes are WIP-limited work items moving through status columns (`idle` -> `in-progress` -> `needs-review` -> `ready-for-pr` -> `pr-review` -> `ready-to-merge` -> `resolved`), with feedback loops (`changes-requested`, `repair-needed`) that route work back to the writer or escalate to a human. Work is pulled, not pushed — agents claim lanes when capacity opens. File locks provide branch-level isolation without actual git branches, because AI agents share a single worktree. A watchdog auto-detects invalid state transitions, every active lane carries a structured delegation packet, and every handoff requires structured reviewer context (files changed, verification run, review asks) — essentially a PR description plus a worker contract built into the workflow.
 
 The closest human equivalent: a team using a Kanban board where every card requires a PR approval before moving to "done", with automated integrity enforcement that a human board can't provide.
 
@@ -23,11 +23,23 @@ Agent follows instructions:
   idle/resolved   --> claim a task
   in-progress     --> continue working
   needs-review    --> review (if you're the reviewer)
+  ready-for-pr     --> create/link a GitHub PR
+  pr-review        --> wait for bot feedback, poll PR status
+  ready-to-merge   --> merge the PR, then resolve
   changes-requested --> fix findings, re-handoff
   repair-needed   --> fix workflow state
 ```
 
 The source of truth is `.claude/collab/HANDOFF_*.md` (one per lane). Never edit these directly — always use the CLI.
+
+PR flow is opt-in per repo:
+
+```toml
+[pr_flow]
+enabled = true
+base = "main"
+required_bots = ["codex", "unblocked"]
+```
 
 ---
 
@@ -62,6 +74,16 @@ btrain handoff update --lane a --status needs-review --actor "claude" \
 # Reviewer approves
 btrain handoff resolve --lane a --summary "Approved." --actor "codex"
 
+# In repos with [pr_flow].enabled = true, local approval moves to ready-for-pr:
+btrain pr create --lane a --bots all
+btrain pr poll --lane a --apply
+
+# If bots request changes, fix/push and request them again
+btrain pr request-review --lane a --bots all
+
+# When the PR is merged, poll once more to release locks and resolve the lane
+btrain pr poll --lane a --apply
+
 # Or requests changes
 btrain handoff request-changes --lane a \
   --summary "Need verification pass" --reason-code missing-verification \
@@ -80,8 +102,12 @@ btrain handoff request-changes --lane a \
 | `btrain handoff` | Print current state and what to do next |
 | `btrain handoff claim` | Claim a lane with task, owner, reviewer, file locks, and a delegation packet |
 | `btrain handoff update` | Update status, delegation packet fields, and reviewer context |
-| `btrain handoff resolve` | Approve and close a review |
+| `btrain handoff resolve` | Approve local review; in PR-flow repos this advances to `ready-for-pr` |
 | `btrain handoff request-changes` | Return review findings to the writer |
+| `btrain pr create` | Push the branch, create a GitHub PR, link it to the lane, and request bot reviews |
+| `btrain pr status` | Classify current PR bot review state |
+| `btrain pr poll` | Fetch PR comments, classify feedback, and optionally update lane status |
+| `btrain pr request-review` | Re-request configured bot reviews |
 | `btrain status [--json]` | Show all lane states (JSON output for integrations) |
 | `btrain doctor [--repair] [--skip-feedback]` | Health check; `--repair` fixes stale locks and workflow integrity |
 | `btrain locks` | List active file locks across lanes |

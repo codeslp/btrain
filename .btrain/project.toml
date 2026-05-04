@@ -28,3 +28,16 @@ handoff_path = ".claude/collab/HANDOFF_E.md"
 
 [lanes.f]
 handoff_path = ".claude/collab/HANDOFF_F.md"
+
+[pr_flow]
+enabled = true
+base = "main"
+required_bots = ["codex", "unblocked"]
+
+[pr_flow.bots.codex]
+aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
+request_body = "@codex review"
+
+[pr_flow.bots.unblocked]
+aliases = ["unblocked[bot]", "unblocked"]
+request_body = "@unblocked review again"
