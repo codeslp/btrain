@@ -63,6 +63,11 @@ def resolve_poller_cue_targets(
     Repo-scoped cues are strict. Returning [] is preferable to waking an agent
     that is registered for a different repo.
     """
+    if not repo_path:
+        if registry is None:
+            return [target]
+        return registry.resolve_to_instances(target)
+
     resolved = resolve_repo_agent(
         target,
         repo_path,

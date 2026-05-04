@@ -189,6 +189,22 @@ class TestPollerWiringIntegration(unittest.TestCase):
         inst = self.registry.get_instance(targets[0])
         self.assertEqual(inst["repo"], "/abs/btrain")
 
+    def test_unscoped_poller_cue_fans_out_to_active_family_instances(self):
+        """Single-repo/unscoped poller cues preserve legacy family fan-out."""
+        self.registry.register("claude", repo="")
+        self.registry.register("claude", repo="")
+
+        targets = resolve_poller_cue_targets(
+            "claude",
+            "",
+            registry=self.registry,
+        )
+
+        self.assertEqual(len(targets), 2)
+        for target in targets:
+            inst = self.registry.get_instance(target)
+            self.assertEqual(inst["base"], "claude")
+
 
 if __name__ == "__main__":
     unittest.main()
