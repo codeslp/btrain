@@ -282,6 +282,8 @@ function countJsonBraceDelta(text) {
 
 const PACKAGE_DEPENDENCY_SECTION = /^\s*"(?:dependencies|devDependencies|peerDependencies|optionalDependencies)"\s*:\s*\{/
 const PACKAGE_ENTRY = /^\s*"([^"]+)"\s*:\s*"[^"]*"\s*,?\s*(?:\/\/.*)?$/
+const TOML_SECTION = /^\s*\[([^\]]+)\]\s*$/
+const TOML_ENTRY = /^[A-Za-z0-9_.-]+\s*=\s*['"`{[]/
 
 function collectPackageJsonDependencyLinesFromText(content) {
   const lineNumbers = new Set()
@@ -353,6 +355,95 @@ function getPackageJsonDependencyLines(file, lines, fileContentsByPath) {
   return collectPackageJsonDependencyLinesFromDiff(lines)
 }
 
+function normalizeTomlSection(section) {
+  return String(section || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("\"", "")
+    .replaceAll("'", "")
+}
+
+function isCargoDependencySection(section) {
+  const normalized = normalizeTomlSection(section)
+  return (
+    normalized === "dependencies" ||
+    normalized === "dev-dependencies" ||
+    normalized === "build-dependencies" ||
+    normalized === "workspace.dependencies" ||
+    normalized.startsWith("dependencies.") ||
+    normalized.endsWith(".dependencies") ||
+    normalized.includes(".dependencies.")
+  )
+}
+
+function isPyprojectDependencySection(section) {
+  const normalized = normalizeTomlSection(section)
+  return (
+    normalized === "tool.poetry.dependencies" ||
+    normalized === "tool.poetry.dev-dependencies" ||
+    normalized === "project.optional-dependencies" ||
+    normalized === "dependency-groups" ||
+    (normalized.startsWith("tool.poetry.group.") && normalized.endsWith(".dependencies"))
+  )
+}
+
+function isCargoDependencyEntry(section, text) {
+  return isCargoDependencySection(section) && TOML_ENTRY.test(text.trim())
+}
+
+function isPyprojectDependencyEntry(section, text) {
+  const normalized = normalizeTomlSection(section)
+  const trimmed = text.trim()
+  if (normalized === "project") {
+    return /^(?:dependencies|optional-dependencies)\s*=/.test(trimmed)
+  }
+  return isPyprojectDependencySection(section) && TOML_ENTRY.test(trimmed)
+}
+
+function collectTomlDependencyLinesFromEntries(entries, isDependencyEntry) {
+  const lineNumbers = new Set()
+  let currentSection = ""
+
+  for (const entry of entries || []) {
+    const text = entry.text || ""
+    const sectionMatch = TOML_SECTION.exec(text)
+    if (sectionMatch) {
+      currentSection = sectionMatch[1]
+      continue
+    }
+    if (entry.kind === "added" && isDependencyEntry(currentSection, text)) {
+      lineNumbers.add(entry.line)
+    }
+  }
+
+  return lineNumbers
+}
+
+function collectTomlDependencyLinesFromText(content, isDependencyEntry) {
+  const entries = String(content || "")
+    .split("\n")
+    .map((text, index) => ({ line: index + 1, text, kind: "added" }))
+  return collectTomlDependencyLinesFromEntries(entries, isDependencyEntry)
+}
+
+function getTomlDependencyLines(file, lines, fileContentsByPath, isDependencyEntry) {
+  const content = fileContentsByPath?.[file]
+  if (typeof content === "string") {
+    return collectTomlDependencyLinesFromText(content, isDependencyEntry)
+  }
+  return collectTomlDependencyLinesFromEntries(lines, isDependencyEntry)
+}
+
+function getTomlDependencyLinesForFile(base, file, lines, fileContentsByPath) {
+  if (base === "Cargo.toml") {
+    return getTomlDependencyLines(file, lines, fileContentsByPath, isCargoDependencyEntry)
+  }
+  if (base === "pyproject.toml") {
+    return getTomlDependencyLines(file, lines, fileContentsByPath, isPyprojectDependencyEntry)
+  }
+  return null
+}
+
 function scanNewDependency(file, addedLines, lines, options = {}) {
   const out = []
   const base = path.basename(file)
@@ -362,6 +453,7 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
     base === "package.json"
       ? getPackageJsonDependencyLines(file, lines, options.fileContentsByPath)
       : null
+  const tomlDependencyLines = getTomlDependencyLinesForFile(base, file, lines, options.fileContentsByPath)
 
   // For files where every added line counts as a dep (requirements.txt), flag
   // every non-comment, non-empty added line.
@@ -395,7 +487,7 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
       if (!PACKAGE_ENTRY.test(text) || !packageJsonDependencyLines.has(line)) continue
     } else if (base === "Cargo.toml" || base === "pyproject.toml") {
       // name = "version"
-      if (!/^[A-Za-z0-9_.-]+\s*=\s*['"`{]/.test(trimmed)) continue
+      if (!TOML_ENTRY.test(trimmed) || !tomlDependencyLines.has(line)) continue
     } else if (base === "go.mod") {
       if (!/^(?:require\s+)?[A-Za-z0-9./_-]+\s+v\d/.test(trimmed)) continue
     } else {

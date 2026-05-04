@@ -378,9 +378,54 @@ describe("new-dependency rule", () => {
   })
 
   it("flags an added line in Cargo.toml", () => {
-    const diff = makeDiff("Cargo.toml", ['serde = "1.0"'])
+    const diff = makeDiff("Cargo.toml", ["[dependencies]", 'serde = "1.0"'])
     const { summary } = scanDiff(diff)
     assert.equal(summary.warn, 1)
+  })
+
+  it("does not flag Cargo.toml metadata outside dependency sections", () => {
+    const diff = makeDiff("Cargo.toml", ['version = "0.2.0"'], { startLine: 2 })
+    const { summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "Cargo.toml": [
+          "[package]",
+          'version = "0.2.0"',
+        ].join("\n"),
+      },
+    })
+    assert.equal(summary.warn, 0)
+  })
+
+  it("flags an added line in pyproject.toml dependency sections", () => {
+    const diff = makeDiff("pyproject.toml", ["[tool.poetry.dependencies]", 'requests = "^2.31"'])
+    const { summary } = scanDiff(diff)
+    assert.equal(summary.warn, 1)
+  })
+
+  it("flags project dependencies in pyproject.toml without treating all project keys as dependencies", () => {
+    const diff = makeDiff("pyproject.toml", ['dependencies = ["requests>=2.31"]'], { startLine: 2 })
+    const { summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "pyproject.toml": [
+          "[project]",
+          'dependencies = ["requests>=2.31"]',
+        ].join("\n"),
+      },
+    })
+    assert.equal(summary.warn, 1)
+  })
+
+  it("does not flag pyproject.toml project metadata outside dependency sections", () => {
+    const diff = makeDiff("pyproject.toml", ['version = "0.2.0"'], { startLine: 2 })
+    const { summary } = scanDiff(diff, {
+      fileContentsByPath: {
+        "pyproject.toml": [
+          "[project]",
+          'version = "0.2.0"',
+        ].join("\n"),
+      },
+    })
+    assert.equal(summary.warn, 0)
   })
 
   it("flags an added line in go.mod", () => {
