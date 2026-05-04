@@ -189,6 +189,19 @@ describe("hardcoded-secret rule", () => {
     const { summary } = scanDiff(diff)
     assert.equal(summary.hard, 0)
   })
+
+  it("respects an allow marker on a previous context line", () => {
+    const diff = [
+      "diff --git a/test/fixtures.ts b/test/fixtures.ts",
+      "--- a/test/fixtures.ts",
+      "+++ b/test/fixtures.ts",
+      "@@ -1,1 +1,2 @@",
+      " // btrain-allow: hardcoded-secret",
+      `+const k = "${FAKE.aws}"`,
+    ].join("\n")
+    const { summary } = scanDiff(`${diff}\n`)
+    assert.equal(summary.hard, 0)
+  })
 })
 
 describe("cors-wildcard rule", () => {
@@ -416,6 +429,19 @@ describe("new-dependency rule", () => {
       "requests>=2.31",
     ])
     const { summary } = scanDiff(diff)
+    assert.equal(summary.warn, 0)
+  })
+
+  it("respects a previous context-line allow marker for dependency manifests", () => {
+    const diff = [
+      "diff --git a/requirements.txt b/requirements.txt",
+      "--- a/requirements.txt",
+      "+++ b/requirements.txt",
+      "@@ -1,1 +1,2 @@",
+      " # btrain-allow: new-dependency",
+      "+requests>=2.31",
+    ].join("\n")
+    const { summary } = scanDiff(`${diff}\n`)
     assert.equal(summary.warn, 0)
   })
 })

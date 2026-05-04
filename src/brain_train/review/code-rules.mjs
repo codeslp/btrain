@@ -149,22 +149,24 @@ export function lineHasAllow(text, ruleId) {
     .includes(ruleId.toLowerCase())
 }
 
-// Whether the immediately previous line carries an allow marker.
-function prevLineAllows(addedLines, indexInAdded, ruleId) {
-  if (indexInAdded === 0) return false
-  const prev = addedLines[indexInAdded - 1]
+// Whether the immediately previous new-file line carries an allow marker.
+function prevLineAllows(lines, line, ruleId) {
+  const prev = (lines || []).find((entry) => entry.line === line - 1)
   return prev && lineHasAllow(prev.text, ruleId)
+}
+
+function lineIsAllowed(text, line, lines, ruleId) {
+  return lineHasAllow(text, ruleId) || prevLineAllows(lines, line, ruleId)
 }
 
 // ---- per-rule scanners ----
 
-function scanHardcodedSecret(file, addedLines) {
+function scanHardcodedSecret(file, addedLines, lines) {
   const out = []
-  for (let i = 0; i < addedLines.length; i++) {
-    const { line, text } = addedLines[i]
+  for (const { line, text } of addedLines) {
     for (const pattern of SECRET_PATTERNS) {
       if (!pattern.regex.test(text)) continue
-      if (lineHasAllow(text, "hardcoded-secret") || prevLineAllows(addedLines, i, "hardcoded-secret")) continue
+      if (lineIsAllowed(text, line, lines, "hardcoded-secret")) continue
       out.push({
         rule: "hardcoded-secret",
         severity: "hard",
@@ -179,12 +181,11 @@ function scanHardcodedSecret(file, addedLines) {
   return out
 }
 
-function scanCorsWildcard(file, addedLines) {
+function scanCorsWildcard(file, addedLines, lines) {
   const out = []
-  for (let i = 0; i < addedLines.length; i++) {
-    const { line, text } = addedLines[i]
+  for (const { line, text } of addedLines) {
     if (!CORS_WILDCARD_PATTERNS.some((re) => re.test(text))) continue
-    if (lineHasAllow(text, "cors-wildcard") || prevLineAllows(addedLines, i, "cors-wildcard")) continue
+    if (lineIsAllowed(text, line, lines, "cors-wildcard")) continue
     out.push({
       rule: "cors-wildcard",
       severity: "hard",
@@ -197,10 +198,9 @@ function scanCorsWildcard(file, addedLines) {
   return out
 }
 
-function scanEnvVarRequired(file, addedLines) {
+function scanEnvVarRequired(file, addedLines, lines) {
   const out = []
-  for (let i = 0; i < addedLines.length; i++) {
-    const { line, text } = addedLines[i]
+  for (const { line, text } of addedLines) {
     const nameMatch = SECRET_VAR_NAME.exec(text)
     if (!nameMatch) continue
 
@@ -214,7 +214,7 @@ function scanEnvVarRequired(file, addedLines) {
     // Don't double-fire if hardcoded-secret already matches a known pattern
     if (SECRET_PATTERNS.some((p) => p.regex.test(text))) continue
 
-    if (lineHasAllow(text, "env-var-required") || prevLineAllows(addedLines, i, "env-var-required")) continue
+    if (lineIsAllowed(text, line, lines, "env-var-required")) continue
 
     out.push({
       rule: "env-var-required",
@@ -231,7 +231,7 @@ function scanEnvVarRequired(file, addedLines) {
 // Per-file: if added lines introduce any route handler and the WHOLE file
 // (added lines viewed, since we don't read the on-disk file) has no helmet
 // or security-header import, flag once.
-function scanUnprotectedRoute(file, addedLines) {
+function scanUnprotectedRoute(file, addedLines, lines) {
   const out = []
   const hasRoute = addedLines.some(({ text }) => ROUTE_PATTERNS.some((re) => re.test(text)))
   if (!hasRoute) return out
@@ -240,8 +240,8 @@ function scanUnprotectedRoute(file, addedLines) {
   // Allow marker may appear on the route line.
   const routeIndex = addedLines.findIndex(({ text }) => ROUTE_PATTERNS.some((re) => re.test(text)))
   if (routeIndex >= 0) {
-    const { text } = addedLines[routeIndex]
-    if (lineHasAllow(text, "unprotected-route") || prevLineAllows(addedLines, routeIndex, "unprotected-route")) {
+    const { line, text } = addedLines[routeIndex]
+    if (lineIsAllowed(text, line, lines, "unprotected-route")) {
       return out
     }
   }
@@ -366,11 +366,10 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
   // For files where every added line counts as a dep (requirements.txt), flag
   // every non-comment, non-empty added line.
   if (config.everyAddedLine) {
-    for (let i = 0; i < addedLines.length; i++) {
-      const { line, text } = addedLines[i]
+    for (const { line, text } of addedLines) {
       const trimmed = text.trim()
       if (!trimmed || trimmed.startsWith("#")) continue
-      if (lineHasAllow(text, "new-dependency") || prevLineAllows(addedLines, i, "new-dependency")) continue
+      if (lineIsAllowed(text, line, lines, "new-dependency")) continue
       out.push({
         rule: "new-dependency",
         severity: "warn",
@@ -387,11 +386,10 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
   // inside a deps block. We don't have full file context here; approximate by
   // checking whether the added line itself looks like a dependency entry
   // (key-value form for json/toml).
-  for (let i = 0; i < addedLines.length; i++) {
-    const { line, text } = addedLines[i]
+  for (const { line, text } of addedLines) {
     const trimmed = text.trim()
     if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("/*")) continue
-    if (lineHasAllow(text, "new-dependency") || prevLineAllows(addedLines, i, "new-dependency")) continue
+    if (lineIsAllowed(text, line, lines, "new-dependency")) continue
 
     if (base === "package.json") {
       if (!PACKAGE_ENTRY.test(text) || !packageJsonDependencyLines.has(line)) continue
@@ -423,10 +421,10 @@ export function scanDiff(diff, options = {}) {
   const violations = []
   for (const { file, added, lines } of files) {
     if (added.length === 0) continue
-    violations.push(...scanHardcodedSecret(file, added))
-    violations.push(...scanCorsWildcard(file, added))
-    violations.push(...scanEnvVarRequired(file, added))
-    violations.push(...scanUnprotectedRoute(file, added))
+    violations.push(...scanHardcodedSecret(file, added, lines))
+    violations.push(...scanCorsWildcard(file, added, lines))
+    violations.push(...scanEnvVarRequired(file, added, lines))
+    violations.push(...scanUnprotectedRoute(file, added, lines))
     violations.push(...scanNewDependency(file, added, lines, options))
   }
   // Stable sort: by file, then line, then rule.
