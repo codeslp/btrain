@@ -178,6 +178,11 @@ const BUNDLED_DEV_TOOLS = [
     targetParts: ["scripts", "register-handoff-watch-path.sh"],
   },
   {
+    label: "unblocked-context-helper",
+    sourcePath: path.join(PACKAGE_ROOT, ".claude", "scripts", "unblocked-context.sh"),
+    targetParts: [".claude", "scripts", "unblocked-context.sh"],
+  },
+  {
     label: "agentchattr",
     sourcePath: BUNDLED_AGENTCHATTR_DIR,
     targetParts: ["agentchattr"],
