@@ -26,10 +26,11 @@ Block bad review handoffs before they reach the reviewer.
    - If a source surfaces design rationale or a rejected alternative, fold it into `--why` and cite the URL.
    - If the JSON contains a `_skipped` field (CLI missing / unauthed / errored), record one `--gap` noting `Unblocked context check skipped: <reason>` and proceed. Do not block the handoff on it.
    - For deeper synthesis on novel or risky changes, escalate to `--effort medium`. Skip on routine work — `low` is the default budget.
-5. **Code-review gate** — run `btrain review code` against the lane diff:
+5. **Code-review gate** — run `btrain review code` against the active lane diff:
    ```
-   btrain review code --base main
+   btrain review code --lane <id> --base <Base>
    ```
+   - Use the lane id from `btrain handoff` and the same `Base` value you will put in the handoff packet. If no explicit base is recorded, use the repo default review base (usually `main`).
    - Exit **2** (hard violations) is a **hard block**. Hard rules: `hardcoded-secret`, `cors-wildcard`. Fix the violation in the same lane, then re-run; do not flip to `needs-review` until the gate exits 0.
    - Exit **0** with `warn > 0` (e.g., `unprotected-route`, `env-var-required`, `new-dependency`) is informational. Record each warn as a `--gap` bullet in the handoff packet, or address inline before handoff if appropriate.
    - Exit **0** with `0 hard, 0 warn` — record `btrain review code passed` as a `--verification` bullet.
@@ -62,7 +63,7 @@ Block bad review handoffs before they reach the reviewer.
 - Do not read or edit `HANDOFF_*.md` files directly.
 - Do not move a lane to review with placeholder text.
 - Do not move a lane to review with an empty or no-op diff.
-- Do not move a lane to review when `btrain review code` reports hard violations (`hardcoded-secret`, `cors-wildcard`). Fix the violation in the same lane or add a documented `// btrain-allow: <rule-id>` marker first.
+- Do not move a lane to review when `btrain review code --lane <id>` reports hard violations (`hardcoded-secret`, `cors-wildcard`). Fix the violation in the same lane or add a documented `// btrain-allow: <rule-id>` marker first.
 - Do not omit `Base` or `Specific review asks`.
 - Do not hand off superseded work. Resolve it stale and claim a real slice instead.
 - Do not silently skip the simplification pass on a multi-file code change.
