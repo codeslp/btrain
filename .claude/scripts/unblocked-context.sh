@@ -47,6 +47,25 @@ emit_skip() {
   jq -cn --arg reason "$1" '{sources: [], _skipped: $reason}'
 }
 
+die_usage() {
+  echo "$1" >&2
+  exit 64
+}
+
+require_value() {
+  local opt="$1"
+  local value="${2:-}"
+  if [ -z "$value" ] || [[ "$value" == --* ]]; then
+    die_usage "$sub: $opt requires a value"
+  fi
+}
+
+validate_limit() {
+  case "$limit" in
+    ''|*[!0-9]*) die_usage "$sub: --limit must be a non-negative integer" ;;
+  esac
+}
+
 if ! command -v jq >/dev/null 2>&1; then
   printf '{"sources":[],"_skipped":"jq not installed"}\n'
   exit 0
@@ -102,11 +121,12 @@ case "$sub" in
     limit="$DEFAULT_LIMIT"
     while [ $# -gt 0 ]; do
       case "$1" in
-        --effort) effort="${2:-}"; shift 2 ;;
-        --limit)  limit="${2:-}"; shift 2 ;;
+        --effort) require_value "$1" "${2:-}"; effort="$2"; shift 2 ;;
+        --limit)  require_value "$1" "${2:-}"; limit="$2"; shift 2 ;;
         *) echo "research: unknown arg: $1" >&2; exit 64 ;;
       esac
     done
+    validate_limit
     args=(context-research --query "$query")
     [ -n "$effort" ] && args+=(--effort "$effort")
     run_unblocked "{summary: (.summary // \"\"), sources: ([.sources[] | {title, url, sourceType}][:$limit])}" "${args[@]}"
@@ -118,10 +138,11 @@ case "$sub" in
     limit="$DEFAULT_LIMIT"
     while [ $# -gt 0 ]; do
       case "$1" in
-        --limit) limit="${2:-}"; shift 2 ;;
+        --limit) require_value "$1" "${2:-}"; limit="$2"; shift 2 ;;
         *) echo "$sub: unknown arg: $1" >&2; exit 64 ;;
       esac
     done
+    validate_limit
     run_unblocked "{sources: ([.sources[] | {title, url, sourceType}][:$limit])}" \
       "context-$sub" --query "$query"
     ;;
@@ -134,12 +155,13 @@ case "$sub" in
     user_name=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --projects)  projects+=("${2:-}"); shift 2 ;;
-        --user-name) user_name="${2:-}"; shift 2 ;;
-        --limit)     limit="${2:-}"; shift 2 ;;
+        --projects)  require_value "$1" "${2:-}"; projects+=("$2"); shift 2 ;;
+        --user-name) require_value "$1" "${2:-}"; user_name="$2"; shift 2 ;;
+        --limit)     require_value "$1" "${2:-}"; limit="$2"; shift 2 ;;
         *) echo "$sub: unknown arg: $1" >&2; exit 64 ;;
       esac
     done
+    validate_limit
     args=(context-"$sub" --query "$query")
     if [ ${#projects[@]} -gt 0 ]; then
       for p in "${projects[@]}"; do args+=(--projects "$p"); done
