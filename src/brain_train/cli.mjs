@@ -54,6 +54,7 @@ import {
   listTraces,
   showTrace,
 } from "./harness/trace-discovery.mjs"
+import { pullPrComments } from "./handoff/pr-comments.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -71,6 +72,7 @@ Usage:
   btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
                                                                               Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
+  btrain handoff pull-pr --lane <id> --pr <number> [--show] [--acknowledge]     Fetch GH PR comments (issue, review, inline) into .btrain/pr-comments/ JSONL log
   btrain harness list [--repo <path>]                                            List bundled and repo-local harness profiles
   btrain harness inspect [--repo <path>] [--profile <name>]                      Inspect one harness profile (defaults to active)
   btrain harness trace list [--repo <path>] [--limit <n>]                        List harness trace bundles under .btrain/harness/runs
@@ -1398,7 +1400,7 @@ async function run() {
   }
 
   if (command === "handoff") {
-    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next", "pull-pr"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
 
     if (options.help || options.h) {
@@ -1446,6 +1448,11 @@ async function run() {
       await requestChangesHandoff(repoRoot, options)
       const result = await checkHandoff(repoRoot)
       printHandoffState(result)
+      return
+    }
+
+    if (subcommand === "pull-pr") {
+      await pullPrComments(repoRoot, options)
       return
     }
 
