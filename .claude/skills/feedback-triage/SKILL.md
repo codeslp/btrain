@@ -33,20 +33,44 @@ Turn raw user feedback into a triaged log entry, a failing reproduction test, an
 5. Present assessment to the user with reasoning (which files, why this category)
 6. **Do NOT write tests or code yet**
 
-### Step 2: Append to Feedback Log
+### Step 2: Unblocked Dedup + Related-Context Check
+
+Before logging a new entry, check whether the issue is already tracked or has related user discussion. Uses the shared helper:
+
+1. **Issue dedup** — structured query against connected issue trackers, scoped to the project:
+   ```bash
+   .claude/scripts/unblocked-context.sh query-issues \
+     "<symptom in user's words>" \
+     --projects ai_sales --limit 5
+   ```
+   Replace `--projects ai_sales` with the actual project key when working in a different repo. If a result clearly matches the new feedback, link the FB entry to that ticket URL instead of creating standalone work.
+
+2. **Related complaints** — semantic search over team messaging for prior reports of the same symptom:
+   ```bash
+   .claude/scripts/unblocked-context.sh search-messages \
+     "<symptom in user's words>" --limit 5
+   ```
+   Multiple recent reports of the same symptom escalate complexity (a low-complexity-looking fix may actually need a broader investigation).
+
+3. If either call returns `_skipped` (helper missing / unauthed / errored), proceed to Step 3 without external dedup. Note the skip reason in the upcoming log entry's notes field.
+
+4. Bring the resolved ticket URL (if any) and a count of related complaints into the assessment shown to the user. The user's confirmation may now include "this is the same as <ticket>" or "I see — escalate complexity to medium given the message volume."
+
+### Step 3: Append to Feedback Log
 
 1. Read `.claude/collab/FEEDBACK_LOG.md` to find the next sequential number (or create the file if missing — use the template in `references/log-template.md`)
 2. Append a new entry using the format in `references/entry-format.md`
 3. ID format: `FB-<CATEGORY>-<NNN>` where NNN is globally sequential
 4. Set status to `new`
+5. If Step 2 surfaced an existing ticket, record the URL in the entry's `Linked ticket` field. If it surfaced related messages, record the count in the `Related reports` field.
 
-### Step 3: Wait for User Confirmation
+### Step 4: Wait for User Confirmation
 
 1. User confirms or overrides the category
 2. If category changes, update the tag in the ID (keep same sequential number)
 3. Update status to `triaged`
 
-### Step 4: Branch by Category
+### Step 5: Branch by Category
 
 **If MINOR or BUG:**
 
