@@ -55,6 +55,7 @@ import {
   showTrace,
 } from "./harness/trace-discovery.mjs"
 import { pullPrComments } from "./handoff/pr-comments.mjs"
+import { reviewCode, formatSummary as formatReviewCodeSummary } from "./review/code-rules.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -82,6 +83,8 @@ Usage:
   btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
+  btrain review code --lane <id> [--repo <path>] [--base <ref>] [--head <ref>] [--format json|summary]
+                                                                                Run deterministic code-review rules (hardcoded-secret, cors-wildcard, unprotected-route, env-var-required, new-dependency) against the lane diff. Exit 2 if any hard violation. Per-line "// btrain-allow: <rule-id>" suppresses.
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
@@ -1693,13 +1696,13 @@ async function run() {
   }
 
   if (command === "review") {
-    const subcommand = ["run", "status"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["run", "status", "code"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
       throw new BtrainError({
         message: "`btrain review` requires a subcommand.",
         reason: "No subcommand was provided.",
         fix: "btrain review run --repo . --mode parallel",
-        context: "Available subcommands: run, status.",
+        context: "Available subcommands: run, status, code.",
       })
     }
 
@@ -1716,6 +1719,19 @@ async function run() {
       console.log(formatReviewRunResult(result))
       if (result.status === "failed") {
         process.exitCode = 1
+      }
+      return
+    }
+
+    if (subcommand === "code") {
+      const result = await reviewCode(repoRoot, { base: options.base, head: options.head, lane: options.lane })
+      if (options.format === "json") {
+        console.log(JSON.stringify(result, null, 2))
+      } else {
+        console.log(formatReviewCodeSummary(result))
+      }
+      if (result.summary.hard > 0) {
+        process.exitCode = 2
       }
       return
     }
