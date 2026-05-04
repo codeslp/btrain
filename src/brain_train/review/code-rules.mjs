@@ -5,6 +5,7 @@
 //
 // Rules:
 //   hardcoded-secret    (hard)  — known API key formats in added lines
+// btrain-allow: cors-wildcard
 //   cors-wildcard       (hard)  — Access-Control-Allow-Origin: *
 //   unprotected-route   (warn)  — new HTTP route handler with no
 //                                 helmet/security-header import in the file
@@ -48,10 +49,13 @@ const SECRET_PATTERNS = [
 ]
 
 const CORS_WILDCARD_PATTERNS = [
+  // btrain-allow: cors-wildcard
   // Header literal: Access-Control-Allow-Origin: *
   /Access-Control-Allow-Origin\s*:\s*['"`]?\*['"`]?/i,
+  // btrain-allow: cors-wildcard
   // setHeader / set call: ('Access-Control-Allow-Origin', '*')
   /['"`]Access-Control-Allow-Origin['"`]\s*,\s*['"`]\*['"`]/i,
+  // btrain-allow: cors-wildcard
   // JS object form: { origin: "*" } or origin:'*'
   /\borigin\s*:\s*['"`]\*['"`]/i,
 ]
@@ -149,10 +153,15 @@ export function lineHasAllow(text, ruleId) {
     .includes(ruleId.toLowerCase())
 }
 
+function lineHasStandaloneAllow(text, ruleId) {
+  if (!lineHasAllow(text, ruleId)) return false
+  return /^(?:\/\/|#|--|\/\*)\s*btrain-allow\s*:/i.test(text.trim())
+}
+
 // Whether the immediately previous new-file line carries an allow marker.
 function prevLineAllows(lines, line, ruleId) {
   const prev = (lines || []).find((entry) => entry.line === line - 1)
-  return prev && lineHasAllow(prev.text, ruleId)
+  return prev && lineHasStandaloneAllow(prev.text, ruleId)
 }
 
 function lineIsAllowed(text, line, lines, ruleId) {
@@ -233,24 +242,19 @@ function scanEnvVarRequired(file, addedLines, lines) {
 // or security-header import, flag once.
 function scanUnprotectedRoute(file, addedLines, lines) {
   const out = []
-  const hasRoute = addedLines.some(({ text }) => ROUTE_PATTERNS.some((re) => re.test(text)))
-  if (!hasRoute) return out
+  const routeLines = addedLines.filter(({ text }) => ROUTE_PATTERNS.some((re) => re.test(text)))
+  if (routeLines.length === 0) return out
   const hasSecurity = addedLines.some(({ text }) => SECURITY_IMPORT_PATTERNS.some((re) => re.test(text)))
   if (hasSecurity) return out
-  // Allow marker may appear on the route line.
-  const routeIndex = addedLines.findIndex(({ text }) => ROUTE_PATTERNS.some((re) => re.test(text)))
-  if (routeIndex >= 0) {
-    const { line, text } = addedLines[routeIndex]
-    if (lineIsAllowed(text, line, lines, "unprotected-route")) {
-      return out
-    }
-  }
+  // Allow markers are per-line; keep scanning later route additions.
+  const route = routeLines.find(({ line, text }) => !lineIsAllowed(text, line, lines, "unprotected-route"))
+  if (!route) return out
   out.push({
     rule: "unprotected-route",
     severity: "warn",
     file,
-    line: routeIndex >= 0 ? addedLines[routeIndex].line : 0,
-    preview: routeIndex >= 0 ? addedLines[routeIndex].text.trim().slice(0, 200) : "",
+    line: route.line,
+    preview: route.text.trim().slice(0, 200),
     detail: "New HTTP route added without helmet/security-header import in the same file.",
   })
   return out
@@ -284,6 +288,7 @@ const PACKAGE_DEPENDENCY_SECTION = /^\s*"(?:dependencies|devDependencies|peerDep
 const PACKAGE_ENTRY = /^\s*"([^"]+)"\s*:\s*"[^"]*"\s*,?\s*(?:\/\/.*)?$/
 const TOML_SECTION = /^\s*\[([^\]]+)\]\s*$/
 const TOML_ENTRY = /^[A-Za-z0-9_.-]+\s*=\s*['"`{[]/
+const TOML_STRING_ARRAY_ENTRY = /^['"][^'"]+['"]\s*,?$/
 
 function collectPackageJsonDependencyLinesFromText(content) {
   const lineNumbers = new Set()
@@ -400,6 +405,14 @@ function isPyprojectDependencyEntry(section, text) {
   return isPyprojectDependencySection(section) && TOML_ENTRY.test(trimmed)
 }
 
+function startsTomlArrayAssignment(text) {
+  return /=\s*\[/.test(text)
+}
+
+function closesTomlArray(text) {
+  return text.includes("]")
+}
+
 function collectTomlDependencyLinesFromEntries(entries, isDependencyEntry) {
   const lineNumbers = new Set()
   let currentSection = ""
@@ -434,12 +447,64 @@ function getTomlDependencyLines(file, lines, fileContentsByPath, isDependencyEnt
   return collectTomlDependencyLinesFromEntries(lines, isDependencyEntry)
 }
 
+function collectPyprojectDependencyLinesFromEntries(entries) {
+  const lineNumbers = new Set()
+  let currentSection = ""
+  let inDependencyArray = false
+
+  for (const entry of entries || []) {
+    const text = entry.text || ""
+    const trimmed = text.trim()
+    const sectionMatch = TOML_SECTION.exec(text)
+    if (sectionMatch) {
+      currentSection = sectionMatch[1]
+      inDependencyArray = false
+      continue
+    }
+
+    if (inDependencyArray) {
+      if (entry.kind === "added" && TOML_STRING_ARRAY_ENTRY.test(trimmed)) {
+        lineNumbers.add(entry.line)
+      }
+      if (closesTomlArray(trimmed)) {
+        inDependencyArray = false
+      }
+      continue
+    }
+
+    if (!isPyprojectDependencyEntry(currentSection, text)) continue
+    if (entry.kind === "added") {
+      lineNumbers.add(entry.line)
+    }
+    if (startsTomlArrayAssignment(trimmed) && !closesTomlArray(trimmed)) {
+      inDependencyArray = true
+    }
+  }
+
+  return lineNumbers
+}
+
+function collectPyprojectDependencyLinesFromText(content) {
+  const entries = String(content || "")
+    .split("\n")
+    .map((text, index) => ({ line: index + 1, text, kind: "added" }))
+  return collectPyprojectDependencyLinesFromEntries(entries)
+}
+
+function getPyprojectDependencyLines(file, lines, fileContentsByPath) {
+  const content = fileContentsByPath?.[file]
+  if (typeof content === "string") {
+    return collectPyprojectDependencyLinesFromText(content)
+  }
+  return collectPyprojectDependencyLinesFromEntries(lines)
+}
+
 function getTomlDependencyLinesForFile(base, file, lines, fileContentsByPath) {
   if (base === "Cargo.toml") {
     return getTomlDependencyLines(file, lines, fileContentsByPath, isCargoDependencyEntry)
   }
   if (base === "pyproject.toml") {
-    return getTomlDependencyLines(file, lines, fileContentsByPath, isPyprojectDependencyEntry)
+    return getPyprojectDependencyLines(file, lines, fileContentsByPath)
   }
   return null
 }
@@ -486,8 +551,7 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
     if (base === "package.json") {
       if (!PACKAGE_ENTRY.test(text) || !packageJsonDependencyLines.has(line)) continue
     } else if (base === "Cargo.toml" || base === "pyproject.toml") {
-      // name = "version"
-      if (!TOML_ENTRY.test(trimmed) || !tomlDependencyLines.has(line)) continue
+      if (!tomlDependencyLines.has(line)) continue
     } else if (base === "go.mod") {
       if (!/^(?:require\s+)?[A-Za-z0-9./_-]+\s+v\d/.test(trimmed)) continue
     } else {
@@ -584,22 +648,42 @@ async function getLanePathspecs(repoRoot, laneId) {
   })
 }
 
+async function hasHeadCommit(repoRoot) {
+  try {
+    await execFileAsync("git", ["rev-parse", "--verify", "HEAD"], { cwd: repoRoot })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function execDiff(repoRoot, args) {
+  const { stdout } = await execFileAsync("git", args, { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
+  return stdout
+}
+
 async function getLaneDiff(repoRoot, { base, head, lane }) {
   // If both base and head are provided, diff between them.
-  // Otherwise, diff the working tree (uncommitted changes) for fast feedback
-  // during local development.
+  // Otherwise, default to HEAD vs index/worktree so staged-only edits are
+  // included in local pre-handoff scans.
   const args = ["diff", "--unified=3"]
+  const pathspecs = await getLanePathspecs(repoRoot, lane)
   if (base) {
     args.push(`${base}${head ? `..${head}` : ""}`)
   } else if (head) {
     args.push(head)
+  } else if (await hasHeadCommit(repoRoot)) {
+    args.push("HEAD")
+  } else {
+    const pathArgs = pathspecs.length > 0 ? ["--", ...pathspecs] : []
+    const cached = await execDiff(repoRoot, ["diff", "--cached", "--unified=3", ...pathArgs])
+    const unstaged = await execDiff(repoRoot, ["diff", "--unified=3", ...pathArgs])
+    return [cached, unstaged].filter(Boolean).join("\n")
   }
-  const pathspecs = await getLanePathspecs(repoRoot, lane)
   if (pathspecs.length > 0) {
     args.push("--", ...pathspecs)
   }
-  const { stdout } = await execFileAsync("git", args, { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
-  return stdout
+  return execDiff(repoRoot, args)
 }
 
 async function readFileForReview(repoRoot, file, head) {

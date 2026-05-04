@@ -146,7 +146,7 @@ describe("hardcoded-secret rule", () => {
   })
 
   it("flags an Anthropic key", () => {
-    const diff = makeDiff("src/llm.ts", [`ANTHROPIC_API_KEY = "${FAKE.anthropic}"`])
+    const diff = makeDiff("src/llm.ts", [`ANTHROPIC_API_KEY = "${FAKE.anthropic}"`]) // btrain-allow: env-var-required
     const { summary } = scanDiff(diff)
     assert.equal(summary.hard, 1)
   })
@@ -205,15 +205,17 @@ describe("hardcoded-secret rule", () => {
 })
 
 describe("cors-wildcard rule", () => {
+  // btrain-allow: cors-wildcard
   it("flags an Access-Control-Allow-Origin: * header line", () => {
-    const diff = makeDiff("src/server.ts", ['res.setHeader("Access-Control-Allow-Origin", "*")'])
+    const diff = makeDiff("src/server.ts", ['res.setHeader("Access-Control-Allow-Origin", "*")']) // btrain-allow: cors-wildcard
     const { violations, summary } = scanDiff(diff)
     assert.equal(summary.hard, 1)
     assert.equal(violations[0].rule, "cors-wildcard")
   })
 
+  // btrain-allow: cors-wildcard
   it("flags an inline cors({ origin: '*' }) call", () => {
-    const diff = makeDiff("src/server.ts", ["app.use(cors({ origin: '*', credentials: false }))"])
+    const diff = makeDiff("src/server.ts", ["app.use(cors({ origin: '*', credentials: false }))"]) // btrain-allow: cors-wildcard
     const { summary } = scanDiff(diff)
     assert.equal(summary.hard, 1)
   })
@@ -238,7 +240,7 @@ describe("cors-wildcard rule", () => {
 describe("env-var-required rule", () => {
   it("flags a SECRET-named var assigned to a long literal", () => {
     const diff = makeDiff("src/config.ts", [
-      `const STRIPE_SECRET = "${FAKE.longLiteral}"`,
+      `const STRIPE_SECRET = "${FAKE.longLiteral}"`, // btrain-allow: env-var-required
     ])
     const { violations, summary } = scanDiff(diff)
     assert.equal(summary.warn, 1)
@@ -256,7 +258,7 @@ describe("env-var-required rule", () => {
   it("does NOT flag if a known secret pattern already fires (avoid double-flagging)", () => {
     // The Stripe key pattern fires hardcoded-secret; env-var-required should yield to it.
     const diff = makeDiff("src/config.ts", [
-      `const STRIPE_SECRET = "${FAKE.stripe}"`,
+      `const STRIPE_SECRET = "${FAKE.stripe}"`, // btrain-allow: env-var-required
     ])
     const { summary } = scanDiff(diff)
     assert.equal(summary.hard, 1)
@@ -309,6 +311,17 @@ describe("unprotected-route rule", () => {
     ])
     const { summary } = scanDiff(diff)
     assert.equal(summary.warn, 0)
+  })
+
+  it("continues scanning routes after an allowed route line", () => {
+    const diff = makeDiff("src/server.ts", [
+      "app.get('/api/fixture', (req, res) => res.json({})) // btrain-allow: unprotected-route",
+      "app.post('/api/live', (req, res) => res.json({}))",
+    ])
+    const { violations, summary } = scanDiff(diff)
+    assert.equal(summary.warn, 1)
+    assert.equal(violations[0].rule, "unprotected-route")
+    assert.equal(violations[0].line, 2)
   })
 
   it("does not fire when no route handlers were added", () => {
@@ -412,6 +425,21 @@ describe("new-dependency rule", () => {
         ].join("\n"),
       },
     })
+    assert.equal(summary.warn, 1)
+  })
+
+  it("flags project dependencies added inside existing pyproject dependency arrays", () => {
+    const diff = [
+      "diff --git a/pyproject.toml b/pyproject.toml",
+      "--- a/pyproject.toml",
+      "+++ b/pyproject.toml",
+      "@@ -1,3 +1,4 @@",
+      " [project]",
+      " dependencies = [",
+      "+  \"urllib3>=2\",",
+      " ]",
+    ].join("\n")
+    const { summary } = scanDiff(`${diff}\n`)
     assert.equal(summary.warn, 1)
   })
 
@@ -588,6 +616,28 @@ describe("reviewCode lane scoping", () => {
       await fs.rm(repo, { recursive: true, force: true })
     }
   })
+
+  it("includes staged-only changes in the default scan", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-staged-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await fs.mkdir(path.join(repo, "src"), { recursive: true })
+      await fs.writeFile(path.join(repo, "src", "config.js"), "export const ok = true\n")
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      await fs.writeFile(path.join(repo, "src", "config.js"), `export const token = "${FAKE.aws}"\n`)
+      await git(repo, ["add", "."])
+
+      const result = await reviewCode(repo)
+      assert.equal(result.summary.hard, 1)
+      assert.equal(result.violations[0].rule, "hardcoded-secret")
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("scanDiff aggregation", () => {
@@ -601,7 +651,7 @@ describe("scanDiff aggregation", () => {
     const diff =
       makeDiff("z.ts", [`const k = "${FAKE.aws}"`]) +
       makeDiff("a.ts", [
-        "app.use(cors({ origin: '*' }))",
+        "app.use(cors({ origin: '*' }))", // btrain-allow: cors-wildcard
         `const k = "${FAKE.aws}"`,
       ])
     const { violations } = scanDiff(diff)
@@ -615,7 +665,7 @@ describe("scanDiff aggregation", () => {
 
   it("counts hard vs warn correctly across multiple files", () => {
     const diff =
-      makeDiff("src/server.ts", ["app.use(cors({ origin: '*' }))"]) +
+      makeDiff("src/server.ts", ["app.use(cors({ origin: '*' }))"]) + // btrain-allow: cors-wildcard
       makeDiff("requirements.txt", ["new-package"])
     const { summary } = scanDiff(diff)
     assert.equal(summary.hard, 1)
