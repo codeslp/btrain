@@ -33,6 +33,7 @@ from btrain.notifications import (
     build_btrain_notification_text,
     create_btrain_delivery,
 )
+from btrain.routing import resolve_poller_cue_targets
 from btrain.validator import btrainValidator
 from registry import RuntimeRegistry
 from session_store import SessionStore, validate_session_template
@@ -463,11 +464,12 @@ def _refresh_btrain_state_for_repo(repo_label: str, repo_entry: dict, env: dict)
                 store.add("btrain", notify_text, channel=agents_channel)
                 if notify_text.startswith("@") and agents:
                     target = notify_text.split()[0][1:]
-                    targets, repo_path = _resolve_targets_for_channel([target], agents_channel)
+                    repo_path = _repo_path_for_channel(agents_channel)
+                    targets = resolve_poller_cue_targets(
+                        target, repo_path, registry=registry,
+                    ) if registry else [target]
                     delivered = False
                     for resolved in targets:
-                        if not _target_matches_repo(resolved, repo_path):
-                            continue
                         if agents.is_available(resolved):
                             delivery = create_btrain_delivery(
                                 lane,
@@ -487,7 +489,7 @@ def _refresh_btrain_state_for_repo(repo_label: str, repo_entry: dict, env: dict)
                     if not delivered:
                         store.add(
                             "system",
-                            f"btrain delivery failed for lane {lid}: no available repo-matched target for {target}.",
+                            f"btrain delivery failed for lane {lid}: no repo-matched {target} instance available.",
                             msg_type="system",
                             channel=agents_channel,
                         )
