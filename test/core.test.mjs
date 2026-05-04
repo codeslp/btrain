@@ -332,6 +332,18 @@ describe("btrain init", () => {
       "pre-handoff skill should exist",
     )
     await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".agents", "skills", "pre-handoff", "SKILL.md")),
+      "Codex-facing pre-handoff skill should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".agents", "skills", "bug-rca", "SKILL.md")),
+      "Codex-facing bug-rca skill should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".agents", "skills", "feedback-triage", "SKILL.md")),
+      "Codex-facing feedback-triage skill should exist",
+    )
+    await assert.doesNotReject(
       fs.access(path.join(tmpDir, ".claude", "skills", "tessl__webapp-testing", "scripts", "with_server.py")),
       "webapp-testing helper should exist",
     )
@@ -432,6 +444,10 @@ describe("btrain init", () => {
         "bundled skills should be skipped in core-only mode",
       )
       await assert.rejects(
+        fs.access(path.join(localTmpDir, ".agents", "skills", "pre-handoff", "SKILL.md")),
+        "Codex-facing bundled skills should be skipped in core-only mode",
+      )
+      await assert.rejects(
         fs.access(path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")),
         "Unblocked context helper should be skipped in core-only mode",
       )
@@ -464,15 +480,18 @@ describe("btrain init", () => {
       assert.equal(result.code, 0, result.stderr)
 
       const preservedSkillPath = path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")
+      const restoredAgentSkillPath = path.join(localTmpDir, ".agents", "skills", "bug-rca", "SKILL.md")
       const restoredAssetPath = path.join(localTmpDir, ".claude", "skills", "tessl__yeet", "agents", "openai.yaml")
 
       await fs.writeFile(preservedSkillPath, "custom skill text\n", "utf8")
+      await fs.rm(restoredAgentSkillPath, { force: true })
       await fs.rm(restoredAssetPath)
 
       result = await runBtrain(["init", localTmpDir], localTmpDir)
       assert.equal(result.code, 0, result.stderr)
 
       assert.equal(await fs.readFile(preservedSkillPath, "utf8"), "custom skill text\n")
+      await assert.doesNotReject(fs.access(restoredAgentSkillPath), "missing Codex-facing skill should be restored")
       await assert.doesNotReject(fs.access(restoredAssetPath), "missing bundled asset should be restored")
     } finally {
       await rmDir(localTmpDir)

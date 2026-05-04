@@ -36,6 +36,10 @@ import {
   summarizeCodexCommand,
   summarizeLoopProgressText,
 } from "./runners/stream-observers.mjs"
+import {
+  buildClaimReviewContextFields,
+  collectClaimUnblockedContext,
+} from "./unblocked/context.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -155,6 +159,7 @@ const CORE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = path.resolve(CORE_DIR, "..", "..")
 const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "option_a_review.py")
 const BUNDLED_SKILLS_DIR = path.join(PACKAGE_ROOT, ".claude", "skills")
+const BUNDLED_AGENT_SKILLS_DIR = path.join(PACKAGE_ROOT, ".agents", "skills")
 const BUNDLED_AGENTCHATTR_DIR = path.join(PACKAGE_ROOT, "agentchattr")
 const BUNDLED_DEV_TOOLS = [
   {
@@ -1191,6 +1196,7 @@ function getRepoPaths(repoRoot) {
     codexPromptsDir: path.join(repoRoot, ".codex", "prompts"),
     codexAgentsPath: path.join(repoRoot, ".codex", "prompts", "AGENTS.md"),
     skillsPath: path.join(repoRoot, ".claude", "skills"),
+    agentSkillsPath: path.join(repoRoot, ".agents", "skills"),
     feedbackLogPath: path.join(repoRoot, ".claude", "collab", "FEEDBACK_LOG.md"),
   }
 }
@@ -1549,8 +1555,9 @@ async function copyMissingTree(sourcePath, targetPath, options = {}, relativePat
   return 1
 }
 
-async function syncBundledSkills(targetSkillsPath) {
-  if (!(await pathExists(BUNDLED_SKILLS_DIR))) {
+async function syncBundledSkills(targetSkillsPath, options = {}) {
+  const sourceSkillsDir = options.sourceSkillsDir || BUNDLED_SKILLS_DIR
+  if (!(await pathExists(sourceSkillsDir))) {
     return {
       copiedSkills: [],
       skippedSkills: [],
@@ -1558,7 +1565,7 @@ async function syncBundledSkills(targetSkillsPath) {
     }
   }
 
-  if (path.resolve(BUNDLED_SKILLS_DIR) === path.resolve(targetSkillsPath)) {
+  if (path.resolve(sourceSkillsDir) === path.resolve(targetSkillsPath)) {
     return {
       copiedSkills: [],
       skippedSkills: [],
@@ -1570,7 +1577,7 @@ async function syncBundledSkills(targetSkillsPath) {
 
   const copiedSkills = []
   const skippedSkills = []
-  const sourceEntries = await fs.readdir(BUNDLED_SKILLS_DIR, { withFileTypes: true })
+  const sourceEntries = await fs.readdir(sourceSkillsDir, { withFileTypes: true })
 
   for (const entry of sourceEntries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (entry.name.startsWith(".")) {
@@ -1582,7 +1589,7 @@ async function syncBundledSkills(targetSkillsPath) {
       continue
     }
 
-    const sourcePath = path.join(BUNDLED_SKILLS_DIR, entry.name)
+    const sourcePath = path.join(sourceSkillsDir, entry.name)
     const targetPath = path.join(targetSkillsPath, entry.name)
     const targetExisted = await pathExists(targetPath)
     await copyMissingTree(sourcePath, targetPath)
@@ -1595,6 +1602,37 @@ async function syncBundledSkills(targetSkillsPath) {
     copiedSkills,
     skippedSkills,
     skippedReason: "",
+  }
+}
+
+async function syncBundledSkillTargets(repoPaths) {
+  const claude = await syncBundledSkills(repoPaths.skillsPath, {
+    sourceSkillsDir: BUNDLED_SKILLS_DIR,
+  })
+  const agents = await syncBundledSkills(repoPaths.agentSkillsPath, {
+    sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
+  })
+  const copiedSkills = Array.from(new Set([
+    ...claude.copiedSkills,
+    ...agents.copiedSkills,
+  ])).sort()
+  const skippedSkills = Array.from(new Set([
+    ...claude.skippedSkills,
+    ...agents.skippedSkills,
+  ])).sort()
+  const skippedReason =
+    claude.skippedReason === "self" && agents.skippedReason === "self"
+      ? "self"
+      : ""
+
+  return {
+    copiedSkills,
+    skippedSkills,
+    skippedReason,
+    targets: {
+      claude,
+      agents,
+    },
   }
 }
 
@@ -2234,7 +2272,7 @@ async function initRepo(repoPathInput, options = {}) {
   await ensureBtrainGitignore(repoRoot, { includeDevToolIgnores: shouldScaffoldDevTools })
 
   const bundledSkillsResult = shouldScaffoldBundledSkills
-    ? await syncBundledSkills(repoPaths.skillsPath)
+    ? await syncBundledSkillTargets(repoPaths)
     : null
   const devToolsResult = shouldScaffoldDevTools
     ? await syncBundledDevTools(repoRoot)
@@ -4527,6 +4565,14 @@ async function updateHandoff(repoRoot, updates, options = {}) {
   })
 }
 
+function shouldRunClaimUnblockedContext(options = {}) {
+  const value = options["unblocked-context"]
+  if (value === undefined || value === false) {
+    return false
+  }
+  return String(value).toLowerCase() !== "false"
+}
+
 async function claimHandoff(repoRoot, options) {
   if (!options.reviewer) {
     options.reviewer = "any-other"
@@ -4627,6 +4673,15 @@ async function claimHandoff(repoRoot, options) {
     laneId: laneId || "",
     files,
   })
+  const claimReviewContextFields = shouldRunClaimUnblockedContext(options)
+    ? buildClaimReviewContextFields(await collectClaimUnblockedContext(repoRoot, {
+        task: options.task,
+        files,
+        laneId: laneId || "",
+        owner: options.owner,
+        helperPath: options["unblocked-helper"],
+      }))
+    : {}
 
   // If lanes enabled, write to lane-specific handoff file
   if (laneConfigs && laneId) {
@@ -4640,7 +4695,7 @@ async function claimHandoff(repoRoot, options) {
           task: options.task,
           lockedFiles: files,
         }),
-        contextSectionText: buildContextForReviewerSection(),
+        contextSectionText: buildContextForReviewerSection(claimReviewContextFields),
         reviewResponseText: buildPendingReviewResponseSection(),
         config,
         eventType: "claim",
@@ -4666,7 +4721,7 @@ async function claimHandoff(repoRoot, options) {
         task: options.task,
         lockedFiles: files,
       }),
-      contextSectionText: buildContextForReviewerSection(),
+      contextSectionText: buildContextForReviewerSection(claimReviewContextFields),
       reviewResponseText: buildPendingReviewResponseSection(),
       eventType: "claim",
       eventDetails: {

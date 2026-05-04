@@ -313,7 +313,15 @@ class CgraphAdapter {
     return this._exec(args, "audit")
   }
 
-  async advise(situation, laneId, context = null) {
+  async advise(situation, opts = {}, legacyContext = null) {
+    const laneId =
+      typeof opts === "string"
+        ? opts
+        : (opts && typeof opts === "object" && !Array.isArray(opts) ? opts.laneId : "")
+    const context =
+      typeof opts === "string"
+        ? legacyContext
+        : (opts && typeof opts === "object" && !Array.isArray(opts) ? opts.context : null)
     const args = ["advise", situation]
     if (context && typeof context === "object" && !Array.isArray(context) && Object.keys(context).length > 0) {
       args.push("--context", JSON.stringify(context))

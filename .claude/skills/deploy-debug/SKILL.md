@@ -19,13 +19,21 @@ Debug the correct layer first.
    - `readiness`
    - `runtime`
 2. Require one concrete log line that proves the classification before proposing a cause.
-3. Use the matching platform surface:
+3. **Related deployment context (Unblocked)** — after you have the decisive log line, search for recent deploy PRs, incidents, or team discussion around the same service/error:
+   ```bash
+   .claude/scripts/unblocked-context.sh research \
+     "<service/deploy target> <decisive log line> deploy incident startup readiness" \
+     --effort medium --limit 6
+   ```
+   - Use matching incidents or PRs to choose the next validation step.
+   - If the result has `_skipped`, record `Unblocked deploy context skipped: <reason>` and continue from logs. Do not hypothesize without the concrete log line from step 2.
+4. Use the matching platform surface:
    - build: build logs for the failed deployment
    - startup: deployment or container startup logs
    - readiness: public health or readiness check plus runtime logs
    - runtime: app or HTTP logs for the failing route
    - if the repo uses Railway, `railway logs --build` and `railway logs --deployment <id> --lines <n>` are the preferred shortcuts
-4. Record deployment ID, timestamp, route, and decisive error text in the handoff or incident note.
+5. Record deployment ID, timestamp, route, decisive error text, and any relevant Unblocked source URLs in the handoff or incident note.
 
 ## Constraints
 
@@ -38,6 +46,7 @@ Debug the correct layer first.
 - Failure class
 - Deployment ID and timestamp
 - Decisive log line
+- Unblocked deploy context sources or skip reason
 - Next validation step
 
 ## Persistent Note
