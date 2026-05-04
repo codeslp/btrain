@@ -56,6 +56,7 @@ import {
 } from "./harness/trace-discovery.mjs"
 import { pullPrComments } from "./handoff/pr-comments.mjs"
 import { reviewCode, formatSummary as formatReviewCodeSummary } from "./review/code-rules.mjs"
+import { reviewContext, formatReviewContextSummary } from "./review/context.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -68,7 +69,7 @@ Usage:
   btrain handoff [--repo <path>] [--since <hash>]                               Check whose turn it is and what to do (--since short-circuits when state is unchanged)
   btrain handoff show-next [--lane <id>] [--repo <path>]                         Print the full Next Action body, expanding any .btrain/handoff-notes/ pointer
   btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [--pr <number|url>] [options]
-                                                                              Claim a new task. --pr links a GH PR; surfaces in needs-review/changes-requested guidance so reviewers consult the PR instead of the local working tree.
+                                                                              Claim a new task. --pr links a GH PR; --unblocked-context records a soft claim-time context check.
   btrain handoff update [--pr <number|url>] [options]                            Update the current handoff state. Use --pr to link or relink the PR after the lane is claimed.
   btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
                                                                               Return review findings to the writer
@@ -85,6 +86,8 @@ Usage:
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
   btrain review code --lane <id> [--repo <path>] [--base <ref>] [--head <ref>] [--format json|summary]
                                                                                 Run deterministic code-review rules (hardcoded-secret, cors-wildcard, unprotected-route, env-var-required, new-dependency) against the lane diff. Exit 2 if any hard violation. Per-line "// btrain-allow: <rule-id>" suppresses.
+  btrain review context --lane <id> [--repo <path>] [--effort low|medium|high] [--limit <n>] [--format json|summary]
+                                                                                Fetch reviewer-side Unblocked context for the lane task and locked files without mutating handoff state.
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
@@ -137,6 +140,7 @@ Handoff/Lane Options:
   --reason-tag <tag>
                     Repeatable. Optional secondary tags for reason-code metadata.
   --no-diff           Skip the reviewable-diff gate for this handoff (e.g. docs-only or config changes).
+  --unblocked-context Run a soft Unblocked research pass during \`handoff claim\` and record the result in the lane context.
   --override-id <id>
                     Consume a previously granted audited override when re-running a blocked action.
   --requested-by <agent>
@@ -152,7 +156,7 @@ Environment:
 
 Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
-  - \`init\` also scaffolds the bundled \`.claude/skills/\` pack plus repo-local dashboard, handoff-history helpers, and \`agentchattr/\` unless you pass \`--core-only\`.
+  - \`init\` also scaffolds the bundled \`.claude/skills/\` and \`.agents/skills/\` packs plus repo-local dashboard, handoff-history helpers, and \`agentchattr/\` unless you pass \`--core-only\`.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
   - \`loop\` reads the active harness profile from \`[harness].active_profile\` in \`.btrain/project.toml\`; new repos default to the bundled \`default\` profile.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
@@ -1696,13 +1700,13 @@ async function run() {
   }
 
   if (command === "review") {
-    const subcommand = ["run", "status", "code"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["run", "status", "code", "context"].includes(rest[0]) ? rest[0] : null
     if (!subcommand) {
       throw new BtrainError({
         message: "`btrain review` requires a subcommand.",
         reason: "No subcommand was provided.",
         fix: "btrain review run --repo . --mode parallel",
-        context: "Available subcommands: run, status, code.",
+        context: "Available subcommands: run, status, code, context.",
       })
     }
 
@@ -1731,6 +1735,25 @@ async function run() {
         console.log(formatReviewCodeSummary(result))
       }
       if (result.summary.hard > 0) {
+        process.exitCode = 2
+      }
+      return
+    }
+
+    if (subcommand === "context") {
+      const result = await reviewContext(repoRoot, {
+        lane: options.lane,
+        query: options.query,
+        effort: options.effort,
+        limit: options.limit,
+        helperPath: options["unblocked-helper"],
+      })
+      if (options.format === "json") {
+        console.log(JSON.stringify(result, null, 2))
+      } else {
+        console.log(formatReviewContextSummary(result))
+      }
+      if (result.status === "error") {
         process.exitCode = 2
       }
       return

@@ -14,13 +14,21 @@ Catch security logic that only exists in the client and force enforcement at the
 ## Workflow
 
 1. List each new or changed mutating endpoint.
-2. For each endpoint, answer:
+2. **Prior security context (Unblocked)** — before judging the new shape, search for prior auth/payment/admin incidents, accepted patterns, and rejected approaches touching the same boundary:
+   ```bash
+   .claude/scripts/unblocked-context.sh research \
+     "<endpoint names> auth permissions rate-limit entitlement payment admin security" \
+     --effort medium --limit 6
+   ```
+   - Use cited prior incidents or PRs to tighten the checklist for this lane.
+   - If the result has `_skipped`, note `Unblocked security context skipped: <reason>` in the handoff gaps and continue with the local trust-boundary check.
+3. For each endpoint, answer:
    - Can this API be called directly to bypass the frontend guard?
    - Is there server-side proof of the qualifying action?
    - Is the operation idempotent or replay-safe?
    - Is rate limiting enforced server-side rather than in browser state?
-3. If any answer is `no` or `unclear`, treat it as a blocking issue before handoff.
-4. Add a short `Trust Boundary` note to the handoff context naming the endpoints and their enforcement status.
+4. If any answer is `no` or `unclear`, treat it as a blocking issue before handoff.
+5. Add a short `Trust Boundary` note to the handoff context naming the endpoints, their enforcement status, and any relevant Unblocked source URLs.
 
 ## Constraints
 
@@ -32,6 +40,7 @@ Catch security logic that only exists in the client and force enforcement at the
 ## Default Output
 
 - Endpoints checked
+- Unblocked security context sources or skip reason
 - Trust-boundary status for each endpoint
 - Blocking gaps
 - Verification run

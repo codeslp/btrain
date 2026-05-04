@@ -287,7 +287,7 @@ btrain scaffolds a `.claude/collab/FEEDBACK_LOG.md` during init and monitors it 
 
 ## Bundled Skills
 
-`btrain init` scaffolds these skills into `.claude/skills/` (skip with `--core-only`):
+`btrain init` scaffolds these skills into `.claude/skills/` and `.agents/skills/` (skip with `--core-only`). Re-run `btrain sync-skills --force --skill <name>` to refresh an existing local mirror from the bundled source; omit `--skill` to sync the whole bundle, and omit `--force` to preserve local edits while restoring missing files.
 
 | Skill | Purpose |
 |-------|---------|
@@ -298,7 +298,7 @@ btrain scaffolds a `.claude/collab/FEEDBACK_LOG.md` during init and monitors it 
 | `secure-by-default` | Trust-boundary check for auth, permissions, mutating endpoints |
 | `integration-test-check` | Composition check when fixes span multiple components |
 | `deploy-debug` | Classify deployment failures before debugging |
-| `code-simplifier` | Simplify and refine code after implementation |
+| `code-simplifier` | Simplify recent code and surface architecture-deepening opportunities |
 | `test-writer` | Write or expand unit, integration, and component tests |
 | `skill-creator` | Create or revise repo-local skills |
 | `frontend-tokens` | Validate CSS custom property usage |
@@ -364,6 +364,7 @@ btrain/
   .btrain/           # Config, events, history, locks
   .claude/collab/    # Handoff files (HANDOFF_A.md, etc.) + FEEDBACK_LOG.md
   .claude/skills/    # Bundled + custom skills
+  .agents/skills/    # Bundled + custom skills for agents that read .agents
 ```
 
 ---

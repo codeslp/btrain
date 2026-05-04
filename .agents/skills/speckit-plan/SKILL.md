@@ -45,12 +45,26 @@ You **MUST** consider the user input before proceeding (if not empty).
    - For each dependency → best practices task
    - For each integration → patterns task
 
-2. **Generate and dispatch research agents**:
+2. **Pull cited context first (Unblocked), then dispatch agents only for residuals**:
+
+   For broad multi-source synthesis covering all unknowns at once:
+
+   ```bash
+   .claude/scripts/unblocked-context.sh research \
+     "<feature name> <one-sentence description> <key unknowns and tech choices>" \
+     --effort medium --limit 8
+   ```
+
+   The returned `summary` plus cited `sources` often resolve multiple NEEDS CLARIFICATION items in one call, with citations you can copy into `research.md`. Cross-reference against existing ADRs, prior specs, and rejected alternatives before committing to a Decision.
+
+   If the JSON contains a `_skipped` field (helper missing / unauthed / errored), proceed straight to the agent dispatch path below.
+
+   For unknowns and tech choices NOT resolved by the Unblocked pass:
 
    ```text
-   For each unknown in Technical Context:
+   For each remaining unknown in Technical Context:
      Task: "Research {unknown} for {feature context}"
-   For each technology choice:
+   For each remaining technology choice:
      Task: "Find best practices for {tech} in {domain}"
    ```
 

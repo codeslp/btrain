@@ -65,8 +65,8 @@ poll_interval = 5
 # When present, these override [btrain].repo_path.
 
 [[repos]]
-label = "btrain"
-path = "/Users/bfaris96/btrain"
+label = "kepleronto"
+path = "/Users/bfaris96/kepleronto"
 poll_interval = 5
 
 [[repos]]
@@ -75,9 +75,14 @@ path = "/Users/bfaris96/cgraph"
 poll_interval = 5
 
 [[repos]]
-label = "mech_ai"
-path = "/Users/bfaris96/mech_ai"
-poll_interval = 10
+label = "closr"
+path = "/Volumes/zombie/closr"
+poll_interval = 5
+
+[[repos]]
+label = "btrain"
+path = "/Users/bfaris96/btrain"
+poll_interval = 5
 
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.
