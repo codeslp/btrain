@@ -366,10 +366,11 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
   // For files where every added line counts as a dep (requirements.txt), flag
   // every non-comment, non-empty added line.
   if (config.everyAddedLine) {
-    for (const { line, text } of addedLines) {
+    for (let i = 0; i < addedLines.length; i++) {
+      const { line, text } = addedLines[i]
       const trimmed = text.trim()
       if (!trimmed || trimmed.startsWith("#")) continue
-      if (lineHasAllow(text, "new-dependency")) continue
+      if (lineHasAllow(text, "new-dependency") || prevLineAllows(addedLines, i, "new-dependency")) continue
       out.push({
         rule: "new-dependency",
         severity: "warn",
@@ -386,10 +387,11 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
   // inside a deps block. We don't have full file context here; approximate by
   // checking whether the added line itself looks like a dependency entry
   // (key-value form for json/toml).
-  for (const { line, text } of addedLines) {
+  for (let i = 0; i < addedLines.length; i++) {
+    const { line, text } = addedLines[i]
     const trimmed = text.trim()
     if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("/*")) continue
-    if (lineHasAllow(text, "new-dependency")) continue
+    if (lineHasAllow(text, "new-dependency") || prevLineAllows(addedLines, i, "new-dependency")) continue
 
     if (base === "package.json") {
       if (!PACKAGE_ENTRY.test(text) || !packageJsonDependencyLines.has(line)) continue
@@ -499,6 +501,8 @@ async function getLaneDiff(repoRoot, { base, head, lane }) {
   const args = ["diff", "--unified=3"]
   if (base) {
     args.push(`${base}${head ? `..${head}` : ""}`)
+  } else if (head) {
+    args.push(head)
   }
   const pathspecs = await getLanePathspecs(repoRoot, lane)
   if (pathspecs.length > 0) {

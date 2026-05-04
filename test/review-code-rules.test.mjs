@@ -409,6 +409,15 @@ describe("new-dependency rule", () => {
     })
     assert.equal(summary.warn, 0)
   })
+
+  it("respects a previous-line allow marker for dependency manifests", () => {
+    const diff = makeDiff("requirements.txt", [
+      "# btrain-allow: new-dependency",
+      "requests>=2.31",
+    ])
+    const { summary } = scanDiff(diff)
+    assert.equal(summary.warn, 0)
+  })
 })
 
 describe("reviewCode lane scoping", () => {
@@ -449,6 +458,29 @@ describe("reviewCode lane scoping", () => {
       const scoped = await reviewCode(repo, { base: "HEAD", lane: "e" })
       assert.deepEqual(scoped.summary, { hard: 0, warn: 0 })
       assert.deepEqual(scoped.violations, [])
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("honors --head without requiring --base", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-head-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await fs.mkdir(path.join(repo, "src"), { recursive: true })
+      await fs.writeFile(path.join(repo, "src", "config.js"), "export const ok = true\n")
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      await fs.writeFile(path.join(repo, "src", "config.js"), `export const token = "${FAKE.aws}"\n`)
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "add token"])
+
+      const result = await reviewCode(repo, { head: "HEAD~1" })
+      assert.equal(result.summary.hard, 1)
+      assert.equal(result.violations[0].rule, "hardcoded-secret")
     } finally {
       await fs.rm(repo, { recursive: true, force: true })
     }
