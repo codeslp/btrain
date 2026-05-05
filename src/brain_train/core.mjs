@@ -210,11 +210,22 @@ const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
 const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
-const ACTIVE_LANE_STATUSES = new Set(["in-progress", "needs-review", "changes-requested", "repair-needed"])
+const ACTIVE_LANE_STATUSES = new Set([
+  "in-progress",
+  "needs-review",
+  "ready-for-pr",
+  "pr-review",
+  "ready-to-merge",
+  "changes-requested",
+  "repair-needed",
+])
 const VALID_HANDOFF_STATUSES = new Set([
   "idle",
   "in-progress",
   "needs-review",
+  "ready-for-pr",
+  "pr-review",
+  "ready-to-merge",
   "changes-requested",
   "repair-needed",
   "resolved",
@@ -226,6 +237,9 @@ const REASON_CODES_BY_STATUS = {
     "missing-verification",
     "security-risk",
     "integration-breakage",
+    "pr-review-feedback",
+    "ci-failure",
+    "bot-feedback",
   ]),
   "repair-needed": new Set([
     "invalid-handoff",
@@ -559,8 +573,22 @@ function renderPrePushHook() {
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    case "$STATUS" in',
-    '      in-progress|needs-review|changes-requested|repair-needed)',
+    '      in-progress|needs-review|repair-needed|pr-review|ready-to-merge)',
     '        ACTIVE_HANDOFFS="${ACTIVE_HANDOFFS}${HANDOFF}: ${STATUS}\n"',
+    '        ;;',
+    '      changes-requested)',
+    '        REASON=$(grep -m1 "^Primary Reason Code:" "$HANDOFF" | sed \'s/^Primary Reason Code:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
+    '        PR_NUMBER=$(grep -m1 "^PR:" "$HANDOFF" | sed \'s/^PR:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
+    '        case "$REASON" in',
+    '          pr-review-feedback|bot-feedback|ci-failure)',
+    '            if [ -z "$PR_NUMBER" ]; then',
+    '              ACTIVE_HANDOFFS="${ACTIVE_HANDOFFS}${HANDOFF}: ${STATUS}\n"',
+    '            fi',
+    '            ;;',
+    '          *)',
+    '            ACTIVE_HANDOFFS="${ACTIVE_HANDOFFS}${HANDOFF}: ${STATUS}\n"',
+    '            ;;',
+    '        esac',
     '        ;;',
     '    esac',
     '  fi',
@@ -797,6 +825,12 @@ function defaultNextActionForStatus(status, { owner = "", reviewer = "" } = {}) 
       return reviewer
         ? `Waiting on ${reviewer} to review the lane.`
         : "Waiting on peer review."
+    case "ready-for-pr":
+      return "Local peer review is approved. Create or link the GitHub PR, then enter the PR review loop."
+    case "pr-review":
+      return "Waiting on GitHub PR review feedback from required bots and checks."
+    case "ready-to-merge":
+      return "PR feedback is clear. Merge the PR, then mark the lane resolved."
     case "changes-requested":
       return reviewer
         ? `Address ${reviewer}'s review findings in the same lane and re-handoff for review.`
@@ -1301,6 +1335,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF_*.md` files directly.",
   "- Keep the lane `Delegation Packet` current for active work: `Objective`, `Deliverable`, `Constraints`, `Acceptance checks`, `Budget`, and `Done when`.",
   "- When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.",
+  "- When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.",
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
@@ -1321,7 +1356,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- Use `--lane <id>` (e.g. {{laneExamples}}) with `handoff claim|update|resolve`.",
   "- Lock files with `--files \"path/\"` when claiming to prevent cross-lane collisions.",
   "- Run `btrain locks` to see active file locks.",
-  "- When your lane is done, hand it to a peer reviewer while you continue on other work.",
+  "- When your lane is done locally, hand it to a peer reviewer while you continue on other work. In PR-flow repos, keep the lane locks through `ready-for-pr`, `pr-review`, and `ready-to-merge` until the PR merges or closes.",
   "",
   MANAGED_END,
 ].join("\n")
@@ -1432,6 +1467,19 @@ const TEMPLATE_DEFAULTS = {
     "parallel_enabled = true",
     "sequential_enabled = false",
     "sequential_triggers = []",
+    "",
+    "[pr_flow]",
+    "enabled = false",
+    'base = "main"',
+    'required_bots = ["codex", "unblocked"]',
+    "",
+    "[pr_flow.bots.codex]",
+    'aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]',
+    'request_body = "@codex review"',
+    "",
+    "[pr_flow.bots.unblocked]",
+    'aliases = ["unblocked[bot]", "unblocked"]',
+    'request_body = "@unblocked review again"',
     "",
     "[instructions]",
     'project_notes = ""',
@@ -5231,6 +5279,7 @@ async function requestChangesHandoff(repoRoot, options) {
 
 async function resolveHandoff(repoRoot, options) {
   const config = await readProjectConfig(repoRoot)
+  const prFlow = getPrFlowConfig(config)
   const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
   const actorLabel = resolvedActor || options.owner || "btrain"
   const laneConfigs = getLaneConfigs(config)
@@ -5263,6 +5312,41 @@ async function resolveHandoff(repoRoot, options) {
     existingCurrent.task || options.summary
       ? buildPreviousHandoffEntry(existingCurrent, options.summary, actorLabel)
       : null
+
+  const finalResolve = !!options.final || !!options["final"]
+  if (prFlow.enabled && existingCurrent.status === "needs-review" && !finalResolve) {
+    const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
+    if (laneId && retainedFiles.length > 0) {
+      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, retainedFiles)
+    }
+
+    return updateHandoff(
+      repoRoot,
+      {
+        status: "ready-for-pr",
+        lockedFiles: retainedFiles,
+        nextAction:
+          options.next
+          || `Local review approved. ${existingCurrent.owner || "Owner"}: run \`btrain pr create --lane ${laneId || "<id>"} --base ${prFlow.base} --bots all\`, or link an existing PR with \`btrain handoff update --lane ${laneId || "<id>"} --pr <number> --status pr-review --actor "${existingCurrent.owner || "owner"}"\`.`,
+        lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
+        reasonCode: "",
+        reasonTags: [],
+      },
+      {
+        actorLabel,
+        reviewResponseSummary: options.summary,
+        config,
+        eventType: "resolve",
+        laneId,
+        eventDetails: {
+          summary: options.summary || "",
+          localReviewApproved: true,
+          nextStatus: "ready-for-pr",
+        },
+        overrideHandoffPath,
+      },
+    )
+  }
 
   // Release locks for this lane
   if (laneId) {
@@ -5333,12 +5417,53 @@ function buildLaneGuidance(laneId, current) {
         `${owner}: work on your other lane while waiting.`,
       ].join("\n")
     }
+    case "ready-for-pr": {
+      const owner = current.owner || "the active agent"
+      return [
+        `${prefix}Local peer review is approved; PR creation is next.`,
+        lockLine,
+        current.prNumber
+          ? `Linked PR: \`gh pr view ${current.prNumber}\`. Move into PR review with \`btrain handoff update --lane ${laneId} --status pr-review --actor "${owner}"\`.`
+          : `${owner}: create the PR with \`btrain pr create --lane ${laneId} --bots all\`, or link an existing PR with \`btrain handoff update --lane ${laneId} --status pr-review --pr <number> --actor "${owner}"\`.`,
+        "Keep the lane locks until the PR is merged or intentionally closed.",
+      ].join("\n")
+    }
+    case "pr-review": {
+      const owner = current.owner || "the active agent"
+      return [
+        `${prefix}Waiting on GitHub PR review feedback.`,
+        lockLine,
+        current.prNumber
+          ? `Poll the PR loop with \`btrain pr poll --lane ${laneId} --apply\` and inspect with \`gh pr view ${current.prNumber}\`.`
+          : `No PR linked. Link one with \`btrain handoff update --lane ${laneId} --status pr-review --pr <number> --actor "${owner}"\`.`,
+        `${owner}: if bot feedback appears, address it in this lane, push, then run \`btrain pr request-review --lane ${laneId} --bots all\`.`,
+      ].join("\n")
+    }
+    case "ready-to-merge": {
+      return [
+        `${prefix}PR review is clear and ready to merge.`,
+        lockLine,
+        current.prNumber
+          ? `Merge PR #${current.prNumber}, then run \`btrain pr poll --lane ${laneId} --apply\` so btrain releases locks and resolves the lane.`
+          : "No PR linked; link or merge the PR before resolving.",
+      ].join("\n")
+    }
     case "changes-requested": {
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
       const prLine = current.prNumber
         ? `Linked PR: \`gh pr view ${current.prNumber}\` / \`gh pr diff ${current.prNumber}\`. Reviewer should evaluate the PR diff, not the local working tree.`
         : `No PR linked. If a PR exists for this lane, run \`btrain handoff update --lane ${laneId} --pr <number> --actor "${owner}"\` so the next reviewer pass can find it.`
+      if (["pr-review-feedback", "bot-feedback", "ci-failure"].includes(current.reasonCode)) {
+        return [
+          `${prefix}GitHub PR feedback requested changes.`,
+          lockLine,
+          prLine,
+          current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
+          current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
+          `${owner}: address the PR feedback in this lane, commit and push, then \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${owner}"\`.`,
+        ].join("\n")
+      }
       return [
         `${prefix}Changes requested by ${reviewer}.`,
         lockLine,
@@ -5459,9 +5584,49 @@ async function checkHandoff(repoRoot) {
       ].join("\n")
       break
     }
+    case "ready-for-pr": {
+      const owner = current.owner || "the active agent"
+      guidance = [
+        "Local peer review is approved; PR creation is next.",
+        current.prNumber
+          ? `Linked PR: \`gh pr view ${current.prNumber}\`. Move into PR review with \`btrain handoff update --status pr-review --actor "${owner}"\`.`
+          : `If you are ${owner}: create the PR with \`btrain pr create --bots all\`, or link an existing PR with \`btrain handoff update --status pr-review --pr <number> --actor "${owner}"\`.`,
+        "Keep the lane active until the PR is merged or intentionally closed.",
+      ].join("\n")
+      break
+    }
+    case "pr-review": {
+      const owner = current.owner || "the active agent"
+      guidance = [
+        "Waiting on GitHub PR review feedback.",
+        current.prNumber
+          ? `Poll the PR loop with \`btrain pr poll --apply\` and inspect with \`gh pr view ${current.prNumber}\`.`
+          : `No PR linked. Link one with \`btrain handoff update --status pr-review --pr <number> --actor "${owner}"\`.`,
+        `If you are ${owner}: if bot feedback appears, address it, push, then run \`btrain pr request-review --bots all\`.`,
+      ].join("\n")
+      break
+    }
+    case "ready-to-merge": {
+      guidance = [
+        "PR review is clear and ready to merge.",
+        current.prNumber
+          ? `Merge PR #${current.prNumber}, then run \`btrain pr poll --apply\` so btrain resolves the lane.`
+          : "No PR linked; link or merge the PR before resolving.",
+      ].join("\n")
+      break
+    }
     case "changes-requested": {
       const owner = current.owner || "the active agent"
       const reviewer = current.reviewer || "the peer reviewer"
+      if (["pr-review-feedback", "bot-feedback", "ci-failure"].includes(current.reasonCode)) {
+        guidance = [
+          "GitHub PR feedback requested changes.",
+          current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
+          current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
+          `If you are ${owner}: address the PR feedback, commit and push, then \`btrain pr request-review --bots all\` and \`btrain handoff update --status pr-review --actor "${owner}"\`.`,
+        ].join("\n")
+        break
+      }
       guidance = [
         `Changes requested by ${reviewer}.`,
         current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
@@ -5676,6 +5841,55 @@ function getReviewConfig(config) {
         : DEFAULT_PARALLEL_REVIEW_SCRIPT,
     hybridPathTriggers: Array.isArray(reviews.hybrid_path_triggers) ? reviews.hybrid_path_triggers : [],
     hybridContentTriggers: Array.isArray(reviews.hybrid_content_triggers) ? reviews.hybrid_content_triggers : [],
+  }
+}
+
+function normalizePrBotConfig(id, value = {}) {
+  const bot = value && typeof value === "object" ? value : {}
+  const defaultAliases =
+    id === "codex"
+      ? ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
+      : id === "unblocked"
+        ? ["unblocked[bot]", "unblocked"]
+        : [id]
+  const aliases = Array.isArray(bot.aliases)
+    ? bot.aliases.map((item) => String(item).trim()).filter(Boolean)
+    : defaultAliases
+  const requestBody =
+    typeof bot.request_body === "string" && bot.request_body.trim()
+      ? bot.request_body.trim()
+      : id === "codex"
+        ? "@codex review"
+        : id === "unblocked"
+          ? "@unblocked review again"
+          : `@${id} review`
+
+  return {
+    id,
+    aliases,
+    requestBody,
+  }
+}
+
+function getPrFlowConfig(config) {
+  const prFlow = config?.pr_flow && typeof config.pr_flow === "object" ? config.pr_flow : {}
+  const rawBots = prFlow.bots && typeof prFlow.bots === "object" ? prFlow.bots : {}
+  const requiredBots = Array.isArray(prFlow.required_bots) && prFlow.required_bots.length > 0
+    ? prFlow.required_bots.map((item) => String(item).trim()).filter(Boolean)
+    : ["codex", "unblocked"]
+  const botConfigs = {}
+  for (const botId of requiredBots) {
+    botConfigs[botId] = normalizePrBotConfig(botId, rawBots[botId])
+  }
+
+  return {
+    enabled: prFlow.enabled === true,
+    base:
+      typeof prFlow.base === "string" && prFlow.base.trim()
+        ? prFlow.base.trim()
+        : "main",
+    requiredBots,
+    bots: botConfigs,
   }
 }
 
@@ -6286,6 +6500,13 @@ function getLoopActorForState(current) {
   }
   if (current.status === "needs-review") {
     return current.reviewer || ""
+  }
+  if (
+    current.status === "ready-for-pr"
+    || current.status === "pr-review"
+    || current.status === "ready-to-merge"
+  ) {
+    return current.owner || ""
   }
   return ""
 }
@@ -8358,6 +8579,7 @@ export {
   getLaneConfigs,
   getRepoPaths,
   getReviewStatus,
+  getPrFlowConfig,
   getStartupSnapshot,
   getStatus,
   grantOverride,

@@ -6,6 +6,7 @@ This repo uses the `btrain` collaboration workflow.
 - **Always use CLI commands** (`btrain handoff`, `handoff claim`, `handoff update`, `handoff resolve`) to read and update handoff state. Do not read or edit `HANDOFF_*.md` files directly.
 - Keep the lane `Delegation Packet` current for active work: `Objective`, `Deliverable`, `Constraints`, `Acceptance checks`, `Budget`, and `Done when`.
 - When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.
+- When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.
 - If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.
 - Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.
 - Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.
@@ -27,7 +28,7 @@ When `[lanes]` is enabled in `project.toml`, agents work concurrently on separat
 - Use `--lane <id>` (e.g. `a`, `b`, `c`, `d`, `e`, `f`) with `handoff claim|update|resolve`.
 - Lock files with `--files "path/"` when claiming to prevent cross-lane collisions.
 - Run `btrain locks` to see active file locks.
-- When your lane is done, hand it to a peer reviewer while you continue on other work.
+- When your lane is done locally, hand it to a peer reviewer while you continue on other work. In PR-flow repos, keep the lane locks through `ready-for-pr`, `pr-review`, and `ready-to-merge` until the PR merges or closes.
 
 <!-- btrain:managed:end -->
 
@@ -62,7 +63,10 @@ When the user or a workflow signal (handoff, lane status, delegation packet, rev
 
 `btrain handoff` tells you whose turn it is. Execute — don't just print the status.
 
-- **needs-review, you are reviewer** → do the review now, then `btrain handoff resolve --lane <id> --summary "..." --actor "..."`.
+- **needs-review, you are reviewer** → do the review now, then `btrain handoff resolve --lane <id> --summary "..." --actor "..."`. In PR-flow repos this local approval moves to `ready-for-pr`, not final `resolved`.
+- **ready-for-pr, you are owner** → run `btrain pr create --lane <id> --bots all` or link an existing PR and move to `pr-review`.
+- **pr-review** → run `btrain pr poll --lane <id> --apply`; address bot feedback, push, and run `btrain pr request-review --lane <id> --bots all` until clear.
+- **ready-to-merge** → merge the PR, then run `btrain pr poll --lane <id> --apply` so btrain final-resolves and releases locks.
 - **in-progress, you are owner** → keep working on the task. Only flip to `needs-review` after real completed work exists, reviewer context is filled in, and the `pre-handoff` skill has run.
 - **resolved or idle** → `btrain handoff claim --lane <id> --task "..." --owner "..." --reviewer "..."` and start working immediately.
 - `bth` in agent chat means the same thing: run `btrain handoff`, then do the work it points to. Never print status and stop.

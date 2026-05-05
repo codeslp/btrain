@@ -144,6 +144,26 @@ async function disableLanes(tmpDir) {
   await fs.writeFile(tomlPath, toml.replace(/\n\[lanes\][\s\S]*$/, "\n"), "utf8")
 }
 
+async function enablePrFlow(tmpDir) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  await fs.writeFile(tomlPath, `${toml.trimEnd()}
+
+[pr_flow]
+enabled = true
+base = "main"
+required_bots = ["codex", "unblocked"]
+
+[pr_flow.bots.codex]
+aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
+request_body = "@codex review"
+
+[pr_flow.bots.unblocked]
+aliases = ["unblocked[bot]", "unblocked"]
+request_body = "@unblocked review again"
+`, "utf8")
+}
+
 async function configureGitIdentity(tmpDir) {
   await runGit(["config", "user.name", "Test Bot"], tmpDir)
   await runGit(["config", "user.email", "test@example.com"], tmpDir)
@@ -165,6 +185,7 @@ function replaceCurrentSection(content, sectionText) {
 function buildNeedsReviewArgs(tmpDir, {
   actor,
   reviewer,
+  lane,
   base = "feat/test-review",
   changed = ["src/feature.ts - implement the requested change"],
   verification = ["node --test test/core.test.mjs"],
@@ -173,6 +194,9 @@ function buildNeedsReviewArgs(tmpDir, {
   reviewAsk = ["Check the targeted behavior and any regressions."],
 } = {}) {
   const args = ["handoff", "update", "--repo", tmpDir, "--status", "needs-review"]
+  if (lane) {
+    args.push("--lane", lane)
+  }
   if (actor) {
     args.push("--actor", actor)
   }
@@ -779,6 +803,11 @@ describe("installPreCommitHook", () => {
     })
     assert.ok(preCommitContent.includes("# btrain:pre-commit-hook"), "Expected btrain pre-commit hook marker")
     assert.ok(prePushContent.includes("# btrain:pre-push-hook"), "Expected btrain pre-push hook marker")
+    assert.match(
+      prePushContent,
+      /in-progress\|needs-review\|repair-needed\|pr-review\|ready-to-merge/,
+      "pre-push hook should block pushes from pr-review and ready-to-merge so a clear-review SHA isn't invalidated by new commits",
+    )
   })
 })
 
@@ -1114,6 +1143,164 @@ describe("btrain handoff lifecycle", () => {
   it("handoff guidance no longer mentions editing HANDOFF.md directly", async () => {
     const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
     assert.ok(!stdout.includes("edit HANDOFF.md directly"), `Guidance should not contain 'edit HANDOFF.md directly': ${stdout}`)
+  })
+})
+
+describe("btrain PR flow handoff lifecycle", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enablePrFlow(tmpDir)
+    await fs.writeFile(path.join(tmpDir, "README.md"), "# test\n", "utf8")
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "initial"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("local handoff resolve advances to ready-for-pr and keeps lane locks when PR flow is enabled", async () => {
+    await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--task",
+        "PR flow work",
+        "--owner",
+        "TestBot",
+        "--reviewer",
+        "ReviewBot",
+        "--files",
+        "README.md",
+      ],
+      tmpDir,
+    )
+    await fs.appendFile(path.join(tmpDir, "README.md"), "\nPR flow change\n", "utf8")
+
+    const needsReview = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "TestBot", lane: "a" }), tmpDir)
+    assert.equal(needsReview.code, 0, needsReview.stderr)
+
+    const resolved = await runBtrain(
+      [
+        "handoff",
+        "resolve",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--summary",
+        "Local review approved.",
+        "--actor",
+        "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(resolved.code, 0, resolved.stderr)
+    assert.ok(resolved.stdout.includes("status: ready-for-pr"), resolved.stdout)
+    assert.ok(resolved.stdout.includes("Local peer review is approved"), resolved.stdout)
+
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    assert.ok(locks.locks.some((lock) => lock.lane === "a" && lock.path === "README.md"), JSON.stringify(locks))
+  })
+
+  it("rejects btrain pr create when the lane has not been locally approved", async () => {
+    await fs.writeFile(path.join(tmpDir, "bypass.md"), "# bypass\n", "utf8")
+    const claim = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "b",
+        "--task",
+        "Bypass attempt",
+        "--owner",
+        "TestBot",
+        "--reviewer",
+        "ReviewBot",
+        "--files",
+        "bypass.md",
+      ],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const created = await runBtrain(
+      ["pr", "create", "--repo", tmpDir, "--lane", "b", "--base", "main", "--no-push"],
+      tmpDir,
+    )
+
+    assert.notEqual(created.code, 0, created.stdout)
+    assert.match(created.stderr, /requires lane b to be in `ready-for-pr`/)
+    assert.match(created.stderr, /Current status: `in-progress`/)
+  })
+
+  it("btrain loop dispatches the lane owner from ready-for-pr", async () => {
+    const ownerScript = path.join(tmpDir, "owner-ready-for-pr.js")
+    await writeExecutable(
+      ownerScript,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const path = require("node:path")
+fs.writeFileSync(path.join(process.cwd(), "ready-for-pr-loop.txt"), "owner ran for ready-for-pr", "utf8")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content.replace("Status: ready-for-pr", "Status: resolved")
+fs.writeFileSync(handoffPath, updated)
+console.log("ready-for-pr owner ran")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"TestBot" = "${ownerScript}"`, '"ReviewBot" = "notify"'])
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.match(stdout, /selected agent:\s+TestBot/)
+    assert.match(stdout, /reason: handoff status is ready-for-pr/)
+    assert.match(stdout, /dispatch TestBot:/)
+  })
+
+  it("final resolve releases locks after the PR phase completes", async () => {
+    const resolved = await runBtrain(
+      [
+        "handoff",
+        "resolve",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--summary",
+        "PR merged.",
+        "--actor",
+        "TestBot",
+        "--final",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(resolved.code, 0, resolved.stderr)
+    assert.ok(resolved.stdout.includes("status: resolved"), resolved.stdout)
+
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    assert.ok(!locks.locks.some((lock) => lock.lane === "a"), JSON.stringify(locks))
   })
 })
 

@@ -55,6 +55,12 @@ import {
   showTrace,
 } from "./harness/trace-discovery.mjs"
 import { pullPrComments } from "./handoff/pr-comments.mjs"
+import {
+  runPrCreate,
+  runPrPoll,
+  runPrRequestReview,
+  runPrStatus,
+} from "./pr-flow.mjs"
 import { reviewCode, formatSummary as formatReviewCodeSummary } from "./review/code-rules.mjs"
 import { reviewContext, formatReviewContextSummary } from "./review/context.mjs"
 
@@ -88,6 +94,12 @@ Usage:
                                                                                 Run deterministic code-review rules (hardcoded-secret, cors-wildcard, unprotected-route, env-var-required, new-dependency) against the lane diff. Exit 2 if any hard violation. Per-line "// btrain-allow: <rule-id>" suppresses.
   btrain review context --lane <id> [--repo <path>] [--effort low|medium|high] [--limit <n>] [--format json|summary]
                                                                                 Fetch reviewer-side Unblocked context for the lane task and locked files without mutating handoff state.
+  btrain pr create --lane <id> [--base <ref>] [--bots all|codex,unblocked|none] [--draft]
+                                                                                Push the current branch, create a GitHub PR, link it to the lane, and request configured bot reviews.
+  btrain pr status --lane <id> [--pr <number>] [--format json|summary]          Classify current PR bot review state.
+  btrain pr poll --lane <id> [--pr <number>] [--apply] [--format json|summary]  Fetch PR comments, classify bot feedback, and optionally update lane status.
+  btrain pr request-review --lane <id> [--pr <number>] [--bots all|codex,unblocked]
+                                                                                Post configured bot review trigger comments such as @codex review and @unblocked review again.
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
@@ -149,6 +161,9 @@ Handoff/Lane Options:
                     Human confirming the audited override.
   --reason <text>   Required audit reason for \`override grant\`.
   --skip-feedback   Skip feedback log checks in \`doctor\` output.
+  --bots <list>     PR review bots to request. Defaults to all configured required bots.
+  --apply           For \`btrain pr poll\`, update the lane status from the PR classification.
+  --final           For \`handoff resolve\`, fully resolve instead of advancing local approval into PR flow.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
@@ -1204,6 +1219,7 @@ function printHandoffState(result) {
   console.log("")
   console.log("ACT NOW — do not ask permission, do not summarize the next step and stop.")
   console.log("  needs-review (you are reviewer): do the review now, then `btrain handoff resolve --lane <id> --summary \"...\"`.")
+  console.log("  ready-for-pr/pr-review/ready-to-merge: use `btrain pr create|poll|request-review` until the PR is merged and the lane resolves.")
   console.log("  in-progress (you are owner): keep working the task; only flip to needs-review after real completed work + filled reviewer context + `pre-handoff` skill.")
   console.log("  resolved/idle: `btrain handoff claim --lane <id> --task \"...\" --owner \"...\" --reviewer \"...\"` and start immediately.")
   if (result.overrides?.length > 0) {
@@ -1762,6 +1778,41 @@ async function run() {
     const result = await getReviewStatus(repoRoot)
     console.log(formatReviewStatus(result))
     return
+  }
+
+  if (command === "pr") {
+    const subcommand = ["create", "status", "poll", "request-review"].includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new BtrainError({
+        message: "`btrain pr` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: "btrain pr status --lane <id>",
+        context: "Available subcommands: create, status, poll, request-review.",
+      })
+    }
+
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+
+    if (subcommand === "create") {
+      await runPrCreate(repoRoot, options)
+      return
+    }
+
+    if (subcommand === "status") {
+      await runPrStatus(repoRoot, options)
+      return
+    }
+
+    if (subcommand === "poll") {
+      await runPrPoll(repoRoot, options)
+      return
+    }
+
+    if (subcommand === "request-review") {
+      await runPrRequestReview(repoRoot, options)
+      return
+    }
   }
 
   if (command === "loop") {

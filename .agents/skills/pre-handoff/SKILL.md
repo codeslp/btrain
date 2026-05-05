@@ -57,6 +57,7 @@ Block bad review handoffs before they reach the reviewer.
     - one `--gap` per remaining risk
     - one `--review-ask` per concrete reviewer check
 12. Only then run `btrain handoff update --status needs-review`.
+13. If `[pr_flow].enabled` is true, remember that reviewer approval is not final resolution: `btrain handoff resolve` moves the lane to `ready-for-pr`, then the owner runs `btrain pr create --lane <id> --bots all` and stays in the PR loop until `btrain pr poll --lane <id> --apply` resolves the merged PR.
 
 ## Constraints
 
@@ -68,6 +69,7 @@ Block bad review handoffs before they reach the reviewer.
 - Do not hand off superseded work. Resolve it stale and claim a real slice instead.
 - Do not silently skip the simplification pass on a multi-file code change.
 - Do not collapse the whole reviewer context into a single paragraph when repeatable `btrain` flags would make the review sharper.
+- Do not treat local reviewer approval as done in PR-flow repos; the lane remains active through bot feedback and merge.
 
 ## Default Output
 
