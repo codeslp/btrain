@@ -573,7 +573,7 @@ function renderPrePushHook() {
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    case "$STATUS" in',
-    '      in-progress|needs-review|repair-needed)',
+    '      in-progress|needs-review|repair-needed|pr-review|ready-to-merge)',
     '        ACTIVE_HANDOFFS="${ACTIVE_HANDOFFS}${HANDOFF}: ${STATUS}\n"',
     '        ;;',
     '      changes-requested)',

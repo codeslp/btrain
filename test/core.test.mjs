@@ -803,6 +803,11 @@ describe("installPreCommitHook", () => {
     })
     assert.ok(preCommitContent.includes("# btrain:pre-commit-hook"), "Expected btrain pre-commit hook marker")
     assert.ok(prePushContent.includes("# btrain:pre-push-hook"), "Expected btrain pre-push hook marker")
+    assert.match(
+      prePushContent,
+      /in-progress\|needs-review\|repair-needed\|pr-review\|ready-to-merge/,
+      "pre-push hook should block pushes from pr-review and ready-to-merge so a clear-review SHA isn't invalidated by new commits",
+    )
   })
 })
 
