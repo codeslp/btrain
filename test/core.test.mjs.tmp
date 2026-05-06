@@ -144,26 +144,6 @@ async function disableLanes(tmpDir) {
   await fs.writeFile(tomlPath, toml.replace(/\n\[lanes\][\s\S]*$/, "\n"), "utf8")
 }
 
-async function enablePrFlow(tmpDir) {
-  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
-  const toml = await fs.readFile(tomlPath, "utf8")
-  await fs.writeFile(tomlPath, `${toml.trimEnd()}
-
-[pr_flow]
-enabled = true
-base = "main"
-required_bots = ["codex", "unblocked"]
-
-[pr_flow.bots.codex]
-aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
-request_body = "@codex review"
-
-[pr_flow.bots.unblocked]
-aliases = ["unblocked[bot]", "unblocked"]
-request_body = "@unblocked review again"
-`, "utf8")
-}
-
 async function configureGitIdentity(tmpDir) {
   await runGit(["config", "user.name", "Test Bot"], tmpDir)
   await runGit(["config", "user.email", "test@example.com"], tmpDir)
@@ -185,7 +165,6 @@ function replaceCurrentSection(content, sectionText) {
 function buildNeedsReviewArgs(tmpDir, {
   actor,
   reviewer,
-  lane,
   base = "feat/test-review",
   changed = ["src/feature.ts - implement the requested change"],
   verification = ["node --test test/core.test.mjs"],
@@ -194,9 +173,6 @@ function buildNeedsReviewArgs(tmpDir, {
   reviewAsk = ["Check the targeted behavior and any regressions."],
 } = {}) {
   const args = ["handoff", "update", "--repo", tmpDir, "--status", "needs-review"]
-  if (lane) {
-    args.push("--lane", lane)
-  }
   if (actor) {
     args.push("--actor", actor)
   }
@@ -356,18 +332,6 @@ describe("btrain init", () => {
       "pre-handoff skill should exist",
     )
     await assert.doesNotReject(
-      fs.access(path.join(tmpDir, ".agents", "skills", "pre-handoff", "SKILL.md")),
-      "Codex-facing pre-handoff skill should exist",
-    )
-    await assert.doesNotReject(
-      fs.access(path.join(tmpDir, ".agents", "skills", "bug-rca", "SKILL.md")),
-      "Codex-facing bug-rca skill should exist",
-    )
-    await assert.doesNotReject(
-      fs.access(path.join(tmpDir, ".agents", "skills", "feedback-triage", "SKILL.md")),
-      "Codex-facing feedback-triage skill should exist",
-    )
-    await assert.doesNotReject(
       fs.access(path.join(tmpDir, ".claude", "skills", "tessl__webapp-testing", "scripts", "with_server.py")),
       "webapp-testing helper should exist",
     )
@@ -405,10 +369,6 @@ describe("btrain init", () => {
     await assert.doesNotReject(
       fs.access(path.join(tmpDir, "scripts", "register-handoff-watch-path.sh")),
       "handoff history watch registration helper should exist",
-    )
-    await assert.doesNotReject(
-      fs.access(path.join(tmpDir, ".claude", "scripts", "unblocked-context.sh")),
-      "Unblocked context helper should exist",
     )
     await assert.doesNotReject(
       fs.access(path.join(tmpDir, "agentchattr", "run.py")),
@@ -468,14 +428,6 @@ describe("btrain init", () => {
         "bundled skills should be skipped in core-only mode",
       )
       await assert.rejects(
-        fs.access(path.join(localTmpDir, ".agents", "skills", "pre-handoff", "SKILL.md")),
-        "Codex-facing bundled skills should be skipped in core-only mode",
-      )
-      await assert.rejects(
-        fs.access(path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")),
-        "Unblocked context helper should be skipped in core-only mode",
-      )
-      await assert.rejects(
         fs.access(path.join(localTmpDir, "scripts", "serve-dashboard.js")),
         "dashboard scaffold should be skipped in core-only mode",
       )
@@ -504,18 +456,15 @@ describe("btrain init", () => {
       assert.equal(result.code, 0, result.stderr)
 
       const preservedSkillPath = path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")
-      const restoredAgentSkillPath = path.join(localTmpDir, ".agents", "skills", "bug-rca", "SKILL.md")
       const restoredAssetPath = path.join(localTmpDir, ".claude", "skills", "tessl__yeet", "agents", "openai.yaml")
 
       await fs.writeFile(preservedSkillPath, "custom skill text\n", "utf8")
-      await fs.rm(restoredAgentSkillPath, { force: true })
       await fs.rm(restoredAssetPath)
 
       result = await runBtrain(["init", localTmpDir], localTmpDir)
       assert.equal(result.code, 0, result.stderr)
 
       assert.equal(await fs.readFile(preservedSkillPath, "utf8"), "custom skill text\n")
-      await assert.doesNotReject(fs.access(restoredAgentSkillPath), "missing Codex-facing skill should be restored")
       await assert.doesNotReject(fs.access(restoredAssetPath), "missing bundled asset should be restored")
     } finally {
       await rmDir(localTmpDir)
@@ -536,12 +485,10 @@ describe("btrain init", () => {
       const preservedConfigPath = path.join(localTmpDir, "agentchattr", "config.toml")
       const restoredDashboardPath = path.join(localTmpDir, "scripts", "serve-dashboard.js")
       const restoredAgentAssetPath = path.join(localTmpDir, "agentchattr", "open_chat.html")
-      const restoredUnblockedHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
 
       await fs.writeFile(preservedConfigPath, "custom agentchattr config\n", "utf8")
       await fs.rm(restoredDashboardPath)
       await fs.rm(restoredAgentAssetPath)
-      await fs.rm(restoredUnblockedHelperPath)
 
       result = await runBtrain(["init", localTmpDir], localTmpDir)
       assert.equal(result.code, 0, result.stderr)
@@ -549,10 +496,6 @@ describe("btrain init", () => {
       assert.equal(await fs.readFile(preservedConfigPath, "utf8"), "custom agentchattr config\n")
       await assert.doesNotReject(fs.access(restoredDashboardPath), "missing dashboard file should be restored")
       await assert.doesNotReject(fs.access(restoredAgentAssetPath), "missing agentchattr asset should be restored")
-      await assert.doesNotReject(
-        fs.access(restoredUnblockedHelperPath),
-        "missing Unblocked helper should be restored",
-      )
     } finally {
       await rmDir(localTmpDir)
     }
@@ -803,11 +746,6 @@ describe("installPreCommitHook", () => {
     })
     assert.ok(preCommitContent.includes("# btrain:pre-commit-hook"), "Expected btrain pre-commit hook marker")
     assert.ok(prePushContent.includes("# btrain:pre-push-hook"), "Expected btrain pre-push hook marker")
-    assert.match(
-      prePushContent,
-      /in-progress\|needs-review\|repair-needed\|pr-review\|ready-to-merge/,
-      "pre-push hook should block pushes from pr-review and ready-to-merge so a clear-review SHA isn't invalidated by new commits",
-    )
   })
 })
 
@@ -1137,170 +1075,12 @@ describe("btrain handoff lifecycle", () => {
       ["handoff", "resolve", "--repo", tmpDir, "--summary", "All good", "--actor", "ReviewBot"],
       tmpDir,
     )
-    assert.ok(stdout.includes("status: resolved"), `Expected resolved: ${stdout}`)
+    console.error("DEBUG stdout:", stdout); console.error("DEBUG stderr:", stderr); assert.ok(stdout.includes("status: resolved"), `Expected resolved: ${stdout}`)
   })
 
   it("handoff guidance no longer mentions editing HANDOFF.md directly", async () => {
     const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
     assert.ok(!stdout.includes("edit HANDOFF.md directly"), `Guidance should not contain 'edit HANDOFF.md directly': ${stdout}`)
-  })
-})
-
-describe("btrain PR flow handoff lifecycle", () => {
-  let tmpDir
-
-  before(async () => {
-    tmpDir = await makeTmpDir()
-    const { execFile } = await import("node:child_process")
-    const { promisify } = await import("node:util")
-    const exec = promisify(execFile)
-    await exec("git", ["init", tmpDir])
-    await configureGitIdentity(tmpDir)
-    await runBtrain(["init", tmpDir], tmpDir)
-    await enablePrFlow(tmpDir)
-    await fs.writeFile(path.join(tmpDir, "README.md"), "# test\n", "utf8")
-    await runGit(["add", "."], tmpDir)
-    await runGit(["commit", "-m", "initial"], tmpDir)
-  })
-
-  after(async () => {
-    await rmDir(tmpDir)
-  })
-
-  it("local handoff resolve advances to ready-for-pr and keeps lane locks when PR flow is enabled", async () => {
-    await runBtrain(
-      [
-        "handoff",
-        "claim",
-        "--repo",
-        tmpDir,
-        "--lane",
-        "a",
-        "--task",
-        "PR flow work",
-        "--owner",
-        "TestBot",
-        "--reviewer",
-        "ReviewBot",
-        "--files",
-        "README.md",
-      ],
-      tmpDir,
-    )
-    await fs.appendFile(path.join(tmpDir, "README.md"), "\nPR flow change\n", "utf8")
-
-    const needsReview = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "TestBot", lane: "a" }), tmpDir)
-    assert.equal(needsReview.code, 0, needsReview.stderr)
-
-    const resolved = await runBtrain(
-      [
-        "handoff",
-        "resolve",
-        "--repo",
-        tmpDir,
-        "--lane",
-        "a",
-        "--summary",
-        "Local review approved.",
-        "--actor",
-        "ReviewBot",
-      ],
-      tmpDir,
-    )
-
-    assert.equal(resolved.code, 0, resolved.stderr)
-    assert.ok(resolved.stdout.includes("status: ready-for-pr"), resolved.stdout)
-    assert.ok(resolved.stdout.includes("Local peer review is approved"), resolved.stdout)
-
-    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
-    assert.ok(locks.locks.some((lock) => lock.lane === "a" && lock.path === "README.md"), JSON.stringify(locks))
-  })
-
-  it("rejects btrain pr create when the lane has not been locally approved", async () => {
-    await fs.writeFile(path.join(tmpDir, "bypass.md"), "# bypass\n", "utf8")
-    const claim = await runBtrain(
-      [
-        "handoff",
-        "claim",
-        "--repo",
-        tmpDir,
-        "--lane",
-        "b",
-        "--task",
-        "Bypass attempt",
-        "--owner",
-        "TestBot",
-        "--reviewer",
-        "ReviewBot",
-        "--files",
-        "bypass.md",
-      ],
-      tmpDir,
-    )
-    assert.equal(claim.code, 0, claim.stderr)
-
-    const created = await runBtrain(
-      ["pr", "create", "--repo", tmpDir, "--lane", "b", "--base", "main", "--no-push"],
-      tmpDir,
-    )
-
-    assert.notEqual(created.code, 0, created.stdout)
-    assert.match(created.stderr, /requires lane b to be in `ready-for-pr`/)
-    assert.match(created.stderr, /Current status: `in-progress`/)
-  })
-
-  it("btrain loop dispatches the lane owner from ready-for-pr", async () => {
-    const ownerScript = path.join(tmpDir, "owner-ready-for-pr.js")
-    await writeExecutable(
-      ownerScript,
-      `#!/usr/bin/env node
-const fs = require("node:fs")
-const path = require("node:path")
-fs.writeFileSync(path.join(process.cwd(), "ready-for-pr-loop.txt"), "owner ran for ready-for-pr", "utf8")
-const handoffPath = ".claude/collab/HANDOFF_A.md"
-const content = fs.readFileSync(handoffPath, "utf8")
-const updated = content.replace("Status: ready-for-pr", "Status: resolved")
-fs.writeFileSync(handoffPath, updated)
-console.log("ready-for-pr owner ran")
-`,
-    )
-
-    await setRunnerConfig(tmpDir, [`"TestBot" = "${ownerScript}"`, '"ReviewBot" = "notify"'])
-
-    const { stdout, code } = await runBtrain(
-      ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run", "--poll-interval", "0.05"],
-      tmpDir,
-    )
-
-    assert.equal(code, 0, stdout)
-    assert.match(stdout, /selected agent:\s+TestBot/)
-    assert.match(stdout, /reason: handoff status is ready-for-pr/)
-    assert.match(stdout, /dispatch TestBot:/)
-  })
-
-  it("final resolve releases locks after the PR phase completes", async () => {
-    const resolved = await runBtrain(
-      [
-        "handoff",
-        "resolve",
-        "--repo",
-        tmpDir,
-        "--lane",
-        "a",
-        "--summary",
-        "PR merged.",
-        "--actor",
-        "TestBot",
-        "--final",
-      ],
-      tmpDir,
-    )
-
-    assert.equal(resolved.code, 0, resolved.stderr)
-    assert.ok(resolved.stdout.includes("status: resolved"), resolved.stdout)
-
-    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
-    assert.ok(!locks.locks.some((lock) => lock.lane === "a"), JSON.stringify(locks))
   })
 })
 
@@ -3808,7 +3588,7 @@ describe("multi-lane handoff lifecycle", () => {
             reviewer: "Gemini",
             base: "HEAD",
             changed: ["src/auth/guard.ts - auth guard", "src/auth/util.ts - auth util"],
-            verification: ["node --test test/core.test.mjs", "[X] code-simplifier passed"],
+            verification: ["node --test test/core.test.mjs"],
             gap: ["Did not run manual smoke validation"],
             why: ["Auth lane is ready for review."],
             reviewAsk: ["Check the auth lane changes."],
@@ -4394,19 +4174,14 @@ describe("withFileLock", () => {
       })
     }
 
-    // Launch two tasks concurrently — one must wait for the other
+    // Launch two tasks concurrently — task B should wait for task A
     await Promise.all([task("A", 100), task("B", 10)])
 
-    // Assert serialization (no interleaving), not ordering —
-    // Promise.all does not guarantee which task acquires the lock first
-    assert.equal(log.length, 4)
-    const first = log[0].split(":")[0]
-    const second = log[2].split(":")[0]
-    assert.equal(log[0], `${first}:enter`)
-    assert.equal(log[1], `${first}:exit`)
-    assert.equal(log[2], `${second}:enter`)
-    assert.equal(log[3], `${second}:exit`)
-    assert.notEqual(first, second, "Both tasks should have run")
+    // A enters first, exits before B enters
+    assert.equal(log[0], "A:enter")
+    assert.equal(log[1], "A:exit")
+    assert.equal(log[2], "B:enter")
+    assert.equal(log[3], "B:exit")
   })
 
   it("cleans up lockfile after completion", async () => {

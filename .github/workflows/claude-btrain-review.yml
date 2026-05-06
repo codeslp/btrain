@@ -1,0 +1,69 @@
+name: btrain PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  btrain-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run btrain PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 10"
+          prompt: |
+            You are a btrain PR reviewer. Review this pull request using btrain's
+            pre-handoff checklist semantics. Check the following:
+
+            1. **Locked-file diff check**: Do the changed files match the lane's
+               locked files? Are there unexpected changes outside the lane scope?
+
+            2. **Reviewer context completeness**: Does the PR description or linked
+               handoff contain all six required fields?
+               - Base (branch/commit the work started from)
+               - Pre-flight review (what was checked before editing)
+               - Files changed (with descriptions)
+               - Verification run (test commands and results)
+               - Remaining gaps (known issues or follow-ups)
+               - Why this was done (motivation)
+
+            3. **Code-simplifier gate**: For multi-file changes, verify that a
+               code-simplifier pass was performed (look for "code-simplifier passed"
+               in verification lines).
+
+            4. **State-transition correctness**: If HANDOFF_*.md files are modified,
+               verify the status transitions are valid per btrain's lane state machine:
+               idle -> in-progress -> needs-review -> ready-for-pr -> pr-review ->
+               ready-to-merge -> resolved.
+
+            5. **No hardcoded secrets**: Flag any hardcoded API keys, tokens, or
+               credentials. Check for patterns like API_KEY=, Bearer tokens, or
+               .env file contents in the diff.
+
+            6. **Lock integrity**: If .btrain/locks.json is modified, verify the
+               changes are consistent with the lane state in HANDOFF files.
+
+            Post your findings as a structured review comment with sections for each
+            check. Use a clear PASS/WARN/FAIL verdict per section. If all checks
+            pass, approve. If any hard violations exist (secrets, invalid state
+            transitions), request changes.
+
+            Read .github/CLAUDE.md for btrain-specific review priorities.
