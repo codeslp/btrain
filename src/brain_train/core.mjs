@@ -3022,20 +3022,22 @@ async function extractResolvableRef(repoRoot, proseBase) {
 async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [], skipDiff = false } = {}) {
   const issues = collectNeedsReviewContextIssues({ base, contextSectionText })
 
-  if (pathspecs.length > 1) {
-    const context = parseContextForReviewerSection(contextSectionText || "")
-    const hasSimplification = (context.verificationLines || []).some((line) => {
-      const normalized = line.toLowerCase()
-      return normalized.includes("code-simplifier passed") || normalized.includes("code-simplifier skipped")
-    })
-
-    if (!hasSimplification) {
-      issues.push("code-simplifier pass (required for multi-file changes)")
-    }
-  }
-
   if (!skipDiff && pathspecs.length > 0) {
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
+
+    // Gate code-simplifier on actual changed files, not lock pathspecs —
+    // a single directory lock can still touch many files.
+    if (changedPaths.length > 1) {
+      const context = parseContextForReviewerSection(contextSectionText || "")
+      const hasSimplification = (context.verificationLines || []).some((line) => {
+        const normalized = line.toLowerCase()
+        return normalized.includes("code-simplifier passed") || normalized.includes("code-simplifier skipped")
+      })
+
+      if (!hasSimplification) {
+        issues.push("code-simplifier pass (required for multi-file changes)")
+      }
+    }
 
     // Only run the base-diff check if git status found nothing uncommitted
     if (changedPaths.length === 0) {
