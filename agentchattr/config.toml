@@ -75,8 +75,8 @@ path = "/Users/bfaris96/cgraph"
 poll_interval = 5
 
 [[repos]]
-label = "closr"
-path = "/Volumes/zombie/closr"
+label = "ai_sales"
+path = "/Volumes/zombie/closr/ai_sales"
 poll_interval = 5
 
 [[repos]]

@@ -1593,7 +1593,7 @@ async function copyMissingTree(sourcePath, targetPath, options = {}, relativePat
     return copiedCount
   }
 
-  if (await pathExists(targetPath)) {
+  if (!options.overwrite && (await pathExists(targetPath))) {
     return 0
   }
 
@@ -1637,11 +1637,17 @@ async function syncBundledSkills(targetSkillsPath, options = {}) {
       continue
     }
 
+    if (options.skillName && entry.name !== options.skillName) {
+      continue
+    }
+
     const sourcePath = path.join(sourceSkillsDir, entry.name)
     const targetPath = path.join(targetSkillsPath, entry.name)
     const targetExisted = await pathExists(targetPath)
-    await copyMissingTree(sourcePath, targetPath)
-    if (!targetExisted) {
+    const copiedCount = await copyMissingTree(sourcePath, targetPath, {
+      overwrite: options.overwrite,
+    })
+    if (!targetExisted || (options.overwrite && copiedCount > 0)) {
       copiedSkills.push(entry.name)
     }
   }
@@ -3015,6 +3021,18 @@ async function extractResolvableRef(repoRoot, proseBase) {
 async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, contextSectionText, pathspecs = [], skipDiff = false } = {}) {
   const issues = collectNeedsReviewContextIssues({ base, contextSectionText })
 
+  if (pathspecs.length > 1) {
+    const context = parseContextForReviewerSection(contextSectionText || "")
+    const hasSimplification = (context.verificationLines || []).some((line) => {
+      const normalized = line.toLowerCase()
+      return normalized.includes("code-simplifier passed") || normalized.includes("code-simplifier skipped")
+    })
+
+    if (!hasSimplification) {
+      issues.push("code-simplifier pass (required for multi-file changes)")
+    }
+  }
+
   if (!skipDiff && pathspecs.length > 0) {
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
 
@@ -3038,18 +3056,23 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
   }
 
   const hasDiffIssue = issues.some((issue) => issue.includes("reviewable diff"))
+  const hasSimplificationIssue = issues.some((issue) => issue.includes("code-simplifier"))
 
   if (issues.length > 0) {
     const laneFlag = laneId ? ` --lane ${laneId}` : ""
     const baseFix = hasDiffIssue
       ? `\n         If the diff check is wrong, bypass it with: btrain handoff update${laneFlag} --status needs-review --no-diff --actor "<agent>"`
       : ""
+    const simplificationFix = hasSimplificationIssue
+      ? `\n         Multi-file changes require a simplification pass. Run the \`code-simplifier\` skill, then add "- [X] code-simplifier passed" to your verification lines.`
+      : ""
+
     throw new BtrainError({
       message: "Cannot enter `needs-review` — reviewer context is incomplete.",
       reason: `Missing or placeholder fields: ${issues.join(", ")}.`,
       fix: (laneId
         ? `btrain handoff update --lane ${laneId} --preflight "..." --changed "file1" --verification "tests pass" --gap "none" --why "..." --review-ask "..."`
-        : `btrain handoff update --preflight "..." --changed "file1" --verification "tests pass" --gap "none" --why "..." --review-ask "..."`) + baseFix,
+        : `btrain handoff update --preflight "..." --changed "file1" --verification "tests pass" --gap "none" --why "..." --review-ask "..."`) + baseFix + simplificationFix,
       context: "All six reviewer-context fields must be filled with real content (not placeholders) before moving to needs-review.",
     })
   }
@@ -7917,6 +7940,58 @@ async function syncManagedFile(filePath, managedTemplate, { dryRun }) {
   return { path: filePath, status: dryRun ? "would-update" : "updated" }
 }
 
+async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
+  const targetRepos = []
+
+  if (repoRoot) {
+    targetRepos.push({ name: normalizeRepoName(repoRoot), path: repoRoot })
+  } else {
+    targetRepos.push(...(await getRegisteredRepos()))
+  }
+
+  const results = []
+  for (const repo of targetRepos) {
+    const absoluteRepoRoot = path.resolve(repo.path)
+    if (!(await pathExists(absoluteRepoRoot))) {
+      results.push({
+        name: repo.name,
+        path: absoluteRepoRoot,
+        status: "skipped",
+        reason: "missing-repo",
+      })
+      continue
+    }
+
+    const repoPaths = getRepoPaths(absoluteRepoRoot)
+    const claude = await syncBundledSkills(repoPaths.skillsPath, {
+      sourceSkillsDir: BUNDLED_SKILLS_DIR,
+      skillName,
+      overwrite,
+    })
+    const agents = await syncBundledSkills(repoPaths.agentSkillsPath, {
+      sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
+      skillName,
+      overwrite,
+    })
+
+    const copiedSkills = Array.from(new Set([
+      ...claude.copiedSkills,
+      ...agents.copiedSkills,
+    ])).sort()
+
+    results.push({
+      name: repo.name || normalizeRepoName(absoluteRepoRoot),
+      path: absoluteRepoRoot,
+      copiedSkills,
+      status: copiedSkills.length > 0 ? "updated" : "unchanged",
+    })
+  }
+
+  return {
+    results,
+  }
+}
+
 async function syncTemplates({ repoRoot, dryRun = false } = {}) {
   const targetRepos = []
 
@@ -8607,6 +8682,7 @@ export {
   runReview,
   runLoop,
   syncActiveAgents,
+  syncSkills,
   syncTemplates,
   withFileLock,
 }

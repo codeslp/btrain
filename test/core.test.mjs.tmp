@@ -1,0 +1,4360 @@
+import { describe, it, before, after } from "node:test"
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import {
+  DEFAULT_LOCK_TTL_MS,
+  installGitHooks,
+  isLockExpired,
+  parseCsvList,
+  checkLockConflicts,
+  findAvailableLane,
+  getLaneConfigs,
+  runPush,
+  withFileLock,
+} from "../src/brain_train/core.mjs"
+
+// ──────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────
+
+async function makeTmpDir() {
+  return fs.mkdtemp(path.join(os.tmpdir(), "btrain-test-"))
+}
+
+async function rmDir(dirPath) {
+  await fs.rm(dirPath, { recursive: true, force: true })
+}
+
+async function runBtrain(args, cwd, envOverrides = {}) {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const exec = promisify(execFile)
+  try {
+    const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
+      cwd,
+      env: { ...process.env, BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"), ...envOverrides },
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
+  } catch (error) {
+    return {
+      stdout: error.stdout?.trim() || "",
+      stderr: error.stderr?.trim() || "",
+      code:
+        typeof error.code === "number"
+          ? error.code
+          : typeof error.status === "number"
+            ? error.status
+            : 1,
+    }
+  }
+}
+
+async function runGit(args, cwd, envOverrides = {}) {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const exec = promisify(execFile)
+  try {
+    const result = await exec("git", args, {
+      cwd,
+      env: { ...process.env, ...envOverrides },
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
+  } catch (error) {
+    return {
+      stdout: error.stdout?.trim() || "",
+      stderr: error.stderr?.trim() || "",
+      code:
+        typeof error.code === "number"
+          ? error.code
+          : typeof error.status === "number"
+            ? error.status
+            : 1,
+    }
+  }
+}
+
+async function runShellScript(scriptPath, args, cwd, envOverrides = {}) {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const exec = promisify(execFile)
+  try {
+    const result = await exec("bash", [path.resolve(scriptPath), ...args], {
+      cwd,
+      env: { ...process.env, ...envOverrides },
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
+  } catch (error) {
+    return {
+      stdout: error.stdout?.trim() || "",
+      stderr: error.stderr?.trim() || "",
+      code:
+        typeof error.code === "number"
+          ? error.code
+          : typeof error.status === "number"
+            ? error.status
+            : 1,
+    }
+  }
+}
+
+async function writeExecutable(filePath, content) {
+  await fs.writeFile(filePath, content, "utf8")
+  await fs.chmod(filePath, 0o755)
+}
+
+async function setRunnerConfig(tmpDir, mappingLines) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const updated = toml.replace(
+    /\[agents\.runners\][\s\S]*?\n\[reviews\]/,
+    `[agents.runners]\n${mappingLines.join("\n")}\n\n[reviews]`,
+  )
+  await fs.writeFile(tomlPath, updated, "utf8")
+}
+
+async function setHandoffPath(tmpDir, relativeHandoffPath) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const defaultHandoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+  const nextHandoffPath = path.join(tmpDir, relativeHandoffPath)
+  let toml = await fs.readFile(tomlPath, "utf8")
+
+  // Replace the top-level handoff_path (before [agents] section)
+  toml = toml.replace(
+    /^handoff_path = ".*"/m,
+    `handoff_path = "${relativeHandoffPath.replaceAll("\\", "/")}"`,
+  )
+  // Remove entire [lanes] block to test single-file custom handoff path
+  toml = toml.replace(/\n\[lanes\][\s\S]*$/, "\n")
+
+  await fs.writeFile(tomlPath, toml, "utf8")
+  await fs.mkdir(path.dirname(nextHandoffPath), { recursive: true })
+  await fs.rename(defaultHandoffPath, nextHandoffPath)
+
+  return nextHandoffPath
+}
+
+async function disableLanes(tmpDir) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  await fs.writeFile(tomlPath, toml.replace(/\n\[lanes\][\s\S]*$/, "\n"), "utf8")
+}
+
+async function configureGitIdentity(tmpDir) {
+  await runGit(["config", "user.name", "Test Bot"], tmpDir)
+  await runGit(["config", "user.email", "test@example.com"], tmpDir)
+}
+
+async function readJsonLines(filePath) {
+  const content = await fs.readFile(filePath, "utf8")
+  return content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
+function replaceCurrentSection(content, sectionText) {
+  return content.replace(/## Current[\s\S]*?(?=\n## |\s*$)/, sectionText)
+}
+
+function buildNeedsReviewArgs(tmpDir, {
+  actor,
+  reviewer,
+  base = "feat/test-review",
+  changed = ["src/feature.ts - implement the requested change"],
+  verification = ["node --test test/core.test.mjs"],
+  gap = ["Did not rerun manual smoke validation"],
+  why = ["The lane is ready for targeted review."],
+  reviewAsk = ["Check the targeted behavior and any regressions."],
+} = {}) {
+  const args = ["handoff", "update", "--repo", tmpDir, "--status", "needs-review"]
+  if (actor) {
+    args.push("--actor", actor)
+  }
+  if (reviewer) {
+    args.push("--reviewer", reviewer)
+  }
+  if (base) {
+    args.push("--base", base)
+  }
+  args.push("--preflight")
+  for (const item of changed) {
+    args.push("--changed", item)
+  }
+  for (const item of verification) {
+    args.push("--verification", item)
+  }
+  for (const item of gap) {
+    args.push("--gap", item)
+  }
+  for (const item of why) {
+    args.push("--why", item)
+  }
+  for (const item of reviewAsk) {
+    args.push("--review-ask", item)
+  }
+  return args
+}
+
+function buildRepairNeededArgs(tmpDir, {
+  actor,
+  lane,
+  reasonCode = "invalid-handoff",
+  reasonTags = [],
+} = {}) {
+  const args = ["handoff", "update", "--repo", tmpDir, "--status", "repair-needed", "--reason-code", reasonCode]
+  if (lane) {
+    args.push("--lane", lane)
+  }
+  for (const tag of reasonTags) {
+    args.push("--reason-tag", tag)
+  }
+  if (actor) {
+    args.push("--actor", actor)
+  }
+  return args
+}
+
+async function setupFakeLaunchctl(baseDir) {
+  const binDir = path.join(baseDir, "fake-bin")
+  const launchctlPath = path.join(binDir, "launchctl")
+  await fs.mkdir(binDir, { recursive: true })
+  await writeExecutable(
+    launchctlPath,
+    `#!/bin/bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
+if [ "\${1:-}" = "print" ]; then
+  IFS=',' read -r -a labels <<< "\${FAKE_LAUNCHCTL_ACTIVE_LABELS:-}"
+  for label in "\${labels[@]}"; do
+    if [ -n "$label" ] && [[ "\${2:-}" == */"$label" ]]; then
+      exit 0
+    fi
+  done
+  exit 1
+fi
+exit 0
+`,
+  )
+  return binDir
+}
+
+async function setupBtrainShim(baseDir) {
+  const binDir = path.join(baseDir, "btrain-bin")
+  const shimPath = path.join(binDir, "btrain")
+  await fs.mkdir(binDir, { recursive: true })
+  await writeExecutable(
+    shimPath,
+    `#!/bin/bash
+set -euo pipefail
+node "${path.resolve("src/brain_train/cli.mjs")}" "$@"
+`,
+  )
+  return binDir
+}
+
+// ──────────────────────────────────────────────
+// Unit tests: parseCsvList
+// ──────────────────────────────────────────────
+
+describe("parseCsvList", () => {
+  it("returns empty array for empty string", () => {
+    assert.deepStrictEqual(parseCsvList(""), [])
+  })
+
+  it("returns empty array for null/undefined", () => {
+    assert.deepStrictEqual(parseCsvList(null), [])
+    assert.deepStrictEqual(parseCsvList(undefined), [])
+  })
+
+  it("parses comma-separated values", () => {
+    assert.deepStrictEqual(parseCsvList("a.mjs, b.mjs, c.mjs"), ["a.mjs", "b.mjs", "c.mjs"])
+  })
+
+  it("trims whitespace from items", () => {
+    assert.deepStrictEqual(parseCsvList("  foo ,  bar  "), ["foo", "bar"])
+  })
+
+  it("filters out empty segments", () => {
+    assert.deepStrictEqual(parseCsvList("a,,b,"), ["a", "b"])
+  })
+
+  it("handles single item", () => {
+    assert.deepStrictEqual(parseCsvList("core.mjs"), ["core.mjs"])
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain init
+// ──────────────────────────────────────────────
+
+describe("btrain init", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    // Create a minimal git repo so findRepoRoot works
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("creates all required files", async () => {
+    const { stdout } = await runBtrain(["init", tmpDir], tmpDir)
+
+    assert.ok(stdout.includes("Initialized"), `Expected 'Initialized' in output: ${stdout}`)
+
+    // Check files exist
+    const agentsPath = path.join(tmpDir, "AGENTS.md")
+    const claudePath = path.join(tmpDir, "CLAUDE.md")
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+
+    await assert.doesNotReject(fs.access(agentsPath), "AGENTS.md should exist")
+    await assert.doesNotReject(fs.access(claudePath), "CLAUDE.md should exist")
+    await assert.doesNotReject(fs.access(handoffPath), "HANDOFF_A.md should exist")
+    await assert.doesNotReject(fs.access(tomlPath), "project.toml should exist")
+  })
+
+  it("copies the bundled skill pack by default and excludes the multispeaker skill", async () => {
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
+      "pre-handoff skill should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "skills", "tessl__webapp-testing", "scripts", "with_server.py")),
+      "webapp-testing helper should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "skills", "tessl__yeet", "agents", "openai.yaml")),
+      "yeet metadata should exist",
+    )
+    await assert.rejects(
+      fs.access(
+        path.join(
+          tmpDir,
+          ".claude",
+          "skills",
+          "create-multi-speaker-static-recordings-using-tts",
+          "SKILL.md",
+        ),
+      ),
+      "excluded multispeaker skill should not exist",
+    )
+  })
+
+  it("scaffolds the local dashboard and agentchattr toolchain by default", async () => {
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "serve-dashboard.js")),
+      "dashboard entrypoint should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "handoff-history-watcher.mjs")),
+      "handoff history watcher should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "install-handoff-history-launch-agent.sh")),
+      "handoff history launch-agent installer should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "scripts", "register-handoff-watch-path.sh")),
+      "handoff history watch registration helper should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "agentchattr", "run.py")),
+      "agentchattr runner should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, "agentchattr", "macos-linux", "start_codex.sh")),
+      "agentchattr launcher should exist",
+    )
+  })
+
+  it("adds agentchattr runtime ignores to .gitignore", async () => {
+    const gitignore = await fs.readFile(path.join(tmpDir, ".gitignore"), "utf8")
+    assert.ok(gitignore.includes("agentchattr/data/"), gitignore)
+    assert.ok(gitignore.includes("agentchattr/.venv/"), gitignore)
+    assert.ok(gitignore.includes("agentchattr/uploads/"), gitignore)
+  })
+
+  it("AGENTS.md contains the managed block with CLI-first rule", async () => {
+    const content = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
+    assert.ok(content.includes("<!-- btrain:managed:start -->"), "Missing managed start fence")
+    assert.ok(content.includes("<!-- btrain:managed:end -->"), "Missing managed end fence")
+    assert.ok(content.includes("Always use CLI commands"), "Missing CLI-first rule")
+    assert.ok(content.includes("Run `btrain handoff` before acting"), "Missing handoff identity check rule")
+    assert.ok(content.includes("Before editing, do a short pre-flight review"), "Missing pre-flight review rule")
+  })
+
+  it("HANDOFF_A.md has idle status", async () => {
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Status: idle"), `Expected idle status in HANDOFF_A.md`)
+  })
+
+  it("project.toml has correct structure", async () => {
+    const content = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(content.includes("[harness]"), "Missing [harness] section")
+    assert.ok(content.includes('active_profile = "default"'), "Missing default harness profile scaffold")
+    assert.ok(content.includes("[reviews]"), "Missing [reviews] section")
+    assert.ok(content.includes("default_review_mode"), "Missing default_review_mode")
+    assert.ok(content.includes("active = []"), "Missing [agents].active scaffold")
+    assert.ok(content.includes("[lanes.d]"), "Expected default 4-lane scaffold")
+  })
+
+  it("supports core-only init", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      const { code, stderr, stdout } = await runBtrain(["init", localTmpDir, "--core-only"], localTmpDir)
+      assert.equal(code, 0, stderr)
+      assert.ok(stdout.includes("bundled skills: skipped (--core-only)"), stdout)
+      await assert.doesNotReject(fs.access(path.join(localTmpDir, "AGENTS.md")), "AGENTS.md should exist")
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
+        "bundled skills should be skipped in core-only mode",
+      )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, "scripts", "serve-dashboard.js")),
+        "dashboard scaffold should be skipped in core-only mode",
+      )
+      await assert.rejects(
+        fs.access(path.join(localTmpDir, "agentchattr", "run.py")),
+        "agentchattr scaffold should be skipped in core-only mode",
+      )
+      const gitignore = await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8")
+      assert.ok(!gitignore.includes("agentchattr/data/"), gitignore)
+      assert.ok(!gitignore.includes("agentchattr/.venv/"), gitignore)
+      assert.ok(!gitignore.includes("agentchattr/uploads/"), gitignore)
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("re-running init restores missing bundled skill files without overwriting existing skill content", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const preservedSkillPath = path.join(localTmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")
+      const restoredAssetPath = path.join(localTmpDir, ".claude", "skills", "tessl__yeet", "agents", "openai.yaml")
+
+      await fs.writeFile(preservedSkillPath, "custom skill text\n", "utf8")
+      await fs.rm(restoredAssetPath)
+
+      result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      assert.equal(await fs.readFile(preservedSkillPath, "utf8"), "custom skill text\n")
+      await assert.doesNotReject(fs.access(restoredAssetPath), "missing bundled asset should be restored")
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("re-running init restores missing dev-tool files without overwriting existing tool content", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const preservedConfigPath = path.join(localTmpDir, "agentchattr", "config.toml")
+      const restoredDashboardPath = path.join(localTmpDir, "scripts", "serve-dashboard.js")
+      const restoredAgentAssetPath = path.join(localTmpDir, "agentchattr", "open_chat.html")
+
+      await fs.writeFile(preservedConfigPath, "custom agentchattr config\n", "utf8")
+      await fs.rm(restoredDashboardPath)
+      await fs.rm(restoredAgentAssetPath)
+
+      result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      assert.equal(await fs.readFile(preservedConfigPath, "utf8"), "custom agentchattr config\n")
+      await assert.doesNotReject(fs.access(restoredDashboardPath), "missing dashboard file should be restored")
+      await assert.doesNotReject(fs.access(restoredAgentAssetPath), "missing agentchattr asset should be restored")
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+})
+
+describe("dynamic collaborator bootstrap", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("scaffolds 2 lanes per configured collaborator and renders their names into docs", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        "init",
+        tmpDir,
+        "--agent",
+        "Opus 4.6",
+        "--agent",
+        "GPT-5 Codex",
+        "--agent",
+        "Gemini 3.1",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+
+    const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(
+      projectToml.includes('active = ["Opus 4.6", "GPT-5 Codex", "Gemini 3.1"]'),
+      projectToml,
+    )
+    assert.ok(projectToml.includes("[lanes.f]"), projectToml)
+
+    for (const laneId of ["A", "B", "C", "D", "E", "F"]) {
+      await assert.doesNotReject(
+        fs.access(path.join(tmpDir, ".claude", "collab", `HANDOFF_${laneId}.md`)),
+        `HANDOFF_${laneId}.md should exist`,
+      )
+    }
+
+    const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
+    assert.ok(agentsDoc.includes("Active collaborating agents: `Opus 4.6`, `GPT-5 Codex`, `Gemini 3.1`"), agentsDoc)
+    assert.ok(agentsDoc.includes("Current lane target: 6 lane(s) (2 per collaborating agent)"), agentsDoc)
+    assert.ok(agentsDoc.includes("e.g. `a`, `b`, `c`, `d`, `e`, `f`"), agentsDoc)
+  })
+
+  it("uses the configured lanes-per-agent value during init", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+
+      const { code, stderr } = await runBtrain(
+        [
+          "init",
+          localTmpDir,
+          "--agent",
+          "GPT-5 Codex",
+          "--lanes-per-agent",
+          "3",
+        ],
+        localTmpDir,
+      )
+
+      assert.equal(code, 0, stderr)
+
+      const projectToml = await fs.readFile(path.join(localTmpDir, ".btrain", "project.toml"), "utf8")
+      assert.ok(projectToml.includes('active = ["GPT-5 Codex"]'), projectToml)
+      assert.ok(projectToml.includes('writer_default = "GPT-5 Codex"'), projectToml)
+      assert.ok(projectToml.includes('reviewer_default = ""'), projectToml)
+      assert.ok(projectToml.includes("per_agent = 3"), projectToml)
+      assert.ok(projectToml.includes("[lanes.c]"), projectToml)
+      assert.ok(!projectToml.includes("[lanes.d]"), projectToml)
+
+      for (const laneId of ["A", "B", "C"]) {
+        await assert.doesNotReject(
+          fs.access(path.join(localTmpDir, ".claude", "collab", `HANDOFF_${laneId}.md`)),
+          `HANDOFF_${laneId}.md should exist`,
+        )
+      }
+
+      const agentsDoc = await fs.readFile(path.join(localTmpDir, "AGENTS.md"), "utf8")
+      assert.ok(agentsDoc.includes("Current lane target: 3 lane(s) (3 per collaborating agent)"), agentsDoc)
+      assert.ok(agentsDoc.includes("Change `[agents].active` or `[lanes].per_agent`"), agentsDoc)
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+})
+
+describe("dynamic collaborator migration", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("re-running init with --agent updates the active agent list on an existing repo", async () => {
+    const { code, stderr } = await runBtrain(
+      ["init", tmpDir, "--agent", "GPT-5 Codex", "--agent", "Opus 4.6"],
+      tmpDir,
+    )
+    assert.equal(code, 0, stderr)
+
+    const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(projectToml.includes('active = ["GPT-5 Codex", "Opus 4.6"]'), projectToml)
+    assert.ok(projectToml.includes('writer_default = "GPT-5 Codex"'), projectToml)
+    assert.ok(projectToml.includes('reviewer_default = "Opus 4.6"'), projectToml)
+
+    const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
+    assert.ok(agentsDoc.includes("Active collaborating agents: `GPT-5 Codex`, `Opus 4.6`"), agentsDoc)
+  })
+
+  it("re-running init with --lanes-per-agent appends missing lane sections and files", async () => {
+    const { code, stderr } = await runBtrain(
+      ["init", tmpDir, "--agent", "GPT-5 Codex", "--agent", "Opus 4.6", "--lanes-per-agent", "3"],
+      tmpDir,
+    )
+    assert.equal(code, 0, stderr)
+
+    const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(projectToml.includes('active = ["GPT-5 Codex", "Opus 4.6"]'), projectToml)
+    assert.ok(projectToml.includes("per_agent = 3"), projectToml)
+    assert.ok(projectToml.includes("[lanes.e]"), projectToml)
+    assert.ok(projectToml.includes("[lanes.f]"), projectToml)
+
+    for (const laneId of ["E", "F"]) {
+      await assert.doesNotReject(
+        fs.access(path.join(tmpDir, ".claude", "collab", `HANDOFF_${laneId}.md`)),
+        `HANDOFF_${laneId}.md should exist`,
+      )
+    }
+
+    const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
+    assert.ok(agentsDoc.includes("Current lane target: 6 lane(s) (3 per collaborating agent)"), agentsDoc)
+  })
+})
+
+describe("btrain agents commands", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir, "--agent", "GPT-5 Codex", "--lanes-per-agent", "3"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("agents add appends collaborators and scaffolds newly required lanes", async () => {
+    const { code, stderr } = await runBtrain(
+      ["agents", "add", "--repo", tmpDir, "--agent", "Opus 4.6"],
+      tmpDir,
+    )
+    assert.equal(code, 0, stderr)
+
+    const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(projectToml.includes('active = ["GPT-5 Codex", "Opus 4.6"]'), projectToml)
+    assert.ok(projectToml.includes("per_agent = 3"), projectToml)
+    assert.ok(projectToml.includes("[lanes.f]"), projectToml)
+
+    for (const laneId of ["D", "E", "F"]) {
+      await assert.doesNotReject(
+        fs.access(path.join(tmpDir, ".claude", "collab", `HANDOFF_${laneId}.md`)),
+        `HANDOFF_${laneId}.md should exist`,
+      )
+    }
+
+    const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
+    assert.ok(agentsDoc.includes("Active collaborating agents: `GPT-5 Codex`, `Opus 4.6`"), agentsDoc)
+    assert.ok(agentsDoc.includes("Current lane target: 6 lane(s) (3 per collaborating agent)"), agentsDoc)
+  })
+
+  it("agents set replaces the active agent list and refreshes docs", async () => {
+    const { code, stderr } = await runBtrain(
+      ["agents", "set", "--repo", tmpDir, "--agent", "Opus 4.6", "--agent", "Gemini 3.1"],
+      tmpDir,
+    )
+    assert.equal(code, 0, stderr)
+
+    const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(projectToml.includes('active = ["Opus 4.6", "Gemini 3.1"]'), projectToml)
+
+    const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
+    assert.ok(agentsDoc.includes("Active collaborating agents: `Opus 4.6`, `Gemini 3.1`"), agentsDoc)
+    assert.ok(agentsDoc.includes("Current lane target: 6 lane(s) (3 per collaborating agent)"), agentsDoc)
+  })
+})
+
+describe("installPreCommitHook", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("writes hooks into the common git dir for worktree-style repos", async () => {
+    const worktreeGitDir = path.join(tmpDir, ".git-state", "worktree")
+    const commonGitDir = path.join(tmpDir, ".git-state", "common")
+
+    await fs.mkdir(worktreeGitDir, { recursive: true })
+    await fs.mkdir(commonGitDir, { recursive: true })
+    await fs.writeFile(path.join(tmpDir, ".git"), `gitdir: ${worktreeGitDir}\n`, "utf8")
+    await fs.writeFile(path.join(worktreeGitDir, "commondir"), "../common\n", "utf8")
+
+    const result = await installGitHooks(tmpDir)
+    const preCommitPath = path.join(commonGitDir, "hooks", "pre-commit")
+    const prePushPath = path.join(commonGitDir, "hooks", "pre-push")
+    const preCommitContent = await fs.readFile(preCommitPath, "utf8")
+    const prePushContent = await fs.readFile(prePushPath, "utf8")
+
+    assert.deepStrictEqual(result, {
+      preCommit: { installed: true, reason: "created" },
+      prePush: { installed: true, reason: "created" },
+    })
+    assert.ok(preCommitContent.includes("# btrain:pre-commit-hook"), "Expected btrain pre-commit hook marker")
+    assert.ok(prePushContent.includes("# btrain:pre-push-hook"), "Expected btrain pre-push hook marker")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain handoff lifecycle
+// ──────────────────────────────────────────────
+
+describe("btrain handoff lifecycle", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("handoff shows idle status after init", async () => {
+    const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("status: idle"), `Expected idle status: ${stdout}`)
+  })
+
+  it("claim transitions to in-progress", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Test task", "--owner", "TestBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("status: in-progress"), `Expected in-progress: ${stdout}`)
+    assert.ok(stdout.includes("task: Test task"), `Expected task name: ${stdout}`)
+  })
+
+  it("claim initializes a structured delegation packet from the lane task", async () => {
+    const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+
+    assert.ok(stdout.includes("objective: Test task"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("## Delegation Packet"), content)
+    assert.ok(content.includes("Objective:\n\nTest task"), content)
+    assert.ok(content.includes("Deliverable:\n\nProduce reviewable changes or artifacts inside the claimed lane scope."), content)
+    assert.ok(content.includes("- Leave the lane with concrete, reviewable progress."), content)
+    assert.ok(content.includes("Done when:\n\nThe lane is ready for `needs-review` or for a narrower follow-up handoff with explicit remaining gaps."), content)
+  })
+
+  it("update writes explicit delegation packet fields and exposes them in status json", async () => {
+    const updateResult = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--actor",
+        "TestBot",
+        "--objective",
+        "Implement the structured delegation packet flow end-to-end.",
+        "--deliverable",
+        "Reviewable core, CLI, docs, and tests for delegation metadata.",
+        "--constraint",
+        "Do not widen the lock model in this slice.",
+        "--constraint",
+        "Keep needs-review validation backward-compatible.",
+        "--acceptance",
+        "Claim/update can write delegation metadata.",
+        "--acceptance",
+        "status --json exposes the packet.",
+        "--budget",
+        "One lane-scoped implementation pass plus focused regression tests.",
+        "--done-when",
+        "The lane carries machine-readable delegation data without breaking existing handoff flows.",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(updateResult.code, 0, updateResult.stderr)
+
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(handoffResult.stdout.includes("objective: Implement the structured delegation packet flow end-to-end."), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("deliverable: Reviewable core, CLI, docs, and tests for delegation metadata."),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("constraints:"), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("  - Do not widen the lock model in this slice."), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("  - Keep needs-review validation backward-compatible."), handoffResult.stdout)
+    assert.ok(handoffResult.stdout.includes("acceptance:"), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("  - Claim/update can write delegation metadata."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes("  - status --json exposes the packet."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "budget: One lane-scoped implementation pass plus focused regression tests.",
+      ),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("done when: The lane carries machine-readable delegation data without breaking existing handoff flows."), handoffResult.stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Implement the structured delegation packet flow end-to-end."), content)
+    assert.ok(content.includes("Reviewable core, CLI, docs, and tests for delegation metadata."), content)
+    assert.ok(content.includes("- Do not widen the lock model in this slice."), content)
+    assert.ok(content.includes("- Keep needs-review validation backward-compatible."), content)
+    assert.ok(content.includes("- Claim/update can write delegation metadata."), content)
+    assert.ok(content.includes("- status --json exposes the packet."), content)
+    assert.ok(content.includes("One lane-scoped implementation pass plus focused regression tests."), content)
+    assert.ok(content.includes("The lane carries machine-readable delegation data without breaking existing handoff flows."), content)
+
+    const statusResult = await runBtrain(["status", "--repo", tmpDir, "--json"], tmpDir)
+    const status = JSON.parse(statusResult.stdout)
+    assert.equal(status[0].current.delegationPacket.objective, "Implement the structured delegation packet flow end-to-end.")
+    assert.equal(status[0].current.delegationPacket.deliverable, "Reviewable core, CLI, docs, and tests for delegation metadata.")
+    assert.deepEqual(status[0].current.delegationPacket.constraints, [
+      "Do not widen the lock model in this slice.",
+      "Keep needs-review validation backward-compatible.",
+    ])
+    assert.deepEqual(status[0].current.delegationPacket.acceptance, [
+      "Claim/update can write delegation metadata.",
+      "status --json exposes the packet.",
+    ])
+    assert.equal(status[0].current.delegationPacket.budget, "One lane-scoped implementation pass plus focused regression tests.")
+    assert.equal(status[0].current.delegationPacket.doneWhen, "The lane carries machine-readable delegation data without breaking existing handoff flows.")
+  })
+
+  it("preserves all lines of multiline packet paragraph fields in handoff output", async () => {
+    await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--objective",
+        "Ship the delegation protocol.\nEnsure backward compatibility with existing handoff flows.",
+        "--deliverable",
+        "Updated core, CLI, and tests.\nRegression coverage for multiline fields.",
+        "--budget",
+        "One lane-scoped pass.\nNo cross-lane changes.",
+        "--done-when",
+        "All paragraph fields render in full.\nNo content is truncated.",
+        "--actor",
+        "TestBot",
+      ],
+      tmpDir,
+    )
+
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(
+      handoffResult.stdout.includes(
+        "objective: Ship the delegation protocol. Ensure backward compatibility with existing handoff flows.",
+      ),
+      `Expected full multiline objective: ${handoffResult.stdout}`,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "deliverable: Updated core, CLI, and tests. Regression coverage for multiline fields.",
+      ),
+      `Expected full multiline deliverable: ${handoffResult.stdout}`,
+    )
+    assert.ok(
+      handoffResult.stdout.includes("budget: One lane-scoped pass. No cross-lane changes."),
+      `Expected full multiline budget: ${handoffResult.stdout}`,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "done when: All paragraph fields render in full. No content is truncated.",
+      ),
+      `Expected full multiline done-when: ${handoffResult.stdout}`,
+    )
+  })
+
+  it("rejects needs-review while reviewer context is still placeholder-only", async () => {
+    const { code, stderr } = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--actor", "TestBot"],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /Cannot enter `needs-review`/)
+  })
+
+  it("update transitions to needs-review when reviewer context is complete", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "TestBot" }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: needs-review"), `Expected needs-review: ${stdout}`)
+    assert.ok(stdout.includes("peer reviewer: ReviewBot"), `Expected peer reviewer to stay on the peer: ${stdout}`)
+  })
+
+  it("update fills structured reviewer context fields", async () => {
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Structured handoff", "--owner", "TestBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout } = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--status",
+        "needs-review",
+        "--actor",
+        "TestBot",
+        "--base",
+        "feat/structured-handoff",
+        "--preflight",
+        "--changed",
+        "src/engine/synthesizer.ts — align reviewer context parsing",
+        "--changed",
+        "README.md — document structured reviewer context flags",
+        "--verification",
+        "node --test test/core.test.mjs",
+        "--verification",
+        "git diff --check",
+        "--gap",
+        "Did not re-run end-to-end browser validation",
+        "--why",
+        "The public CLI needs to fill the same structured handoff fields that the docs require.",
+        "--review-ask",
+        "Verify the placeholder review asks are replaced",
+        "--review-ask",
+        "Confirm the Base field is written to Current",
+      ],
+      tmpDir,
+    )
+
+    assert.ok(stdout.includes("status: needs-review"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Base: feat/structured-handoff"), content)
+    assert.ok(content.includes("- [x] Checked locked files, nearby diff, and likely risk areas before editing"), content)
+    assert.ok(content.includes("- src/engine/synthesizer.ts — align reviewer context parsing"), content)
+    assert.ok(content.includes("- README.md — document structured reviewer context flags"), content)
+    assert.ok(content.includes("- node --test test/core.test.mjs"), content)
+    assert.ok(content.includes("- git diff --check"), content)
+    assert.ok(content.includes("- Did not re-run end-to-end browser validation"), content)
+    assert.ok(content.includes("The public CLI needs to fill the same structured handoff fields that the docs require."), content)
+    assert.ok(content.includes("- Verify the placeholder review asks are replaced"), content)
+    assert.ok(content.includes("- Confirm the Base field is written to Current"), content)
+    assert.ok(!content.includes("Fill this in before handoff"), content)
+  })
+
+  it("request-changes transitions to changes-requested and records reason metadata", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "request-changes",
+        "--repo",
+        tmpDir,
+        "--summary",
+        "Need one more verification pass before approval.",
+        "--reason-code",
+        "missing-verification",
+        "--reason-tag",
+        "smoke-check",
+        "--reason-tag",
+        "tests",
+        "--actor",
+        "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: changes-requested"), stdout)
+    assert.ok(stdout.includes("Changes requested by ReviewBot."), stdout)
+    assert.ok(stdout.includes("reason code: missing-verification"), stdout)
+    assert.ok(stdout.includes("reason tags: smoke-check, tests"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Status: changes-requested"), content)
+    assert.ok(content.includes("Primary Reason Code: missing-verification"), content)
+    assert.ok(content.includes("Reason Tags: smoke-check, tests"), content)
+    assert.ok(content.includes("Need one more verification pass before approval."), content)
+  })
+
+  it("writer can re-handoff after changes-requested", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "TestBot" }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: needs-review"), stdout)
+    assert.ok(stdout.includes("Waiting on peer review from ReviewBot."), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(!content.includes("Primary Reason Code:"), content)
+    assert.ok(!content.includes("Reason Tags:"), content)
+  })
+
+  it("request-changes requires a reason code", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "request-changes",
+        "--repo",
+        tmpDir,
+        "--summary",
+        "Need one more verification pass before approval.",
+        "--actor",
+        "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /requires a reason code/)
+  })
+
+  it("resolve transitions to resolved", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--summary", "All good", "--actor", "ReviewBot"],
+      tmpDir,
+    )
+    console.error("DEBUG stdout:", stdout); console.error("DEBUG stderr:", stderr); assert.ok(stdout.includes("status: resolved"), `Expected resolved: ${stdout}`)
+  })
+
+  it("handoff guidance no longer mentions editing HANDOFF.md directly", async () => {
+    const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("edit HANDOFF.md directly"), `Guidance should not contain 'edit HANDOFF.md directly': ${stdout}`)
+  })
+})
+
+describe("btrain workflow history", () => {
+  it("writes structured workflow events for lane transitions", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Track workflow events",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/feature-a.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "feature-a.ts"), "export const featureA = true\n", "utf8")
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--status",
+          "needs-review",
+          "--actor",
+          "WriterBot",
+          "--base",
+          "HEAD",
+          "--preflight",
+          "--changed",
+          "src/feature-a.ts - add workflow event coverage",
+          "--verification",
+          "npx tsx --test test/core.test.mjs",
+          "--gap",
+          "Did not rerun manual smoke validation",
+          "--why",
+          "Need a reviewable diff for workflow event coverage.",
+          "--review-ask",
+          "Confirm lane events are written in order.",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "request-changes",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--summary",
+          "Need a clearer verification trail.",
+          "--reason-code",
+          "missing-verification",
+          "--actor",
+          "ReviewerBot",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--status",
+          "in-progress",
+          "--actor",
+          "WriterBot",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "feature-a.ts"), "export const featureA = 'updated'\n", "utf8")
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--status",
+          "needs-review",
+          "--actor",
+          "WriterBot",
+          "--base",
+          "HEAD",
+          "--preflight",
+          "--changed",
+          "src/feature-a.ts - clarify verification trail",
+          "--verification",
+          "npx tsx --test test/core.test.mjs",
+          "--gap",
+          "Did not rerun manual smoke validation",
+          "--why",
+          "Need reviewer approval after the follow-up pass.",
+          "--review-ask",
+          "Confirm the request-changes loop is preserved in history.",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Approved", "--actor", "ReviewerBot"],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["claim", "update", "request-changes", "update", "update", "resolve"],
+      )
+      assert.ok(events.every((event) => event.laneId === "a"))
+      assert.equal(events[0].actor, "WriterBot")
+      assert.equal(events[2].actor, "ReviewerBot")
+      assert.equal(events.at(-1)?.after?.status, "resolved")
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("keeps only the newest warm handoffs and archives the rest under .btrain", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+
+      for (let index = 1; index <= 5; index += 1) {
+        const claimResult = await runBtrain(
+          [
+            "handoff",
+            "claim",
+            "--repo",
+            tmpDir,
+            "--lane",
+            "a",
+            "--task",
+            `History ${index}`,
+            "--owner",
+            "WriterBot",
+            "--reviewer",
+            "ReviewerBot",
+            "--files",
+            "src/history-a.ts",
+          ],
+          tmpDir,
+        )
+        assert.equal(claimResult.code, 0, claimResult.stderr)
+
+        await fs.writeFile(path.join(tmpDir, "src", "history-a.ts"), `export const historyValue = ${index}\n`, "utf8")
+
+        const resolveResult = await runBtrain(
+          [
+            "handoff",
+            "resolve",
+            "--repo",
+            tmpDir,
+            "--lane",
+            "a",
+            "--summary",
+            `Resolved ${index}`,
+            "--actor",
+            "ReviewerBot",
+          ],
+          tmpDir,
+        )
+        assert.equal(resolveResult.code, 0, resolveResult.stderr)
+      }
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const archivePath = path.join(tmpDir, ".btrain", "history", "lane-a.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const warmEntries = [...handoffContent.matchAll(/^- \d{4}-\d{2}-\d{2}\b/gm)]
+
+      assert.equal(warmEntries.length, 3)
+      assert.ok(handoffContent.includes("History 5"), handoffContent)
+      assert.ok(handoffContent.includes("History 4"), handoffContent)
+      assert.ok(handoffContent.includes("History 3"), handoffContent)
+      assert.ok(!handoffContent.includes("History 2"), handoffContent)
+
+      const archiveContent = await fs.readFile(archivePath, "utf8")
+      assert.ok(archiveContent.includes("History 1"), archiveContent)
+      assert.ok(archiveContent.includes("History 2"), archiveContent)
+
+      let events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(events.some((event) => event.type === "history-compact"), events.map((event) => event.type).join(", "))
+
+      const cleanupResult = await runBtrain(["hcleanup", "--repo", tmpDir, "--keep", "1"], tmpDir)
+      assert.equal(cleanupResult.code, 0, cleanupResult.stderr)
+      assert.ok(cleanupResult.stdout.includes("archived:"), cleanupResult.stdout)
+
+      const compactedContent = await fs.readFile(handoffPath, "utf8")
+      const compactedWarmEntries = [...compactedContent.matchAll(/^- \d{4}-\d{2}-\d{2}\b/gm)]
+      assert.equal(compactedWarmEntries.length, 1)
+      assert.ok(compactedContent.includes("History 5"), compactedContent)
+
+      const expandedArchive = await fs.readFile(archivePath, "utf8")
+      assert.ok(expandedArchive.includes("History 3"), expandedArchive)
+      assert.ok(expandedArchive.includes("History 4"), expandedArchive)
+
+      events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(
+        events.some((event) => event.type === "history-compact" && event.actor === "btrain hcleanup"),
+        events.map((event) => `${event.type}:${event.actor}`).join(", "),
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("prefers the newest lane state snapshot from workflow events when the handoff file is stale", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Fresh workflow state",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/fresh.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "fresh.ts"), "export const fresh = true\n", "utf8")
+
+      result = await runBtrain(
+        [
+          "handoff",
+          "resolve",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--summary",
+          "Fresh workflow summary",
+          "--actor",
+          "ReviewerBot",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const staleCurrentSection = [
+        "## Current",
+        "",
+        "Task: Stale branch copy",
+        "Owner: WriterBot",
+        "Reviewer: ReviewerBot",
+        "Status: resolved",
+        "Review Mode: manual",
+        "Locked Files: (none)",
+        "Next Action: Stale branch summary",
+        "Base:",
+        "Last Updated: WriterBot 2025-01-01T00:00:00.000Z",
+        "Lane: a",
+        "",
+      ].join("\n")
+      await fs.writeFile(handoffPath, replaceCurrentSection(handoffContent, staleCurrentSection), "utf8")
+
+      const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+      assert.equal(handoffResult.code, 0, handoffResult.stderr)
+      assert.ok(handoffResult.stdout.includes("task: Fresh workflow state"), handoffResult.stdout)
+      assert.ok(handoffResult.stdout.includes("Fresh workflow summary"), handoffResult.stdout)
+      assert.ok(!handoffResult.stdout.includes("Stale branch summary"), handoffResult.stdout)
+
+      const statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+      assert.equal(statusResult.code, 0, statusResult.stderr)
+      assert.ok(statusResult.stdout.includes("lane a: resolved — Fresh workflow state"), statusResult.stdout)
+      assert.ok(!statusResult.stdout.includes("2025-01-01T00:00:00.000Z"), statusResult.stdout)
+      assert.ok(!statusResult.stdout.includes("Stale branch summary"), statusResult.stdout)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+describe("audited overrides", () => {
+  it("allows a human-confirmed needs-review override to bypass the reviewable-diff guard once", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
+      await runBtrain(["init", tmpDir], tmpDir)
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Override review guard",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/override-a.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            actor: "WriterBot",
+            base: "HEAD",
+            changed: ["src/override-a.ts - no diff present yet"],
+            verification: ["npx tsx --test test/core.test.mjs"],
+            gap: ["No file diff exists; this is an override path."],
+            why: ["Need an emergency reviewer checkpoint despite the empty diff."],
+            reviewAsk: ["Confirm the override is recorded and the lane still moves to review."],
+          }),
+          "--lane",
+          "a",
+        ],
+        tmpDir,
+      )
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /reviewable diff in locked files/)
+
+      const grantResult = await runBtrain(
+        [
+          "override",
+          "grant",
+          "--repo",
+          tmpDir,
+          "--action",
+          "needs-review",
+          "--lane",
+          "a",
+          "--requested-by",
+          "WriterBot",
+          "--confirmed-by",
+          "HumanOperator",
+          "--reason",
+          "Emergency review checkpoint before any file diff exists.",
+        ],
+        tmpDir,
+      )
+      assert.equal(grantResult.code, 0, grantResult.stderr)
+      const overrideIdMatch = grantResult.stdout.match(/override granted: (\S+)/)
+      assert.ok(overrideIdMatch, grantResult.stdout)
+      const overrideId = overrideIdMatch[1]
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            actor: "WriterBot",
+            base: "HEAD",
+            changed: ["src/override-a.ts - no diff present yet"],
+            verification: ["npx tsx --test test/core.test.mjs"],
+            gap: ["No file diff exists; this is an override path."],
+            why: ["Need an emergency reviewer checkpoint despite the empty diff."],
+            reviewAsk: ["Confirm the override is recorded and the lane still moves to review."],
+          }),
+          "--lane",
+          "a",
+          "--override-id",
+          overrideId,
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+      assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+
+      const overrideList = await runBtrain(["override", "list", "--repo", tmpDir], tmpDir)
+      assert.equal(overrideList.code, 0, overrideList.stderr)
+      assert.ok(overrideList.stdout.includes("No active overrides."), overrideList.stdout)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(events.some((event) => event.type === "override-granted"), events.map((event) => event.type).join(", "))
+      assert.ok(events.some((event) => event.type === "override-consumed"), events.map((event) => event.type).join(", "))
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+describe("btrain handoff reviewer intelligence", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(
+      ["init", tmpDir, "--agent", "OwnerBot", "--agent", "ReviewBot", "--agent", "BackupBot"],
+      tmpDir,
+    )
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("keeps needs-review pointed at a peer even if --reviewer matches the actor", async () => {
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Peer review", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code, stderr } = await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "OwnerBot", reviewer: "OwnerBot" }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: needs-review"), stdout)
+    assert.ok(stdout.includes("peer reviewer: ReviewBot"), stdout)
+  })
+
+  it("supports --reviewer any-other during claim", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Auto peer", "--owner", "OwnerBot", "--reviewer", "any-other"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("peer reviewer: ReviewBot"), stdout)
+  })
+
+  it("snaps claim reviewer to a peer when it matches the owner", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Same owner reviewer", "--owner", "OwnerBot", "--reviewer", "OwnerBot"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("peer reviewer: ReviewBot"), stdout)
+  })
+
+  it("accepts --reviewer any-other during needs-review updates", async () => {
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Any other update", "--owner", "OwnerBot", "--reviewer", "BackupBot"],
+      tmpDir,
+    )
+
+    const { stdout, code, stderr } = await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "OwnerBot", reviewer: "any-other" }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("peer reviewer: BackupBot"), stdout)
+  })
+
+  it("errors when any-other cannot resolve to a peer", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      await runBtrain(["init", localTmpDir, "--agent", "SoloBot"], localTmpDir)
+      await disableLanes(localTmpDir)
+
+      const result = await runBtrain(
+        ["handoff", "claim", "--repo", localTmpDir, "--task", "No peer", "--owner", "SoloBot", "--reviewer", "any-other"],
+        localTmpDir,
+      )
+
+      assert.notEqual(result.code, 0)
+      assert.ok(
+        result.stderr.includes('Could not infer a reviewer different from "SoloBot"'),
+        result.stderr,
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+})
+
+describe("btrain handoff agent verification", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+    await setRunnerConfig(tmpDir, ['"GPT-5 Codex" = "codex"', '"Opus 4.6" = "claude"'])
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("shows the detected agent during handoff checks", async () => {
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Verified handoff", "--owner", "GPT-5 Codex", "--reviewer", "Opus 4.6"],
+      tmpDir,
+      { BTRAIN_AGENT: "GPT-5 Codex" },
+    )
+
+    const { stdout, code, stderr } = await runBtrain(
+      ["handoff", "--repo", tmpDir],
+      tmpDir,
+      { BTRAIN_AGENT: "GPT-5 Codex" },
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("agent check: GPT-5 Codex"), stdout)
+  })
+
+  it("auto-detects the actor and rejects mismatched --actor values", async () => {
+    let result = await runBtrain(
+      buildNeedsReviewArgs(tmpDir),
+      tmpDir,
+      { BTRAIN_AGENT: "GPT-5 Codex" },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.includes("peer reviewer: Opus 4.6"), result.stdout)
+
+    result = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--status", "in-progress", "--actor", "Opus 4.6"],
+      tmpDir,
+      { BTRAIN_AGENT: "GPT-5 Codex" },
+    )
+
+    assert.notEqual(result.code, 0)
+    assert.ok(result.stderr.includes('does not match the detected agent "GPT-5 Codex"'), result.stderr)
+  })
+})
+
+describe("extended handoff statuses", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Repair flow", "--owner", "WriterBot", "--reviewer", "ReviewerBot"],
+      tmpDir,
+    )
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("repair-needed requires a reason code on transition", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--status",
+        "repair-needed",
+        "--actor",
+        "WriterBot",
+      ],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /requires a reason code/)
+  })
+
+  it("supports repair-needed guidance", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--status",
+        "repair-needed",
+        "--reason-code",
+        "invalid-handoff",
+        "--reason-tag",
+        "placeholder-context",
+        "--actor",
+        "WriterBot",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("status: repair-needed"), stdout)
+    assert.ok(stdout.includes("Workflow repair needed before normal work can resume."), stdout)
+    assert.ok(stdout.includes("reason code: invalid-handoff"), stdout)
+    assert.ok(stdout.includes("reason tags: placeholder-context"), stdout)
+
+    const content = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(content.includes("Primary Reason Code: invalid-handoff"), content)
+    assert.ok(content.includes("Reason Tags: placeholder-context"), content)
+  })
+})
+
+describe("repair-needed routing", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Repair routing", "--owner", "WriterBot", "--reviewer", "ReviewerBot"],
+      tmpDir,
+    )
+    const handoffResult = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "WriterBot" }), tmpDir)
+    assert.equal(handoffResult.code, 0, handoffResult.stderr)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("routes repair-needed back to the last canonical workflow actor and escalates after one retry", async () => {
+    let result = await runBtrain(
+      buildRepairNeededArgs(tmpDir, {
+        actor: "ReviewerBot",
+        reasonCode: "invalid-handoff",
+        reasonTags: ["placeholder-context"],
+      }),
+      tmpDir,
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.includes("status: repair-needed"), result.stdout)
+    assert.ok(result.stdout.includes("repair owner: WriterBot"), result.stdout)
+    assert.ok(result.stdout.includes("repair attempts: 1"), result.stdout)
+    assert.ok(!result.stdout.includes("repair escalation:"), result.stdout)
+
+    let statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repair owner: WriterBot"), statusResult.stdout)
+    assert.ok(statusResult.stdout.includes("repair attempts: 1"), statusResult.stdout)
+
+    let doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("assigned to WriterBot"), doctorResult.stdout)
+
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    let handoffContent = await fs.readFile(handoffPath, "utf8")
+    assert.ok(handoffContent.includes("Repair Owner: WriterBot"), handoffContent)
+    assert.ok(handoffContent.includes("Repair Attempts: 1"), handoffContent)
+    assert.ok(!handoffContent.includes("Repair Escalation:"), handoffContent)
+
+    result = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--status", "in-progress", "--actor", "WriterBot"],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(!result.stdout.includes("repair owner:"), result.stdout)
+
+    handoffContent = await fs.readFile(handoffPath, "utf8")
+    assert.ok(!handoffContent.includes("Repair Owner:"), handoffContent)
+    assert.ok(!handoffContent.includes("Repair Escalation:"), handoffContent)
+    assert.ok(!handoffContent.includes("Repair Attempts:"), handoffContent)
+
+    result = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "WriterBot" }), tmpDir)
+    assert.equal(result.code, 0, result.stderr)
+
+    result = await runBtrain(
+      buildRepairNeededArgs(tmpDir, {
+        actor: "ReviewerBot",
+        reasonCode: "invalid-handoff",
+      }),
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.includes("repair owner: WriterBot"), result.stdout)
+    assert.ok(result.stdout.includes("repair attempts: 2"), result.stdout)
+    assert.ok(result.stdout.includes("repair escalation: human"), result.stdout)
+    assert.ok(result.stdout.includes("Human escalation required"), result.stdout)
+
+    statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repair escalation: human"), statusResult.stdout)
+
+    doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("requires human escalation"), doctorResult.stdout)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain doctor
+// ──────────────────────────────────────────────
+
+describe("btrain doctor", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("reports healthy for a freshly initialized repo", async () => {
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("healthy: yes"), `Expected healthy repo: ${stdout}`)
+  })
+
+  it("surfaces stale resolved handoffs as repurpose-ready", async () => {
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    const content = await fs.readFile(handoffPath, "utf8")
+    const updated = content
+      .replace("Status: idle", "Status: resolved")
+      .replace(/^Last Updated: .*$/m, "Last Updated: GPT 2000-01-01T00:00:00.000Z")
+    await fs.writeFile(handoffPath, updated, "utf8")
+
+    const statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repurpose-ready"), statusResult.stdout)
+
+    const doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("repurpose-ready"), doctorResult.stdout)
+  })
+})
+
+describe("btrain doctor feedback monitoring", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("init scaffolds FEEDBACK_LOG.md", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const content = await fs.readFile(feedbackPath, "utf8")
+    assert.ok(content.includes("Feedback Log"), content)
+    assert.ok(!content.includes("{{repoName}}"), "Template variables should be rendered")
+  })
+
+  it("init --core-only skips FEEDBACK_LOG.md and feedback guidance in managed block", async () => {
+    const coreOnlyDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", coreOnlyDir])
+      await runBtrain(["init", coreOnlyDir, "--core-only"], coreOnlyDir)
+      const feedbackPath = path.join(coreOnlyDir, ".claude", "collab", "FEEDBACK_LOG.md")
+      const exists = await fs.access(feedbackPath).then(() => true, () => false)
+      assert.ok(!exists, "FEEDBACK_LOG.md should not be created with --core-only")
+      const agentsContent = await fs.readFile(path.join(coreOnlyDir, "AGENTS.md"), "utf8")
+      assert.ok(!agentsContent.includes("feedback-triage"), "AGENTS.md should not mention feedback-triage with --core-only")
+      assert.ok(!agentsContent.includes("bug-fix"), "AGENTS.md should not mention bug-fix with --core-only")
+      const claudeContent = await fs.readFile(path.join(coreOnlyDir, "CLAUDE.md"), "utf8")
+      assert.ok(!claudeContent.includes("feedback-triage"), "CLAUDE.md should not mention feedback-triage with --core-only")
+      assert.ok(!claudeContent.includes("bug-fix"), "CLAUDE.md should not mention bug-fix with --core-only")
+    } finally {
+      await rmDir(coreOnlyDir)
+    }
+  })
+
+  it("doctor warns on stale feedback entries", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const staleEntry = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-001: Button does not work",
+      "- **Reported:** 2020-01-01",
+      "- **Category:** BUG",
+      "- **Status:** new",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, staleEntry, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("FB-BUG-001"), stdout)
+    assert.ok(stdout.includes("days"), stdout)
+  })
+
+  it("doctor warns on missing required fields", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const badEntry = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-002: Another issue",
+      "- **Reported:** 2025-01-01",
+      "- **Notes:** something",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, badEntry, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("missing Category"), stdout)
+    assert.ok(stdout.includes("missing Status"), stdout)
+  })
+
+  it("doctor does not warn on healthy entries", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    const healthyContent = [
+      "# Feedback Log",
+      "",
+      "## FB-BUG-001: Fixed issue",
+      "- **Reported:** 2025-04-01",
+      "- **Category:** BUG",
+      "- **Status:** verified",
+      "",
+    ].join("\n")
+    await fs.writeFile(feedbackPath, healthyContent, "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("FB-BUG-001"), stdout)
+  })
+
+  it("doctor warns when FEEDBACK_LOG.md is missing", async () => {
+    const feedbackPath = path.join(tmpDir, ".claude", "collab", "FEEDBACK_LOG.md")
+    await fs.unlink(feedbackPath).catch(() => {})
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("FEEDBACK_LOG.md"), stdout)
+  })
+
+  it("--skip-feedback suppresses feedback warnings", async () => {
+    // feedback log is already missing from the previous test
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir, "--skip-feedback"], tmpDir)
+    assert.ok(!stdout.includes("FEEDBACK_LOG.md"), stdout)
+  })
+
+  it("feedback disabled in config suppresses warnings", async () => {
+    const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    await fs.writeFile(tomlPath, toml + "\n[feedback]\nenabled = false\n", "utf8")
+    const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!stdout.includes("FEEDBACK_LOG.md"), stdout)
+    // Restore
+    await fs.writeFile(tomlPath, toml, "utf8")
+  })
+})
+
+describe("btrain doctor --repair", () => {
+  it("releases stale lane locks as a safe mechanical repair", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await enableLanes(tmpDir)
+      await runBtrain(["init", tmpDir], tmpDir)
+      await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Stale lock repair",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/stale-lock.ts",
+        ],
+        tmpDir,
+      )
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const staleContent = handoffContent
+        .replace("Status: in-progress", "Status: resolved")
+        .replace(
+          /^Next Action: .*$/m,
+          "Next Action: Manual edit left the lane resolved while locks stayed behind.",
+        )
+      await fs.writeFile(handoffPath, staleContent, "utf8")
+
+      const beforeDoctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+      assert.ok(beforeDoctor.stdout.includes("Stale lock: lane a"), beforeDoctor.stdout)
+
+      const repairDoctor = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+      assert.equal(repairDoctor.code, 0, repairDoctor.stderr)
+      assert.ok(repairDoctor.stdout.includes("repairs: lane a: released 1 stale lock"), repairDoctor.stdout)
+      assert.ok(!repairDoctor.stdout.includes("Stale lock: lane a"), repairDoctor.stdout)
+
+      const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+      assert.equal(locks.locks.filter((lock) => lock.lane === "a").length, 0)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.ok(
+        events.some((event) => event.type === "watchdog-repair" && event.details?.repairType === "release-stale-locks"),
+        events.map((event) => `${event.type}:${event.details?.repairType || ""}`).join(", "),
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("runs history compaction as a backstop repair", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await disableLanes(tmpDir)
+
+      const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const overflowEntries = [
+        "- 2026-04-01 WriterBot: History 5",
+        "- 2026-03-31 WriterBot: History 4",
+        "- 2026-03-30 WriterBot: History 3",
+        "- 2026-03-29 WriterBot: History 2",
+        "- 2026-03-28 WriterBot: History 1",
+      ].join("\n")
+      const overflowContent = handoffContent.replace(/## Previous Handoffs[\s\S]*$/, `## Previous Handoffs\n\n${overflowEntries}\n`)
+      await fs.writeFile(handoffPath, overflowContent, "utf8")
+
+      const repairDoctor = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+      assert.equal(repairDoctor.code, 0, repairDoctor.stderr)
+      assert.ok(repairDoctor.stdout.includes("repairs: current handoff: archived 2, kept 3"), repairDoctor.stdout)
+
+      const compactedContent = await fs.readFile(handoffPath, "utf8")
+      const warmEntries = [...compactedContent.matchAll(/^- \d{4}-\d{2}-\d{2}\b/gm)]
+      assert.equal(warmEntries.length, 3)
+      assert.ok(compactedContent.includes("History 5"), compactedContent)
+      assert.ok(compactedContent.includes("History 4"), compactedContent)
+      assert.ok(compactedContent.includes("History 3"), compactedContent)
+      assert.ok(!compactedContent.includes("History 2"), compactedContent)
+
+      const archivePath = path.join(tmpDir, ".btrain", "history", "repo.md")
+      const archiveContent = await fs.readFile(archivePath, "utf8")
+      assert.ok(archiveContent.includes("History 1"), archiveContent)
+      assert.ok(archiveContent.includes("History 2"), archiveContent)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "repo.jsonl"))
+      assert.ok(
+        events.some((event) => event.type === "history-compact" && event.actor === "btrain doctor"),
+        events.map((event) => `${event.type}:${event.actor}`).join(", "),
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain sync-templates
+// ──────────────────────────────────────────────
+
+describe("btrain sync-templates", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("reports unchanged after fresh init", async () => {
+    const { stdout } = await runBtrain(["sync-templates", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("unchanged"), `Expected unchanged: ${stdout}`)
+  })
+
+  it("detects and fixes managed block drift", async () => {
+    // Tamper with the managed block in AGENTS.md
+    const agentsPath = path.join(tmpDir, "AGENTS.md")
+    const content = await fs.readFile(agentsPath, "utf8")
+    const tampered = content.replace("Always use CLI commands", "Tampered text")
+    await fs.writeFile(agentsPath, tampered, "utf8")
+
+    // sync-templates should fix it
+    const { stdout } = await runBtrain(["sync-templates", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("updated") || stdout.includes("AGENTS.md"), `Expected update: ${stdout}`)
+
+    // Verify the fix
+    const fixed = await fs.readFile(agentsPath, "utf8")
+    assert.ok(fixed.includes("Always use CLI commands"), "Managed block should be restored")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain go
+// ──────────────────────────────────────────────
+
+describe("btrain go", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("outputs bootstrap context with all expected sections", async () => {
+    const { stdout, code } = await runBtrain(["go", "--repo", tmpDir], tmpDir)
+    assert.equal(code, 0, stdout)
+    assert.ok(stdout.includes("# btrain go"), stdout)
+    assert.ok(stdout.includes("## Agent instructions"), stdout)
+    assert.ok(stdout.includes("CLAUDE.md"), stdout)
+    assert.ok(stdout.includes("AGENTS.md"), stdout)
+    assert.ok(stdout.includes("## Project config"), stdout)
+    assert.ok(stdout.includes(".btrain/project.toml"), stdout)
+    assert.ok(stdout.includes("## Current handoff state"), stdout)
+    assert.ok(stdout.includes("Do NOT read .claude/collab/HANDOFF_*.md directly"), stdout)
+    assert.ok(stdout.includes("## File locks"), stdout)
+    assert.ok(stdout.includes("## Skills"), stdout)
+    assert.ok(stdout.includes("## Quick-start commands"), stdout)
+    assert.ok(stdout.includes("btrain handoff"), stdout)
+  })
+
+  it("lists configured agents and lanes", async () => {
+    const { stdout } = await runBtrain(["go", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("agents:"), stdout)
+    assert.ok(stdout.includes("lanes:"), stdout)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain review status
+// ──────────────────────────────────────────────
+
+describe("btrain review status", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("reports review configuration", async () => {
+    const { stdout } = await runBtrain(["review", "status", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("mode:"), `Expected mode in output: ${stdout}`)
+    assert.ok(stdout.includes("manual"), `Expected manual mode: ${stdout}`)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: hybrid review mode
+// ──────────────────────────────────────────────
+
+describe("hybrid review mode", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+
+    // Set project.toml to hybrid mode with triggers
+    const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    const updated = toml
+      .replace('default_review_mode = "manual"', 'default_review_mode = "hybrid"')
+      .replace("[reviews]", `[reviews]\nparallel_enabled = true\nhybrid_path_triggers = ["auth", "routes", "scoring"]\nhybrid_content_triggers = ["(password|token)", "(score|weight)"]`)
+    await fs.writeFile(tomlPath, updated, "utf8")
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("review status shows hybrid mode from project config", async () => {
+    const { stdout } = await runBtrain(["review", "status", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("hybrid"), `Expected hybrid mode in output: ${stdout}`)
+    assert.ok(stdout.includes("project-config"), `Expected project-config source: ${stdout}`)
+  })
+
+  it("project config takes priority over default handoff mode", async () => {
+    // Claim a handoff (which sets default reviewMode: manual)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Hybrid test", "--owner", "Bot1", "--reviewer", "Bot2"],
+      tmpDir,
+    )
+
+    // Review status should still show hybrid from project config
+    const { stdout } = await runBtrain(["review", "status", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("hybrid"), `Expected hybrid despite handoff default: ${stdout}`)
+    assert.ok(stdout.includes("project-config"), `Expected project-config source: ${stdout}`)
+  })
+
+  it("explicit handoff --mode overrides project config", async () => {
+    // Claim with explicit --mode parallel (should override hybrid project config)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Override test", "--owner", "Bot1", "--reviewer", "Bot2", "--mode", "parallel"],
+      tmpDir,
+    )
+
+    // Review status should show parallel from handoff, not hybrid from config
+    const { stdout } = await runBtrain(["review", "status", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("parallel"), `Expected parallel from explicit handoff: ${stdout}`)
+    assert.ok(stdout.includes("handoff"), `Expected handoff source: ${stdout}`)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: btrain loop
+// ──────────────────────────────────────────────
+
+describe("btrain loop", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("prints the next notify dispatch in dry-run mode", async () => {
+    await setRunnerConfig(tmpDir, ['"OwnerBot" = "notify"'])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Loop dry run", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--dry-run", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("loop context:"), stdout)
+    assert.ok(stdout.includes("selected agent:"), stdout)
+    assert.ok(stdout.includes("reason: handoff status is in-progress, so the active agent acts next"), stdout)
+    assert.ok(stdout.includes("harness profile: default"), stdout)
+    assert.ok(stdout.includes("dispatch prompt: bth"), stdout)
+    assert.ok(!stdout.includes("bth (+ delegation packet)"), stdout)
+    assert.ok(stdout.includes("delegation packet:"), stdout)
+    assert.ok(stdout.includes("objective: Loop dry run"), stdout)
+    assert.ok(stdout.includes("prompt: bth"), stdout)
+    assert.ok(stdout.includes("dry-run round 1: wait for OwnerBot (notify mode)"), stdout)
+    assert.ok(stdout.includes("status: dry-run"), stdout)
+  })
+
+  it("uses the configured active harness profile prompt when a repo-local profile exists", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-custom-prompt.js")
+    const capturedPromptPath = path.join(tmpDir, "owner-custom-prompt.txt")
+    const harnessDir = path.join(tmpDir, ".btrain", "harness", "profiles")
+
+    await fs.mkdir(harnessDir, { recursive: true })
+    await fs.writeFile(
+      path.join(harnessDir, "brief.json"),
+      JSON.stringify(
+        {
+          id: "brief",
+          loop: {
+            dispatchPrompt: "brief-bth",
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+    await setActiveHarnessProfile(tmpDir, "brief")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+fs.writeFileSync(${JSON.stringify(capturedPromptPath)}, process.argv.slice(2).join("\\n"), "utf8")
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:00.000Z")
+fs.writeFileSync(handoffPath, updated)
+console.log("captured custom harness prompt")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Custom harness prompt", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "1", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.ok(stdout.includes("harness profile: brief"), stdout)
+    assert.ok(stdout.includes("dispatch prompt: brief-bth"), stdout)
+    assert.ok(stdout.includes("prompt: brief-bth"), stdout)
+
+    const capturedPrompt = await fs.readFile(capturedPromptPath, "utf8")
+    assert.equal(capturedPrompt.trim(), "brief-bth")
+  })
+
+  it("fails with a clear fix when the configured harness profile is missing", async () => {
+    await setActiveHarnessProfile(tmpDir, "missing-profile")
+
+    const { stderr, code } = await runBtrain(["loop", "--repo", tmpDir, "--dry-run"], tmpDir)
+
+    assert.equal(code, 1, stderr)
+    assert.ok(stderr.includes('Unknown harness profile "missing-profile".'), stderr)
+    assert.ok(stderr.includes('Set [harness].active_profile to "default"'), stderr)
+  })
+
+  it("surfaces malformed repo-local harness profiles with a repair hint", async () => {
+    const harnessDir = path.join(tmpDir, ".btrain", "harness", "profiles")
+
+    await fs.mkdir(harnessDir, { recursive: true })
+    await fs.writeFile(path.join(harnessDir, "broken.json"), "{\n  invalid json\n", "utf8")
+    await setActiveHarnessProfile(tmpDir, "broken")
+
+    const { stderr, code } = await runBtrain(["loop", "--repo", tmpDir, "--dry-run"], tmpDir)
+
+    assert.equal(code, 1, stderr)
+    assert.ok(stderr.includes('Failed to load harness profile "broken".'), stderr)
+    assert.ok(stderr.includes("repair .btrain/harness/profiles/broken.json"), stderr)
+  })
+
+  it("dispatches bare bth and surfaces the delegation packet through btrain handoff", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-capture-prompt.js")
+    const capturedPromptPath = path.join(tmpDir, "owner-captured-prompt.txt")
+
+    await setActiveHarnessProfile(tmpDir, "default")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const promptPath = ${JSON.stringify(capturedPromptPath)}
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+fs.writeFileSync(promptPath, process.argv.slice(2).join("\\n"), "utf8")
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:00.000Z")
+fs.writeFileSync(handoffPath, updated)
+console.log("captured prompt and resolved the handoff")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Loop prompt capture", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--objective",
+        "Ship Option A loop dispatch.",
+        "--deliverable",
+        "A dispatched prompt that trusts btrain handoff to carry the lane contract.",
+        "--constraint",
+        "Keep the handoff trigger anchored on bth.",
+        "--acceptance",
+        "The runner receives only bth in its prompt payload.",
+        "--budget",
+        "One loop-driven regression test.",
+        "--done-when",
+        "btrain handoff surfaces the full packet so dispatched prompts stay bare.",
+        "--actor",
+        "OwnerBot",
+      ],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "1", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("delegation packet:"), stdout)
+    assert.ok(stdout.includes("captured prompt and resolved the handoff"), stdout)
+    assert.ok(!stdout.includes("bth (+ delegation packet)"), stdout)
+
+    const capturedPrompt = await fs.readFile(capturedPromptPath, "utf8")
+    assert.equal(capturedPrompt.trim(), "bth")
+    assert.ok(!capturedPrompt.includes("Delegation Packet:"), capturedPrompt)
+    assert.ok(!capturedPrompt.includes("Objective:"), capturedPrompt)
+    assert.ok(!capturedPrompt.includes("Ship Option A loop dispatch."), capturedPrompt)
+
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(handoffResult.stdout.includes("objective: Ship Option A loop dispatch."), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes(
+        "deliverable: A dispatched prompt that trusts btrain handoff to carry the lane contract.",
+      ),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("constraints:"), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("  - Keep the handoff trigger anchored on bth."),
+      handoffResult.stdout,
+    )
+    assert.ok(handoffResult.stdout.includes("acceptance:"), handoffResult.stdout)
+    assert.ok(
+      handoffResult.stdout.includes("  - The runner receives only bth in its prompt payload."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes("budget: One loop-driven regression test."),
+      handoffResult.stdout,
+    )
+    assert.ok(
+      handoffResult.stdout.includes(
+        "done when: btrain handoff surfaces the full packet so dispatched prompts stay bare.",
+      ),
+      handoffResult.stdout,
+    )
+  })
+
+  it("dispatches owner then reviewer and exits once the handoff resolves", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-runner.js")
+    const reviewerRunner = path.join(tmpDir, "reviewer-runner.js")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: needs-review")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:00.000Z")
+fs.writeFileSync(handoffPath, updated)
+console.log("owner runner updated handoff to needs-review")
+`,
+    )
+
+    await writeExecutable(
+      reviewerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: needs-review", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: ReviewBot 2026-03-15T12:00:01.000Z")
+fs.writeFileSync(handoffPath, updated)
+console.log("reviewer runner resolved the handoff")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`, `"ReviewBot" = "${reviewerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Loop relay", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "4", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("dispatch OwnerBot"), stdout)
+    assert.ok(stdout.includes("dispatch ReviewBot"), stdout)
+    assert.ok(stdout.includes("agent stdout:"), stdout)
+    assert.ok(stdout.includes("owner runner updated handoff to needs-review"), stdout)
+    assert.ok(stdout.includes("reviewer runner resolved the handoff"), stdout)
+    assert.ok(stdout.includes("handoff transition:"), stdout)
+    assert.ok(stdout.includes("before: status=in-progress"), stdout)
+    assert.ok(stdout.includes("after:  status=needs-review"), stdout)
+    assert.ok(stdout.includes("status: completed"), stdout)
+    assert.ok(stdout.includes("final handoff: resolved"), stdout)
+  })
+
+  it("streams Claude progress events while the runner is still working", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-notify.js")
+    const reviewerRunner = path.join(tmpDir, "claude")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: needs-review")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:01.500Z")
+fs.writeFileSync(handoffPath, updated)
+`,
+    )
+
+    await writeExecutable(
+      reviewerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+
+function emit(event) {
+  process.stdout.write(JSON.stringify(event) + "\\n")
+}
+
+emit({
+  type: "system",
+  subtype: "init",
+  model: "claude-sonnet-4-6",
+  permissionMode: "bypassPermissions",
+})
+emit({
+  type: "assistant",
+  message: {
+    content: [
+      {
+        type: "tool_use",
+        name: "Bash",
+        input: { command: "git status --short" },
+      },
+    ],
+  },
+})
+emit({
+  type: "user",
+  tool_use_result: {
+    stdout: "M src/brain_train/core.mjs",
+    stderr: "",
+    interrupted: false,
+    isImage: false,
+    noOutputExpected: false,
+  },
+})
+emit({
+  type: "assistant",
+  message: {
+    content: [
+      {
+        type: "text",
+        text: "Review finished.",
+      },
+    ],
+  },
+})
+
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: needs-review", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: ReviewBot 2026-03-15T12:00:02.000Z")
+fs.writeFileSync(handoffPath, updated)
+
+emit({
+  type: "result",
+  subtype: "success",
+  is_error: false,
+  duration_ms: 42,
+  result: "Review finished.",
+})
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`, `"ReviewBot" = "${reviewerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Claude stream", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    await runBtrain(
+      buildNeedsReviewArgs(tmpDir, { actor: "OwnerBot" }),
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "2", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("--output-format stream-json"), stdout)
+    assert.ok(stdout.includes("agent progress:"), stdout)
+    assert.ok(stdout.includes("tool Bash: git status --short"), stdout)
+    assert.ok(stdout.includes("tool result: M src/brain_train/core.mjs"), stdout)
+    assert.ok(stdout.includes("Review finished."), stdout)
+    assert.ok(stdout.includes("final handoff: resolved"), stdout)
+  })
+
+  it("streams Codex progress events while the runner is still working", async () => {
+    const ownerRunner = path.join(tmpDir, "codex")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+
+function emit(event) {
+  process.stdout.write(JSON.stringify(event) + "\\n")
+}
+
+emit({ type: "thread.started", thread_id: "thread_123" })
+emit({ type: "turn.started" })
+emit({
+  type: "item.completed",
+  item: {
+    id: "item_0",
+    type: "agent_message",
+    text: "Checking the handoff state first.",
+  },
+})
+emit({
+  type: "item.started",
+  item: {
+    id: "item_1",
+    type: "command_execution",
+    command: "/bin/zsh -lc 'git status --short'",
+    aggregated_output: "",
+    exit_code: null,
+    status: "in_progress",
+  },
+})
+emit({
+  type: "item.completed",
+  item: {
+    id: "item_1",
+    type: "command_execution",
+    command: "/bin/zsh -lc 'git status --short'",
+    aggregated_output: "M src/brain_train/core.mjs\\n",
+    exit_code: 0,
+    status: "completed",
+  },
+})
+
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:03.000Z")
+fs.writeFileSync(handoffPath, updated)
+
+emit({
+  type: "item.completed",
+  item: {
+    id: "item_2",
+    type: "agent_message",
+    text: "Done.",
+  },
+})
+emit({
+  type: "turn.completed",
+  usage: {
+    input_tokens: 1,
+    cached_input_tokens: 0,
+    output_tokens: 1,
+  },
+})
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`, `"ReviewBot" = "notify"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Codex stream", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "2", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("exec --json -C"), stdout)
+    assert.ok(stdout.includes("agent progress:"), stdout)
+    assert.ok(stdout.includes("Checking the handoff state first."), stdout)
+    assert.ok(stdout.includes("command: git status --short"), stdout)
+    assert.ok(stdout.includes("command result: M src/brain_train/core.mjs"), stdout)
+    assert.ok(stdout.includes("Done."), stdout)
+    assert.ok(stdout.includes("final handoff: resolved"), stdout)
+    assert.ok(!stdout.includes("agent stdout (unparsed):"), stdout)
+  })
+
+  it("stops when max rounds is exceeded", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-loop.js")
+    const reviewerRunner = path.join(tmpDir, "reviewer-loop.js")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: in-progress", "Status: needs-review")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerBot 2026-03-15T12:00:02.000Z")
+fs.writeFileSync(handoffPath, updated)
+`,
+    )
+
+    await writeExecutable(
+      reviewerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+const handoffPath = ".claude/collab/HANDOFF_A.md"
+const content = fs.readFileSync(handoffPath, "utf8")
+const updated = content
+  .replace("Status: needs-review", "Status: in-progress")
+  .replace(/Last Updated: .*$/, "Last Updated: ReviewBot 2026-03-15T12:00:03.000Z")
+fs.writeFileSync(handoffPath, updated)
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`, `"ReviewBot" = "${reviewerRunner}"`])
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Loop guardrail", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--max-rounds", "2", "--timeout", "5", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 1)
+    assert.ok(stdout.includes("selected agent:"), stdout)
+    assert.ok(stdout.includes("runner selection:"), stdout)
+    assert.ok(stdout.includes("status: max-rounds-exceeded"), stdout)
+    assert.ok(stdout.includes("reason: Reached max rounds (2)"), stdout)
+  })
+
+  it("exits immediately when the handoff is already resolved", async () => {
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Already done", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--summary", "Done already", "--actor", "ReviewBot"],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(["loop", "--repo", tmpDir], tmpDir)
+
+    assert.equal(code, 0)
+    assert.ok(stdout.includes("loop exit: handoff already resolved"), stdout)
+    assert.ok(stdout.includes("status: noop"), stdout)
+    assert.ok(stdout.includes("final handoff: resolved"), stdout)
+  })
+})
+
+describe("btrain push", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await disableLanes(tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("rejects the removed push command", async () => {
+    const { stdout, stderr, code } = await runBtrain(
+      ["push", "OwnerBot", "--repo", tmpDir, "--prompt", "check lane e"],
+      tmpDir,
+    )
+
+    const output = `${stdout}\n${stderr}`
+    assert.equal(code, 1, output)
+    assert.ok(
+      output.includes("`btrain push` has been removed."),
+      output,
+    )
+  })
+
+  it("uses the configured active harness profile prompt for runPush", async () => {
+    const ownerRunner = path.join(tmpDir, "owner-push-prompt.js")
+    const capturedPromptPath = path.join(tmpDir, "owner-push-prompt.txt")
+    const harnessDir = path.join(tmpDir, ".btrain", "harness", "profiles")
+    const events = []
+
+    await fs.mkdir(harnessDir, { recursive: true })
+    await fs.writeFile(
+      path.join(harnessDir, "brief.json"),
+      JSON.stringify(
+        {
+          id: "brief",
+          loop: {
+            dispatchPrompt: "brief-bth",
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+    await setActiveHarnessProfile(tmpDir, "brief")
+
+    await writeExecutable(
+      ownerRunner,
+      `#!/usr/bin/env node
+const fs = require("node:fs")
+fs.writeFileSync(${JSON.stringify(capturedPromptPath)}, process.argv.slice(2).join("\\n"), "utf8")
+console.log("captured push prompt")
+`,
+    )
+
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`])
+
+    const result = await runPush("OwnerBot", {
+      repoRoot: tmpDir,
+      onEvent: (line) => events.push(line),
+    })
+
+    assert.equal(result.status, "completed")
+    assert.equal(result.exitCode, 0)
+    assert.ok(events.some((line) => line.includes("push: dispatching OwnerBot via CLI runner:")), events.join("\n"))
+    assert.ok(events.includes("captured push prompt"), events.join("\n"))
+
+    const capturedPrompt = await fs.readFile(capturedPromptPath, "utf8")
+    assert.equal(capturedPrompt.trim(), "brief-bth")
+  })
+})
+
+describe("managed pre-push hook", () => {
+  let tmpDir
+  let remoteDir
+  let btrainBinDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    remoteDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await exec("git", ["init", "--bare", remoteDir])
+    await configureGitIdentity(tmpDir)
+    btrainBinDir = await setupBtrainShim(tmpDir)
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+    await disableLanes(tmpDir)
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "Initial commit"], tmpDir)
+    await runGit(["remote", "add", "origin", remoteDir], tmpDir)
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--task", "Guarded push", "--owner", "OwnerBot", "--reviewer", "ReviewBot"],
+      tmpDir,
+    )
+    await fs.appendFile(path.join(tmpDir, "README.md"), "\nPush guard work\n", "utf8")
+    await runGit(["add", "README.md"], tmpDir)
+    await runGit(["commit", "-m", "Guarded change"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+    await rmDir(remoteDir)
+  })
+
+  it("blocks pushes while unresolved handoff state is active", async () => {
+    const { stdout, stderr, code } = await runGit(["push", "origin", "HEAD:main"], tmpDir)
+    const output = `${stdout}\n${stderr}`
+
+    assert.notEqual(code, 0, output)
+    assert.match(output, /blocked push/i)
+    assert.match(output, /HANDOFF_A\.md: in-progress/)
+  })
+
+  it("allows a single push after a human-confirmed audited override", async () => {
+    const grantResult = await runBtrain(
+      [
+        "override",
+        "grant",
+        "--repo",
+        tmpDir,
+        "--action",
+        "push",
+        "--requested-by",
+        "OwnerBot",
+        "--confirmed-by",
+        "HumanOperator",
+        "--reason",
+        "Emergency push while the handoff is still unresolved.",
+      ],
+      tmpDir,
+    )
+    assert.equal(grantResult.code, 0, grantResult.stderr)
+
+    let pushResult = await runGit(
+      ["push", "origin", "HEAD:main"],
+      tmpDir,
+      { PATH: `${btrainBinDir}:${process.env.PATH || ""}` },
+    )
+    let output = `${pushResult.stdout}\n${pushResult.stderr}`
+    assert.equal(pushResult.code, 0, output)
+    assert.match(output, /allowing one push due to a human-confirmed audited override/i)
+
+    await fs.appendFile(path.join(tmpDir, "README.md"), "\nSecond guarded push\n", "utf8")
+    await runGit(["add", "README.md"], tmpDir)
+    await runGit(["commit", "-m", "Second guarded change"], tmpDir)
+
+    pushResult = await runGit(
+      ["push", "origin", "HEAD:main"],
+      tmpDir,
+      { PATH: `${btrainBinDir}:${process.env.PATH || ""}` },
+    )
+    output = `${pushResult.stdout}\n${pushResult.stderr}`
+    assert.notEqual(pushResult.code, 0, output)
+    assert.match(output, /blocked push/i)
+
+    const overrides = await runBtrain(["override", "list", "--repo", tmpDir], tmpDir)
+    assert.equal(overrides.code, 0, overrides.stderr)
+    assert.ok(overrides.stdout.includes("No active overrides."), overrides.stdout)
+
+    const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "repo.jsonl"))
+    assert.ok(events.some((event) => event.type === "override-granted"), events.map((event) => event.type).join(", "))
+    assert.ok(events.some((event) => event.type === "override-consumed"), events.map((event) => event.type).join(", "))
+  })
+})
+
+describe("custom handoff_path", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("uses the configured handoff_path for handoff and loop commands", async () => {
+    const customHandoffPath = await setHandoffPath(tmpDir, "workflow/current-handoff.md")
+
+    const claimResult = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        tmpDir,
+        "--task",
+        "Custom path task",
+        "--owner",
+        "OwnerBot",
+        "--reviewer",
+        "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(claimResult.code, 0)
+    await assert.rejects(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")))
+
+    const handoffContent = await fs.readFile(customHandoffPath, "utf8")
+    assert.ok(handoffContent.includes("Task: Custom path task"), handoffContent)
+    assert.ok(handoffContent.includes("Status: in-progress"), handoffContent)
+
+    const { stdout: handoffStdout, code: handoffCode } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.equal(handoffCode, 0)
+    assert.ok(handoffStdout.includes(`handoff file: ${customHandoffPath}`), handoffStdout)
+
+    const { stdout: loopStdout, code: loopCode } = await runBtrain(["loop", "--repo", tmpDir, "--dry-run"], tmpDir)
+    assert.equal(loopCode, 0)
+    assert.ok(loopStdout.includes(`handoff file: ${customHandoffPath}`), loopStdout)
+    assert.ok(loopStdout.includes("task: Custom path task"), loopStdout)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Helper: enable lanes in project.toml
+// ──────────────────────────────────────────────
+
+async function enableLanes(tmpDir) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const lanesSection = [
+    "",
+    "[lanes]",
+    "enabled = true",
+    "",
+    "[lanes.a]",
+    'handoff_path = ".claude/collab/HANDOFF_A.md"',
+    "",
+    "[lanes.b]",
+    'handoff_path = ".claude/collab/HANDOFF_B.md"',
+  ].join("\n")
+
+  await fs.writeFile(tomlPath, toml + lanesSection, "utf8")
+}
+
+async function setLaneIdsMetadata(tmpDir, laneIds) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const updated = toml.replace(/^\[lanes\]\n([\s\S]*?)(?=\n\[lanes\.|\s*$)/m, (match) => {
+    const withoutIds = match.replace(/^ids\s*=.*\n?/m, "")
+    return `${withoutIds.trimEnd()}\nids = [${laneIds.map((id) => `"${id}"`).join(", ")}]\n`
+  })
+  await fs.writeFile(tomlPath, updated, "utf8")
+}
+
+async function setActiveHarnessProfile(tmpDir, profileId) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const profileLine = `active_profile = "${profileId}"`
+  const updated = /^active_profile\s*=.*$/m.test(toml)
+    ? toml.replace(/^active_profile\s*=.*$/m, profileLine)
+    : `${toml.trimEnd()}\n\n[harness]\n${profileLine}\n`
+  await fs.writeFile(tomlPath, updated, "utf8")
+}
+
+// ──────────────────────────────────────────────
+// Unit tests: checkLockConflicts
+// ──────────────────────────────────────────────
+
+describe("checkLockConflicts", () => {
+  it("returns empty when no locks exist", () => {
+    const registry = { version: 1, locks: [] }
+    const conflicts = checkLockConflicts(registry, "a", ["src/foo.mjs"])
+    assert.deepStrictEqual(conflicts, [])
+  })
+
+  it("returns empty when file is locked by the same lane", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/foo.mjs", lane: "a", owner: "Claude" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/foo.mjs"])
+    assert.deepStrictEqual(conflicts, [])
+  })
+
+  it("detects exact path conflict from another lane", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/foo.mjs", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/foo.mjs"])
+    assert.equal(conflicts.length, 1)
+    assert.equal(conflicts[0].lockedBy, "b")
+    assert.equal(conflicts[0].owner, "Gemini")
+  })
+
+  it("detects directory prefix conflict", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/auth/", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/auth/login.mjs"])
+    assert.equal(conflicts.length, 1)
+  })
+
+  it("detects when a claimed file is a parent of a locked path", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/auth/login.mjs", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/auth/"])
+    assert.equal(conflicts.length, 1)
+  })
+
+  it("returns empty for non-overlapping paths", () => {
+    const registry = {
+      version: 1,
+      locks: [{ path: "src/auth/", lane: "b", owner: "Gemini" }],
+    }
+    const conflicts = checkLockConflicts(registry, "a", ["src/scoring/engine.mjs"])
+    assert.deepStrictEqual(conflicts, [])
+  })
+})
+
+// ──────────────────────────────────────────────
+// Unit tests: findAvailableLane
+// ──────────────────────────────────────────────
+
+describe("findAvailableLane", () => {
+  it("picks idle lane over resolved", () => {
+    const states = [
+      { _laneId: "a", status: "in-progress" },
+      { _laneId: "b", status: "idle" },
+    ]
+    assert.equal(findAvailableLane(states), "b")
+  })
+
+  it("picks resolved lane when no idle", () => {
+    const states = [
+      { _laneId: "a", status: "in-progress" },
+      { _laneId: "b", status: "resolved" },
+    ]
+    assert.equal(findAvailableLane(states), "b")
+  })
+
+  it("returns null when all lanes are busy", () => {
+    const states = [
+      { _laneId: "a", status: "in-progress" },
+      { _laneId: "b", status: "needs-review" },
+    ]
+    assert.equal(findAvailableLane(states), null)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Unit tests: getLaneConfigs
+// ──────────────────────────────────────────────
+
+describe("getLaneConfigs", () => {
+  it("returns null when no lanes section exists", () => {
+    assert.equal(getLaneConfigs({}), null)
+    assert.equal(getLaneConfigs({ name: "test" }), null)
+  })
+
+  it("returns null when lanes.enabled is false", () => {
+    assert.equal(getLaneConfigs({ lanes: { enabled: false } }), null)
+  })
+
+  it("returns default lane configs (a-d) when lanes is enabled with no subsections", () => {
+    const configs = getLaneConfigs({ lanes: { enabled: true } })
+    assert.ok(configs)
+    assert.equal(configs.length, 4)
+    assert.equal(configs[0].id, "a")
+    assert.equal(configs[1].id, "b")
+    assert.equal(configs[2].id, "c")
+    assert.equal(configs[3].id, "d")
+  })
+
+  it("derives 2 lanes per active collaborator when names are configured", () => {
+    const configs = getLaneConfigs({
+      agents: { active: ["Opus 4.6", "GPT-5 Codex", "Gemini 3.1"] },
+      lanes: { enabled: true },
+    })
+    assert.ok(configs)
+    assert.equal(configs.length, 6)
+    assert.equal(configs[5].id, "f")
+  })
+
+  it("uses the configured collaborator count when only one active agent is set", () => {
+    const configs = getLaneConfigs({
+      agents: { active: ["GPT-5 Codex"] },
+      lanes: { enabled: true, per_agent: 3 },
+    })
+    assert.ok(configs)
+    assert.equal(configs.length, 3)
+    assert.equal(configs[2].id, "c")
+  })
+
+  it("uses lanes.per_agent when deriving the default lane set", () => {
+    const configs = getLaneConfigs({
+      agents: { active: ["Opus 4.6", "GPT-5 Codex"] },
+      lanes: { enabled: true, per_agent: 3 },
+    })
+    assert.ok(configs)
+    assert.equal(configs.length, 6)
+    assert.equal(configs[5].id, "f")
+  })
+
+  it("uses custom handoff paths from config", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        a: { handoff_path: "custom/A.md" },
+        b: { handoff_path: "custom/B.md" },
+      },
+    })
+    assert.equal(configs[0].handoffPath, "custom/A.md")
+    assert.equal(configs[1].handoffPath, "custom/B.md")
+  })
+
+  it("treats lanes.ids as metadata instead of a real lane", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        ids: ["a", "b", "i"],
+        a: { handoff_path: ".claude/collab/HANDOFF_A.md" },
+        b: { handoff_path: ".claude/collab/HANDOFF_B.md" },
+        i: { handoff_path: ".claude/collab/HANDOFF_I.md" },
+      },
+    })
+    assert.deepStrictEqual(configs.map((config) => config.id), ["a", "b", "i"])
+  })
+
+  it("dynamically discovers lanes c and d from config", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        a: { handoff_path: ".claude/collab/HANDOFF_A.md" },
+        b: { handoff_path: ".claude/collab/HANDOFF_B.md" },
+        c: { handoff_path: ".claude/collab/HANDOFF_C.md" },
+        d: { handoff_path: ".claude/collab/HANDOFF_D.md" },
+      },
+    })
+    assert.equal(configs.length, 4)
+    assert.equal(configs[0].id, "a")
+    assert.equal(configs[1].id, "b")
+    assert.equal(configs[2].id, "c")
+    assert.equal(configs[3].id, "d")
+    assert.equal(configs[2].handoffPath, ".claude/collab/HANDOFF_C.md")
+    assert.equal(configs[3].handoffPath, ".claude/collab/HANDOFF_D.md")
+  })
+
+  it("generates default handoff paths for unconfigured lanes", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        a: {},
+        c: {},
+      },
+    })
+    assert.equal(configs.length, 2)
+    assert.equal(configs[0].id, "a")
+    assert.equal(configs[0].handoffPath, ".claude/collab/HANDOFF_A.md")
+    assert.equal(configs[1].id, "c")
+    assert.equal(configs[1].handoffPath, ".claude/collab/HANDOFF_C.md")
+  })
+
+  it("sorts multi-letter lane ids in lane order", () => {
+    const configs = getLaneConfigs({
+      lanes: {
+        enabled: true,
+        z: {},
+        aa: {},
+        b: {},
+      },
+    })
+    assert.deepStrictEqual(configs.map((config) => config.id), ["b", "z", "aa"])
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: lane upgrade migration (2→4)
+// ──────────────────────────────────────────────
+
+describe("lane upgrade migration", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+
+    // Simulate an old 2-lane repo by removing lanes c and d from the toml
+    const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+    let toml = await fs.readFile(tomlPath, "utf8")
+    toml = toml.replace(/\n\[lanes\.c\][\s\S]*?\[lanes\.d\][\s\S]*$/, "\n")
+    await fs.writeFile(tomlPath, toml, "utf8")
+
+    // Remove the scaffolded C/D handoff files
+    const collabDir = path.join(tmpDir, ".claude", "collab")
+    await fs.rm(path.join(collabDir, "HANDOFF_C.md"), { force: true })
+    await fs.rm(path.join(collabDir, "HANDOFF_D.md"), { force: true })
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("re-running init adds missing lanes c and d to existing 2-lane config", async () => {
+    // Verify only A/B exist before upgrade
+    const tomlBefore = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(tomlBefore.includes("[lanes.a]"), "Should have lane a before upgrade")
+    assert.ok(tomlBefore.includes("[lanes.b]"), "Should have lane b before upgrade")
+    assert.ok(!tomlBefore.includes("[lanes.c]"), "Should NOT have lane c before upgrade")
+    assert.ok(!tomlBefore.includes("[lanes.d]"), "Should NOT have lane d before upgrade")
+
+    // Run init to trigger migration
+    const { code, stderr } = await runBtrain(["init", tmpDir], tmpDir)
+    assert.equal(code, 0, stderr)
+
+    // Verify lanes c and d were added to toml
+    const tomlAfter = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    assert.ok(tomlAfter.includes("[lanes.c]"), "Should have lane c after upgrade")
+    assert.ok(tomlAfter.includes("[lanes.d]"), "Should have lane d after upgrade")
+    assert.ok(tomlAfter.includes("HANDOFF_C.md"), "Should have HANDOFF_C path")
+    assert.ok(tomlAfter.includes("HANDOFF_D.md"), "Should have HANDOFF_D path")
+
+    // Verify handoff files were scaffolded
+    await assert.doesNotReject(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_C.md")), "HANDOFF_C.md should exist")
+    await assert.doesNotReject(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_D.md")), "HANDOFF_D.md should exist")
+
+    // Verify existing lanes a/b are untouched
+    assert.ok(tomlAfter.includes("[lanes.a]"), "Lane a should still exist")
+    assert.ok(tomlAfter.includes("[lanes.b]"), "Lane b should still exist")
+  })
+})
+
+describe("lane ids metadata compatibility", () => {
+  it("does not scaffold a bogus ids lane when [lanes].ids is present", async () => {
+    const tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", tmpDir])
+      await runBtrain(["init", tmpDir], tmpDir)
+      await enableLanes(tmpDir)
+      await setLaneIdsMetadata(tmpDir, ["a", "b"])
+      await runBtrain(["init", tmpDir], tmpDir)
+
+      await assert.doesNotReject(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")))
+      await assert.doesNotReject(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")))
+      await assert.rejects(fs.access(path.join(tmpDir, ".claude", "collab", "HANDOFF_IDS.md")))
+
+      const handoffResult = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+      assert.equal(handoffResult.code, 0, handoffResult.stderr)
+      assert.ok(!handoffResult.stdout.includes("--- lane ids ---"), handoffResult.stdout)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: multi-lane handoff lifecycle
+// ──────────────────────────────────────────────
+
+describe("multi-lane handoff lifecycle", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    // Re-run init to create lane handoff files
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("init creates per-lane handoff files", async () => {
+    const handoffA = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+    const locksFile = path.join(tmpDir, ".btrain", "locks.json")
+
+    await assert.doesNotReject(fs.access(handoffA), "HANDOFF_A.md should exist")
+    await assert.doesNotReject(fs.access(handoffB), "HANDOFF_B.md should exist")
+    await assert.doesNotReject(fs.access(locksFile), "locks.json should exist")
+  })
+
+  it("handoff shows both lanes", async () => {
+    const { stdout } = await runBtrain(["handoff", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("lane a"), `Expected lane a output: ${stdout}`)
+    assert.ok(stdout.includes("lane b"), `Expected lane b output: ${stdout}`)
+  })
+
+  it("claim with --lane targets specific lane", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Auth work", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/auth/"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("status: in-progress"), `Expected in-progress: ${stdout}`)
+    assert.ok(stdout.includes("Auth work"), `Expected task name: ${stdout}`)
+    assert.ok(stdout.includes("objective: Auth work"), `Expected lane objective: ${stdout}`)
+    assert.ok(stdout.includes("constraints:"), `Expected constraint heading: ${stdout}`)
+    assert.ok(
+      stdout.includes("  - Stay within locked files unless the lane is re-scoped: src/auth/"),
+      `Expected lane constraint: ${stdout}`,
+    )
+    assert.ok(stdout.includes("locked files: src/auth/"), `Expected lock summary: ${stdout}`)
+    assert.ok(stdout.includes("lock state: active"), `Expected active lock state: ${stdout}`)
+
+    // Verify lane-specific handoff file was written
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Auth work"), "Lane A handoff should contain the task")
+    assert.ok(contentA.includes("Status: in-progress"), "Lane A should be in-progress")
+
+    // Verify lane B is still idle
+    const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
+    assert.ok(contentB.includes("Status: idle"), "Lane B should still be idle")
+  })
+
+  it("claim on lane b while lane a is in-progress", async () => {
+    const { stdout } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Scoring work", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/scoring/"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("Scoring work"), `Expected task name: ${stdout}`)
+
+    // Both lanes should be in-progress
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
+    assert.ok(contentA.includes("Status: in-progress"), "Lane A should be in-progress")
+    assert.ok(contentB.includes("Status: in-progress"), "Lane B should be in-progress")
+  })
+
+  it("locks are created during lane claim", async () => {
+    const { stdout } = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.ok(stdout.includes("src/auth/"), `Expected auth lock: ${stdout}`)
+    assert.ok(stdout.includes("src/scoring/"), `Expected scoring lock: ${stdout}`)
+    assert.ok(stdout.includes("lane a"), `Expected lane a lock: ${stdout}`)
+    assert.ok(stdout.includes("lane b"), `Expected lane b lock: ${stdout}`)
+  })
+
+  it("rejects lane review handoffs when the locked files have no reviewable diff", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "HEAD",
+          changed: ["src/auth/guard.ts - supposed auth lane work"],
+          verification: ["node --test test/core.test.mjs"],
+          gap: ["Did not run a browser login smoke test"],
+          why: ["Auth lane is supposedly ready for review."],
+          reviewAsk: ["Check the auth lane changes."],
+        }),
+        "--lane",
+        "a",
+      ],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.match(stderr, /reviewable diff in locked files/)
+  })
+
+  it("allows lane review handoffs with --no-diff even without a reviewable diff", async () => {
+    const { code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "feat/auth-work",
+          changed: ["docs/README.md - documentation-only update"],
+          verification: ["manual review of docs"],
+          gap: ["None - docs only"],
+          why: ["Documentation update for auth module."],
+          reviewAsk: ["Verify docs accuracy."],
+        }),
+        "--lane",
+        "a",
+        "--no-diff",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, `Expected success but got stderr: ${stderr}`)
+  })
+
+  it("accepts later lane updates when locked files were stored as a legacy space-separated blob", async () => {
+    const legacyDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", legacyDir])
+      await runBtrain(["init", legacyDir], legacyDir)
+      await enableLanes(legacyDir)
+      await runBtrain(["init", legacyDir], legacyDir)
+
+      const claimResult = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          legacyDir,
+          "--lane",
+          "a",
+          "--task",
+          "Auth work",
+          "--owner",
+          "Claude",
+          "--reviewer",
+          "Gemini",
+          "--files",
+          "src/auth/guard.ts,src/auth/util.ts",
+        ],
+        legacyDir,
+      )
+      assert.equal(claimResult.code, 0, claimResult.stderr)
+
+      await fs.mkdir(path.join(legacyDir, "src", "auth"), { recursive: true })
+      await fs.writeFile(path.join(legacyDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+      await fs.writeFile(path.join(legacyDir, "src", "auth", "util.ts"), "export const util = true\n", "utf8")
+
+      const reviewResult = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(legacyDir, {
+            actor: "Claude",
+            reviewer: "Gemini",
+            base: "HEAD",
+            changed: ["src/auth/guard.ts - auth guard", "src/auth/util.ts - auth util"],
+            verification: ["node --test test/core.test.mjs"],
+            gap: ["Did not run manual smoke validation"],
+            why: ["Auth lane is ready for review."],
+            reviewAsk: ["Check the auth lane changes."],
+          }),
+          "--lane",
+          "a",
+        ],
+        legacyDir,
+      )
+      assert.equal(reviewResult.code, 0, reviewResult.stderr)
+
+      const handoffPath = path.join(legacyDir, ".claude", "collab", "HANDOFF_A.md")
+      const handoffContent = await fs.readFile(handoffPath, "utf8")
+      const legacyContent = handoffContent.replace(
+        "Locked Files: src/auth/guard.ts, src/auth/util.ts",
+        "Locked Files: src/auth/guard.ts src/auth/util.ts",
+      )
+      await fs.writeFile(handoffPath, legacyContent, "utf8")
+
+      const rerouteResult = await runBtrain(
+        ["handoff", "update", "--repo", legacyDir, "--lane", "a", "--reviewer", "Codex", "--actor", "Claude"],
+        legacyDir,
+      )
+
+      assert.equal(rerouteResult.code, 0, rerouteResult.stderr)
+      assert.ok(rerouteResult.stdout.includes("peer reviewer: Codex"), rerouteResult.stdout)
+    } finally {
+      await rmDir(legacyDir)
+    }
+  })
+
+  it("does not split a legitimate locked file path that contains spaces", async () => {
+    const spacedDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", spacedDir])
+      await runBtrain(["init", spacedDir], spacedDir)
+      await enableLanes(spacedDir)
+      await runBtrain(["init", spacedDir], spacedDir)
+
+      const claimResult = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          spacedDir,
+          "--lane",
+          "a",
+          "--task",
+          "Docs work",
+          "--owner",
+          "Claude",
+          "--reviewer",
+          "Gemini",
+          "--files",
+          "docs/My File.md",
+        ],
+        spacedDir,
+      )
+      assert.equal(claimResult.code, 0, claimResult.stderr)
+
+      const updateResult = await runBtrain(
+        ["handoff", "update", "--repo", spacedDir, "--lane", "a", "--reviewer", "Codex", "--actor", "Claude"],
+        spacedDir,
+      )
+
+      assert.equal(updateResult.code, 0, updateResult.stderr)
+      assert.ok(updateResult.stdout.includes("peer reviewer: Codex"), updateResult.stdout)
+      assert.ok(updateResult.stdout.includes("docs/My File.md"), updateResult.stdout)
+    } finally {
+      await rmDir(spacedDir)
+    }
+  })
+
+  it("update lane a to needs-review", async () => {
+    await fs.mkdir(path.join(tmpDir, "src", "auth"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+
+    const { stdout, code, stderr } = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "Claude",
+          base: "feat/auth-work",
+          changed: ["src/auth/guard.ts - add the auth guard implementation"],
+          verification: ["node --test test/core.test.mjs"],
+          gap: ["Did not run a browser login smoke test"],
+          why: ["Auth lane is ready for peer review."],
+          reviewAsk: ["Check the auth lock scope and review context rendering."],
+        }),
+        "--lane",
+        "a",
+      ],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("lane a"), stdout)
+
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Status: needs-review"), "Lane A should be needs-review")
+    assert.ok(contentA.includes("Peer Reviewer: Gemini"), contentA)
+
+    // Lane B should still be in-progress
+    const contentB = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"), "utf8")
+    assert.ok(contentB.includes("Status: in-progress"), "Lane B should still be in-progress")
+  })
+
+  it("routes lane repair-needed back to the last canonical lane actor", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      buildRepairNeededArgs(tmpDir, {
+        lane: "a",
+        actor: "Gemini",
+        reasonCode: "invalid-handoff",
+        reasonTags: ["review-context"],
+      }),
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("lane a"), stdout)
+    assert.ok(stdout.includes("reason code: invalid-handoff"), stdout)
+    assert.ok(stdout.includes("repair owner: Claude"), stdout)
+    assert.ok(stdout.includes("repair attempts: 1"), stdout)
+
+    const statusResult = await runBtrain(["status", "--repo", tmpDir], tmpDir)
+    assert.ok(statusResult.stdout.includes("repair owner: Claude"), statusResult.stdout)
+
+    const doctorResult = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(doctorResult.stdout.includes("Lane a is `repair-needed` and assigned to Claude."), doctorResult.stdout)
+
+    const resetResult = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "Claude"],
+      tmpDir,
+    )
+    assert.equal(resetResult.code, 0, resetResult.stderr)
+  })
+
+  it("resolve lane a releases its locks", async () => {
+    await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Auth done", "--actor", "Gemini"],
+      tmpDir,
+    )
+
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Status: resolved"), "Lane A should be resolved")
+    assert.match(contentA, /^Locked Files:\s*$/m, "Lane A should clear Locked Files on resolve")
+
+    // Lane A locks should be released, Lane B locks should remain
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneALocks = locks.locks.filter((l) => l.lane === "a")
+    const laneBLocks = locks.locks.filter((l) => l.lane === "b")
+    assert.equal(laneALocks.length, 0, "Lane A should have no locks")
+    assert.ok(laneBLocks.length > 0, "Lane B should still have locks")
+  })
+
+  it("locks release-lane clears all locks for a lane", async () => {
+    const { stdout } = await runBtrain(
+      ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
+      tmpDir,
+    )
+    assert.ok(stdout.includes("Released"), stdout)
+
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    assert.equal(locks.locks.length, 0, "All locks should be released")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: multi-lane guardrails
+// ──────────────────────────────────────────────
+
+describe("multi-lane guardrails", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("requires --files when claiming a lane", async () => {
+    const { stderr, code } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Unsafely unscoped", "--owner", "Claude", "--reviewer", "Gemini"],
+      tmpDir,
+    )
+
+    assert.notEqual(code, 0)
+    assert.ok(stderr.includes("require --files"), stderr)
+  })
+
+  it("requires --lane for update and resolve in multi-lane mode", async () => {
+    const updateResult = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--status", "needs-review", "--actor", "Claude"],
+      tmpDir,
+    )
+    assert.notEqual(updateResult.code, 0)
+    assert.ok(updateResult.stderr.includes("requires --lane"), updateResult.stderr)
+
+    const resolveResult = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--summary", "done", "--actor", "Gemini"],
+      tmpDir,
+    )
+    assert.notEqual(resolveResult.code, 0)
+    assert.ok(resolveResult.stderr.includes("requires --lane"), resolveResult.stderr)
+  })
+
+  it("rejects claiming an already-active lane", async () => {
+    const claimResult = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Auth", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/auth/"],
+      tmpDir,
+    )
+    assert.equal(claimResult.code, 0, claimResult.stderr)
+
+    const secondClaim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "More auth", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/auth/"],
+      tmpDir,
+    )
+    assert.notEqual(secondClaim.code, 0)
+    assert.ok(secondClaim.stderr.includes("already `in-progress`"), secondClaim.stderr)
+  })
+
+  it("resyncs the lane lock registry when --files changes", async () => {
+    const { stdout, code, stderr } = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--files", "src/auth/, test/auth/", "--actor", "Claude"],
+      tmpDir,
+    )
+    assert.equal(code, 0, stderr)
+    assert.ok(stdout.includes("locked files: src/auth/, test/auth/"), stdout)
+    assert.ok(stdout.includes("lock state: active"), stdout)
+
+    const contentA = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.ok(contentA.includes("Locked Files: src/auth/, test/auth/"), contentA)
+
+    const locks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneALocks = locks.locks.filter((lock) => lock.lane === "a").map((lock) => lock.path).sort()
+    assert.deepStrictEqual(laneALocks, ["src/auth/", "test/auth/"])
+  })
+
+  it("does not allow in-progress without active locks after resolve", async () => {
+    const resolveResult = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "done", "--actor", "Gemini"],
+      tmpDir,
+    )
+    assert.equal(resolveResult.code, 0, resolveResult.stderr)
+
+    const updateResult = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "in-progress", "--actor", "Claude"],
+      tmpDir,
+    )
+    assert.notEqual(updateResult.code, 0)
+    assert.ok(updateResult.stderr.includes("without locked files"), updateResult.stderr)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Integration tests: lock conflict detection
+// ──────────────────────────────────────────────
+
+describe("multi-lane lock conflicts", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("claiming overlapping files on different lanes fails", async () => {
+    // Claim lane A with src/shared/
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Task A", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/shared/"],
+      tmpDir,
+    )
+
+    // Claiming lane B with overlapping path should fail
+    const { stderr, code } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Task B", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/shared/utils.mjs"],
+      tmpDir,
+    )
+
+    assert.ok(code !== 0 || stderr.includes("lock conflict"), `Expected lock conflict error: ${stderr}`)
+  })
+
+  it("claiming non-overlapping files on different lanes succeeds", async () => {
+    // Clean up lane A first
+    await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "done", "--actor", "Gemini"],
+      tmpDir,
+    )
+
+    // Claim lane A with src/auth/
+    await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Auth", "--owner", "Claude", "--reviewer", "Gemini", "--files", "src/auth/"],
+      tmpDir,
+    )
+
+    // Claim lane B with src/scoring/ — should succeed
+    const { code } = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Scoring", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/scoring/"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, "Non-overlapping file claims should succeed")
+  })
+})
+
+describe("handoff history launch-agent rename compatibility", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("register-handoff-watch keeps legacy installs updated while writing the new watch list", async () => {
+    const codexHome = path.join(tmpDir, "codex-home-register")
+    const fakeHome = path.join(tmpDir, "home-register")
+    const legacyDir = path.join(codexHome, "collab", "ai_sales_brain_train")
+    const legacyWatchListPath = path.join(legacyDir, "handoff-watch-paths.txt")
+    const newWatchListPath = path.join(codexHome, "collab", "btrain", "handoff-watch-paths.txt")
+    const launchctlLog = path.join(tmpDir, "launchctl-register.log")
+    const targetRepo = path.join(tmpDir, "watched-repo")
+    const fakeBinDir = await setupFakeLaunchctl(tmpDir)
+
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(legacyDir, { recursive: true })
+    await fs.mkdir(targetRepo, { recursive: true })
+    await fs.writeFile(legacyWatchListPath, "", "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+
+    const result = await runShellScript(
+      "scripts/register-handoff-watch-path.sh",
+      [targetRepo],
+      process.cwd(),
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        FAKE_LAUNCHCTL_ACTIVE_LABELS: "com.codeslp.handoff-history.ai-sales-brain-train",
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok((await fs.readFile(newWatchListPath, "utf8")).includes(targetRepo))
+    assert.ok((await fs.readFile(legacyWatchListPath, "utf8")).includes(targetRepo))
+
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+    assert.match(launchctlCalls, /print gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
+    assert.match(launchctlCalls, /kickstart -k gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
+  })
+
+  it("install-handoff-history-agent reuses legacy config and migrates watched repos", async () => {
+    const codexHome = path.join(tmpDir, "codex-home-install")
+    const fakeHome = path.join(tmpDir, "home-install")
+    const legacyDir = path.join(codexHome, "collab", "ai_sales_brain_train")
+    const legacyConfigPath = path.join(legacyDir, "handoff-history-agent.env")
+    const legacyWatchListPath = path.join(legacyDir, "handoff-watch-paths.txt")
+    const newConfigPath = path.join(codexHome, "collab", "btrain", "handoff-history-agent.env")
+    const newWatchListPath = path.join(codexHome, "collab", "btrain", "handoff-watch-paths.txt")
+    const launchctlLog = path.join(tmpDir, "launchctl-install.log")
+    const fakeBinDir = await setupFakeLaunchctl(path.join(tmpDir, "install-bin"))
+    const historyPath = path.join(tmpDir, "history.md")
+    const existingWatchedRepo = path.join(tmpDir, "existing-watched-repo")
+    const currentWatchedRepo = path.join(tmpDir, "current-watched-repo")
+
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(legacyDir, { recursive: true })
+    await fs.mkdir(existingWatchedRepo, { recursive: true })
+    await fs.mkdir(currentWatchedRepo, { recursive: true })
+    await fs.writeFile(historyPath, "# history\n", "utf8")
+    await fs.writeFile(
+      legacyConfigPath,
+      `HANDOFF_HISTORY_PATH=${historyPath}\nHANDOFF_WATCH_CONFIG_PATH=${legacyWatchListPath}\n`,
+      "utf8",
+    )
+    await fs.writeFile(legacyWatchListPath, `${existingWatchedRepo}\n`, "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+
+    const result = await runShellScript(
+      "scripts/install-handoff-history-launch-agent.sh",
+      [],
+      process.cwd(),
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        WATCH_REPO_PATH_OVERRIDE: currentWatchedRepo,
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+
+    const newConfig = await fs.readFile(newConfigPath, "utf8")
+    const newWatchList = await fs.readFile(newWatchListPath, "utf8")
+    assert.ok(newConfig.includes(`HANDOFF_HISTORY_PATH=${historyPath}`), newConfig)
+    assert.ok(newWatchList.includes(existingWatchedRepo), newWatchList)
+    assert.ok(newWatchList.includes(currentWatchedRepo), newWatchList)
+
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+    assert.match(launchctlCalls, /bootout gui\/\d+\/com\.codeslp\.handoff-history\.ai-sales-brain-train/)
+    assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.btrain\.plist/)
+  })
+
+  it("bootstrapped repo history helpers derive repo-specific paths and labels", async () => {
+    const repoRoot = path.join(tmpDir, "mech_ai-demo")
+    const codexHome = path.join(tmpDir, "codex-home-generic")
+    const fakeHome = path.join(tmpDir, "home-generic")
+    const launchctlLog = path.join(tmpDir, "launchctl-generic.log")
+    const fakeBinDir = await setupFakeLaunchctl(path.join(tmpDir, "generic-bin"))
+    const historyPath = path.join(tmpDir, "generic-history.md")
+    const watchedRepo = path.join(tmpDir, "generic-watched-repo")
+    const expectedConfigDir = path.join(codexHome, "collab", "mech_ai_demo")
+    const expectedConfigPath = path.join(expectedConfigDir, "handoff-history-agent.env")
+    const expectedWatchListPath = path.join(expectedConfigDir, "handoff-watch-paths.txt")
+    const expectedPlistPath = path.join(fakeHome, "Library", "LaunchAgents", "com.codeslp.handoff-history.mech-ai-demo.plist")
+
+    await fs.mkdir(repoRoot, { recursive: true })
+    await fs.mkdir(fakeHome, { recursive: true })
+    await fs.mkdir(watchedRepo, { recursive: true })
+    await fs.writeFile(historyPath, "# history\n", "utf8")
+    await fs.writeFile(launchctlLog, "", "utf8")
+    await runGit(["init", repoRoot], repoRoot)
+
+    const initResult = await runBtrain(["init", repoRoot], repoRoot)
+    assert.equal(initResult.code, 0, initResult.stderr)
+
+    const result = await runShellScript(
+      path.join(repoRoot, "scripts", "install-handoff-history-launch-agent.sh"),
+      [],
+      repoRoot,
+      {
+        CODEX_HOME: codexHome,
+        HOME: fakeHome,
+        PATH: `${fakeBinDir}:${process.env.PATH || ""}`,
+        FAKE_LAUNCHCTL_LOG: launchctlLog,
+        HANDOFF_HISTORY_PATH_OVERRIDE: historyPath,
+        WATCH_REPO_PATH_OVERRIDE: watchedRepo,
+      },
+    )
+
+    assert.equal(result.code, 0, result.stderr)
+    await assert.doesNotReject(fs.access(expectedConfigPath), "expected generic config path should exist")
+    await assert.doesNotReject(fs.access(expectedWatchListPath), "expected generic watch list should exist")
+    await assert.doesNotReject(fs.access(expectedPlistPath), "expected generic plist should exist")
+
+    const config = await fs.readFile(expectedConfigPath, "utf8")
+    const watchList = await fs.readFile(expectedWatchListPath, "utf8")
+    const plist = await fs.readFile(expectedPlistPath, "utf8")
+    const launchctlCalls = await fs.readFile(launchctlLog, "utf8")
+
+    assert.ok(config.includes(`HANDOFF_HISTORY_PATH=${historyPath}`), config)
+    assert.ok(watchList.includes(watchedRepo), watchList)
+    assert.ok(plist.includes("<string>com.codeslp.handoff-history.mech-ai-demo</string>"), plist)
+    assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.codeslp\.handoff-history\.mech-ai-demo\.plist/)
+    assert.doesNotMatch(launchctlCalls, /ai-sales-brain-train/)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Regression: prose Base field with embedded SHA
+// ──────────────────────────────────────────────
+
+describe("needs-review with human-readable Base field", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await runGit(["init", tmpDir], tmpDir)
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+
+    // Create an initial commit so we have a base ref
+    await fs.writeFile(path.join(tmpDir, "README.md"), "# test\n", "utf8")
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "initial"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("accepts a prose Base string containing an embedded short SHA when locked files have a diff", async () => {
+    // Get the current HEAD short SHA to embed in the prose Base field
+    const { stdout: baseShortSha } = await runGit(["rev-parse", "--short", "HEAD"], tmpDir)
+
+    // Claim a lane with locked files
+    let result = await runBtrain(
+      [
+        "handoff", "claim",
+        "--repo", tmpDir,
+        "--lane", "a",
+        "--task", "Prose base regression test",
+        "--owner", "WriterBot",
+        "--reviewer", "ReviewerBot",
+        "--files", "src/",
+      ],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+
+    // Create a file change in the locked path and commit it
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.ts"), "export const x = 1;\n", "utf8")
+    await runGit(["add", "src/feature.ts"], tmpDir)
+    await runGit(["commit", "-m", "add feature"], tmpDir)
+
+    // Attempt needs-review with a human-readable Base string (not a bare ref)
+    // This is the bug: the prose string "Branch foo forked at abc1234" fails git rev-parse
+    const proseBase = `Branch 001-source-references forked from main at ${baseShortSha}. Plan commits: abc1234, def5678.`
+    result = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "WriterBot",
+          base: proseBase,
+          changed: ["src/feature.ts - added feature"],
+          verification: ["npm test"],
+          gap: ["None"],
+          why: ["Testing prose base field."],
+          reviewAsk: ["Verify the diff check works."],
+        }),
+        "--lane", "a",
+      ],
+      tmpDir,
+    )
+
+    // BUG: This currently fails with "reviewable diff in locked files"
+    // because listDiffPathsFromBase passes the full prose string to git rev-parse
+    assert.equal(result.code, 0, `Expected success but got: ${result.stderr}`)
+    assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+  })
+})
+
+// ──────────────────────────────────────────────
+// withFileLock — atomic file locking primitive
+// ──────────────────────────────────────────────
+
+describe("withFileLock", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("serializes concurrent operations on the same lock", async () => {
+    const lockPath = path.join(tmpDir, "test.lock")
+    const log = []
+
+    const task = async (id, delayMs) => {
+      await withFileLock(lockPath, async () => {
+        log.push(`${id}:enter`)
+        await new Promise((r) => setTimeout(r, delayMs))
+        log.push(`${id}:exit`)
+      })
+    }
+
+    // Launch two tasks concurrently — task B should wait for task A
+    await Promise.all([task("A", 100), task("B", 10)])
+
+    // A enters first, exits before B enters
+    assert.equal(log[0], "A:enter")
+    assert.equal(log[1], "A:exit")
+    assert.equal(log[2], "B:enter")
+    assert.equal(log[3], "B:exit")
+  })
+
+  it("cleans up lockfile after completion", async () => {
+    const lockPath = path.join(tmpDir, "cleanup.lock")
+    await withFileLock(lockPath, async () => {})
+
+    // Lockfile should be removed
+    const exists = await fs.access(lockPath).then(() => true, () => false)
+    assert.equal(exists, false, "Lockfile should be cleaned up after release")
+  })
+
+  it("cleans up lockfile after error", async () => {
+    const lockPath = path.join(tmpDir, "error.lock")
+    await assert.rejects(
+      withFileLock(lockPath, async () => { throw new Error("test") }),
+      { message: "test" },
+    )
+
+    const exists = await fs.access(lockPath).then(() => true, () => false)
+    assert.equal(exists, false, "Lockfile should be cleaned up after error")
+  })
+
+  it("recovers from stale lockfiles older than 30 seconds", async () => {
+    const lockPath = path.join(tmpDir, "stale.lock")
+    // Create a lockfile and backdate it
+    await fs.writeFile(lockPath, "stale")
+    const past = new Date(Date.now() - 31_000)
+    await fs.utimes(lockPath, past, past)
+
+    let entered = false
+    await withFileLock(lockPath, async () => { entered = true })
+    assert.ok(entered, "Should acquire lock after removing stale lockfile")
+  })
+})
+
+// ──────────────────────────────────────────────
+// Lock registry atomicity
+// ──────────────────────────────────────────────
+
+describe("lock registry atomicity", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await runBtrain(["init", tmpDir, "--agent", "alice", "--agent", "bob"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("concurrent claims on different lanes do not lose locks", async () => {
+    // Both claims run concurrently; without locking, one would overwrite the other
+    const [resultA, resultB] = await Promise.all([
+      runBtrain([
+        "handoff", "claim",
+        "--lane", "a",
+        "--task", "task A",
+        "--owner", "alice",
+        "--reviewer", "bob",
+        "--files", "src/a/",
+      ], tmpDir),
+      runBtrain([
+        "handoff", "claim",
+        "--lane", "b",
+        "--task", "task B",
+        "--owner", "bob",
+        "--reviewer", "alice",
+        "--files", "src/b/",
+      ], tmpDir),
+    ])
+
+    assert.equal(resultA.code, 0, `Lane A claim failed: ${resultA.stderr}`)
+    assert.equal(resultB.code, 0, `Lane B claim failed: ${resultB.stderr}`)
+
+    // Verify both sets of locks survived
+    const locksResult = await runBtrain(["locks"], tmpDir)
+    assert.ok(locksResult.stdout.includes("src/a/"), `Lane A lock missing: ${locksResult.stdout}`)
+    assert.ok(locksResult.stdout.includes("src/b/"), `Lane B lock missing: ${locksResult.stdout}`)
+  })
+})
+
+// ──────────────────────────────────────────────
+// isLockExpired and lock TTL
+// ──────────────────────────────────────────────
+
+describe("lock TTL", () => {
+  it("isLockExpired returns false for fresh locks", () => {
+    const lock = { acquired_at: new Date().toISOString() }
+    assert.equal(isLockExpired(lock, DEFAULT_LOCK_TTL_MS), false)
+  })
+
+  it("isLockExpired returns true for locks older than TTL", () => {
+    const old = new Date(Date.now() - DEFAULT_LOCK_TTL_MS - 1000)
+    const lock = { acquired_at: old.toISOString() }
+    assert.equal(isLockExpired(lock, DEFAULT_LOCK_TTL_MS), true)
+  })
+
+  it("isLockExpired returns false for locks without acquired_at", () => {
+    assert.equal(isLockExpired({}, DEFAULT_LOCK_TTL_MS), false)
+  })
+
+  it("doctor warns about TTL-expired locks", async () => {
+    const tmpDir = await makeTmpDir()
+    try {
+      await runBtrain(["init", tmpDir, "--agent", "alice", "--agent", "bob"], tmpDir)
+
+      // Claim a lane to create locks
+      await runBtrain([
+        "handoff", "claim",
+        "--lane", "a",
+        "--task", "old task",
+        "--owner", "alice",
+        "--reviewer", "bob",
+        "--files", "src/old/",
+      ], tmpDir)
+
+      // Backdate the lock's acquired_at to exceed the 24h TTL
+      const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const expired = new Date(Date.now() - DEFAULT_LOCK_TTL_MS - 3600000)
+      for (const lock of registry.locks) {
+        lock.acquired_at = expired.toISOString()
+      }
+      await fs.writeFile(locksPath, JSON.stringify(registry, null, 2) + "\n")
+
+      // Doctor should warn about expired locks
+      const result = await runBtrain(["doctor"], tmpDir)
+      assert.ok(
+        result.stdout.includes("TTL") || result.stdout.includes("expired") || result.stdout.includes("24h"),
+        `Doctor should warn about expired locks: ${result.stdout}`,
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("doctor --repair auto-releases TTL-expired locks", async () => {
+    const tmpDir = await makeTmpDir()
+    try {
+      await runBtrain(["init", tmpDir, "--agent", "alice", "--agent", "bob"], tmpDir)
+
+      await runBtrain([
+        "handoff", "claim",
+        "--lane", "a",
+        "--task", "stale task",
+        "--owner", "alice",
+        "--reviewer", "bob",
+        "--files", "src/stale/",
+      ], tmpDir)
+
+      // Backdate locks
+      const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const expired = new Date(Date.now() - DEFAULT_LOCK_TTL_MS - 3600000)
+      for (const lock of registry.locks) {
+        lock.acquired_at = expired.toISOString()
+      }
+      await fs.writeFile(locksPath, JSON.stringify(registry, null, 2) + "\n")
+
+      // Repair should release expired locks
+      const result = await runBtrain(["doctor", "--repair"], tmpDir)
+      assert.ok(
+        result.stdout.includes("expired") || result.stdout.includes("release"),
+        `Doctor --repair should release expired locks: ${result.stdout}`,
+      )
+
+      // Verify locks are gone
+      const afterRegistry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const laneLocks = afterRegistry.locks.filter((l) => l.lane === "a")
+      assert.equal(laneLocks.length, 0, "Expired locks should be released after repair")
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})

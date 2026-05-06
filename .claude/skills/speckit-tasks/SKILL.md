@@ -68,6 +68,9 @@ The tasks.md should be immediately executable - each task must be specific enoug
 
 **CRITICAL**: Tasks MUST be organized by user story to enable independent implementation and testing.
 
+**Bite-Sized Task Rule (REQUIRED)**: 
+Every task MUST be "bite-sized," meaning it should ideally take 2-5 minutes for an agent to execute. If a task is too broad (e.g., "Implement the entire service layer"), it MUST be decomposed into granular steps (e.g., "Define service interface," "Implement data mapping," "Implement validation logic"). Granular tasks reduce context sprawl, simplify reviews, and minimize file lock duration.
+
 **Tests are OPTIONAL**: Only generate test tasks if explicitly requested in the feature specification or if user requests TDD approach.
 
 ### Checklist Format (REQUIRED)
@@ -86,17 +89,18 @@ Every task MUST strictly follow this format:
 4. **[Story] label**: REQUIRED for user story phase tasks only
    - Format: [US1], [US2], [US3], etc. (maps to user stories from spec.md)
    - Setup phase: NO story label
-   - Foundational phase: NO story label
+   - Foundational phase: NO story label  
    - User Story phases: MUST have story label
    - Polish phase: NO story label
-5. **Description**: Clear action with exact file path
+5. **Description**: Clear action with exact file path. **Ensure the action is granular enough to meet the Bite-Sized Task Rule.**
 
 **Examples**:
 
 - ✅ CORRECT: `- [ ] T001 Create project structure per implementation plan`
-- ✅ CORRECT: `- [ ] T005 [P] Implement authentication middleware in src/middleware/auth.py`
-- ✅ CORRECT: `- [ ] T012 [P] [US1] Create User model in src/models/user.py`
-- ✅ CORRECT: `- [ ] T014 [US1] Implement UserService in src/services/user_service.py`
+- ✅ CORRECT: `- [ ] T005 [P] Define authentication middleware interface in src/middleware/auth.py`
+- ✅ CORRECT: `- [ ] T012 [P] [US1] Create User entity schema in src/models/user.py`
+- ✅ CORRECT: `- [ ] T014 [US1] Implement User creation validation in src/services/user_service.py`
+- ❌ TOO BROAD: `- [ ] T014 [US1] Implement entire UserService in src/services/user_service.py` (violates Bite-Sized rule)
 - ❌ WRONG: `- [ ] Create User model` (missing ID and Story label)
 - ❌ WRONG: `T001 [US1] Create model` (missing checkbox)
 - ❌ WRONG: `- [ ] [US1] Create User model` (missing Task ID)
@@ -105,7 +109,8 @@ Every task MUST strictly follow this format:
 ### Task Organization
 
 1. **From User Stories (spec.md)** - PRIMARY ORGANIZATION:
-   - Each user story (P1, P2, P3...) gets its own phase
+   - Each user story (P1, P2, P3...) gets its own phase.
+   - Decompose each story into granular, independent increments. Each phase should be independently testable.
    - Map all related components to their story:
      - Models needed for that story
      - Services needed for that story
@@ -132,6 +137,6 @@ Every task MUST strictly follow this format:
 - **Phase 1**: Setup (project initialization)
 - **Phase 2**: Foundational (blocking prerequisites - MUST complete before user stories)
 - **Phase 3+**: User Stories in priority order (P1, P2, P3...)
-  - Within each story: Tests (if requested) → Models → Services → Endpoints → Integration
+  - Within each story: Tests (if requested) → Models → Services → Endpoints → Integration. **Break these down further if they exceed the 2-5 minute threshold.**
   - Each phase should be a complete, independently testable increment
 - **Final Phase**: Polish & Cross-Cutting Concerns

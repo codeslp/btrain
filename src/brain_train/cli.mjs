@@ -33,6 +33,7 @@ import {
   runReview,
   runLoop,
   syncActiveAgents,
+  syncSkills,
   syncTemplates,
 } from "./core.mjs"
 import {
@@ -105,6 +106,7 @@ Usage:
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
   btrain register <repo-path>                                                    Register an existing repo without bootstrapping it
   btrain sync-templates [--repo <path>] [--dry-run]                              Sync managed AGENTS/CLAUDE blocks from templates
+  btrain sync-skills [--repo <path>] [--force] [--skill <name>]                  Sync bundled skills across registered repos
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
@@ -1830,6 +1832,35 @@ async function run() {
     console.log(formatLoopResult(result))
     if (result.status === "failed" || result.status === "timed-out" || result.status === "max-rounds-exceeded") {
       process.exitCode = 1
+    }
+    return
+  }
+
+  if (command === "sync-skills") {
+    const options = parseOptions(rest)
+    const repoRoot = options.repo ? path.resolve(options.repo) : null
+    const result = await syncSkills({
+      repoRoot,
+      skillName: options.skill,
+      overwrite: !!options.force,
+    })
+
+    if (result.results.length === 0) {
+      console.log("No repos registered yet.")
+      return
+    }
+
+    for (const repoResult of result.results) {
+      console.log(`- ${repoResult.name}`)
+      console.log(`  path: ${repoResult.path}`)
+      console.log(`  status: ${repoResult.status}`)
+      if (repoResult.reason) {
+        console.log(`  reason: ${repoResult.reason}`)
+      }
+      if (repoResult.copiedSkills?.length > 0) {
+        console.log(`  skills: ${repoResult.copiedSkills.join(", ")}`)
+      }
+      console.log("")
     }
     return
   }
