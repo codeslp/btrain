@@ -3024,20 +3024,7 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
 
   if (!skipDiff && pathspecs.length > 0) {
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
-
-    // Gate code-simplifier on actual changed files, not lock pathspecs —
-    // a single directory lock can still touch many files.
-    if (changedPaths.length > 1) {
-      const context = parseContextForReviewerSection(contextSectionText || "")
-      const hasSimplification = (context.verificationLines || []).some((line) => {
-        const normalized = line.toLowerCase()
-        return normalized.includes("code-simplifier passed") || normalized.includes("code-simplifier skipped")
-      })
-
-      if (!hasSimplification) {
-        issues.push("code-simplifier pass (required for multi-file changes)")
-      }
-    }
+    let effectiveChangedCount = changedPaths.length
 
     // Only run the base-diff check if git status found nothing uncommitted
     if (changedPaths.length === 0) {
@@ -3049,12 +3036,27 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
       if (baseRef) {
         // Base resolved — run the actual diff check
         const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
+        effectiveChangedCount = baseDiffPaths.length
         if (baseDiffPaths.length === 0) {
           issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
         }
       }
       // If baseRef is null we cannot verify the diff, so we skip the check
       // rather than blocking the agent in an unrecoverable loop.
+    }
+
+    // Gate code-simplifier on actual changed files (uncommitted or committed) —
+    // a single directory lock can still touch many files.
+    if (effectiveChangedCount > 1) {
+      const context = parseContextForReviewerSection(contextSectionText || "")
+      const hasSimplification = (context.verificationLines || []).some((line) => {
+        const normalized = line.toLowerCase()
+        return normalized.includes("code-simplifier passed") || normalized.includes("code-simplifier skipped")
+      })
+
+      if (!hasSimplification) {
+        issues.push("code-simplifier pass (required for multi-file changes)")
+      }
     }
   }
 
