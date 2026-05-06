@@ -1339,6 +1339,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
+  "- Use `rtk` (Rust Token Killer) to execute shell commands when available to minimize token usage.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
   "- Repo config lives at `.btrain/project.toml`.",
   "{{feedbackGuidance}}",
@@ -7963,16 +7964,18 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
     }
 
     const repoPaths = getRepoPaths(absoluteRepoRoot)
-    const claude = await syncBundledSkills(repoPaths.skillsPath, {
-      sourceSkillsDir: BUNDLED_SKILLS_DIR,
-      skillName,
-      overwrite,
-    })
-    const agents = await syncBundledSkills(repoPaths.agentSkillsPath, {
-      sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
-      skillName,
-      overwrite,
-    })
+    const [claude, agents] = await Promise.all([
+      syncBundledSkills(repoPaths.skillsPath, {
+        sourceSkillsDir: BUNDLED_SKILLS_DIR,
+        skillName,
+        overwrite,
+      }),
+      syncBundledSkills(repoPaths.agentSkillsPath, {
+        sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
+        skillName,
+        overwrite,
+      }),
+    ])
 
     const copiedSkills = Array.from(new Set([
       ...claude.copiedSkills,
@@ -7980,7 +7983,7 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
     ])).sort()
 
     results.push({
-      name: repo.name || normalizeRepoName(absoluteRepoRoot),
+      name: repo.name,
       path: absoluteRepoRoot,
       copiedSkills,
       status: copiedSkills.length > 0 ? "updated" : "unchanged",

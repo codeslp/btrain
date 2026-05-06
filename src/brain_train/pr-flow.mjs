@@ -357,6 +357,10 @@ async function fetchMarkedIssueCommentReactions({ owner, repo, issueComments = [
   return out
 }
 
+export async function fetchPrMergeState(repoRoot, prNumber) {
+  return ghJson(["pr", "view", prNumber, "--json", "url,mergeable,mergeStateStatus"], repoRoot)
+}
+
 export async function fetchPrReviewStatus(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)

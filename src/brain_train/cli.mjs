@@ -61,9 +61,11 @@ import {
   runPrPoll,
   runPrRequestReview,
   runPrStatus,
+  fetchPrMergeState,
 } from "./pr-flow.mjs"
 import { reviewCode, formatSummary as formatReviewCodeSummary } from "./review/code-rules.mjs"
 import { reviewContext, formatReviewContextSummary } from "./review/context.mjs"
+import { runUnblockedHelper } from "./unblocked/context.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -2073,7 +2075,13 @@ async function run() {
       }
     }
 
-    // 2. Project config
+    // 2. RTK
+    console.log("")
+    console.log("## Token Optimization")
+    console.log("  Use `rtk` (Rust Token Killer) to execute shell commands when available.")
+    console.log("  Example: `rtk git status` or `rtk npm test`.")
+
+    // 3. Project config
     console.log("")
     console.log("## Project config")
     console.log(`  .btrain/project.toml`)
@@ -2191,6 +2199,50 @@ async function run() {
       console.log("  btrain handoff claim --lane <id> --task \"...\" --owner \"...\" --reviewer \"...\" --files \"...\"")
     } else {
       console.log("  btrain handoff claim --task \"...\" --owner \"...\" --reviewer \"...\"")
+    }
+
+    // 10. PR Status & Mission Prompt
+    console.log("")
+    console.log("## PR Status & Mission Prompt")
+    const handoffState = await checkHandoff(repoRoot)
+    const activeLanes = handoffState.lanes || (handoffState.current ? [handoffState.current] : [])
+    let hasPr = false
+
+    for (const lane of activeLanes) {
+      if (lane.prNumber) {
+        hasPr = true
+        console.log(`\n### Lane ${lane._laneId || "(single)"} - PR #${lane.prNumber}`)
+        let prUrl = ""
+        try {
+          const prData = await fetchPrMergeState(repoRoot, lane.prNumber)
+          prUrl = prData.url
+          const conflicts = prData.mergeable === "CONFLICTING" || prData.mergeStateStatus === "DIRTY" ? "YES" : "NO"
+          console.log(`Conflicts: ${conflicts}`)
+        } catch (e) {
+          console.log("Conflicts: Could not check via gh")
+        }
+
+        if (prUrl) {
+          console.log(`Fetching comments via Unblocked CLI for ${prUrl}...`)
+          const unblockedResult = await runUnblockedHelper(repoRoot, ["get-urls", prUrl])
+          if (unblockedResult && unblockedResult.status !== "skipped" && unblockedResult.status !== "error") {
+            const summary = unblockedResult.summary || unblockedResult.sources?.[0]?.summary || "No summary available."
+            console.log(`Unblocked Summary: ${summary}`)
+          } else {
+            console.log(`Unblocked fetch failed or skipped: ${unblockedResult?.skippedReason || unblockedResult?.error || "unknown"}`)
+          }
+        }
+
+        console.log("\n*** MISSION PROMPT ***")
+        console.log("Agent: Review the PR status above.")
+        console.log("1. If there are comments, address them.")
+        console.log("2. If there are merge conflicts, resolve them.")
+        console.log("3. Once all comments and conflicts are resolved, merge the PR.")
+      }
+    }
+
+    if (!hasPr) {
+      console.log("  (no active PRs found in handoff lanes)")
     }
 
     return

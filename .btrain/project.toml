@@ -4,7 +4,7 @@ name = "btrain"
 [agents]
 reviewer_default = "codex"
 writer_default = "claude"
-active = ["claude", "codex"]
+active = ["claude", "codex", "gemini"]
 
 [lanes]
 per_agent = 3

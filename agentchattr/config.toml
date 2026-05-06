@@ -84,6 +84,11 @@ label = "btrain"
 path = "/Users/bfaris96/btrain"
 poll_interval = 5
 
+[[repos]]
+label = "solvr"
+path = "/Volumes/zombie/closr/solvr"
+poll_interval = 5
+
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.
 default = "none"

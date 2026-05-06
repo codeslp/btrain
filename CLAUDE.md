@@ -10,6 +10,7 @@ This repo uses the `btrain` collaboration workflow.
 - If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.
 - Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.
 - Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.
+- Use `rtk` (Rust Token Killer) to execute shell commands when available to minimize token usage.
 - Run `btrain status` or `btrain doctor` if the local workflow files look stale.
 - Repo config lives at `.btrain/project.toml`.
 - Use the `feedback-triage` skill when processing user-reported issues. It logs entries to `.claude/collab/FEEDBACK_LOG.md` and drives test-first resolution.

@@ -3808,7 +3808,7 @@ describe("multi-lane handoff lifecycle", () => {
             reviewer: "Gemini",
             base: "HEAD",
             changed: ["src/auth/guard.ts - auth guard", "src/auth/util.ts - auth util"],
-            verification: ["node --test test/core.test.mjs"],
+            verification: ["node --test test/core.test.mjs", "[X] code-simplifier passed"],
             gap: ["Did not run manual smoke validation"],
             why: ["Auth lane is ready for review."],
             reviewAsk: ["Check the auth lane changes."],
@@ -4394,14 +4394,19 @@ describe("withFileLock", () => {
       })
     }
 
-    // Launch two tasks concurrently — task B should wait for task A
+    // Launch two tasks concurrently — one must wait for the other
     await Promise.all([task("A", 100), task("B", 10)])
 
-    // A enters first, exits before B enters
-    assert.equal(log[0], "A:enter")
-    assert.equal(log[1], "A:exit")
-    assert.equal(log[2], "B:enter")
-    assert.equal(log[3], "B:exit")
+    // Assert serialization (no interleaving), not ordering —
+    // Promise.all does not guarantee which task acquires the lock first
+    assert.equal(log.length, 4)
+    const first = log[0].split(":")[0]
+    const second = log[2].split(":")[0]
+    assert.equal(log[0], `${first}:enter`)
+    assert.equal(log[1], `${first}:exit`)
+    assert.equal(log[2], `${second}:enter`)
+    assert.equal(log[3], `${second}:exit`)
+    assert.notEqual(first, second, "Both tasks should have run")
   })
 
   it("cleans up lockfile after completion", async () => {
