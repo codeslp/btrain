@@ -582,14 +582,19 @@ function renderPreCommitHook() {
     "",
     '      LOCKED_FILES=$(grep -m1 "^Locked Files:" "$HANDOFF" | sed \'s/^Locked Files:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '      BLOCKED_FILES=""',
-    '      for STAGED_FILE in $NON_HANDOFF; do',
-    '        for LOCKED_FILE in $(printf "%s" "$LOCKED_FILES" | tr "," "\\n"); do',
-    '          if path_matches_lock "$STAGED_FILE" "$LOCKED_FILE"; then',
-    '            BLOCKED_FILES="${BLOCKED_FILES}${STAGED_FILE}\n"',
-    "            break",
-    "          fi",
+    "",
+    '      if [ -z "$LOCKED_FILES" ] || [ "$LOCKED_FILES" = "(none)" ]; then',
+    '        BLOCKED_FILES="$NON_HANDOFF"',
+    "      else",
+    '        for STAGED_FILE in $NON_HANDOFF; do',
+    '          for LOCKED_FILE in $(printf "%s" "$LOCKED_FILES" | tr "," "\\n"); do',
+    '            if path_matches_lock "$STAGED_FILE" "$LOCKED_FILE"; then',
+    '              BLOCKED_FILES="${BLOCKED_FILES}${STAGED_FILE}\n"',
+    "              break",
+    "            fi",
+    "          done",
     "        done",
-    "      done",
+    "      fi",
     "",
     '      if [ -n "$BLOCKED_FILES" ]; then',
     '        echo ""',
@@ -3079,24 +3084,23 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
     let effectiveChangedCount = changedPaths.length
 
-    // Only run the base-diff check if git status found nothing uncommitted
-    if (changedPaths.length === 0) {
-      const resolvedBase = String(base || "").trim()
-      const baseRef = resolvedBase
-        ? (await resolveGitRevision(repoRoot, resolvedBase)) || (await extractResolvableRef(repoRoot, resolvedBase))
-        : null
+    const resolvedBase = String(base || "").trim()
+    const baseRef = resolvedBase
+      ? (await resolveGitRevision(repoRoot, resolvedBase)) || (await extractResolvableRef(repoRoot, resolvedBase))
+      : null
 
-      if (baseRef) {
-        // Base resolved — run the actual diff check
-        const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
-        effectiveChangedCount = baseDiffPaths.length
-        if (baseDiffPaths.length === 0) {
-          issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
-        }
+    if (baseRef) {
+      const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
+      // Use the larger of uncommitted and committed-since-base counts
+      // so the simplifier gate fires when there are many committed files
+      // even if only one remains uncommitted.
+      effectiveChangedCount = Math.max(effectiveChangedCount, baseDiffPaths.length)
+      if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
+        issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
       }
-      // If baseRef is null we cannot verify the diff, so we skip the check
-      // rather than blocking the agent in an unrecoverable loop.
     }
+    // If baseRef is null we cannot verify the diff, so we skip the check
+    // rather than blocking the agent in an unrecoverable loop.
 
     // Gate code-simplifier on actual changed files (uncommitted or committed) —
     // a single directory lock can still touch many files.
