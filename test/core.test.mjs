@@ -2420,6 +2420,71 @@ describe("btrain go", () => {
     assert.ok(stdout.includes("agents:"), stdout)
     assert.ok(stdout.includes("lanes:"), stdout)
   })
+
+  it("does not report no conflicts when GitHub mergeability is unknown", async () => {
+    const prTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", prTmpDir])
+    await runBtrain(["init", prTmpDir], prTmpDir)
+
+    const ghBinDir = path.join(prTmpDir, "fake-gh-bin")
+    await fs.mkdir(ghBinDir, { recursive: true })
+    await writeExecutable(
+      path.join(ghBinDir, "gh"),
+      `#!/usr/bin/env node
+const args = process.argv.slice(2)
+if (args[0] === "pr" && args[1] === "view") {
+  console.log(JSON.stringify({
+    url: "https://github.com/example/repo/pull/42",
+    mergeable: "UNKNOWN",
+    mergeStateStatus: "UNKNOWN",
+  }))
+  process.exit(0)
+}
+console.error("unexpected gh args: " + args.join(" "))
+process.exit(1)
+`,
+    )
+
+    try {
+      const claim = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          prTmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Unknown mergeability",
+          "--owner",
+          "OwnerBot",
+          "--reviewer",
+          "ReviewBot",
+          "--files",
+          "README.md",
+          "--pr",
+          "42",
+        ],
+        prTmpDir,
+      )
+      assert.equal(claim.code, 0, claim.stderr || claim.stdout)
+
+      const { stdout, code } = await runBtrain(
+        ["go", "--repo", prTmpDir],
+        prTmpDir,
+        { PATH: `${ghBinDir}:${process.env.PATH || ""}` },
+      )
+
+      assert.equal(code, 0, stdout)
+      assert.ok(stdout.includes("Conflicts: UNKNOWN"), stdout)
+      assert.ok(!stdout.includes("Conflicts: NO"), stdout)
+    } finally {
+      await rmDir(prTmpDir)
+    }
+  })
 })
 
 // ──────────────────────────────────────────────

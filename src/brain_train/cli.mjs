@@ -2216,7 +2216,12 @@ async function run() {
         try {
           const prData = await fetchPrMergeState(repoRoot, lane.prNumber)
           prUrl = prData.url
-          const conflicts = prData.mergeable === "CONFLICTING" || prData.mergeStateStatus === "DIRTY" ? "YES" : "NO"
+          let conflicts = "NO"
+          if (prData.mergeable === "CONFLICTING" || prData.mergeStateStatus === "DIRTY") {
+            conflicts = "YES"
+          } else if (prData.mergeable === "UNKNOWN" || prData.mergeStateStatus === "UNKNOWN") {
+            conflicts = "UNKNOWN"
+          }
           console.log(`Conflicts: ${conflicts}`)
         } catch (e) {
           console.log("Conflicts: Could not check via gh")
