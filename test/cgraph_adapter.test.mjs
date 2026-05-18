@@ -166,7 +166,7 @@ describe("cgraph_adapter", () => {
         skipDaemon: true,
         // Override timeout via a short custom timeout by using manifest kind
       })
-      // The default audit timeout is 15s, so we can't easily test real timeout
+      // The default audit timeout is 180s, so we can't easily test real timeout
       // Instead, test with a direct execCommand using a very short timeout
       // We'll test the timeout detection path separately
       assert.equal(typeof result.latency_ms, "number")
