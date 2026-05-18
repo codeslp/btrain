@@ -398,7 +398,7 @@ describe("cgraph audit hard-violation gate", () => {
     await rmDir(tmpDir)
   })
 
-  it("blocks needs-review when audit reports a hard violation, surfaces the advisory, and clears once disabled", async () => {
+  it("blocks needs-review when audit reports a hard violation and surfaces the advisory", async () => {
     const claim = await runCli(
       ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Trigger hard violation",
        "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
@@ -418,19 +418,8 @@ describe("cgraph audit hard-violation gate", () => {
     assert.match(combined, /hard violation/i)
     assert.match(combined, /C99/)
     assert.match(combined, /src\/feature\.js/)
-    assert.match(combined, /gate_on_hard/)
-
-    // Disabling the gate via config should clear the block.
-    const projectToml = path.join(tmpDir, ".btrain", "project.toml")
-    await fs.appendFile(projectToml, "\ngate_on_hard = false\n", "utf8")
-
-    const retry = await runCli(
-      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review",
-       "--actor", "codex", "--base", "HEAD", "--no-diff",
-       "--preflight", "Checked locked files.", "--changed", "Forbidden pattern present for test.",
-       "--verification", "n/a", "--gap", "n/a", "--why", "Exercise the audit gate.", "--review-ask", "n/a"],
-      tmpDir, { BTRAIN_AGENT: "codex" },
-    )
-    assert.equal(retry.code, 0, retry.stderr)
+    assert.match(combined, /Remove the forbidden call/)
+    // Gate must be mandatory — no per-config opt-out should be advertised.
+    assert.doesNotMatch(combined, /gate_on_hard/)
   })
 })

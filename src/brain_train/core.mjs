@@ -4089,7 +4089,7 @@ function buildAuditGateError(auditPayload) {
   return new BtrainError({
     message: `Cannot enter \`needs-review\` — kkg audit reports ${count} hard violation${count === 1 ? "" : "s"}.`,
     reason: "Hard standards must be clean before asking a peer for review. The whole point of the audit gate is to catch these before the reviewer's time is spent.",
-    fix: `Fix the offenders below, re-run \`btrain handoff update --status needs-review\`. To bypass (rare): set \`[cgraph].gate_on_hard = false\` in \`.btrain/project.toml\`, or request a one-time override with \`btrain override grant --action needs-review\`.`,
+    fix: `Fix the offenders below, then re-run \`btrain handoff update --status needs-review\`. The gate is mandatory: the audit ran for a reason. If the violation is genuinely wrong, fix the standard or the exemption — do not bypass per-handoff. (Emergency-only one-time override: \`btrain override grant --action needs-review\`.)`,
     context: `Hard violations:\n${lines.join("\n")}`,
   })
 }
@@ -4136,9 +4136,7 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
       // needs-review transition so the agent fixes the issue before
       // asking a reviewer to look. Audit failures still fail open
       // (handled above); only confirmed hard violations gate.
-      const hardCount = audit.payload.counts?.hard || 0
-      const gateEnabled = config?.cgraph?.gate_on_hard !== false
-      if (gateEnabled && hardCount > 0) {
+      if ((audit.payload.counts?.hard || 0) > 0) {
         throw buildAuditGateError(audit.payload)
       }
     }
