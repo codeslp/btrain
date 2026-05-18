@@ -366,6 +366,29 @@ describe("cgraph_adapter", () => {
       assert.deepEqual(auditCall.argv, ["--format", "json", "--scope", "all"])
     })
 
+    it("audit indexes each in-scope file before running rules", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const beforeCalls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean).length
+
+      const result = await adapter.audit({ scope: "lane", files: ["src/foo.py", "src/bar.py"] })
+      assert.equal(result.ok, true)
+
+      const newCalls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .slice(beforeCalls)
+      const indexCalls = newCalls.filter((entry) => entry.cmd === "index")
+      assert.equal(indexCalls.length, 2)
+      assert.deepEqual(indexCalls.map((c) => c.argv[0]).sort(), ["src/bar.py", "src/foo.py"])
+      // Audit fires after index step
+      assert.equal(newCalls[newCalls.length - 1].cmd, "audit")
+    })
+
     it("advise uses positional situation and optional context", async () => {
       const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
       const result = await adapter.advise("lock_overlap", "a", { files: "src/foo.py" })
