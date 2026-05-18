@@ -4074,6 +4074,26 @@ async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files =
   return metadata
 }
 
+function buildAuditGateError(auditPayload) {
+  const advisories = Array.isArray(auditPayload?.advisories) ? auditPayload.advisories : []
+  const hardOnly = advisories.filter((a) => a?.severity === "hard")
+  const lines = hardOnly.map((a) => {
+    const offenders = Array.isArray(a.offenders) ? a.offenders : []
+    const paths = offenders.map((o) => o?.path).filter(Boolean).slice(0, 5).join(", ")
+    const suffix = offenders.length > 5 ? ` (+${offenders.length - 5} more)` : ""
+    const where = paths ? `\n      offenders: ${paths}${suffix}` : ""
+    const tip = a.suggestion ? `\n      fix: ${a.suggestion}` : ""
+    return `  - [HARD] ${a.standard_id || "(unknown)"}: ${a.kind || a.advisory_kind || ""}${where}${tip}`
+  })
+  const count = hardOnly.length
+  return new BtrainError({
+    message: `Cannot enter \`needs-review\` — kkg audit reports ${count} hard violation${count === 1 ? "" : "s"}.`,
+    reason: "Hard standards must be clean before asking a peer for review. The whole point of the audit gate is to catch these before the reviewer's time is spent.",
+    fix: `Fix the offenders below, re-run \`btrain handoff update --status needs-review\`. To bypass (rare): set \`[cgraph].gate_on_hard = false\` in \`.btrain/project.toml\`, or request a one-time override with \`btrain override grant --action needs-review\`.`,
+    context: `Hard violations:\n${lines.join("\n")}`,
+  })
+}
+
 async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
   laneId = "",
   files = [],
@@ -4112,6 +4132,15 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
     if (audit.ok && audit.payload) {
       results.auditArtifact =
         await failOpen(() => adapter.persistAuditSummary(artifactLaneId, audit.payload))
+      // Hard-violation gate: a confirmed hard advisory blocks the
+      // needs-review transition so the agent fixes the issue before
+      // asking a reviewer to look. Audit failures still fail open
+      // (handled above); only confirmed hard violations gate.
+      const hardCount = audit.payload.counts?.hard || 0
+      const gateEnabled = config?.cgraph?.gate_on_hard !== false
+      if (gateEnabled && hardCount > 0) {
+        throw buildAuditGateError(audit.payload)
+      }
     }
   }
 
