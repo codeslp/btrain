@@ -529,23 +529,90 @@ function renderPreCommitHook() {
   return [
     "#!/bin/sh",
     PRE_COMMIT_HOOK_MARKER,
-    "# Blocks commits when any HANDOFF is in 'needs-review' and non-handoff files are staged.",
+    "# Blocks commits touching a needs-review lane's locked files unless run by the peer reviewer.",
     "# Installed by: btrain init --hooks",
     "# Bypass with: git commit --no-verify",
+    "",
+    'STAGED=$(git diff --cached --name-only)',
+    'NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF")',
+    'if [ -z "$NON_HANDOFF" ]; then',
+    "  exit 0",
+    "fi",
+    "",
+    'CURRENT_AGENT="${BTRAIN_AGENT:-$BRAIN_TRAIN_AGENT}"',
+    'CURRENT_AGENT_KEY=$(printf "%s" "$CURRENT_AGENT" | tr "[:upper:]" "[:lower:]")',
+    "",
+    'path_matches_lock() {',
+    '  staged_path="$1"',
+    '  lock_path="$2"',
+    "",
+    '  lock_path=$(printf "%s" "$lock_path" | sed \'s/^[[:space:]]*//; s/[[:space:]]*$//\')',
+    '  [ -z "$lock_path" ] && return 1',
+    '  [ "$lock_path" = "(none)" ] && return 1',
+    "",
+    '  case "$lock_path" in',
+    '    */**)',
+    '      lock_prefix=${lock_path%/**}',
+    '      ;;',
+    '    */)',
+    '      lock_prefix=${lock_path%/}',
+    '      ;;',
+    '    *)',
+    '      lock_prefix=$lock_path',
+    '      ;;',
+    '  esac',
+    "",
+    '  [ "$staged_path" = "$lock_prefix" ] && return 0',
+    '  case "$staged_path" in',
+    '    "$lock_prefix"/*) return 0 ;;',
+    '  esac',
+    "",
+    "  return 1",
+    "}",
     "",
     'for HANDOFF in .claude/collab/HANDOFF*.md; do',
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    if [ "$STATUS" = "needs-review" ]; then',
-    '      STAGED=$(git diff --cached --name-only)',
-    '      NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF")',
-    '      if [ -n "$NON_HANDOFF" ]; then',
+    '      REVIEWER=$(grep -m1 "^Peer Reviewer:" "$HANDOFF" | sed \'s/^Peer Reviewer:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
+    '      REVIEWER_KEY=$(printf "%s" "$REVIEWER" | tr "[:upper:]" "[:lower:]")',
+    '      if [ -n "$CURRENT_AGENT_KEY" ] && [ "$CURRENT_AGENT_KEY" = "$REVIEWER_KEY" ]; then',
+    "        continue",
+    "      fi",
+    "",
+    '      LOCKED_FILES=$(grep -m1 "^Locked Files:" "$HANDOFF" | sed \'s/^Locked Files:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
+    '      BLOCKED_FILES=""',
+    "",
+    '      if [ -z "$LOCKED_FILES" ] || [ "$LOCKED_FILES" = "(none)" ]; then',
+    '        BLOCKED_FILES="$NON_HANDOFF"',
+    "      else",
+    '        # Newline-safe iteration so paths containing spaces are preserved.',
+    '        # `for ... in $VAR` would word-split on whitespace and truncate paths.',
+    '        LOCKED_LIST=$(printf "%s" "$LOCKED_FILES" | tr "," "\\n")',
+    '        while IFS= read -r STAGED_FILE; do',
+    '          [ -z "$STAGED_FILE" ] && continue',
+    '          while IFS= read -r LOCKED_FILE; do',
+    '            [ -z "$LOCKED_FILE" ] && continue',
+    '            if path_matches_lock "$STAGED_FILE" "$LOCKED_FILE"; then',
+    '              BLOCKED_FILES="${BLOCKED_FILES}${STAGED_FILE}\\n"',
+    "              break",
+    "            fi",
+    '          done <<EOF_LOCKS',
+    '$LOCKED_LIST',
+    'EOF_LOCKS',
+    '        done <<EOF_STAGED',
+    '$NON_HANDOFF',
+    'EOF_STAGED',
+    "      fi",
+    "",
+    '      if [ -n "$BLOCKED_FILES" ]; then',
     '        echo ""',
     '        echo "✖ btrain: blocked commit — $HANDOFF status is \'needs-review\'."',
-    '        echo "  ↳ Why: Only the peer reviewer should be committing right now."',
+    '        echo "  ↳ Why: Staged files touch locked files for a lane waiting on peer review."',
     '        echo ""',
-    '        echo "  Staged non-handoff files:"',
-    '        echo "$NON_HANDOFF" | sed \'s/^/    /\'',
+    '        echo "  Peer reviewer: ${REVIEWER:-unknown}"',
+    '        echo "  Matching staged files:"',
+    '        printf "%b" "$BLOCKED_FILES" | sed \'/^$/d; s/^/    /\'',
     '        echo ""',
     '        echo "  ✦ Fix: Wait for the reviewer to resolve, or bypass with: git commit --no-verify"',
     '        echo "         To resolve the lane: btrain handoff resolve --lane <id> --summary \"...\""',
@@ -3026,24 +3093,23 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
     const changedPaths = await listGitStatusPaths(repoRoot, pathspecs)
     let effectiveChangedCount = changedPaths.length
 
-    // Only run the base-diff check if git status found nothing uncommitted
-    if (changedPaths.length === 0) {
-      const resolvedBase = String(base || "").trim()
-      const baseRef = resolvedBase
-        ? (await resolveGitRevision(repoRoot, resolvedBase)) || (await extractResolvableRef(repoRoot, resolvedBase))
-        : null
+    const resolvedBase = String(base || "").trim()
+    const baseRef = resolvedBase
+      ? (await resolveGitRevision(repoRoot, resolvedBase)) || (await extractResolvableRef(repoRoot, resolvedBase))
+      : null
 
-      if (baseRef) {
-        // Base resolved — run the actual diff check
-        const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
-        effectiveChangedCount = baseDiffPaths.length
-        if (baseDiffPaths.length === 0) {
-          issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
-        }
+    if (baseRef) {
+      const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
+      // Use the larger of uncommitted and committed-since-base counts
+      // so the simplifier gate fires when there are many committed files
+      // even if only one remains uncommitted.
+      effectiveChangedCount = Math.max(effectiveChangedCount, baseDiffPaths.length)
+      if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
+        issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
       }
-      // If baseRef is null we cannot verify the diff, so we skip the check
-      // rather than blocking the agent in an unrecoverable loop.
     }
+    // If baseRef is null we cannot verify the diff, so we skip the check
+    // rather than blocking the agent in an unrecoverable loop.
 
     // Gate code-simplifier on actual changed files (uncommitted or committed) —
     // a single directory lock can still touch many files.
@@ -4017,6 +4083,26 @@ async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files =
   return metadata
 }
 
+function buildAuditGateError(auditPayload) {
+  const advisories = Array.isArray(auditPayload?.advisories) ? auditPayload.advisories : []
+  const hardOnly = advisories.filter((a) => a?.severity === "hard")
+  const lines = hardOnly.map((a) => {
+    const offenders = Array.isArray(a.offenders) ? a.offenders : []
+    const paths = offenders.map((o) => o?.path).filter(Boolean).slice(0, 5).join(", ")
+    const suffix = offenders.length > 5 ? ` (+${offenders.length - 5} more)` : ""
+    const where = paths ? `\n      offenders: ${paths}${suffix}` : ""
+    const tip = a.suggestion ? `\n      fix: ${a.suggestion}` : ""
+    return `  - [HARD] ${a.standard_id || "(unknown)"}: ${a.kind || a.advisory_kind || ""}${where}${tip}`
+  })
+  const count = hardOnly.length
+  return new BtrainError({
+    message: `Cannot enter \`needs-review\` — kkg audit reports ${count} hard violation${count === 1 ? "" : "s"}.`,
+    reason: "Hard standards must be clean before asking a peer for review. The whole point of the audit gate is to catch these before the reviewer's time is spent.",
+    fix: `Fix the offenders below, then re-run \`btrain handoff update --status needs-review\`. The gate is mandatory: the audit ran for a reason. If the violation is genuinely wrong, fix the standard or the exemption — do not bypass per-handoff. (Emergency-only one-time override: \`btrain override grant --action needs-review\`.)`,
+    context: `Hard violations:\n${lines.join("\n")}`,
+  })
+}
+
 async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
   laneId = "",
   files = [],
@@ -4055,6 +4141,13 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
     if (audit.ok && audit.payload) {
       results.auditArtifact =
         await failOpen(() => adapter.persistAuditSummary(artifactLaneId, audit.payload))
+      // Hard-violation gate: a confirmed hard advisory blocks the
+      // needs-review transition so the agent fixes the issue before
+      // asking a reviewer to look. Audit failures still fail open
+      // (handled above); only confirmed hard violations gate.
+      if ((audit.payload.counts?.hard || 0) > 0) {
+        throw buildAuditGateError(audit.payload)
+      }
     }
   }
 

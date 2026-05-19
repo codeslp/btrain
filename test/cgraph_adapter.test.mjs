@@ -166,7 +166,7 @@ describe("cgraph_adapter", () => {
         skipDaemon: true,
         // Override timeout via a short custom timeout by using manifest kind
       })
-      // The default audit timeout is 15s, so we can't easily test real timeout
+      // The default audit timeout is 180s, so we can't easily test real timeout
       // Instead, test with a direct execCommand using a very short timeout
       // We'll test the timeout detection path separately
       assert.equal(typeof result.latency_ms, "number")
@@ -364,6 +364,29 @@ describe("cgraph_adapter", () => {
       const auditCall = auditCalls[auditCalls.length - 1]
       assert.equal(calls.length, beforeCalls + 1)
       assert.deepEqual(auditCall.argv, ["--format", "json", "--scope", "all"])
+    })
+
+    it("audit indexes each in-scope file before running rules", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const beforeCalls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean).length
+
+      const result = await adapter.audit({ scope: "lane", files: ["src/foo.py", "src/bar.py"] })
+      assert.equal(result.ok, true)
+
+      const newCalls = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .slice(beforeCalls)
+      const indexCalls = newCalls.filter((entry) => entry.cmd === "index")
+      assert.equal(indexCalls.length, 2)
+      assert.deepEqual(indexCalls.map((c) => c.argv[0]).sort(), ["src/bar.py", "src/foo.py"])
+      // Audit fires after index step
+      assert.equal(newCalls[newCalls.length - 1].cmd, "audit")
     })
 
     it("advise uses positional situation and optional context", async () => {

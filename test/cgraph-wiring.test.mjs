@@ -317,3 +317,109 @@ describe("cgraph adapter wiring", () => {
     assert.ok(auditCall?.argv.includes("src/"), "needs-review audit should pass the claimed lane file scope")
   })
 })
+
+async function writeHardFailingKkgBinary(dir, logPath) {
+  const binPath = path.join(dir, "kkg")
+  const manifest = {
+    ok: true,
+    kind: "manifest",
+    schema_version: "1.0",
+    commands: [
+      { name: "review-packet" },
+      { name: "audit" },
+      { name: "blast-radius" },
+      { name: "advise" },
+      { name: "drift-check" },
+      { name: "sync-check" },
+      { name: "health" },
+    ],
+    total_commands: 7,
+  }
+  const script = [
+    "#!/usr/bin/env node",
+    "const fs = require('fs')",
+    "const args = process.argv.slice(2)",
+    "const cmd = args[0] || ''",
+    `const logPath = ${JSON.stringify(logPath)}`,
+    "fs.appendFileSync(logPath, JSON.stringify({ cmd, argv: args.slice(1) }) + '\\n')",
+    "if (cmd === 'manifest') {",
+    `  process.stdout.write(${JSON.stringify(JSON.stringify(manifest))})`,
+    "} else if (cmd === 'health') {",
+    "  process.stdout.write(JSON.stringify({ ok: true, kind: 'health', schema_version: '1.0', grade: 'A', stale_index: false }))",
+    "} else if (cmd === 'blast-radius') {",
+    "  process.stdout.write(JSON.stringify({",
+    "    ok: true, kind: 'blast_radius',",
+    "    summary: { files_requested: 1, nodes_in_scope: 1, transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0 }",
+    "  }))",
+    "} else if (cmd === 'review-packet') {",
+    "  process.stdout.write(JSON.stringify({ source: 'locked_files', touched_nodes: [], advisories: [], truncated: false }))",
+    "} else if (cmd === 'audit') {",
+    "  process.stdout.write(JSON.stringify({",
+    "    ok: true, kind: 'audit',",
+    "    counts: { warn: 0, hard: 1 },",
+    "    standards_evaluated: 12,",
+    "    advisories: [{",
+    "      severity: 'hard',",
+    "      standard_id: 'C99',",
+    "      kind: 'forbidden_pattern',",
+    "      suggestion: 'Remove the forbidden call before requesting review.',",
+    "      offenders: [{ path: 'src/feature.js' }]",
+    "    }],",
+    "    scope_source: 'explicit_files'",
+    "  }))",
+    "} else {",
+    "  process.stdout.write(JSON.stringify({ ok: true, kind: cmd }))",
+    "}",
+  ].join("\n")
+  await fs.writeFile(binPath, script, "utf8")
+  await fs.chmod(binPath, 0o755)
+  return binPath
+}
+
+describe("cgraph audit hard-violation gate", () => {
+  let tmpDir
+  let logPath
+  let binPath
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await gitInit(tmpDir)
+    const initResult = await runCli(["init", tmpDir, "--agent", "claude", "--agent", "codex"], tmpDir)
+    assert.equal(initResult.code, 0, `btrain init failed: ${initResult.stderr}`)
+    await commitAll(tmpDir, "init")
+    logPath = path.join(tmpDir, "kkg-calls.jsonl")
+    binPath = await writeHardFailingKkgBinary(tmpDir, logPath)
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("blocks needs-review when audit reports a hard violation and surfaces the advisory", async () => {
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Trigger hard violation",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const needsReview = await runCli(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review",
+       "--actor", "codex", "--base", "HEAD", "--no-diff",
+       "--preflight", "Checked locked files.", "--changed", "Forbidden pattern present for test.",
+       "--verification", "n/a", "--gap", "n/a", "--why", "Exercise the audit gate.", "--review-ask", "n/a"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.notEqual(needsReview.code, 0, "needs-review must be blocked when audit reports hard violations")
+    const combined = `${needsReview.stdout}\n${needsReview.stderr}`
+    assert.match(combined, /hard violation/i)
+    assert.match(combined, /C99/)
+    assert.match(combined, /src\/feature\.js/)
+    assert.match(combined, /Remove the forbidden call/)
+    // Gate must be mandatory — no per-config opt-out should be advertised.
+    assert.doesNotMatch(combined, /gate_on_hard/)
+  })
+})

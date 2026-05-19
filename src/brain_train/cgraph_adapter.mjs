@@ -26,7 +26,8 @@ const TIMEOUTS = {
   manifest:       3_000,
   blast_radius:   2_000,
   review_packet:  5_000,
-  audit:         15_000,
+  audit:        180_000,
+  index:         30_000,
   advise:           200,
   drift_check:    2_000,
   sync_check:     5_000,
@@ -304,6 +305,13 @@ class CgraphAdapter {
   }
 
   async audit(opts = {}) {
+    // Incrementally re-index in-scope files so audit rules see the current
+    // working tree, not stale graph state. Best-effort: index failures do
+    // not block audit; audit reports against whatever the graph currently has.
+    if (opts.files?.length) {
+      await Promise.all(opts.files.map((f) => this._indexFile(f)))
+    }
+
     const args = ["audit", "--format", "json"]
     if (opts.scope) args.push("--scope", opts.scope)
     if (opts.files?.length) args.push("--files", opts.files.join(","))
@@ -311,6 +319,10 @@ class CgraphAdapter {
     if (opts.requireHardZero) args.push("--require-hard-zero")
     if (opts.project) args.push("--project", opts.project)
     return this._exec(args, "audit")
+  }
+
+  async _indexFile(file) {
+    return this._exec(["index", file], "index")
   }
 
   async advise(situation, opts = {}, legacyContext = null) {

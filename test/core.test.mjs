@@ -2420,6 +2420,71 @@ describe("btrain go", () => {
     assert.ok(stdout.includes("agents:"), stdout)
     assert.ok(stdout.includes("lanes:"), stdout)
   })
+
+  it("does not report no conflicts when GitHub mergeability is unknown", async () => {
+    const prTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", prTmpDir])
+    await runBtrain(["init", prTmpDir], prTmpDir)
+
+    const ghBinDir = path.join(prTmpDir, "fake-gh-bin")
+    await fs.mkdir(ghBinDir, { recursive: true })
+    await writeExecutable(
+      path.join(ghBinDir, "gh"),
+      `#!/usr/bin/env node
+const args = process.argv.slice(2)
+if (args[0] === "pr" && args[1] === "view") {
+  console.log(JSON.stringify({
+    url: "https://github.com/example/repo/pull/42",
+    mergeable: "UNKNOWN",
+    mergeStateStatus: "UNKNOWN",
+  }))
+  process.exit(0)
+}
+console.error("unexpected gh args: " + args.join(" "))
+process.exit(1)
+`,
+    )
+
+    try {
+      const claim = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          prTmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Unknown mergeability",
+          "--owner",
+          "OwnerBot",
+          "--reviewer",
+          "ReviewBot",
+          "--files",
+          "README.md",
+          "--pr",
+          "42",
+        ],
+        prTmpDir,
+      )
+      assert.equal(claim.code, 0, claim.stderr || claim.stdout)
+
+      const { stdout, code } = await runBtrain(
+        ["go", "--repo", prTmpDir],
+        prTmpDir,
+        { PATH: `${ghBinDir}:${process.env.PATH || ""}` },
+      )
+
+      assert.equal(code, 0, stdout)
+      assert.ok(stdout.includes("Conflicts: UNKNOWN"), stdout)
+      assert.ok(!stdout.includes("Conflicts: NO"), stdout)
+    } finally {
+      await rmDir(prTmpDir)
+    }
+  })
 })
 
 // ──────────────────────────────────────────────
@@ -3232,6 +3297,119 @@ describe("managed pre-push hook", () => {
     const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "repo.jsonl"))
     assert.ok(events.some((event) => event.type === "override-granted"), events.map((event) => event.type).join(", "))
     assert.ok(events.some((event) => event.type === "override-consumed"), events.map((event) => event.type).join(", "))
+  })
+})
+
+describe("managed pre-commit hook", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+    await fs.mkdir(path.join(tmpDir, "src", "auth"), { recursive: true })
+    await fs.mkdir(path.join(tmpDir, "src", "scoring"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+    await fs.writeFile(path.join(tmpDir, "src", "scoring", "score.ts"), "export const score = 1\n", "utf8")
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "Initial commit"], tmpDir)
+
+    let result = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--task",
+        "Auth review",
+        "--owner",
+        "OwnerBot",
+        "--reviewer",
+        "ReviewBot",
+        "--files",
+        "src/auth/",
+      ],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+
+    result = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "b",
+        "--task",
+        "Scoring work",
+        "--owner",
+        "OwnerBot",
+        "--reviewer",
+        "ReviewBot",
+        "--files",
+        "src/scoring/",
+      ],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+
+    result = await runBtrain(
+      [
+        ...buildNeedsReviewArgs(tmpDir, {
+          actor: "OwnerBot",
+          base: "HEAD",
+          changed: ["src/auth/ - auth lane is ready for review"],
+          verification: ["manual hook setup"],
+          gap: ["No product diff needed for hook fixture setup."],
+          why: ["Auth lane is waiting for peer review while scoring work continues."],
+          reviewAsk: ["Confirm the pre-commit hook only blocks auth lane files."],
+        }),
+        "--lane",
+        "a",
+        "--no-diff",
+      ],
+      tmpDir,
+    )
+    assert.equal(result.code, 0, result.stderr)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("allows commits for disjoint lane locks while another lane is needs-review", async () => {
+    await fs.appendFile(path.join(tmpDir, "src", "scoring", "score.ts"), "export const nextScore = 2\n", "utf8")
+    await runGit(["add", "src/scoring/score.ts"], tmpDir)
+
+    const commitResult = await runGit(
+      ["commit", "-m", "Scoring change"],
+      tmpDir,
+      { BTRAIN_AGENT: "OwnerBot" },
+    )
+    assert.equal(commitResult.code, 0, `${commitResult.stdout}\n${commitResult.stderr}`)
+
+    await fs.appendFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const stricterGuard = true\n", "utf8")
+    await runGit(["add", "src/auth/guard.ts"], tmpDir)
+
+    const blockedResult = await runGit(
+      ["commit", "-m", "Auth change while in review"],
+      tmpDir,
+      { BTRAIN_AGENT: "OwnerBot" },
+    )
+    const output = `${blockedResult.stdout}\n${blockedResult.stderr}`
+    assert.notEqual(blockedResult.code, 0, output)
+    assert.match(output, /blocked commit/i)
+    assert.match(output, /src\/auth\/guard\.ts/)
+    assert.doesNotMatch(output, /src\/scoring\/score\.ts/)
   })
 })
 

@@ -6,6 +6,10 @@ on:
 
 jobs:
   btrain-review:
+    # Skip on fork-origin PRs where secrets.ANTHROPIC_API_KEY is unavailable;
+    # otherwise the job persistently fails on every external PR.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
