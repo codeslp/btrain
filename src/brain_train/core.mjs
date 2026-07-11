@@ -4585,7 +4585,10 @@ function pickHashFieldsFromCurrent(current) {
     base: current.base || "",
     lastUpdated: current.lastUpdated || "",
     _laneId: current._laneId || "",
-    cgraph: current.cgraph && typeof current.cgraph === "object" ? current.cgraph : null,
+    cgraph:
+      current.cgraph && typeof current.cgraph === "object"
+        ? Object.fromEntries(Object.entries(current.cgraph).filter(([key]) => key !== "latency_ms"))
+        : null,
   }
 }
 

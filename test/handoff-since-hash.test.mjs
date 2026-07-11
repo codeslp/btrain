@@ -134,6 +134,45 @@ describe("computeHandoffStateHash", () => {
       computeHandoffStateHash(mutated),
     )
   })
+
+  it("ignores volatile cgraph latency while preserving substantive cgraph changes", () => {
+    const baseline = {
+      lanes: [{
+        _laneId: "a",
+        status: "in-progress",
+        cgraph: {
+          status: "ok",
+          latency_ms: { blast_radius: 12 },
+          blast_radius: { nodes_in_scope: 3 },
+        },
+      }],
+      locks: [],
+      overrides: [],
+    }
+    const latencyOnly = {
+      ...baseline,
+      lanes: [{
+        ...baseline.lanes[0],
+        cgraph: {
+          ...baseline.lanes[0].cgraph,
+          latency_ms: { blast_radius: 987 },
+        },
+      }],
+    }
+    const substantive = {
+      ...baseline,
+      lanes: [{
+        ...baseline.lanes[0],
+        cgraph: {
+          ...baseline.lanes[0].cgraph,
+          blast_radius: { nodes_in_scope: 4 },
+        },
+      }],
+    }
+
+    assert.equal(computeHandoffStateHash(baseline), computeHandoffStateHash(latencyOnly))
+    assert.notEqual(computeHandoffStateHash(baseline), computeHandoffStateHash(substantive))
+  })
 })
 
 describe("btrain handoff --since hash", () => {
