@@ -1,6 +1,6 @@
 # A2A, LangGraph, and LangSmith Evaluation for btrain
 
-**Date**: 2026-04-19
+**Date**: 2026-04-19 (reassessed 2026-07-10)
 **Status**: Research / recommendation
 **Scope**: Evaluate what `btrain` and `agentchattr` should adopt from A2A, LangGraph, and LangSmith without replacing `btrain` as the workflow authority.
 **Sources**: [A2A Protocol](https://a2a-protocol.org/latest/) | [A2A v1.0 release](https://github.com/a2aproject/A2A/releases/tag/v1.0.0) | [A2A v1.0 announcement](https://a2a-protocol.org/latest/announcing-1.0/) | [LangChain overview](https://docs.langchain.com/oss/python/langchain/overview) | [LangChain multi-agent](https://docs.langchain.com/oss/python/langchain/multi-agent) | [LangGraph overview](https://docs.langchain.com/oss/python/langgraph/overview) | [LangSmith tracing quickstart](https://docs.langchain.com/langsmith/observability-quickstart) | [LangSmith evaluation concepts](https://docs.langchain.com/langsmith/evaluation-concepts) | [docs/architecture.md](/Users/bfaris96/btrain/docs/architecture.md) | [specs/009-meta-harness-for-btrain.md](/Users/bfaris96/btrain/specs/009-meta-harness-for-btrain.md)
@@ -8,6 +8,8 @@
 ## Bottom Line
 
 `btrain` should not be replaced by A2A, LangGraph, or LangSmith.
+
+The July 2026 runtime audit strengthens this conclusion but changes the immediate priority. The main gap is not another protocol or hosted tracing platform; it is a durable repo-local supervisor with per-lane cursors, acknowledgement, leases, retry, and restart recovery. See [the BTH supervisor and AgentChatTR reassessment](./bth-supervisor-agentchattr-reassessment.md).
 
 Those systems solve adjacent problems:
 
@@ -90,6 +92,8 @@ Near-term improvement:
 - add a clearer event stream from `btrain`
 - reduce dependence on periodic polling where event-driven delivery is possible
 - treat delivery acknowledgement as a first-class traceable event
+
+Reassessment: this event stream should originate in `btrain`, not AgentChatTR. AgentChatTR should consume the same canonical stream as the dashboard and any external conductor. Its existing per-repo pollers and retry records are useful prototypes for the delivery schema, but they should not remain a second implementation of transition detection.
 
 ### 4. Trust Boundary Vocabulary
 
@@ -236,6 +240,14 @@ Adopt ideas, not replacements.
 - **Preserve**: `btrain` as the workflow authority and `agentchattr` as the local coordination surface
 
 The highest-leverage next step is not a protocol migration. It is to make `btrain`'s current orchestration more explicit, traceable, and comparable while keeping the authority model simple.
+
+In implementation order, that now means:
+
+1. add `btrain watch` and a durable supervisor
+2. make Claude/Codex subscription CLI readiness and dispatch explicit
+3. move polling/retry/repair scheduling out of AgentChatTR
+4. evaluate agent-deck as a conductor/session adapter
+5. revisit A2A or LangSmith exporters only after the local lifecycle is reliable
 
 ## References
 
