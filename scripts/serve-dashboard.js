@@ -9,7 +9,10 @@ const HOT_SEAT_RESOLVERS = {
   'in-progress': ({ writer }) => writer,
   'needs-review': ({ reviewer }) => reviewer,
   'changes-requested': ({ writer }) => writer,
-  'repair-needed': ({ repairOwner, writer }) => repairOwner || writer
+  'repair-needed': ({ repairOwner, writer }) => repairOwner || writer,
+  'ready-for-pr': ({ writer }) => writer,
+  'pr-review': ({ writer }) => writer,
+  'ready-to-merge': ({ writer }) => writer
 };
 
 const STATUS_CLASS_NAMES = {
@@ -18,6 +21,9 @@ const STATUS_CLASS_NAMES = {
   'needs-review': 'status-needs-review',
   'changes-requested': 'status-changes-requested',
   'repair-needed': 'status-repair-needed',
+  'ready-for-pr': 'status-ready-for-pr',
+  'pr-review': 'status-pr-review',
+  'ready-to-merge': 'status-ready-to-merge',
   resolved: 'status-resolved'
 };
 
@@ -143,15 +149,6 @@ function buildLaneFullText(lane) {
   return lines.join('\n');
 }
 
-function isBugLane(task, detailLines, status) {
-  if (status === 'resolved') {
-    return false;
-  }
-
-  const bugPattern = /\b(bug|issue)\b/i;
-  return detailLines.some((value) => bugPattern.test(String(value || ''))) || bugPattern.test(task || '');
-}
-
 function toDashboardLane(lane) {
   const task = lane.task || '(no task)';
   const writer = lane.owner || '';
@@ -162,18 +159,6 @@ function toDashboardLane(lane) {
   const objective = summarizeText(packet.objective);
   const doneWhen = summarizeText(packet.doneWhen);
   const fullText = buildLaneFullText(lane);
-  const detailLines = [
-    task,
-    lane.nextAction,
-    lane.reasonCode,
-    objective,
-    summarizeText(packet.deliverable),
-    summarizeText(packet.budget),
-    doneWhen,
-    ...normalizeTextList(packet.constraints),
-    ...normalizeTextList(packet.acceptance),
-  ];
-
   let hotSeat = 'Unassigned';
   const resolveHotSeat = HOT_SEAT_RESOLVERS[lane.status];
   if (resolveHotSeat) {
@@ -192,7 +177,6 @@ function toDashboardLane(lane) {
     objective,
     doneWhen,
     fullText,
-    isBug: isBugLane(task, detailLines, lane.status),
   };
 }
 
@@ -213,6 +197,9 @@ const server = http.createServer((req, res) => {
   if (req.url === '/api/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(getBtrainStatus()));
+  } else if (req.url === '/api/health' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, repo: process.cwd(), port: PORT }));
   } else if (req.url === '/' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`
@@ -250,11 +237,14 @@ const server = http.createServer((req, res) => {
         var(--repair-needed-stripe-dark) 0 12px,
         var(--repair-needed) 12px 24px
       );
+      --ready-for-pr: #00c8ff;
+      --ready-for-pr-glow: rgba(0, 200, 255, 0.22);
+      --pr-review: #8b7cff;
+      --pr-review-glow: rgba(139, 124, 255, 0.22);
+      --ready-to-merge: #35f2b0;
+      --ready-to-merge-glow: rgba(53, 242, 176, 0.22);
       --resolved: #00e65c;
       --resolved-glow: rgba(0, 230, 92, 0.2);
-      
-      --bug: #527a20;
-      --bug-glow: rgba(82, 122, 32, 0.4);
 
       /* Typography tokens */
       --font-heading: 'Chakra Petch', sans-serif;
@@ -372,6 +362,13 @@ const server = http.createServer((req, res) => {
     .indicator-pill.status-in-progress {
       animation: chug 1.5s ease-in-out infinite;
     }
+    .indicator-pill.status-ready-for-pr,
+    .indicator-pill.status-pr-review {
+      animation: chug 1.8s ease-in-out infinite;
+    }
+    .indicator-pill.status-ready-to-merge {
+      animation: hop 2.2s cubic-bezier(0.28, 0.84, 0.42, 1) infinite;
+    }
     .indicator-pill.status-resolved {
       animation: squish 30s cubic-bezier(0.4, 0, 0.2, 1) infinite;
       transform-origin: bottom center;
@@ -432,6 +429,9 @@ const server = http.createServer((req, res) => {
       paint-order: stroke fill;
       text-shadow: 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;
     }
+    .lane-box.ready-for-pr { background-color: var(--ready-for-pr); box-shadow: 0 0 12px var(--ready-for-pr-glow); color: #061019; }
+    .lane-box.pr-review { background-color: var(--pr-review); box-shadow: 0 0 12px var(--pr-review-glow); }
+    .lane-box.ready-to-merge { background-color: var(--ready-to-merge); box-shadow: 0 0 12px var(--ready-to-merge-glow); color: #06130e; }
     .lane-box.resolved { background-color: var(--resolved); box-shadow: 0 0 12px var(--resolved-glow); }
 
     /* Lanes Grid */
@@ -480,6 +480,9 @@ const server = http.createServer((req, res) => {
       box-shadow: 0 0 14px var(--repair-needed-glow);
       pointer-events: none;
     }
+    .lane-card[data-status="ready-for-pr"] { border-top-color: var(--ready-for-pr); }
+    .lane-card[data-status="pr-review"] { border-top-color: var(--pr-review); }
+    .lane-card[data-status="ready-to-merge"] { border-top-color: var(--ready-to-merge); }
     .lane-card[data-status="resolved"] { border-top-color: var(--resolved); }
 
     /* Hot Seat Badge */
@@ -527,6 +530,9 @@ const server = http.createServer((req, res) => {
     .status-needs-review { color: var(--needs-review); }
     .status-changes-requested { color: var(--changes-requested); }
     .status-repair-needed { color: var(--repair-needed); }
+    .status-ready-for-pr { color: var(--ready-for-pr); }
+    .status-pr-review { color: var(--pr-review); }
+    .status-ready-to-merge { color: var(--ready-to-merge); }
     .status-resolved { color: var(--resolved); }
 
     .lane-card[data-status="repair-needed"] .lane-status {
@@ -650,16 +656,6 @@ const server = http.createServer((req, res) => {
       border-color: #4b586d;
     }
 
-    .bug-sprout {
-      position: absolute;
-      top: -24px;
-      left: 50%;
-      transform: translateX(-50%);
-      color: var(--bug);
-      animation: hop 2s infinite;
-      z-index: 10;
-      filter: drop-shadow(0 0 8px var(--bug));
-    }
   </style>
 </head>
 <body>
@@ -752,13 +748,11 @@ const server = http.createServer((req, res) => {
 
         // Top Indicators (Vertical Stack Mini Cards)
         const indicatorsHtml = data.lanes.map(lane => {
-          const hasHotSeat = lane.hotSeat && lane.hotSeat !== 'Unassigned' && (lane.status !== 'resolved' || lane.isBug);
+          const hasHotSeat = lane.hotSeat && lane.hotSeat !== 'Unassigned' && lane.status !== 'resolved';
           const identity = getAgentIdentity(lane.hotSeat);
-          const bugStyle = lane.isBug ? \`background-color: var(--bug-glow); border-color: var(--bug); box-shadow: 0 0 12px var(--bug-glow);\` : '';
 
           return \`
-            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" style="position:relative; \${bugStyle}" onclick="scrollToCard('\${lane.id}', event)" title="\${lane.status.toUpperCase()}">
-              \${lane.isBug ? '<div class="bug-sprout"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3 3.96 0 0 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M17.47 9c1.93-.2 3.53-1.9 3.53-3.9"/><path d="M6 13H2"/><path d="M22 13h-4"/><path d="M6.5 17C4.6 17.2 3 18.9 3 21"/><path d="M17.5 17c1.9.2 3.5 1.9 3.5 3.9"/></svg></div>' : ''}
+            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${lane.status.toUpperCase()}">
               <div class="lane-box \${lane.status}">\${lane.id}</div>
               \${hasHotSeat ? \`
                 <div class="indicator-agent" style="color: \${identity.color};">\${identity.short}</div>
@@ -773,15 +767,13 @@ const server = http.createServer((req, res) => {
         // Lane Cards
         const lanesHtml = data.lanes.map(lane => {
           const isExpanded = openCardIds.has(lane.id) ? 'expanded' : '';
-          const hasHotSeat = lane.hotSeat && lane.hotSeat !== 'Unassigned' && (lane.status !== 'resolved' || lane.isBug);
+          const hasHotSeat = lane.hotSeat && lane.hotSeat !== 'Unassigned' && lane.status !== 'resolved';
           const hsIdentity = getAgentIdentity(lane.hotSeat);
           const wIdentity = getAgentIdentity(lane.writer);
           const rIdentity = getAgentIdentity(lane.reviewer);
-          const bugCardStyle = lane.isBug ? \`background-color: rgba(60, 90, 20, 0.4); border-color: var(--bug); box-shadow: 0 0 16px var(--bug-glow);\` : '';
           
           return \`
-          <div id="card-\${lane.id}" class="lane-card \${isExpanded}" style="position:relative; \${bugCardStyle}" data-status="\${lane.status}" onclick="toggleCard('\${lane.id}')">
-            \${lane.isBug ? '<div class="bug-sprout" style="top:-34px;"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3 3.96 0 0 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M17.47 9c1.93-.2 3.53-1.9 3.53-3.9"/><path d="M6 13H2"/><path d="M22 13h-4"/><path d="M6.5 17C4.6 17.2 3 18.9 3 21"/><path d="M17.5 17c1.9.2 3.5 1.9 3.5 3.9"/></svg></div>' : ''}
+          <div id="card-\${lane.id}" class="lane-card \${isExpanded}" data-status="\${lane.status}" onclick="toggleCard('\${lane.id}')">
             \${hasHotSeat ? \`
               <div class="lane-hot-seat" style="color: \${hsIdentity.color}; border-color: \${hsIdentity.color}; box-shadow: 0 0 12px \${hsIdentity.color}40;">
                 HOTSEAT // \${hsIdentity.short}
@@ -855,6 +847,6 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[BTrain Dashboard] HUD Status monitor is running on http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[BTrain Dashboard] HUD Status monitor is running on http://127.0.0.1:${PORT}`);
 });

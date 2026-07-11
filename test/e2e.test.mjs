@@ -562,11 +562,20 @@ describe("installed CLI e2e", () => {
       assert.equal(laneB?.repairOwner, "WriterBot", JSON.stringify(statusPayload))
       assert.equal(laneB?.hotSeat, "WriterBot", JSON.stringify(statusPayload))
 
+      const healthResponse = await waitForUrl(`http://127.0.0.1:${port}/api/health`)
+      const healthPayload = await healthResponse.json()
+      assert.equal(healthPayload.ok, true, JSON.stringify(healthPayload))
+      assert.equal(await fs.realpath(healthPayload.repo), await fs.realpath(projectDir), JSON.stringify(healthPayload))
+      assert.equal(healthPayload.port, port, JSON.stringify(healthPayload))
+
       const htmlResponse = await waitForUrl(`http://127.0.0.1:${port}/`)
       const html = await htmlResponse.text()
       assert.ok(html.includes("const statusClassNames = {"), html)
       assert.ok(html.includes('"changes-requested":"status-changes-requested"'), html)
       assert.ok(html.includes('"repair-needed":"status-repair-needed"'), html)
+      assert.ok(html.includes('"ready-for-pr":"status-ready-for-pr"'), html)
+      assert.ok(html.includes('"pr-review":"status-pr-review"'), html)
+      assert.ok(html.includes('"ready-to-merge":"status-ready-to-merge"'), html)
       assert.ok(html.includes("--repair-needed-tape: repeating-linear-gradient("), html)
       assert.ok(html.includes("return statusClassNames[status] || '';"), html)
       assert.ok(html.includes("OBJ //"), html)
@@ -574,8 +583,47 @@ describe("installed CLI e2e", () => {
       assert.ok(html.includes("lane.objective"), html)
       assert.ok(html.includes("lane.doneWhen"), html)
       assert.ok(!html.includes("return STATUS_CLASS_NAMES[status] || '';"), html)
+      assert.ok(!html.includes("lane.isBug"), html)
+      assert.ok(!html.includes("bug-sprout"), html)
     } finally {
       await stopDashboardServer(server)
+    }
+  })
+
+  it("manages the dashboard through the installed CLI", async () => {
+    const projectDir = await createProjectRepo(installState.btrainBin)
+    cleanupDirs.push(projectDir)
+    const port = await getAvailablePort()
+
+    const start = await runInstalledBtrain(
+      installState.btrainBin,
+      projectDir,
+      ["dashboard", "start", "--repo", projectDir, "--port", String(port), "--no-open"],
+    )
+    assert.equal(start.code, 0, start.stderr)
+    assert.ok(start.stdout.includes("dashboard: started"), start.stdout)
+    assert.ok(start.stdout.includes(`http://127.0.0.1:${port}`), start.stdout)
+
+    try {
+      const healthResponse = await waitForUrl(`http://127.0.0.1:${port}/api/health`)
+      assert.equal((await healthResponse.json()).ok, true)
+
+      const status = await runInstalledBtrain(
+        installState.btrainBin,
+        projectDir,
+        ["dashboard", "status", "--repo", projectDir],
+      )
+      assert.equal(status.code, 0, status.stderr)
+      assert.ok(status.stdout.includes("dashboard: running"), status.stdout)
+      assert.ok(status.stdout.includes(`http://127.0.0.1:${port}`), status.stdout)
+    } finally {
+      const stop = await runInstalledBtrain(
+        installState.btrainBin,
+        projectDir,
+        ["dashboard", "stop", "--repo", projectDir],
+      )
+      assert.equal(stop.code, 0, stop.stderr)
+      assert.ok(stop.stdout.includes("dashboard: stopped"), stop.stdout)
     }
   })
 
