@@ -130,7 +130,7 @@ Required behavior:
 
 Treat local authenticated CLIs as runners, never as model APIs:
 
-- Claude: `claude -p --output-format stream-json ...`
+- Claude: `claude -p --output-format stream-json --verbose --include-partial-messages ...`
 - Codex: `codex exec --json -C <repo> ...`
 - Agent-deck: create or nudge a session/conductor that already owns the authenticated CLI
 
