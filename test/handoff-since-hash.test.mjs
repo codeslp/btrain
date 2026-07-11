@@ -6,8 +6,10 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import {
+  buildLaneGuidance,
   checkHandoff,
   computeHandoffStateHash,
+  waitForHandoffStateChange,
 } from "../src/brain_train/core.mjs"
 
 const exec = promisify(execFile)
@@ -35,6 +37,10 @@ async function runBtrain(args, cwd, envOverrides = {}) {
       code: typeof error.code === "number" ? error.code : 1,
     }
   }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
 async function bootstrapRepo() {
@@ -127,6 +133,45 @@ describe("computeHandoffStateHash", () => {
       computeHandoffStateHash(baseline),
       computeHandoffStateHash(mutated),
     )
+  })
+
+  it("ignores volatile cgraph latency while preserving substantive cgraph changes", () => {
+    const baseline = {
+      lanes: [{
+        _laneId: "a",
+        status: "in-progress",
+        cgraph: {
+          status: "ok",
+          latency_ms: { blast_radius: 12 },
+          blast_radius: { nodes_in_scope: 3 },
+        },
+      }],
+      locks: [],
+      overrides: [],
+    }
+    const latencyOnly = {
+      ...baseline,
+      lanes: [{
+        ...baseline.lanes[0],
+        cgraph: {
+          ...baseline.lanes[0].cgraph,
+          latency_ms: { blast_radius: 987 },
+        },
+      }],
+    }
+    const substantive = {
+      ...baseline,
+      lanes: [{
+        ...baseline.lanes[0],
+        cgraph: {
+          ...baseline.lanes[0].cgraph,
+          blast_radius: { nodes_in_scope: 4 },
+        },
+      }],
+    }
+
+    assert.equal(computeHandoffStateHash(baseline), computeHandoffStateHash(latencyOnly))
+    assert.notEqual(computeHandoffStateHash(baseline), computeHandoffStateHash(substantive))
   })
 })
 
@@ -265,5 +310,227 @@ describe("btrain handoff --since hash", () => {
     )
     assert.equal(matched.code, 0, matched.stderr)
     assert.ok(matched.stdout.split("\n")[0].trim() === "unchanged")
+  })
+})
+
+describe("btrain handoff wait", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    for (const lane of ["a", "b"]) {
+      const claim = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          lane,
+          "--task",
+          `Wait fixture ${lane}`,
+          "--owner",
+          "claude",
+          "--reviewer",
+          "codex",
+          "--files",
+          `src/${lane}/`,
+        ],
+        tmpDir,
+        { BTRAIN_AGENT: "claude" },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+    }
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("returns a stable lane-scoped hash", async () => {
+    const repoResult = await checkHandoff(tmpDir)
+    const laneA = await checkHandoff(tmpDir, { laneId: "a" })
+    const laneB = await checkHandoff(tmpDir, { laneId: "b" })
+
+    assert.equal(laneA.lanes.length, 1)
+    assert.equal(laneA.lanes[0]._laneId, "a")
+    assert.equal(laneB.lanes.length, 1)
+    assert.equal(laneB.lanes[0]._laneId, "b")
+    assert.notEqual(repoResult.stateHash, laneA.stateHash)
+    assert.notEqual(laneA.stateHash, laneB.stateHash)
+  })
+
+  it("wakes and prints canonical guidance when the watched lane changes", async () => {
+    const before = await checkHandoff(tmpDir, { laneId: "a" })
+    const waiting = runBtrain(
+      [
+        "handoff",
+        "wait",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--since",
+        before.stateHash,
+        "--timeout",
+        "2",
+        "--poll-interval",
+        "0.05",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "claude" },
+    )
+
+    await delay(150)
+    const update = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--actor",
+        "claude",
+        "--next",
+        "lane a changed",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "claude" },
+    )
+    assert.equal(update.code, 0, update.stderr)
+
+    const result = await waiting
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.startsWith("handoff changed"), result.stdout)
+    assert.ok(result.stdout.includes("--- lane a ---"), result.stdout)
+    assert.ok(!result.stdout.includes("--- lane b ---"), result.stdout)
+    assert.ok(result.stdout.includes("lane a changed"), result.stdout)
+    assert.ok(result.stdout.includes("ACT NOW"), result.stdout)
+  })
+
+  it("ignores unrelated lane changes and exits 2 on timeout", async () => {
+    const before = await checkHandoff(tmpDir, { laneId: "a" })
+    const waiting = runBtrain(
+      [
+        "handoff",
+        "wait",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--since",
+        before.stateHash,
+        "--timeout",
+        "0.4",
+        "--poll-interval",
+        "0.05",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "claude" },
+    )
+
+    await delay(100)
+    const update = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "b",
+        "--actor",
+        "claude",
+        "--next",
+        "only lane b changed",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "claude" },
+    )
+    assert.equal(update.code, 0, update.stderr)
+
+    const result = await waiting
+    assert.equal(result.code, 2, result.stderr)
+    assert.ok(result.stdout.startsWith("timed out"), result.stdout)
+    assert.ok(result.stdout.includes(`state hash: ${before.stateHash}`), result.stdout)
+    assert.ok(!result.stdout.includes("only lane b changed"), result.stdout)
+  })
+
+  it("uses the current hash as the baseline when --since is omitted", async () => {
+    const waiting = runBtrain(
+      [
+        "handoff",
+        "wait",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--timeout",
+        "2",
+        "--poll-interval",
+        "0.05",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "claude" },
+    )
+
+    await delay(150)
+    const update = await runBtrain(
+      [
+        "handoff",
+        "update",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--actor",
+        "claude",
+        "--next",
+        "woke without explicit since",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "claude" },
+    )
+    assert.equal(update.code, 0, update.stderr)
+
+    const result = await waiting
+    assert.equal(result.code, 0, result.stderr)
+    assert.ok(result.stdout.includes("woke without explicit since"), result.stdout)
+  })
+
+  it("core wait returns immediately when a supplied hash is already stale", async () => {
+    const startedAt = Date.now()
+    const result = await waitForHandoffStateChange(tmpDir, {
+      laneId: "a",
+      sinceHash: "0".repeat(16),
+      timeoutMs: 5_000,
+      pollIntervalMs: 50,
+    })
+
+    assert.equal(result.changed, true)
+    assert.equal(result.timedOut, false)
+    assert.ok(Date.now() - startedAt < 1_000)
+  })
+
+  it("tells waiting writers and reviewers how to attach a lane monitor", () => {
+    const reviewGuidance = buildLaneGuidance("a", {
+      status: "needs-review",
+      owner: "claude",
+      reviewer: "codex",
+      lockState: "active",
+      lockCount: 1,
+      lockPaths: ["src/a/"],
+    })
+    const changesGuidance = buildLaneGuidance("a", {
+      status: "changes-requested",
+      owner: "claude",
+      reviewer: "codex",
+      lockState: "active",
+      lockCount: 1,
+      lockPaths: ["src/a/"],
+    })
+
+    assert.ok(reviewGuidance.includes("bth wait --lane a"))
+    assert.ok(changesGuidance.includes("bth wait --lane a"))
   })
 })

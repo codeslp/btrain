@@ -35,6 +35,7 @@ import {
   syncActiveAgents,
   syncSkills,
   syncTemplates,
+  waitForHandoffStateChange,
 } from "./core.mjs"
 import {
   getConfiguredHarnessProfileId,
@@ -75,7 +76,8 @@ Usage:
                                                                               Bootstrap a repo, local dashboard, and agentchattr (--hooks installs managed git guards)
   btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
-  btrain handoff [--repo <path>] [--since <hash>]                               Check whose turn it is and what to do (--since short-circuits when state is unchanged)
+  btrain handoff [--repo <path>] [--lane <id>] [--since <hash>]                 Check whose turn it is and what to do (--since short-circuits when state is unchanged)
+  btrain handoff wait [--lane <id>] [--since <hash>] [--timeout <sec>]          Wait for a lane state change, then print its new canonical guidance (timeout exits 2)
   btrain handoff show-next [--lane <id>] [--repo <path>]                         Print the full Next Action body, expanding any .btrain/handoff-notes/ pointer
   btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [--pr <number|url>] [options]
                                                                               Claim a new task. --pr links a GH PR; --unblocked-context records a soft claim-time context check.
@@ -222,6 +224,22 @@ function parseOptions(args) {
   }
 
   return options
+}
+
+function parsePositiveSeconds(value, defaultValue, optionName) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue
+  }
+
+  const parsed = Number.parseFloat(String(value))
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new BtrainError({
+      message: `${optionName} must be a positive number of seconds.`,
+      reason: `Received ${JSON.stringify(value)}.`,
+      fix: `Use a positive value such as \`${optionName} 60\`.`,
+    })
+  }
+  return parsed
 }
 
 function formatPacketValue(value) {
@@ -1427,7 +1445,7 @@ async function run() {
   }
 
   if (command === "handoff") {
-    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next", "pull-pr"].includes(rest[0]) ? rest[0] : null
+    const subcommand = ["claim", "update", "request-changes", "resolve", "show-next", "pull-pr", "wait"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
 
     if (options.help || options.h) {
@@ -1436,6 +1454,39 @@ async function run() {
     }
 
     const repoRoot = await resolveRepoRoot(options.repo)
+
+    if (subcommand === "wait") {
+      const config = await readProjectConfig(repoRoot)
+      const laneConfigs = getLaneConfigs(config)
+      const laneId = typeof options.lane === "string" ? options.lane.trim() : ""
+      if (laneConfigs && !laneId) {
+        throw new BtrainError({
+          message: "`btrain handoff wait` requires --lane in a multi-lane repo.",
+          reason: "A repo-wide hash would wake the agent for unrelated lane activity.",
+          fix: `Use --lane with one of: ${laneConfigs.map((lane) => lane.id).join(", ")}.`,
+        })
+      }
+
+      const timeoutSeconds = parsePositiveSeconds(options.timeout, 3600, "--timeout")
+      const pollIntervalSeconds = parsePositiveSeconds(options["poll-interval"], 2, "--poll-interval")
+      const waitResult = await waitForHandoffStateChange(repoRoot, {
+        laneId,
+        sinceHash: typeof options.since === "string" ? options.since : "",
+        timeoutMs: Math.round(timeoutSeconds * 1000),
+        pollIntervalMs: Math.round(pollIntervalSeconds * 1000),
+      })
+
+      if (waitResult.timedOut) {
+        console.log(`timed out waiting for ${laneId ? `lane ${laneId}` : "handoff"} after ${timeoutSeconds}s`)
+        console.log(`state hash: ${waitResult.result.stateHash}`)
+        process.exitCode = 2
+        return
+      }
+
+      console.log("handoff changed")
+      printHandoffState(waitResult.result)
+      return
+    }
 
     if (subcommand === "show-next") {
       await runHandoffShowNext(repoRoot, options)
@@ -1483,7 +1534,7 @@ async function run() {
       return
     }
 
-    const result = await checkHandoff(repoRoot)
+    const result = await checkHandoff(repoRoot, { laneId: options.lane })
     const sinceHash = typeof options.since === "string" ? options.since.trim() : ""
     if (sinceHash && result.stateHash && sinceHash === result.stateHash) {
       console.log("unchanged")
