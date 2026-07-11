@@ -8,6 +8,7 @@ import {
   ensureDashboard,
   findAvailableDashboardPort,
   getDashboardStatus,
+  shouldAutoStartDashboard,
   stopDashboard,
 } from "../src/brain_train/dashboard.mjs"
 
@@ -34,6 +35,15 @@ afterEach(async () => {
 })
 
 describe("dashboard lifecycle", () => {
+  it("auto-starts for interactive handoffs with environment overrides", () => {
+    assert.equal(shouldAutoStartDashboard({ env: {}, isTTY: true }), true)
+    assert.equal(shouldAutoStartDashboard({ env: {}, isTTY: false }), false)
+    assert.equal(shouldAutoStartDashboard({ env: { BTRAIN_DASHBOARD_AUTO_OPEN: "true" }, isTTY: false }), true)
+    assert.equal(shouldAutoStartDashboard({ env: { BTRAIN_DASHBOARD_AUTO_OPEN: "false" }, isTTY: true }), false)
+    assert.equal(shouldAutoStartDashboard({ env: { CI: "true" }, isTTY: true }), false)
+    assert.equal(shouldAutoStartDashboard({ env: { CI: "false" }, isTTY: true }), true)
+  })
+
   it("starts and opens once, then reuses the healthy repo dashboard", async () => {
     const repoRoot = await createDashboardRepo()
     const port = await findAvailableDashboardPort(3400)

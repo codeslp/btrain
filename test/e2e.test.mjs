@@ -590,6 +590,43 @@ describe("installed CLI e2e", () => {
     }
   })
 
+  it("manages the dashboard through the installed CLI", async () => {
+    const projectDir = await createProjectRepo(installState.btrainBin)
+    cleanupDirs.push(projectDir)
+    const port = await getAvailablePort()
+
+    const start = await runInstalledBtrain(
+      installState.btrainBin,
+      projectDir,
+      ["dashboard", "start", "--repo", projectDir, "--port", String(port), "--no-open"],
+    )
+    assert.equal(start.code, 0, start.stderr)
+    assert.ok(start.stdout.includes("dashboard: started"), start.stdout)
+    assert.ok(start.stdout.includes(`http://127.0.0.1:${port}`), start.stdout)
+
+    try {
+      const healthResponse = await waitForUrl(`http://127.0.0.1:${port}/api/health`)
+      assert.equal((await healthResponse.json()).ok, true)
+
+      const status = await runInstalledBtrain(
+        installState.btrainBin,
+        projectDir,
+        ["dashboard", "status", "--repo", projectDir],
+      )
+      assert.equal(status.code, 0, status.stderr)
+      assert.ok(status.stdout.includes("dashboard: running"), status.stdout)
+      assert.ok(status.stdout.includes(`http://127.0.0.1:${port}`), status.stdout)
+    } finally {
+      const stop = await runInstalledBtrain(
+        installState.btrainBin,
+        projectDir,
+        ["dashboard", "stop", "--repo", projectDir],
+      )
+      assert.equal(stop.code, 0, stop.stderr)
+      assert.ok(stop.stdout.includes("dashboard: stopped"), stop.stdout)
+    }
+  })
+
   it("rejects mismatched actors when the installed CLI detects the current agent", async () => {
     const projectDir = await createProjectRepo(installState.btrainBin)
     cleanupDirs.push(projectDir)

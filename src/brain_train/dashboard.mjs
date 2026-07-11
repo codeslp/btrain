@@ -8,6 +8,8 @@ const DEFAULT_DASHBOARD_PORT = 3333
 const DASHBOARD_HOST = "127.0.0.1"
 const DASHBOARD_STATE_FILENAME = "dashboard.json"
 const DASHBOARD_LOG_FILENAME = "dashboard.log"
+const TRUE_VALUES = new Set(["1", "true", "yes"])
+const FALSE_VALUES = new Set(["0", "false", "no"])
 
 function statePath(repoRoot) {
   return path.join(repoRoot, ".btrain", DASHBOARD_STATE_FILENAME)
@@ -92,12 +94,36 @@ async function openDashboardUrl(url, { platform = process.platform, spawnImpl = 
     args = ["/c", "start", "", url]
   }
 
-  const child = spawnImpl(command, args, { detached: true, stdio: "ignore" })
-  child.unref()
+  await new Promise((resolve, reject) => {
+    const child = spawnImpl(command, args, { detached: true, stdio: "ignore" })
+    child.once("error", reject)
+    child.once("spawn", () => {
+      child.unref()
+      resolve()
+    })
+  })
+}
+
+function normalizedSetting(value) {
+  return String(value || "").toLowerCase()
 }
 
 function dashboardDisabled(env) {
-  return ["1", "true", "yes"].includes(String(env.BTRAIN_DASHBOARD_DISABLED || "").toLowerCase())
+  return TRUE_VALUES.has(normalizedSetting(env.BTRAIN_DASHBOARD_DISABLED))
+}
+
+function shouldAutoStartDashboard({ env = process.env, isTTY = process.stdout.isTTY } = {}) {
+  if (dashboardDisabled(env) || TRUE_VALUES.has(normalizedSetting(env.CI))) {
+    return false
+  }
+  const setting = normalizedSetting(env.BTRAIN_DASHBOARD_AUTO_OPEN)
+  if (FALSE_VALUES.has(setting)) {
+    return false
+  }
+  if (TRUE_VALUES.has(setting)) {
+    return true
+  }
+  return Boolean(isTTY)
 }
 
 function configuredPort(value, env) {
@@ -234,5 +260,6 @@ export {
   findAvailableDashboardPort,
   getDashboardStatus,
   openDashboardUrl,
+  shouldAutoStartDashboard,
   stopDashboard,
 }

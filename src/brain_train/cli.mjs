@@ -43,6 +43,13 @@ import {
   listHarnessProfiles,
 } from "./harness/index.mjs"
 import {
+  ensureDashboard,
+  getDashboardStatus,
+  openDashboardUrl,
+  shouldAutoStartDashboard,
+  stopDashboard,
+} from "./dashboard.mjs"
+import {
   HARNESS_TRACE_FAILURE_CATEGORIES,
   HARNESS_TRACE_OUTCOMES,
   listTraceBundles,
@@ -86,6 +93,10 @@ Usage:
                                                                               Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
   btrain handoff pull-pr --lane <id> --pr <number> [--show] [--acknowledge]     Fetch GH PR comments (issue, review, inline) into .btrain/pr-comments/ JSONL log
+  btrain dashboard start [--repo <path>] [--port <n>] [--no-open]              Start the repo HUD and open it unless --no-open is set
+  btrain dashboard status [--repo <path>]                                       Show the repo HUD process and URL
+  btrain dashboard open [--repo <path>]                                         Start if needed, then open the repo HUD
+  btrain dashboard stop [--repo <path>]                                         Stop the repo HUD started by btrain
   btrain harness list [--repo <path>]                                            List bundled and repo-local harness profiles
   btrain harness inspect [--repo <path>] [--profile <name>]                      Inspect one harness profile (defaults to active)
   btrain harness trace list [--repo <path>] [--limit <n>]                        List harness trace bundles under .btrain/harness/runs
@@ -1355,6 +1366,67 @@ async function runHcleanup(repoRoot, keep) {
   console.log(`kept: ${totalKept} warm entries`)
 }
 
+async function maybeAutoStartDashboard(repoRoot) {
+  if (!shouldAutoStartDashboard()) {
+    return
+  }
+  try {
+    const result = await ensureDashboard(repoRoot)
+    if (result.started) {
+      console.log(`dashboard: ${result.browserOpened ? "opened" : "started"} ${result.url}`)
+      if (result.browserError) {
+        console.error(`dashboard browser warning: ${result.browserError}`)
+      }
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error(`dashboard warning: ${error.message}`)
+    }
+  }
+}
+
+async function runDashboardCommand(repoRoot, subcommand, options) {
+  if (subcommand === "status") {
+    const status = await getDashboardStatus(repoRoot)
+    if (!status.running) {
+      console.log("dashboard: stopped")
+      return
+    }
+    console.log(`dashboard: running (pid ${status.pid})`)
+    console.log(`url: ${status.url}`)
+    return
+  }
+
+  if (subcommand === "stop") {
+    const result = await stopDashboard(repoRoot)
+    console.log(result.stopped ? `dashboard: stopped (pid ${result.pid})` : "dashboard: not running")
+    return
+  }
+
+  if (subcommand === "open") {
+    const status = await getDashboardStatus(repoRoot)
+    if (status.running) {
+      await openDashboardUrl(status.url)
+      console.log(`dashboard: opened ${status.url}`)
+      return
+    }
+  }
+
+  const result = await ensureDashboard(repoRoot, {
+    openBrowser: subcommand === "open" || !options["no-open"],
+    port: options.port,
+  })
+  if (result.disabled) {
+    console.log("dashboard: disabled by BTRAIN_DASHBOARD_DISABLED")
+    return
+  }
+  console.log(`dashboard: ${result.started ? "started" : "running"} (pid ${result.pid})`)
+  console.log(`url: ${result.url}`)
+  if (result.browserError) {
+    console.error(`dashboard browser warning: ${result.browserError}`)
+  }
+}
+
 async function run() {
   const [, , command, ...rest] = process.argv
 
@@ -1444,6 +1516,22 @@ async function run() {
     return
   }
 
+  if (command === "dashboard") {
+    const subcommand = ["start", "status", "open", "stop"].includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new BtrainError({
+        message: "`btrain dashboard` requires a subcommand.",
+        reason: "No dashboard action was provided.",
+        fix: "btrain dashboard start",
+        context: "Available subcommands: start, status, open, stop.",
+      })
+    }
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+    await runDashboardCommand(repoRoot, subcommand, options)
+    return
+  }
+
   if (command === "handoff") {
     const subcommand = ["claim", "update", "request-changes", "resolve", "show-next", "pull-pr", "wait"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
@@ -1495,6 +1583,7 @@ async function run() {
 
     if (subcommand === "claim") {
       await claimHandoff(repoRoot, options)
+      await maybeAutoStartDashboard(repoRoot)
       const result = await checkHandoff(repoRoot)
       printHandoffState(result)
       return

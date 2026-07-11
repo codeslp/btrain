@@ -847,6 +847,6 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[BTrain Dashboard] HUD Status monitor is running on http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[BTrain Dashboard] HUD Status monitor is running on http://127.0.0.1:${PORT}`);
 });

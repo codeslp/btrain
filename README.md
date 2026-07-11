@@ -159,10 +159,15 @@ Use `btrain go --repo .` when you need the broader bootstrap inventory of files 
 A local HUD at `http://localhost:3333` with live lane status, hot seat indicators, and file locks:
 
 ```bash
-node scripts/serve-dashboard.js    # from the bootstrapped repo root
+btrain dashboard start             # start and open the HUD
+btrain dashboard status            # print the process and URL
+btrain dashboard open              # reopen an existing HUD
+btrain dashboard stop              # stop this repo's HUD
 ```
 
-Features: PixiJS train animation, status-colored lane cards with hop/chug/squish animations, hot seat agent badges, expandable card details, and hazard-tape styling for repair-needed lanes.
+The first interactive `btrain handoff claim` starts and opens the HUD automatically. Later claims reuse the same repo-owned process instead of opening duplicate tabs. Set `BTRAIN_DASHBOARD_AUTO_OPEN=false` to disable claim-time startup, `BTRAIN_DASHBOARD_DISABLED=true` to disable all dashboard starts, or `BTRAIN_DASHBOARD_PORT=<port>` to choose the preferred port. If that port is occupied, btrain selects the next available port and records the process in `.btrain/dashboard.json`; server output goes to `.btrain/dashboard.log`.
+
+Features: all canonical handoff and PR states, status-colored lane cards, hot-seat agent badges, expandable delegation details, repair-needed hazard styling, and a health endpoint for lifecycle monitoring.
 
 ### agentchattr (Multi-Agent Chat)
 
