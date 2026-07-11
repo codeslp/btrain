@@ -9,7 +9,7 @@
 
 `btrain` should not be replaced by A2A, LangGraph, or LangSmith.
 
-The July 2026 runtime audit strengthens this conclusion but changes the immediate priority. The main gap is not another protocol or hosted tracing platform; it is a durable repo-local supervisor with per-lane cursors, acknowledgement, leases, retry, and restart recovery. See [the BTH supervisor implementation plan](./implementation_plan.md).
+The July 2026 runtime audit strengthens this conclusion but changes the immediate priority. The main gap is not another protocol or hosted tracing platform; it is a durable repo-local supervisor with per-lane cursors, acknowledgement, leases, retry, and restart recovery. See [the BTH supervisor and AgentChatTR reassessment](./bth-supervisor-agentchattr-reassessment.md).
 
 Those systems solve adjacent problems:
 
