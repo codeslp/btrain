@@ -71,6 +71,13 @@ btrain handoff update --lane a --status needs-review --actor "claude" \
   --preflight --changed "src/auth/index.ts" --verification "npm test" \
   --why "Auth logic drifted" --review-ask "Check unauth flows"
 
+# Keep this agent session attached to lane A and wake when its handoff changes.
+# `bth wait` snapshots the current lane hash when --since is omitted.
+bth wait --lane a --timeout 3600
+
+# After a session restart, resume from a previously printed state hash.
+bth wait --lane a --since <state-hash> --timeout 3600
+
 # Reviewer approves
 btrain handoff resolve --lane a --summary "Approved." --actor "codex"
 
@@ -100,6 +107,7 @@ btrain handoff request-changes --lane a \
 |---------|-------------|
 | `btrain init <repo>` | Bootstrap handoff files, lanes, config, skills, dashboard, and agentchattr |
 | `btrain handoff` | Print current state and what to do next |
+| `btrain handoff wait` | Block on one lane's state hash, ignore unrelated lanes, then print the new canonical guidance; timeout exits 2 |
 | `btrain handoff claim` | Claim a lane with task, owner, reviewer, file locks, and a delegation packet |
 | `btrain handoff update` | Update status, delegation packet fields, and reviewer context |
 | `btrain handoff resolve` | Approve local review; in PR-flow repos this advances to `ready-for-pr` |

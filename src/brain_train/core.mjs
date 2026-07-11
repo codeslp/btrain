@@ -1405,6 +1405,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.",
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
+  "- After handing a lane to a peer, either continue on another lane or run `bth wait --lane <id>` so the current session wakes with fresh guidance when that lane changes.",
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
   "- Use `rtk` (Rust Token Killer) to execute shell commands when available to minimize token usage.",
   "- Run `btrain status` or `btrain doctor` if the local workflow files look stale.",
@@ -5535,7 +5536,7 @@ function buildLaneGuidance(laneId, current) {
         lockLine,
         prLine,
         reviewerInstruction,
-        `${owner}: work on your other lane while waiting.`,
+        `${owner}: work on another lane, or monitor this one with \`bth wait --lane ${laneId}\`.`,
       ].join("\n")
     }
     case "ready-for-pr": {
@@ -5592,7 +5593,7 @@ function buildLaneGuidance(laneId, current) {
         current.reasonCode ? `Primary reason code: ${current.reasonCode}.` : "",
         current.reasonTags?.length ? `Reason tags: ${current.reasonTags.join(", ")}.` : "",
         `${owner}: address the reviewer findings in the same lane, then \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
-        `${reviewer}: wait for the writer to re-handoff the lane.`,
+        `${reviewer}: monitor the re-handoff with \`bth wait --lane ${laneId}\`, or continue on another lane.`,
       ].join("\n")
     }
     case "repair-needed": {
@@ -5639,7 +5640,49 @@ function buildLaneGuidance(laneId, current) {
   }
 }
 
-async function checkHandoff(repoRoot) {
+function scopeMultiLaneHandoffResult(result, laneId, { repoRoot, config }) {
+  const normalizedLaneId = typeof laneId === "string" ? laneId.trim().toLowerCase() : ""
+  if (!normalizedLaneId) {
+    return result
+  }
+
+  const lane = result.lanes.find((candidate) => candidate._laneId === normalizedLaneId)
+  if (!lane) {
+    throw new BtrainError({
+      message: `Unknown lane: ${normalizedLaneId}.`,
+      reason: "The requested handoff monitor lane is not configured in this repo.",
+      fix: `Use --lane with one of: ${result.lanes.map((candidate) => candidate._laneId).join(", ")}.`,
+    })
+  }
+
+  const locks = result.locks.filter((lock) => lock.lane === normalizedLaneId)
+  const overrides = result.overrides.filter(
+    (override) => override.scope !== "lane" || override.laneId === normalizedLaneId,
+  )
+  let guidance = buildLaneGuidance(normalizedLaneId, lane)
+
+  if (locks.length > 0) {
+    guidance += `\n\nActive locks:\n${locks.map((lock) => `  ${lock.lane}: ${lock.path} (${lock.owner})`).join("\n")}`
+  }
+
+  if (overrides.length > 0) {
+    guidance += `\n\nActive overrides:\n${overrides.map((record) => `  ${record.id}: ${formatOverrideSummary(record)}`).join("\n")}`
+  }
+
+  const scopedResult = {
+    ...result,
+    handoffPath: getLaneHandoffPath(repoRoot, config, normalizedLaneId),
+    current: lane,
+    lanes: [lane],
+    locks,
+    overrides,
+    guidance,
+  }
+  scopedResult.stateHash = computeHandoffStateHash(scopedResult)
+  return scopedResult
+}
+
+async function checkHandoff(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const repoName = config?.name || normalizeRepoName(repoRoot)
@@ -5680,7 +5723,7 @@ async function checkHandoff(repoRoot) {
       guidance,
     }
     multiResult.stateHash = computeHandoffStateHash(multiResult)
-    return multiResult
+    return scopeMultiLaneHandoffResult(multiResult, options.laneId, { repoRoot, config })
   }
 
   // Single-lane mode (backward compatible)
@@ -5822,6 +5865,58 @@ async function checkHandoff(repoRoot) {
   }
   singleResult.stateHash = computeHandoffStateHash(singleResult)
   return singleResult
+}
+
+async function waitForHandoffStateChange(
+  repoRoot,
+  {
+    laneId = "",
+    sinceHash = "",
+    timeoutMs = DEFAULT_LOOP_TIMEOUT_MS,
+    pollIntervalMs = DEFAULT_LOOP_POLL_INTERVAL_MS,
+  } = {},
+) {
+  const resolvedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 0
+    ? timeoutMs
+    : DEFAULT_LOOP_TIMEOUT_MS
+  const resolvedPollIntervalMs = Number.isFinite(pollIntervalMs) && pollIntervalMs > 0
+    ? pollIntervalMs
+    : DEFAULT_LOOP_POLL_INTERVAL_MS
+  const initial = await checkHandoff(repoRoot, { laneId })
+  const normalizedSinceHash = typeof sinceHash === "string" ? sinceHash.trim() : ""
+  const baselineHash = normalizedSinceHash || initial.stateHash
+
+  if (normalizedSinceHash && initial.stateHash !== normalizedSinceHash) {
+    return {
+      changed: true,
+      timedOut: false,
+      baselineHash,
+      result: initial,
+    }
+  }
+
+  const startedAt = Date.now()
+  let current = initial
+  while (Date.now() - startedAt < resolvedTimeoutMs) {
+    const remainingMs = resolvedTimeoutMs - (Date.now() - startedAt)
+    await delay(Math.min(resolvedPollIntervalMs, remainingMs))
+    current = await checkHandoff(repoRoot, { laneId })
+    if (current.stateHash !== baselineHash) {
+      return {
+        changed: true,
+        timedOut: false,
+        baselineHash,
+        result: current,
+      }
+    }
+  }
+
+  return {
+    changed: false,
+    timedOut: true,
+    baselineHash,
+    result: current,
+  }
 }
 
 function parseTomlString(rawValue) {
@@ -8784,5 +8879,6 @@ export {
   syncActiveAgents,
   syncSkills,
   syncTemplates,
+  waitForHandoffStateChange,
   withFileLock,
 }

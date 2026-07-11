@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 # bth — shorthand for `btrain handoff`
-# Passes all arguments through: `bth --lane a` → `btrain handoff --lane a`
+# Passes all arguments through: `bth wait --lane a` → `btrain handoff wait --lane a`
 exec btrain handoff "$@"
