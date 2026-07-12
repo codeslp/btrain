@@ -501,12 +501,13 @@ const server = http.createServer(async (req, res) => {
     .repo-toggle {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 3px;
       cursor: pointer;
       color: var(--text-muted);
       font-family: 'Chakra Petch', sans-serif;
-      font-size: 10px;
+      font-size: 8px;
       font-weight: 600;
+      padding: 3px 0;
       text-transform: uppercase;
     }
 
@@ -519,10 +520,10 @@ const server = http.createServer(async (req, res) => {
 
     .repo-toggle-track {
       position: relative;
-      width: 34px;
-      height: 18px;
+      width: 22px;
+      height: 11px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 6px;
       background: #191e28;
       transition: background 0.15s ease, border-color 0.15s ease;
     }
@@ -532,8 +533,8 @@ const server = http.createServer(async (req, res) => {
       position: absolute;
       top: 2px;
       left: 2px;
-      width: 12px;
-      height: 12px;
+      width: 5px;
+      height: 5px;
       border-radius: 50%;
       background: #778292;
       transition: transform 0.15s ease, background 0.15s ease;
@@ -545,7 +546,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     .repo-toggle input:checked + .repo-toggle-track::after {
-      transform: translateX(16px);
+      transform: translateX(11px);
       background: var(--resolved);
     }
 
