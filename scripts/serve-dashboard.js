@@ -27,9 +27,9 @@ const STATUS_CLASS_NAMES = {
   resolved: 'status-resolved'
 };
 
-function getActiveAgents() {
+function getActiveAgents(repoRoot) {
   try {
-    const tomlPath = path.join(process.cwd(), '.btrain', 'project.toml');
+    const tomlPath = path.join(repoRoot, '.btrain', 'project.toml');
     if (!fs.existsSync(tomlPath)) {
       return ['(Not found)'];
     }
@@ -97,11 +97,13 @@ function appendBulletSection(lines, title, values) {
   lines.push(`${title}:`, '', ...items.map((item) => `- ${item}`), '');
 }
 
-function buildLaneFullText(lane) {
+function buildLaneFullText(lane, repo) {
   const lockPaths = normalizeTextList(lane.lockPaths);
   const reasonTags = normalizeTextList(lane.reasonTags);
   const packet = lane.delegationPacket || {};
   const lines = [
+    `Repo: ${repo.name}`,
+    `Path: ${repo.path}`,
     `Lane: ${lane._laneId || lane.lane || '(unknown)'}`,
     `Task: ${lane.task || '(no task)'}`,
     `Status: ${lane.status || 'idle'}`,
@@ -149,7 +151,7 @@ function buildLaneFullText(lane) {
   return lines.join('\n');
 }
 
-function toDashboardLane(lane) {
+function toDashboardLane(lane, repo) {
   const task = lane.task || '(no task)';
   const writer = lane.owner || '';
   const reviewer = lane.reviewer || '';
@@ -158,15 +160,20 @@ function toDashboardLane(lane) {
   const packet = lane.delegationPacket || {};
   const objective = summarizeText(packet.objective);
   const doneWhen = summarizeText(packet.doneWhen);
-  const fullText = buildLaneFullText(lane);
+  const fullText = buildLaneFullText(lane, repo);
   let hotSeat = 'Unassigned';
   const resolveHotSeat = HOT_SEAT_RESOLVERS[lane.status];
   if (resolveHotSeat) {
     hotSeat = resolveHotSeat({ writer, reviewer, repairOwner }) || 'Unassigned';
   }
 
+  const laneId = lane._laneId || lane.lane || 'default';
+  const repoKey = Buffer.from(repo.path).toString('base64url');
   return {
-    id: lane._laneId || lane.lane || '',
+    id: `${repoKey}-${laneId}`,
+    laneId,
+    repoName: repo.name,
+    repoPath: repo.path,
     status: lane.status || 'idle',
     desc: task,
     writer,
@@ -180,16 +187,53 @@ function toDashboardLane(lane) {
   };
 }
 
+function getRepoLanes(repo) {
+  if (Array.isArray(repo.lanes) && repo.lanes.length > 0) {
+    return repo.lanes;
+  }
+  if (repo.current) {
+    return [{ ...repo.current, _laneId: 'default' }];
+  }
+  return [];
+}
+
 function getBtrainStatus() {
   try {
-    const raw = execFileSync('btrain', ['status', '--repo', '.', '--json'], { encoding: 'utf8' });
+    const raw = execFileSync('btrain', ['status', '--json'], {
+      encoding: 'utf8',
+      maxBuffer: 20 * 1024 * 1024,
+    });
     const statuses = JSON.parse(raw);
-    const repoStatus = Array.isArray(statuses) ? statuses[0] : null;
-    const currentLanes = Array.isArray(repoStatus?.lanes) ? repoStatus.lanes.map(toDashboardLane) : [];
-    return { lanes: currentLanes, activeAgents: getActiveAgents() };
+    const repositories = [];
+    const unavailableRepos = [];
+    const activeAgents = new Set();
+
+    for (const repo of Array.isArray(statuses) ? statuses : []) {
+      if (!repo?.path || repo.current?.status === 'missing') {
+        unavailableRepos.push({ name: repo?.name || '(unknown)', path: repo?.path || '', status: 'missing' });
+        continue;
+      }
+
+      const sourceLanes = getRepoLanes(repo);
+      const agents = getActiveAgents(repo.path);
+      agents.forEach((agent) => activeAgents.add(agent));
+      repositories.push({
+        name: repo.name,
+        path: repo.path,
+        lanes: sourceLanes.map((lane) => toDashboardLane(lane, repo)),
+      });
+    }
+
+    return {
+      scope: 'global',
+      repositories,
+      lanes: repositories.flatMap((repo) => repo.lanes),
+      activeAgents: [...activeAgents].sort(),
+      unavailableRepos,
+    };
   } catch (error) {
     console.error('Error fetching btrain status:', error);
-    return { lanes: [], activeAgents: [] };
+    return { scope: 'global', repositories: [], lanes: [], activeAgents: [], unavailableRepos: [] };
   }
 }
 
@@ -199,7 +243,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(getBtrainStatus()));
   } else if (req.url === '/api/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, repo: process.cwd(), port: PORT }));
+    res.end(JSON.stringify({ ok: true, scope: 'global', port: PORT }));
   } else if (req.url === '/' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`
@@ -304,6 +348,33 @@ const server = http.createServer((req, res) => {
       display: flex;
       gap: 8px;
       align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .network-summary,
+    .unavailable-repos {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 18px;
+    }
+
+    .unavailable-repos {
+      color: var(--repair-needed);
+    }
+
+    .indicator-repo {
+      width: 100%;
+      padding: 4px 3px;
+      overflow: hidden;
+      color: var(--text-muted);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 8px;
+      line-height: 1.2;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     /* Lane Top Indicators (Vertical Mini Cards) */
@@ -342,7 +413,7 @@ const server = http.createServer((req, res) => {
       border-radius: 4px;
       cursor: pointer;
       overflow: visible;
-      width: 46px; /* Narrow */
+      width: 72px;
       transition: border-color 0.2s ease, box-shadow 0.2s ease;
       will-change: transform;
     }
@@ -452,6 +523,18 @@ const server = http.createServer((req, res) => {
       position: relative;
       transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
       box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .repo-tag {
+      max-width: calc(100% - 120px);
+      margin-bottom: 12px;
+      overflow: hidden;
+      color: var(--ready-for-pr);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .lane-card:hover {
@@ -660,9 +743,12 @@ const server = http.createServer((req, res) => {
 </head>
 <body>
   <div class="header-container">
-    <h1><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg> ${path.basename(process.cwd())} <span style="font-size: 12px; color: var(--text-muted); letter-spacing: 1px; text-transform: lowercase; margin-left: auto;">btrain console</span> <span class="auto-refresh" id="last-updated">INIT...</span></h1>
+    <h1><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg> BTrain Network <span style="font-size: 12px; color: var(--text-muted); letter-spacing: 1px; text-transform: lowercase; margin-left: auto;">global console</span> <span class="auto-refresh" id="last-updated">INIT...</span></h1>
     <div class="agents-container" id="agents-container"></div>
   </div>
+
+  <div class="network-summary" id="network-summary">Discovering registered repos...</div>
+  <div class="unavailable-repos" id="unavailable-repos"></div>
 
   <div class="lane-indicators" id="lane-indicators-container">
     <!-- Renders top lane pills -->
@@ -718,6 +804,10 @@ const server = http.createServer((req, res) => {
         .replace(/>/g, "&gt;");
     };
 
+    const escapeAttribute = (unsafe) => escapeHtml(unsafe)
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
     const updateDOMIfChanged = (elId, newHtml) => {
       const el = document.getElementById(elId);
       if (!el) return;
@@ -732,6 +822,14 @@ const server = http.createServer((req, res) => {
       try {
         const response = await fetch('/api/status');
         const data = await response.json();
+
+        const repoCount = data.repositories?.length || 0;
+        const laneCount = data.lanes?.length || 0;
+        updateDOMIfChanged('network-summary', \`REGISTERED NETWORK // \${repoCount} healthy repos // \${laneCount} lanes\`);
+        const unavailableUi = (data.unavailableRepos || []).length > 0
+          ? \`UNAVAILABLE REGISTRY ENTRIES // \${data.unavailableRepos.map(repo => escapeHtml(repo.name)).join(' // ')}\`
+          : '';
+        updateDOMIfChanged('unavailable-repos', unavailableUi);
         
         // Active Agents Header
         if (data.activeAgents) {
@@ -741,7 +839,7 @@ const server = http.createServer((req, res) => {
               font-family: 'Chakra Petch', sans-serif;
               padding: 4px 12px; border-radius: 2px; font-size: 13px; text-transform: uppercase; font-weight: 700;
               background-color: \${identity.color}15; color: \${identity.color}; border: 1px solid \${identity.color}66;
-            ">\${ag}</span>\`;
+            ">\${escapeHtml(ag)}</span>\`;
           }).join('&nbsp;');
           updateDOMIfChanged('agents-container', agentsUi);
         }
@@ -752,8 +850,9 @@ const server = http.createServer((req, res) => {
           const identity = getAgentIdentity(lane.hotSeat);
 
           return \`
-            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${lane.status.toUpperCase()}">
-              <div class="lane-box \${lane.status}">\${lane.id}</div>
+            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${escapeHtml(lane.repoName)} // \${lane.status.toUpperCase()}">
+              <div class="indicator-repo">\${escapeHtml(lane.repoName)}</div>
+              <div class="lane-box \${lane.status}">\${escapeHtml(lane.laneId)}</div>
               \${hasHotSeat ? \`
                 <div class="indicator-agent" style="color: \${identity.color};">\${identity.short}</div>
               \` : \`
@@ -774,6 +873,7 @@ const server = http.createServer((req, res) => {
           
           return \`
           <div id="card-\${lane.id}" class="lane-card \${isExpanded}" data-status="\${lane.status}" onclick="toggleCard('\${lane.id}')">
+            <div class="repo-tag" title="\${escapeAttribute(lane.repoPath)}">REPO // \${escapeHtml(lane.repoName)}</div>
             \${hasHotSeat ? \`
               <div class="lane-hot-seat" style="color: \${hsIdentity.color}; border-color: \${hsIdentity.color}; box-shadow: 0 0 12px \${hsIdentity.color}40;">
                 HOTSEAT // \${hsIdentity.short}
@@ -781,7 +881,7 @@ const server = http.createServer((req, res) => {
             \` : ''}
             
             <div class="lane-header">
-              <div class="lane-id">LANE \${lane.id}</div>
+              <div class="lane-id">LANE \${escapeHtml(lane.laneId)}</div>
               <div class="lane-status \${renderStatusClass(lane.status)}">[\${lane.status}]</div>
             </div>
 
@@ -799,7 +899,7 @@ const server = http.createServer((req, res) => {
               </div>
             \` : ''}
 
-            <div class="lane-desc">\${lane.desc}</div>
+            <div class="lane-desc">\${escapeHtml(lane.desc)}</div>
             \${lane.objective || lane.doneWhen ? \`
               <div class="lane-packet-summary">
                 \${lane.objective ? \`
