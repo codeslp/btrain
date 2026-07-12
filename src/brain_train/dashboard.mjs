@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import net from "node:net"
+import os from "node:os"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
+import { fileURLToPath } from "node:url"
 
 const DEFAULT_DASHBOARD_PORT = 3333
 const DASHBOARD_HOST = "127.0.0.1"
@@ -10,8 +12,17 @@ const DASHBOARD_STATE_FILENAME = "dashboard.json"
 const DASHBOARD_LOG_FILENAME = "dashboard.log"
 const TRUE_VALUES = new Set(["1", "true", "yes"])
 const FALSE_VALUES = new Set(["0", "false", "no"])
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 
-function statePath(repoRoot) {
+function dashboardHome(env = process.env) {
+  return path.resolve(env.BRAIN_TRAIN_HOME || path.join(os.homedir(), ".btrain"))
+}
+
+function statePath(env) {
+  return path.join(dashboardHome(env), DASHBOARD_STATE_FILENAME)
+}
+
+function legacyStatePath(repoRoot) {
   return path.join(repoRoot, ".btrain", DASHBOARD_STATE_FILENAME)
 }
 
@@ -27,41 +38,86 @@ async function normalizedPath(value) {
   }
 }
 
-async function readDashboardState(repoRoot) {
+async function readJson(filePath) {
   try {
-    return JSON.parse(await fs.readFile(statePath(repoRoot), "utf8"))
+    return JSON.parse(await fs.readFile(filePath, "utf8"))
   } catch {
     return null
   }
 }
 
-async function writeDashboardState(repoRoot, state) {
-  const btrainDir = path.join(repoRoot, ".btrain")
-  const target = statePath(repoRoot)
+async function readDashboardState(env) {
+  return readJson(statePath(env))
+}
+
+async function writeDashboardState(state, env) {
+  const home = dashboardHome(env)
+  const target = statePath(env)
   const temporary = `${target}.${process.pid}.tmp`
-  await fs.mkdir(btrainDir, { recursive: true })
+  await fs.mkdir(home, { recursive: true })
   await fs.writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8")
   await fs.rename(temporary, target)
 }
 
-async function removeDashboardState(repoRoot) {
-  await fs.rm(statePath(repoRoot), { force: true })
+async function removeDashboardState(env) {
+  await fs.rm(statePath(env), { force: true })
 }
 
-async function probeDashboard(repoRoot, port, fetchImpl = fetch) {
+async function fetchHealth(port, fetchImpl = fetch) {
   try {
     const response = await fetchImpl(`${dashboardUrl(port)}/api/health`, {
       signal: AbortSignal.timeout(750),
     })
     if (!response.ok) {
-      return false
+      return null
     }
-    const payload = await response.json()
-    return payload.ok === true
-      && await normalizedPath(payload.repo) === await normalizedPath(repoRoot)
+    return response.json()
   } catch {
+    return null
+  }
+}
+
+async function probeDashboard(port, fetchImpl = fetch) {
+  const payload = await fetchHealth(port, fetchImpl)
+  return payload?.ok === true && payload.scope === "global"
+}
+
+async function probeLegacyDashboard(repoRoot, port, fetchImpl = fetch) {
+  const payload = await fetchHealth(port, fetchImpl)
+  return payload?.ok === true
+    && !payload.scope
+    && payload.repo
+    && await normalizedPath(payload.repo) === await normalizedPath(repoRoot)
+}
+
+function terminateProcess(pid) {
+  if (!pid) {
     return false
   }
+  try {
+    process.kill(pid, "SIGTERM")
+    return true
+  } catch (error) {
+    if (error.code !== "ESRCH") {
+      throw error
+    }
+    return false
+  }
+}
+
+async function migrateLegacyDashboard(repoRoot, fetchImpl) {
+  const legacyPath = legacyStatePath(repoRoot)
+  const legacy = await readJson(legacyPath)
+  if (!legacy) {
+    return false
+  }
+  if (!legacy.port || !await probeLegacyDashboard(repoRoot, legacy.port, fetchImpl)) {
+    await fs.rm(legacyPath, { force: true })
+    return false
+  }
+  terminateProcess(legacy.pid)
+  await fs.rm(legacyPath, { force: true })
+  return true
 }
 
 async function canListen(port) {
@@ -82,6 +138,16 @@ async function findAvailableDashboardPort(startPort = DEFAULT_DASHBOARD_PORT) {
     }
   }
   throw new Error(`No dashboard port is available between ${startPort} and ${Math.min(startPort + 20, 65535)}.`)
+}
+
+async function waitForAvailablePort(startPort) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await canListen(startPort)) {
+      return startPort
+    }
+    await delay(50)
+  }
+  return findAvailableDashboardPort(startPort)
 }
 
 async function openDashboardUrl(url, { platform = process.platform, spawnImpl = spawn } = {}) {
@@ -134,9 +200,10 @@ function configuredPort(value, env) {
   return parsed
 }
 
-async function waitForDashboard(repoRoot, port, fetchImpl) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    if (await probeDashboard(repoRoot, port, fetchImpl)) {
+async function waitForDashboard(port, fetchImpl) {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    if (await probeDashboard(port, fetchImpl)) {
       return true
     }
     await delay(100)
@@ -144,9 +211,9 @@ async function waitForDashboard(repoRoot, port, fetchImpl) {
   return false
 }
 
-async function getDashboardStatus(repoRoot, { fetchImpl = fetch } = {}) {
-  const state = await readDashboardState(repoRoot)
-  if (!state?.port || !await probeDashboard(repoRoot, state.port, fetchImpl)) {
+async function getDashboardStatus(repoRoot, { env = process.env, fetchImpl = fetch } = {}) {
+  const state = await readDashboardState(env)
+  if (!state?.port || !await probeDashboard(state.port, fetchImpl)) {
     return { running: false, state }
   }
   return {
@@ -155,6 +222,18 @@ async function getDashboardStatus(repoRoot, { fetchImpl = fetch } = {}) {
     port: state.port,
     url: dashboardUrl(state.port),
     state,
+  }
+}
+
+async function resolveDashboardScript(repoRoot) {
+  const bundled = path.join(PACKAGE_ROOT, "scripts", "serve-dashboard.js")
+  try {
+    await fs.access(bundled)
+    return bundled
+  } catch {
+    const local = path.join(repoRoot, "scripts", "serve-dashboard.js")
+    await fs.access(local)
+    return local
   }
 }
 
@@ -170,15 +249,18 @@ async function ensureDashboard(repoRoot, {
     return { running: false, disabled: true }
   }
 
-  const existing = await getDashboardStatus(repoRoot, { fetchImpl })
+  const existing = await getDashboardStatus(repoRoot, { env, fetchImpl })
   if (existing.running) {
     return { ...existing, started: false, browserOpened: false }
   }
 
-  const script = path.join(repoRoot, "scripts", "serve-dashboard.js")
-  await fs.access(script)
-  const selectedPort = await findAvailableDashboardPort(configuredPort(port, env))
-  const logPath = path.join(repoRoot, ".btrain", DASHBOARD_LOG_FILENAME)
+  const preferredPort = configuredPort(port, env)
+  const migratedLegacy = await migrateLegacyDashboard(repoRoot, fetchImpl)
+  const selectedPort = migratedLegacy
+    ? await waitForAvailablePort(preferredPort)
+    : await findAvailableDashboardPort(preferredPort)
+  const script = await resolveDashboardScript(repoRoot)
+  const logPath = path.join(dashboardHome(env), DASHBOARD_LOG_FILENAME)
   await fs.mkdir(path.dirname(logPath), { recursive: true })
   const logHandle = await fs.open(logPath, "a")
   let child
@@ -195,18 +277,17 @@ async function ensureDashboard(repoRoot, {
   }
 
   const state = {
+    scope: "global",
     pid: child.pid,
     port: selectedPort,
-    repo: await normalizedPath(repoRoot),
     startedAt: new Date().toISOString(),
+    startedByRepo: await normalizedPath(repoRoot),
   }
-  await writeDashboardState(repoRoot, state)
+  await writeDashboardState(state, env)
 
-  if (!await waitForDashboard(repoRoot, selectedPort, fetchImpl)) {
-    try {
-      process.kill(child.pid, "SIGTERM")
-    } catch {}
-    await removeDashboardState(repoRoot)
+  if (!await waitForDashboard(selectedPort, fetchImpl)) {
+    terminateProcess(child.pid)
+    await removeDashboardState(env)
     throw new Error(`Dashboard did not become healthy. See ${logPath}.`)
   }
 
@@ -233,23 +314,18 @@ async function ensureDashboard(repoRoot, {
   }
 }
 
-async function stopDashboard(repoRoot, { fetchImpl = fetch } = {}) {
-  const state = await readDashboardState(repoRoot)
+async function stopDashboard(repoRoot, { env = process.env, fetchImpl = fetch } = {}) {
+  const state = await readDashboardState(env)
   if (!state) {
-    return { stopped: false, reason: "not-running" }
+    const stoppedLegacy = await migrateLegacyDashboard(repoRoot, fetchImpl)
+    return { stopped: stoppedLegacy, reason: stoppedLegacy ? "legacy" : "not-running" }
   }
 
-  const ownsProcess = state.port && await probeDashboard(repoRoot, state.port, fetchImpl)
-  if (ownsProcess && state.pid) {
-    try {
-      process.kill(state.pid, "SIGTERM")
-    } catch (error) {
-      if (error.code !== "ESRCH") {
-        throw error
-      }
-    }
+  const ownsProcess = state.port && await probeDashboard(state.port, fetchImpl)
+  if (ownsProcess) {
+    terminateProcess(state.pid)
   }
-  await removeDashboardState(repoRoot)
+  await removeDashboardState(env)
   return { stopped: ownsProcess, pid: state.pid, port: state.port }
 }
 

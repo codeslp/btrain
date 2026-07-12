@@ -154,7 +154,7 @@ Use `btrain go --repo .` when you need the broader bootstrap inventory of files 
 
 ### Console Dashboard
 
-`btrain init` scaffolds a local dashboard entrypoint plus the handoff-history helpers into the target repo under `scripts/`.
+The dashboard is one global HUD for every repo in the BTrain registry. `btrain init` registers a repo; it does not create another dashboard process.
 
 A local HUD at `http://localhost:3333` with live lane status, hot seat indicators, and file locks:
 
@@ -162,10 +162,12 @@ A local HUD at `http://localhost:3333` with live lane status, hot seat indicator
 btrain dashboard start             # start and open the HUD
 btrain dashboard status            # print the process and URL
 btrain dashboard open              # reopen an existing HUD
-btrain dashboard stop              # stop this repo's HUD
+btrain dashboard stop              # stop the shared HUD
 ```
 
-The first interactive `btrain handoff claim` starts and opens the HUD automatically. Later claims reuse the same repo-owned process instead of opening duplicate tabs. Set `BTRAIN_DASHBOARD_AUTO_OPEN=false` to disable claim-time startup, `BTRAIN_DASHBOARD_DISABLED=true` to disable all dashboard starts, or `BTRAIN_DASHBOARD_PORT=<port>` to choose the preferred port. If that port is occupied, btrain selects the next available port and records the process in `.btrain/dashboard.json`; server output goes to `.btrain/dashboard.log`.
+The first interactive `btrain handoff claim` in any registered repo starts and opens the HUD automatically. Claims from every other repo reuse that process and browser tab. The HUD reads `btrain status --json`, displays repo-qualified lanes, and lists stale registry entries separately instead of silently dropping them.
+
+Set `BTRAIN_DASHBOARD_AUTO_OPEN=false` to disable claim-time startup, `BTRAIN_DASHBOARD_DISABLED=true` to disable all dashboard starts, or `BTRAIN_DASHBOARD_PORT=<port>` to choose the preferred port. If that port is occupied, btrain selects the next available port. Process state and logs are global at `~/.btrain/dashboard.json` and `~/.btrain/dashboard.log` (or under `BRAIN_TRAIN_HOME`). Existing repo-owned dashboards are stopped and migrated when that repo first starts the global HUD.
 
 Features: all canonical handoff and PR states, status-colored lane cards, hot-seat agent badges, expandable delegation details, repair-needed hazard styling, and a health endpoint for lifecycle monitoring.
 

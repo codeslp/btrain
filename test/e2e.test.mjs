@@ -387,6 +387,18 @@ describe("installed CLI e2e", () => {
   it("embeds client-side status mappings for dashboard rendering", async () => {
     const projectDir = await createProjectRepo(installState.btrainBin)
     cleanupDirs.push(projectDir)
+    const secondProjectDir = await makeTmpDir()
+    cleanupDirs.push(secondProjectDir)
+    const secondGitInit = await runCommand("git", ["init", secondProjectDir], {
+      cwd: REPO_ROOT,
+      env: process.env,
+    })
+    assert.equal(secondGitInit.code, 0, secondGitInit.stderr)
+    const secondInit = await runCommand(installState.btrainBin, ["init", secondProjectDir], {
+      cwd: secondProjectDir,
+      env: buildProjectEnv(projectDir),
+    })
+    assert.equal(secondInit.code, 0, secondInit.stderr)
 
     const setAgentsResult = await runInstalledBtrain(
       installState.btrainBin,
@@ -545,8 +557,14 @@ describe("installed CLI e2e", () => {
     try {
       const statusResponse = await waitForUrl(`http://127.0.0.1:${port}/api/status`)
       const statusPayload = await statusResponse.json()
-      const laneA = statusPayload.lanes.find((lane) => lane.id === "a")
-      const laneB = statusPayload.lanes.find((lane) => lane.id === "b")
+      assert.equal(statusPayload.scope, "global", JSON.stringify(statusPayload))
+      assert.equal(statusPayload.repositories.length, 2, JSON.stringify(statusPayload))
+      const registeredPaths = await Promise.all(statusPayload.repositories.map((repo) => fs.realpath(repo.path)))
+      assert.ok(registeredPaths.includes(await fs.realpath(secondProjectDir)), JSON.stringify(statusPayload.repositories))
+      const laneA = statusPayload.lanes.find((lane) => lane.laneId === "a")
+      const laneB = statusPayload.lanes.find((lane) => lane.laneId === "b")
+      assert.equal(laneA?.repoName, path.basename(projectDir), JSON.stringify(laneA))
+      assert.notEqual(laneA?.id, laneA?.laneId, JSON.stringify(laneA))
       assert.equal(laneA?.status, "changes-requested", JSON.stringify(statusPayload))
       assert.equal(laneA?.hotSeat, "WriterBot", JSON.stringify(statusPayload))
       assert.equal(laneA?.objective, "Render delegation packet fields in the dashboard card.", JSON.stringify(laneA))
@@ -565,7 +583,7 @@ describe("installed CLI e2e", () => {
       const healthResponse = await waitForUrl(`http://127.0.0.1:${port}/api/health`)
       const healthPayload = await healthResponse.json()
       assert.equal(healthPayload.ok, true, JSON.stringify(healthPayload))
-      assert.equal(await fs.realpath(healthPayload.repo), await fs.realpath(projectDir), JSON.stringify(healthPayload))
+      assert.equal(healthPayload.scope, "global", JSON.stringify(healthPayload))
       assert.equal(healthPayload.port, port, JSON.stringify(healthPayload))
 
       const htmlResponse = await waitForUrl(`http://127.0.0.1:${port}/`)
@@ -582,6 +600,9 @@ describe("installed CLI e2e", () => {
       assert.ok(html.includes("DONE //"), html)
       assert.ok(html.includes("lane.objective"), html)
       assert.ok(html.includes("lane.doneWhen"), html)
+      assert.ok(html.includes("BTrain Network"), html)
+      assert.ok(html.includes("REPO //"), html)
+      assert.ok(html.includes("data.repositories"), html)
       assert.ok(!html.includes("return STATUS_CLASS_NAMES[status] || '';"), html)
       assert.ok(!html.includes("lane.isBug"), html)
       assert.ok(!html.includes("bug-sprout"), html)
