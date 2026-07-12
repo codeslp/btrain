@@ -435,13 +435,23 @@ const server = http.createServer(async (req, res) => {
       padding: 12px 14px;
     }
 
-    .repo-controls-panel summary {
-      cursor: pointer;
+    .repo-controls-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
       color: var(--text-muted);
       font-family: 'Chakra Petch', sans-serif;
       font-size: 12px;
       letter-spacing: 1px;
       text-transform: uppercase;
+    }
+
+    .repo-controls-help {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0;
+      text-transform: none;
     }
 
     .repo-controls {
@@ -487,6 +497,64 @@ const server = http.createServer(async (req, res) => {
 
     .repo-control button:hover { border-color: var(--in-progress); }
     .repo-control button.remove:hover { border-color: var(--changes-requested); color: var(--changes-requested); }
+
+    .repo-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-family: 'Chakra Petch', sans-serif;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .repo-toggle input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+    }
+
+    .repo-toggle-track {
+      position: relative;
+      width: 34px;
+      height: 18px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #191e28;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    .repo-toggle-track::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #778292;
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+
+    .repo-toggle input:checked + .repo-toggle-track {
+      border-color: var(--resolved);
+      background: rgba(0, 255, 153, 0.18);
+    }
+
+    .repo-toggle input:checked + .repo-toggle-track::after {
+      transform: translateX(16px);
+      background: var(--resolved);
+    }
+
+    .repo-toggle input:focus-visible + .repo-toggle-track {
+      outline: 2px solid var(--in-progress);
+      outline-offset: 2px;
+    }
+
+    .repo-toggle input:disabled + .repo-toggle-track { opacity: 0.5; }
 
     .indicator-repo {
       width: 100%;
@@ -873,10 +941,13 @@ const server = http.createServer(async (req, res) => {
 
   <div class="network-summary" id="network-summary">Discovering registered repos...</div>
   <div class="unavailable-repos" id="unavailable-repos"></div>
-  <details class="repo-controls-panel">
-    <summary id="repo-controls-summary">Manage repositories</summary>
+  <section class="repo-controls-panel" aria-labelledby="repo-controls-summary">
+    <div class="repo-controls-heading">
+      <span id="repo-controls-summary">Manage repositories</span>
+      <span class="repo-controls-help">Toggle a repo off to hide its lanes without unregistering it.</span>
+    </div>
     <div class="repo-controls" id="repo-controls"></div>
-  </details>
+  </section>
 
   <div class="lane-indicators" id="lane-indicators-container">
     <!-- Renders top lane pills -->
@@ -927,19 +998,25 @@ const server = http.createServer(async (req, res) => {
 
     async function updateRepo(action, repoPath) {
       if (action === 'remove' && !window.confirm('Remove this repo from the BTrain registry? This does not delete project files.')) {
-        return;
+        return false;
       }
-      const response = await fetch('/api/repositories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, path: repoPath }),
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        window.alert(result.error || 'Repository update failed.');
-        return;
+      try {
+        const response = await fetch('/api/repositories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, path: repoPath }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          window.alert(result.error || 'Repository update failed.');
+          return false;
+        }
+        await fetchStatus();
+        return true;
+      } catch (error) {
+        window.alert(error.message || 'Repository update failed.');
+        return false;
       }
-      await fetchStatus();
     }
 
     const escapeHtml = (unsafe) => {
@@ -981,7 +1058,11 @@ const server = http.createServer(async (req, res) => {
         const repoControlsHtml = repoControls.map(repo => \`
           <div class="repo-control \${repo.enabled ? '' : 'disabled'} \${repo.available ? '' : 'missing'}" title="\${escapeAttribute(repo.path)}">
             <span class="repo-control-name">\${escapeHtml(repo.name)}\${repo.available ? '' : ' // missing'}</span>
-            <button data-repo-action="\${repo.enabled ? 'disable' : 'enable'}" data-repo-path="\${escapeAttribute(repo.path)}">\${repo.enabled ? 'off' : 'on'}</button>
+            <label class="repo-toggle">
+              <input type="checkbox" data-repo-toggle data-repo-path="\${escapeAttribute(repo.path)}" aria-label="Toggle \${escapeAttribute(repo.name)}" \${repo.enabled ? 'checked' : ''}>
+              <span class="repo-toggle-track" aria-hidden="true"></span>
+              <span>\${repo.enabled ? 'on' : 'off'}</span>
+            </label>
             <button class="remove" data-repo-action="remove" data-repo-path="\${escapeAttribute(repo.path)}">remove</button>
           </div>
         \`).join('');
@@ -1096,6 +1177,16 @@ const server = http.createServer(async (req, res) => {
     document.getElementById('repo-controls').addEventListener('click', (event) => {
       const button = event.target.closest('button[data-repo-action]');
       if (button) updateRepo(button.dataset.repoAction, button.dataset.repoPath);
+    });
+    document.getElementById('repo-controls').addEventListener('change', async (event) => {
+      const toggle = event.target.closest('input[data-repo-toggle]');
+      if (!toggle) return;
+      toggle.disabled = true;
+      const succeeded = await updateRepo(toggle.checked ? 'enable' : 'disable', toggle.dataset.repoPath);
+      if (!succeeded) {
+        toggle.checked = !toggle.checked;
+        toggle.disabled = false;
+      }
     });
   </script>
 </body>
