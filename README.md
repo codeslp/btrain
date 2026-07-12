@@ -168,7 +168,7 @@ btrain dashboard open              # reopen an existing HUD
 btrain dashboard stop              # stop the shared HUD
 ```
 
-The first interactive `btrain handoff claim` in any registered repo starts and opens the HUD automatically. Claims from every other repo reuse that process and browser tab. The HUD reads `btrain status --json`, displays repo-qualified lanes, and lists stale registry entries separately instead of silently dropping them. Open **Manage repositories** in the HUD to turn individual repos on or off, or remove stale records. Disabled repos stay registered but are excluded from global status, sync operations, and dashboard lanes until re-enabled.
+The first interactive `btrain handoff claim` in any registered repo starts and opens the HUD automatically. Claims from every other repo reuse that process and browser tab. The HUD reads `btrain status --json`, displays repo-qualified lanes, and lists stale registry entries separately instead of silently dropping them. The always-visible **Manage repositories** panel has a switch for every repo, so lanes can be hidden or restored directly from the dashboard. Disabled repos stay registered but are excluded from global status, sync operations, and dashboard lanes until re-enabled.
 
 Use `btrain repos prune` to safely remove every registry entry whose directory no longer exists. `btrain repos remove /path/to/repo` only removes the registry record; it never deletes the repository or its files.
 
