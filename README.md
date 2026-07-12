@@ -117,6 +117,9 @@ btrain handoff request-changes --lane a \
 | `btrain pr poll` | Fetch PR comments, classify feedback, and optionally update lane status |
 | `btrain pr request-review` | Re-request configured bot reviews |
 | `btrain status [--json]` | Show all lane states (JSON output for integrations) |
+| `btrain repos [--json]` | List registered repos, including their enabled/disabled state |
+| `btrain repos enable\|disable\|remove <name-or-path>` | Show/hide a repo globally or remove its registry record without deleting project files |
+| `btrain repos prune` | Remove registry records for paths that no longer exist |
 | `btrain doctor [--repair] [--skip-feedback]` | Health check; `--repair` fixes stale locks and workflow integrity |
 | `btrain locks` | List active file locks across lanes |
 | `btrain harness list` | List bundled and repo-local harness profiles plus the configured active profile |
@@ -165,11 +168,13 @@ btrain dashboard open              # reopen an existing HUD
 btrain dashboard stop              # stop the shared HUD
 ```
 
-The first interactive `btrain handoff claim` in any registered repo starts and opens the HUD automatically. Claims from every other repo reuse that process and browser tab. The HUD reads `btrain status --json`, displays repo-qualified lanes, and lists stale registry entries separately instead of silently dropping them.
+The first interactive `btrain handoff claim` in any registered repo starts and opens the HUD automatically. Claims from every other repo reuse that process and browser tab. The HUD reads `btrain status --json`, displays repo-qualified lanes, and lists stale registry entries separately instead of silently dropping them. Open **Manage repositories** in the HUD to turn individual repos on or off, or remove stale records. Disabled repos stay registered but are excluded from global status, sync operations, and dashboard lanes until re-enabled.
+
+Use `btrain repos prune` to safely remove every registry entry whose directory no longer exists. `btrain repos remove /path/to/repo` only removes the registry record; it never deletes the repository or its files.
 
 Set `BTRAIN_DASHBOARD_AUTO_OPEN=false` to disable claim-time startup, `BTRAIN_DASHBOARD_DISABLED=true` to disable all dashboard starts, or `BTRAIN_DASHBOARD_PORT=<port>` to choose the preferred port. If that port is occupied, btrain selects the next available port. Process state and logs are global at `~/.btrain/dashboard.json` and `~/.btrain/dashboard.log` (or under `BRAIN_TRAIN_HOME`). Existing repo-owned dashboards are stopped and migrated when that repo first starts the global HUD.
 
-Features: all canonical handoff and PR states, status-colored lane cards, hot-seat agent badges, expandable delegation details, repair-needed hazard styling, and a health endpoint for lifecycle monitoring.
+Features: all canonical handoff and PR states, compact status-colored lane indicators, per-repo on/off controls, hot-seat agent badges, expandable delegation details, repair-needed hazard styling, and a health endpoint for lifecycle monitoring.
 
 ### agentchattr (Multi-Agent Chat)
 

@@ -2404,6 +2404,7 @@ async function initRepo(repoPathInput, options = {}) {
   upsertRepoEntry(registry, {
     name: repoName,
     path: repoRoot,
+    enabled: true,
     project_config_path: repoPaths.projectTomlPath,
     handoff_path: repoPaths.handoffPath,
     registered_at: now,
@@ -7761,9 +7762,70 @@ async function runLoop({
   }
 }
 
-async function getRegisteredRepos() {
+async function getRegisteredRepos({ includeDisabled = false } = {}) {
   const { registry } = await loadRegistry()
-  return registry.repos
+  return includeDisabled
+    ? registry.repos
+    : registry.repos.filter((repo) => repo.enabled !== false)
+}
+
+function findRegistryRepo(registry, identifier) {
+  const resolvedIdentifier = path.resolve(identifier)
+  const pathMatch = registry.repos.find((repo) => path.resolve(repo.path) === resolvedIdentifier)
+  if (pathMatch) {
+    return pathMatch
+  }
+
+  const nameMatches = registry.repos.filter((repo) => repo.name === identifier)
+  if (nameMatches.length === 1) {
+    return nameMatches[0]
+  }
+  if (nameMatches.length > 1) {
+    throw new BtrainError({
+      message: `More than one registered repo is named \`${identifier}\`.`,
+      reason: "Repository names are not required to be unique.",
+      fix: "Run `btrain repos` and pass the full repo path instead.",
+    })
+  }
+
+  throw new BtrainError({
+    message: `No registered repo matches \`${identifier}\`.`,
+    reason: "The repo path or unique name is not present in the global registry.",
+    fix: "Run `btrain repos` to list registered repos.",
+  })
+}
+
+async function setRepoEnabled(identifier, enabled) {
+  const { registryPath, registry } = await loadRegistry()
+  const repo = findRegistryRepo(registry, identifier)
+  repo.enabled = enabled
+  repo.updated_at = formatIsoTimestamp()
+  await saveRegistry(registryPath, registry)
+  return repo
+}
+
+async function removeRepo(identifier) {
+  const { registryPath, registry } = await loadRegistry()
+  const repo = findRegistryRepo(registry, identifier)
+  registry.repos = registry.repos.filter((candidate) => candidate !== repo)
+  await saveRegistry(registryPath, registry)
+  return repo
+}
+
+async function pruneRepos() {
+  const { registryPath, registry } = await loadRegistry()
+  const kept = []
+  const removed = []
+  for (const repo of registry.repos) {
+    if (await pathExists(repo.path)) {
+      kept.push(repo)
+    } else {
+      removed.push(repo)
+    }
+  }
+  registry.repos = kept
+  await saveRegistry(registryPath, registry)
+  return removed
 }
 
 function parseLastUpdatedDate(lastUpdated) {
@@ -8101,6 +8163,7 @@ async function registerRepo(repoPathInput) {
   upsertRepoEntry(registry, {
     name: repoName,
     path: repoRoot,
+    enabled: true,
     project_config_path: repoPaths.projectTomlPath,
     handoff_path: configuredRepoPaths.handoffPath,
     registered_at: now,
@@ -8239,7 +8302,7 @@ async function syncTemplates({ repoRoot, dryRun = false } = {}) {
 }
 
 async function listRepos() {
-  return getRegisteredRepos()
+  return getRegisteredRepos({ includeDisabled: true })
 }
 
 async function getRepoStatus(repoRoot) {
@@ -8865,12 +8928,14 @@ export {
   listActiveOverrides,
   listLocks,
   listRepos,
+  pruneRepos,
   normalizeTaskArtifactEnvelope,
   parseCsvList,
   readAllLaneStates,
   readLockRegistry,
   readProjectConfig,
   registerRepo,
+  removeRepo,
   releaseLocks,
   requestChangesHandoff,
   runPush,
@@ -8879,6 +8944,7 @@ export {
   resolveRepoRoot,
   runReview,
   runLoop,
+  setRepoEnabled,
   syncActiveAgents,
   syncSkills,
   syncTemplates,

@@ -23,15 +23,18 @@ import {
   listLocks,
   listRepos,
   patchHandoff,
+  pruneRepos,
   readProjectConfig,
   readSpilledNextActionBody,
   registerRepo,
+  removeRepo,
   releaseLocks,
   requestChangesHandoff,
   resolveHandoff,
   resolveRepoRoot,
   runReview,
   runLoop,
+  setRepoEnabled,
   syncActiveAgents,
   syncSkills,
   syncTemplates,
@@ -127,7 +130,9 @@ Usage:
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
   btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
-  btrain repos                                                                   List registered repos
+  btrain repos [--json]                                                          List registered repos, including disabled repos
+  btrain repos enable|disable|remove <name-or-path>                              Control whether a repo appears in global operations and the dashboard
+  btrain repos prune                                                             Remove registry entries whose paths no longer exist
   btrain startup [--repo <path>]                                                Print a compact repo/bootstrap snapshot for a newly launched agent
   btrain go [--repo <path>]                                                      Bootstrap context: files an agent must read to work correctly
   btrain hcleanup [--repo <path>] [--keep <n>]                                   Trim handoff history, archive old entries
@@ -2121,14 +2126,45 @@ async function run() {
   }
 
   if (command === "repos") {
+    const subcommand = ["enable", "disable", "remove", "prune"].includes(rest[0]) ? rest[0] : null
+    const options = parseOptions(subcommand ? rest.slice(1) : rest)
+
+    if (subcommand === "prune") {
+      const removed = await pruneRepos()
+      console.log(`Pruned ${removed.length} missing ${removed.length === 1 ? "repo" : "repos"}.`)
+      return
+    }
+
+    if (subcommand) {
+      const identifier = options._[0]
+      if (!identifier) {
+        throw new BtrainError({
+          message: `\`btrain repos ${subcommand}\` requires a repo name or path.`,
+          reason: "No repository identifier was provided.",
+          fix: `btrain repos ${subcommand} /path/to/repo`,
+        })
+      }
+      const repo = subcommand === "remove"
+        ? await removeRepo(identifier)
+        : await setRepoEnabled(identifier, subcommand === "enable")
+      const verb = subcommand === "remove" ? "Removed" : subcommand === "enable" ? "Enabled" : "Disabled"
+      console.log(`${verb} ${repo.name}`)
+      console.log(`repo: ${repo.path}`)
+      return
+    }
+
     const repos = await listRepos()
+    if (options.json) {
+      console.log(JSON.stringify(repos, null, 2))
+      return
+    }
     if (repos.length === 0) {
       console.log("No repos registered yet.")
       return
     }
 
     for (const repo of repos) {
-      console.log(`- ${repo.name}: ${repo.path}`)
+      console.log(`- ${repo.name} [${repo.enabled === false ? "disabled" : "enabled"}]: ${repo.path}`)
     }
     return
   }
