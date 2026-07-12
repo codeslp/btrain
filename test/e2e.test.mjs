@@ -623,6 +623,8 @@ describe("installed CLI e2e", () => {
       assert.ok(html.includes("data.repositories"), html)
       assert.ok(html.includes("MANAGE REPOSITORIES"), html)
       assert.ok(html.includes("data-repo-toggle"), html)
+      assert.ok(html.includes("width: 22px"), html)
+      assert.ok(html.includes("height: 11px"), html)
       assert.ok(html.includes("Toggle a repo off to hide its lanes without unregistering it."), html)
       assert.ok(!html.includes('<details class="repo-controls-panel">'), html)
       assert.ok(html.includes("width: 48px"), html)
