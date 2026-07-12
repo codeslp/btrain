@@ -4760,4 +4760,38 @@ describe("lock TTL", () => {
       await rmDir(tmpDir)
     }
   })
+
+  it("enables, disables, removes, and prunes registered repos", async () => {
+    const tmpDir = await makeTmpDir()
+    const firstRepo = path.join(tmpDir, "first")
+    const secondRepo = path.join(tmpDir, "second")
+    try {
+      await fs.mkdir(firstRepo)
+      await fs.mkdir(secondRepo)
+      assert.equal((await runBtrain(["init", firstRepo, "--agent", "alice"], tmpDir)).code, 0)
+      assert.equal((await runBtrain(["init", secondRepo, "--agent", "alice"], tmpDir)).code, 0)
+
+      assert.equal((await runBtrain(["repos", "disable", firstRepo], tmpDir)).code, 0)
+      let repos = JSON.parse((await runBtrain(["repos", "--json"], tmpDir)).stdout)
+      assert.equal(repos.find((repo) => repo.path === firstRepo)?.enabled, false)
+      let statuses = JSON.parse((await runBtrain(["status", "--json"], tmpDir)).stdout)
+      assert.equal(statuses.some((repo) => repo.path === firstRepo), false)
+
+      assert.equal((await runBtrain(["repos", "enable", firstRepo], tmpDir)).code, 0)
+      statuses = JSON.parse((await runBtrain(["status", "--json"], tmpDir)).stdout)
+      assert.equal(statuses.some((repo) => repo.path === firstRepo), true)
+
+      assert.equal((await runBtrain(["repos", "remove", firstRepo], tmpDir)).code, 0)
+      repos = JSON.parse((await runBtrain(["repos", "--json"], tmpDir)).stdout)
+      assert.equal(repos.some((repo) => repo.path === firstRepo), false)
+
+      await fs.rm(secondRepo, { recursive: true, force: true })
+      const prune = await runBtrain(["repos", "prune"], tmpDir)
+      assert.match(prune.stdout, /Pruned 1 missing repo\./)
+      repos = JSON.parse((await runBtrain(["repos", "--json"], tmpDir)).stdout)
+      assert.equal(repos.length, 0)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
 })

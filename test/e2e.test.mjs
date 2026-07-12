@@ -559,6 +559,7 @@ describe("installed CLI e2e", () => {
       const statusPayload = await statusResponse.json()
       assert.equal(statusPayload.scope, "global", JSON.stringify(statusPayload))
       assert.equal(statusPayload.repositories.length, 2, JSON.stringify(statusPayload))
+      assert.equal(statusPayload.repoControls.length, 2, JSON.stringify(statusPayload))
       const registeredPaths = await Promise.all(statusPayload.repositories.map((repo) => fs.realpath(repo.path)))
       assert.ok(registeredPaths.includes(await fs.realpath(secondProjectDir)), JSON.stringify(statusPayload.repositories))
       const laneA = statusPayload.lanes.find((lane) => lane.laneId === "a")
@@ -579,6 +580,23 @@ describe("installed CLI e2e", () => {
       assert.equal(laneB?.status, "repair-needed", JSON.stringify(statusPayload))
       assert.equal(laneB?.repairOwner, "WriterBot", JSON.stringify(statusPayload))
       assert.equal(laneB?.hotSeat, "WriterBot", JSON.stringify(statusPayload))
+
+      const disableResponse = await fetch(`http://127.0.0.1:${port}/api/repositories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "disable", path: secondProjectDir }),
+      })
+      assert.equal(disableResponse.status, 200, await disableResponse.text())
+      const disabledPayload = await (await fetch(`http://127.0.0.1:${port}/api/status`)).json()
+      assert.equal(disabledPayload.repositories.length, 1, JSON.stringify(disabledPayload))
+      assert.equal(disabledPayload.repoControls.find((repo) => repo.path === secondProjectDir)?.enabled, false)
+
+      const enableResponse = await fetch(`http://127.0.0.1:${port}/api/repositories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "enable", path: secondProjectDir }),
+      })
+      assert.equal(enableResponse.status, 200, await enableResponse.text())
 
       const healthResponse = await waitForUrl(`http://127.0.0.1:${port}/api/health`)
       const healthPayload = await healthResponse.json()
@@ -603,6 +621,9 @@ describe("installed CLI e2e", () => {
       assert.ok(html.includes("BTrain Network"), html)
       assert.ok(html.includes("REPO //"), html)
       assert.ok(html.includes("data.repositories"), html)
+      assert.ok(html.includes("MANAGE REPOSITORIES"), html)
+      assert.ok(html.includes("width: 48px"), html)
+      assert.ok(html.includes("/api/repositories"), html)
       assert.ok(!html.includes("return STATUS_CLASS_NAMES[status] || '';"), html)
       assert.ok(!html.includes("lane.isBug"), html)
       assert.ok(!html.includes("bug-sprout"), html)

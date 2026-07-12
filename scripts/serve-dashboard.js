@@ -197,8 +197,56 @@ function getRepoLanes(repo) {
   return [];
 }
 
+function getRegisteredRepos() {
+  try {
+    return JSON.parse(execFileSync('btrain', ['repos', '--json'], {
+      encoding: 'utf8',
+      maxBuffer: 20 * 1024 * 1024,
+    }));
+  } catch (error) {
+    console.error('Error fetching registered repos:', error);
+    return [];
+  }
+}
+
+function updateRegisteredRepo(action, repoPath) {
+  if (!['enable', 'disable', 'remove'].includes(action)) {
+    throw new Error(`Unsupported repo action: ${action}`);
+  }
+  if (!repoPath || typeof repoPath !== 'string') {
+    throw new Error('A repo path is required.');
+  }
+  execFileSync('btrain', ['repos', action, repoPath], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 64 * 1024) {
+        reject(new Error('Request body is too large.'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(body || '{}'));
+      } catch {
+        reject(new Error('Request body must be valid JSON.'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 function getBtrainStatus() {
   try {
+    const registeredRepos = getRegisteredRepos();
     const raw = execFileSync('btrain', ['status', '--json'], {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
@@ -230,20 +278,36 @@ function getBtrainStatus() {
       lanes: repositories.flatMap((repo) => repo.lanes),
       activeAgents: [...activeAgents].sort(),
       unavailableRepos,
+      repoControls: registeredRepos.map((repo) => ({
+        name: repo.name,
+        path: repo.path,
+        enabled: repo.enabled !== false,
+        available: fs.existsSync(repo.path),
+      })),
     };
   } catch (error) {
     console.error('Error fetching btrain status:', error);
-    return { scope: 'global', repositories: [], lanes: [], activeAgents: [], unavailableRepos: [] };
+    return { scope: 'global', repositories: [], lanes: [], activeAgents: [], unavailableRepos: [], repoControls: [] };
   }
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   if (req.url === '/api/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(getBtrainStatus()));
   } else if (req.url === '/api/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, scope: 'global', port: PORT }));
+  } else if (req.url === '/api/repositories' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      updateRegisteredRepo(body.action, body.path);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (error) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: error.message }));
+    }
   } else if (req.url === '/' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`
@@ -364,13 +428,73 @@ const server = http.createServer((req, res) => {
       color: var(--repair-needed);
     }
 
+    .repo-controls-panel {
+      margin: 0 0 22px;
+      border: 1px solid var(--border);
+      background: rgba(13, 16, 23, 0.72);
+      padding: 12px 14px;
+    }
+
+    .repo-controls-panel summary {
+      cursor: pointer;
+      color: var(--text-muted);
+      font-family: 'Chakra Petch', sans-serif;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .repo-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .repo-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      padding: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+    }
+
+    .repo-control.disabled { opacity: 0.58; }
+    .repo-control.missing { border-color: rgba(255, 208, 0, 0.45); }
+
+    .repo-control-name {
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .repo-control button {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: #111722;
+      color: #d9e1ea;
+      padding: 4px 7px;
+      font-family: 'Chakra Petch', sans-serif;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .repo-control button:hover { border-color: var(--in-progress); }
+    .repo-control button.remove:hover { border-color: var(--changes-requested); color: var(--changes-requested); }
+
     .indicator-repo {
       width: 100%;
-      padding: 4px 3px;
+      padding: 2px;
       overflow: hidden;
       color: var(--text-muted);
       font-family: 'IBM Plex Mono', monospace;
-      font-size: 8px;
+      font-size: 7px;
       line-height: 1.2;
       text-align: center;
       text-overflow: ellipsis;
@@ -380,8 +504,8 @@ const server = http.createServer((req, res) => {
     /* Lane Top Indicators (Vertical Mini Cards) */
     .lane-indicators {
       display: flex;
-      gap: 12px;
-      margin-bottom: 40px;
+      gap: 6px;
+      margin-bottom: 28px;
       flex-wrap: wrap;
     }
 
@@ -413,7 +537,7 @@ const server = http.createServer((req, res) => {
       border-radius: 4px;
       cursor: pointer;
       overflow: visible;
-      width: 72px;
+      width: 48px;
       transition: border-color 0.2s ease, box-shadow 0.2s ease;
       will-change: transform;
     }
@@ -462,12 +586,12 @@ const server = http.createServer((req, res) => {
 
     .lane-box {
       width: 100%;
-      height: 38px;
+      height: 26px;
       display: flex;
       align-items: center;
       justify-content: center;
       font-family: 'Chakra Petch', sans-serif;
-      font-size: 20px;
+      font-size: 15px;
       font-weight: 700;
       color: #fff;
       text-transform: uppercase;
@@ -475,9 +599,9 @@ const server = http.createServer((req, res) => {
     }
     
     .indicator-agent {
-      padding: 6px 0;
+      padding: 3px 0;
       font-family: 'Chakra Petch', sans-serif;
-      font-size: 10px;
+      font-size: 8px;
       font-weight: 700;
       letter-spacing: 0.5px;
       display: flex;
@@ -749,6 +873,10 @@ const server = http.createServer((req, res) => {
 
   <div class="network-summary" id="network-summary">Discovering registered repos...</div>
   <div class="unavailable-repos" id="unavailable-repos"></div>
+  <details class="repo-controls-panel">
+    <summary id="repo-controls-summary">Manage repositories</summary>
+    <div class="repo-controls" id="repo-controls"></div>
+  </details>
 
   <div class="lane-indicators" id="lane-indicators-container">
     <!-- Renders top lane pills -->
@@ -797,6 +925,23 @@ const server = http.createServer((req, res) => {
       return statusClassNames[status] || '';
     }
 
+    async function updateRepo(action, repoPath) {
+      if (action === 'remove' && !window.confirm('Remove this repo from the BTrain registry? This does not delete project files.')) {
+        return;
+      }
+      const response = await fetch('/api/repositories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, path: repoPath }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        window.alert(result.error || 'Repository update failed.');
+        return;
+      }
+      await fetchStatus();
+    }
+
     const escapeHtml = (unsafe) => {
       return (unsafe || '').toString()
         .replace(/&/g, "&amp;")
@@ -830,6 +975,17 @@ const server = http.createServer((req, res) => {
           ? \`UNAVAILABLE REGISTRY ENTRIES // \${data.unavailableRepos.map(repo => escapeHtml(repo.name)).join(' // ')}\`
           : '';
         updateDOMIfChanged('unavailable-repos', unavailableUi);
+
+        const repoControls = data.repoControls || [];
+        document.getElementById('repo-controls-summary').textContent = \`MANAGE REPOSITORIES // \${repoControls.filter(repo => repo.enabled).length} ON // \${repoControls.filter(repo => !repo.enabled).length} OFF\`;
+        const repoControlsHtml = repoControls.map(repo => \`
+          <div class="repo-control \${repo.enabled ? '' : 'disabled'} \${repo.available ? '' : 'missing'}" title="\${escapeAttribute(repo.path)}">
+            <span class="repo-control-name">\${escapeHtml(repo.name)}\${repo.available ? '' : ' // missing'}</span>
+            <button data-repo-action="\${repo.enabled ? 'disable' : 'enable'}" data-repo-path="\${escapeAttribute(repo.path)}">\${repo.enabled ? 'off' : 'on'}</button>
+            <button class="remove" data-repo-action="remove" data-repo-path="\${escapeAttribute(repo.path)}">remove</button>
+          </div>
+        \`).join('');
+        updateDOMIfChanged('repo-controls', repoControlsHtml);
         
         // Active Agents Header
         if (data.activeAgents) {
@@ -937,6 +1093,10 @@ const server = http.createServer((req, res) => {
 
     fetchStatus();
     setInterval(fetchStatus, 3000);
+    document.getElementById('repo-controls').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-repo-action]');
+      if (button) updateRepo(button.dataset.repoAction, button.dataset.repoPath);
+    });
   </script>
 </body>
 </html>
