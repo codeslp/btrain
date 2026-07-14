@@ -296,17 +296,23 @@ const CLAUDE_LOOP_WRITE_ALLOWED_TOOLS = [
   "Write",
   "Bash(git add:*)",
   "Bash(git commit:*)",
-  "Bash(git push:*)",
   "Bash(rtk git add:*)",
   "Bash(rtk git commit:*)",
+]
+const CLAUDE_LOOP_PR_ALLOWED_TOOLS = [
+  ...CLAUDE_LOOP_WRITE_ALLOWED_TOOLS,
+  "Bash(git push:*)",
   "Bash(rtk git push:*)",
   "Bash(btrain pr:*)",
   "Bash(rtk btrain pr:*)",
   "Bash(gh pr view:*)",
   "Bash(gh pr checks:*)",
-  "Bash(gh pr merge:*)",
   "Bash(rtk gh pr view:*)",
   "Bash(rtk gh pr checks:*)",
+]
+const CLAUDE_LOOP_MERGE_ALLOWED_TOOLS = [
+  ...CLAUDE_LOOP_PR_ALLOWED_TOOLS,
+  "Bash(gh pr merge:*)",
   "Bash(rtk gh pr merge:*)",
 ]
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
@@ -6991,7 +6997,12 @@ function stripRunnerFlag(args, ...names) {
   return stripped
 }
 
-function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName, allowWrites = false }) {
+function normalizeLoopCliRunner(runnerValue, {
+  repoRoot,
+  prompt,
+  agentName,
+  permissionPhase = "read",
+}) {
   const tokens = parseShellWords(runnerValue)
   if (tokens.length === 0) {
     return null
@@ -7058,9 +7069,13 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName, allo
       args.push("--include-partial-messages")
     }
     if (!hasRunnerArg(args, "--allowedTools", "--allowed-tools")) {
-      const allowedTools = allowWrites
-        ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
-        : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
+      const allowedTools = permissionPhase === "merge"
+        ? CLAUDE_LOOP_MERGE_ALLOWED_TOOLS
+        : permissionPhase === "pr"
+          ? CLAUDE_LOOP_PR_ALLOWED_TOOLS
+          : permissionPhase === "write"
+            ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
+            : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
       args.push(`--allowedTools=${allowedTools.join(" ")}`)
     }
     if (!placeholderPrompt) {
@@ -7084,7 +7099,10 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName, allo
   }
 }
 
-function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT, allowWrites = false } = {}) {
+function resolveLoopRunner(agentName, config, repoRoot, {
+  prompt = LOOP_PROMPT,
+  permissionPhase = "read",
+} = {}) {
   const runnerMap = getAgentRunnerMap(config)
   const configuredValue = runnerMap[agentName]
 
@@ -7110,7 +7128,7 @@ function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT, 
     repoRoot,
     prompt,
     agentName,
-    allowWrites,
+    permissionPhase,
   })
 
   if (!cliRunner) {
@@ -7487,6 +7505,19 @@ function describeLoopAgentReason(current) {
   return `handoff status is ${current.status}`
 }
 
+function getLoopRunnerPermissionPhase(current) {
+  if (current.status === "needs-review") {
+    return "read"
+  }
+  if (current.status === "ready-to-merge") {
+    return "merge"
+  }
+  if (["ready-for-pr", "pr-review"].includes(current.status) || current.prNumber) {
+    return "pr"
+  }
+  return "write"
+}
+
 function emitLoopTransition(onEvent, before, after) {
   onEvent("handoff transition:")
   onEvent(`  before: ${formatLoopState(before)}`)
@@ -7730,7 +7761,7 @@ async function runLoop({
     const beforeFingerprint = serializeCurrentState(before)
     const runner = resolveLoopRunner(agentName, config, repoRoot, {
       prompt: loopPrompt,
-      allowWrites: before.status !== "needs-review",
+      permissionPhase: getLoopRunnerPermissionPhase(before),
     })
     const roundStartedAt = Date.now()
     emitLoopBlock(onEvent, "selected agent:", [

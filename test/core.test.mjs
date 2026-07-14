@@ -1296,6 +1296,29 @@ console.log("ready-for-pr owner ran")
     assert.match(stdout, /dispatch TestBot:/)
     assert.match(stdout, /Bash\(rtk btrain pr:\*\)/)
     assert.match(stdout, /Bash\(rtk git push:\*\)/)
+    assert.doesNotMatch(stdout, /Bash\(rtk gh pr merge:\*\)/)
+  })
+
+  it("only exposes Claude merge tools once the lane is ready-to-merge", async () => {
+    const updated = await runBtrain(
+      [
+        "handoff", "update", "--repo", tmpDir,
+        "--lane", "a",
+        "--status", "ready-to-merge",
+        "--pr", "22",
+        "--actor", "TestBot",
+      ],
+      tmpDir,
+    )
+    assert.equal(updated.code, 0, updated.stderr)
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.match(stdout, /reason: handoff status is ready-to-merge/)
     assert.match(stdout, /Bash\(rtk gh pr merge:\*\)/)
   })
 
