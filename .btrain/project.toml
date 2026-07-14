@@ -6,10 +6,15 @@ reviewer_default = "codex"
 writer_default = "claude"
 active = ["claude", "codex", "gemini"]
 
+[agents.runners]
+"claude" = "claude -p"
+"codex" = "codex"
+"gemini" = "gemini"
+
 [lanes]
 per_agent = 3
 enabled = true
-ids = ["a", "b", "c", "d", "e", "f"]
+ids = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
 
 [lanes.a]
 handoff_path = ".claude/collab/HANDOFF_A.md"
@@ -41,3 +46,12 @@ request_body = "@codex review"
 [pr_flow.bots.unblocked]
 aliases = ["unblocked[bot]", "unblocked"]
 request_body = "@unblocked review again"
+
+[lanes.g]
+handoff_path = ".claude/collab/HANDOFF_G.md"
+
+[lanes.h]
+handoff_path = ".claude/collab/HANDOFF_H.md"
+
+[lanes.i]
+handoff_path = ".claude/collab/HANDOFF_I.md"

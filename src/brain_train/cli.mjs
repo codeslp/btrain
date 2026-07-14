@@ -106,7 +106,8 @@ Usage:
   btrain harness trace show --run-id <id> [--repo <path>]                        Show one harness trace bundle summary
   btrain harness eval list [--repo <path>] [--category <name>]                   List bundled and repo-local benchmark scenarios
   btrain harness eval inspect --scenario <id> [--repo <path>]                    Inspect one benchmark scenario manifest
-  btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
+  btrain loop [--repo <path>] [--lane <id>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]
+                                                                                Relay one lane between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
   btrain review code --lane <id> [--repo <path>] [--base <ref>] [--head <ref>] [--format json|summary]
@@ -237,6 +238,20 @@ function parseOptions(args) {
       options[key] = [options[key], nextToken]
     }
     index += 1
+  }
+
+  const scopedLane = typeof process.env.BTRAIN_LANE === "string"
+    ? process.env.BTRAIN_LANE.trim().toLowerCase()
+    : ""
+  const explicitLane = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
+
+  if (scopedLane && process.env.BTRAIN_LANE_LOCKED === "1" && explicitLane && explicitLane !== scopedLane) {
+    throw new Error(
+      `This btrain runner is scoped to lane ${scopedLane}; refusing explicit --lane ${explicitLane}.`,
+    )
+  }
+  if (scopedLane && !explicitLane) {
+    options.lane = scopedLane
   }
 
   return options
@@ -1969,6 +1984,7 @@ async function run() {
     const repoRoot = await resolveRepoRoot(options.repo)
     const result = await runLoop({
       repoRoot,
+      lane: options.lane,
       dryRun: !!options["dry-run"],
       maxRounds: options["max-rounds"],
       timeout: options.timeout,

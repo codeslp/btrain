@@ -127,6 +127,7 @@ async function installPackedCli() {
 
   return {
     btrainBin: path.join(prefixDir, "bin", "btrain"),
+    bthBin: path.join(prefixDir, "bin", "bth"),
     workspaceDir,
   }
 }
@@ -382,6 +383,62 @@ describe("installed CLI e2e", () => {
 
     assert.equal(claimResult.code, 0, claimResult.stderr)
     assert.ok(claimResult.stdout.includes("peer reviewer: Opus 4.6"), claimResult.stdout)
+  })
+
+  it("keeps the installed bth wrapper inside its locked loop lane", async () => {
+    const projectDir = await createProjectRepo(installState.btrainBin)
+    cleanupDirs.push(projectDir)
+
+    for (const [lane, task, owner, file] of [
+      ["a", "Installed bth lane A", "OwnerA", "src/a.ts"],
+      ["b", "Installed bth lane B", "OwnerB", "src/b.ts"],
+    ]) {
+      const claim = await runInstalledBtrain(
+        installState.btrainBin,
+        projectDir,
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          projectDir,
+          "--lane",
+          lane,
+          "--task",
+          task,
+          "--owner",
+          owner,
+          "--reviewer",
+          "Reviewer",
+          "--files",
+          file,
+        ],
+        { BTRAIN_AGENT: owner },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+    }
+
+    const scopedEnv = buildProjectEnv(projectDir, {
+      BTRAIN_AGENT: "OwnerB",
+      BRAIN_TRAIN_AGENT: "OwnerB",
+      BTRAIN_LANE: "b",
+      BTRAIN_LANE_LOCKED: "1",
+    })
+    const scoped = await runCommand(installState.bthBin, ["--repo", projectDir], {
+      cwd: projectDir,
+      env: scopedEnv,
+    })
+    assert.equal(scoped.code, 0, scoped.stderr)
+    assert.match(scoped.stdout, /--- lane b ---/)
+    assert.match(scoped.stdout, /task: Installed bth lane B/)
+    assert.doesNotMatch(scoped.stdout, /--- lane a ---/)
+
+    const escaped = await runCommand(
+      installState.bthBin,
+      ["--repo", projectDir, "--lane", "a"],
+      { cwd: projectDir, env: scopedEnv },
+    )
+    assert.notEqual(escaped.code, 0)
+    assert.match(escaped.stderr, /scoped to lane b; refusing explicit --lane a/)
   })
 
   it("embeds client-side status mappings for dashboard rendering", async () => {

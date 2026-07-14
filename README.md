@@ -378,6 +378,20 @@ btrain verifies which agent is speaking:
 "Gemini" = "gemini"
 ```
 
+New and updated collaborator configurations infer these runner commands from common Claude, Codex/GPT, and Gemini names. Unknown agents receive an explicit `notify` runner so fallback behavior is visible in config. `btrain doctor` warns if an active agent has no runner mapping.
+
+### Lane-scoped loop dispatch
+
+Use `--lane` when asking btrain to launch the agent whose turn it is:
+
+```bash
+btrain loop --lane b --max-rounds 1 --timeout 300
+```
+
+The child process receives a pinned agent identity plus `BTRAIN_LANE` and `BTRAIN_LANE_LOCKED=1`. Its `btrain` and `bth` commands default to that lane and reject attempts to select a different lane. Dispatch traces are written under `.btrain/harness/runs`; inspect them with `btrain harness trace list` and `btrain harness trace show <run-id>`.
+
+The original lane-less form remains available for single-lane repositories.
+
 ---
 
 ## Environment Variables
@@ -385,6 +399,9 @@ btrain verifies which agent is speaking:
 | Variable | Description |
 |----------|-------------|
 | `BTRAIN_AGENT` | Pin the current agent identity |
+| `BRAIN_TRAIN_AGENT` | Alternate variable for pinning agent identity |
+| `BTRAIN_LANE` | Default lane for child btrain commands |
+| `BTRAIN_LANE_LOCKED` | Reject commands that try to leave `BTRAIN_LANE` when set to `1` |
 | `BRAIN_TRAIN_HOME` | Override the global btrain home directory |
 | `HANDOFF_HISTORY_PATH` | Output file for the handoff history watcher |
 
