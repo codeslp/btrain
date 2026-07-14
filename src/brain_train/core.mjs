@@ -272,10 +272,12 @@ const CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS = [
   "Glob",
   "Bash(btrain handoff:*)",
   "Bash(btrain locks:*)",
+  "Bash(btrain review:*)",
   "Bash(btrain status:*)",
   "Bash(bth:*)",
   "Bash(rtk btrain handoff:*)",
   "Bash(rtk btrain locks:*)",
+  "Bash(rtk btrain review:*)",
   "Bash(rtk btrain status:*)",
   "Bash(git status:*)",
   "Bash(git diff:*)",
@@ -7680,6 +7682,14 @@ async function runLoop({
   )
   const history = []
   const laneId = typeof lane === "string" ? lane.trim().toLowerCase() : ""
+  const laneConfigs = getLaneConfigs(config)
+  if (laneConfigs && !laneId) {
+    throw new BtrainError({
+      message: "`btrain loop` requires --lane when [lanes] is enabled.",
+      reason: "A loop dispatch must pin one lane before selecting state or launching an agent.",
+      fix: `Use --lane with one of: ${laneConfigs.map((entry) => entry.id).join(", ")}.`,
+    })
+  }
   const handoffPath = laneId
     ? getLaneHandoffPath(repoRoot, config, laneId)
     : getConfiguredRepoPaths(repoRoot, config).handoffPath

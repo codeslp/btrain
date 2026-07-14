@@ -3059,6 +3059,7 @@ emit({
     assert.ok(stdout.includes("--output-format stream-json"), stdout)
     assert.ok(stdout.includes("--allowedTools="), stdout)
     assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk btrain review:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)
     assert.doesNotMatch(stdout, /--allowedTools=.*\bEdit\b/)
     assert.ok(stdout.includes("agent progress:"), stdout)
@@ -3293,6 +3294,10 @@ describe("btrain loop lane-scoped dispatch", () => {
     try {
       await claimTwoLanes(repoDir)
       await setRunnerConfig(repoDir, ['"OwnerA" = "notify"', '"OwnerB" = "notify"'])
+
+      const unscoped = await runBtrain(["loop", "--repo", repoDir, "--dry-run"], repoDir)
+      assert.notEqual(unscoped.code, 0)
+      assert.match(unscoped.stderr, /requires --lane when \[lanes\] is enabled/)
 
       const { stdout, code } = await runBtrain(
         ["loop", "--repo", repoDir, "--lane", "b", "--dry-run"],
