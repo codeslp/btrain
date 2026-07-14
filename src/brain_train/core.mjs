@@ -1170,11 +1170,14 @@ async function listLocks(repoRoot) {
   return registry.locks
 }
 
-async function forceReleaseLock(repoRoot, lockPath) {
+async function forceReleaseLock(repoRoot, lockPath, options = {}) {
+  const laneId = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     const registry = await readLockRegistry(repoRoot)
     const before = registry.locks.length
-    registry.locks = registry.locks.filter((lock) => lock.path !== lockPath)
+    registry.locks = registry.locks.filter(
+      (lock) => lock.path !== lockPath || (laneId && lock.lane !== laneId),
+    )
     await writeLockRegistry(repoRoot, registry)
     return before - registry.locks.length
   })

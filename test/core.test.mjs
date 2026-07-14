@@ -3311,6 +3311,31 @@ describe("btrain loop lane-scoped dispatch", () => {
       )
       assert.notEqual(escaped.code, 0)
       assert.match(escaped.stderr, /scoped to lane b; refusing explicit --lane a/)
+
+      const scopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir, scopedEnv)
+      assert.equal(scopedLocks.code, 0, scopedLocks.stderr)
+      assert.match(scopedLocks.stdout, /lane b: src\/lane-b\.ts/)
+      assert.doesNotMatch(scopedLocks.stdout, /lane a: src\/lane-a\.ts/)
+
+      const crossLaneRelease = await runBtrain(
+        ["locks", "release", "--repo", repoDir, "--path", "src/lane-a.ts"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(crossLaneRelease.code, 0)
+      assert.match(crossLaneRelease.stderr, /scoped to lane b; refusing to release a lock outside that lane/)
+
+      const ownLaneRelease = await runBtrain(
+        ["locks", "release", "--repo", repoDir, "--path", "src/lane-b.ts"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.equal(ownLaneRelease.code, 0, ownLaneRelease.stderr)
+      assert.match(ownLaneRelease.stdout, /Released lock: src\/lane-b\.ts/)
+
+      const unscopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir)
+      assert.equal(unscopedLocks.code, 0, unscopedLocks.stderr)
+      assert.match(unscopedLocks.stdout, /lane a: src\/lane-a\.ts/)
     } finally {
       await rmDir(repoDir)
     }

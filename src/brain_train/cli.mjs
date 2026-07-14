@@ -2197,6 +2197,9 @@ async function run() {
     const subcommand = ["release", "release-lane"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
     const repoRoot = await resolveRepoRoot(options.repo)
+    const scopedLane = process.env.BTRAIN_LANE_LOCKED === "1" && typeof options.lane === "string"
+      ? options.lane.trim().toLowerCase()
+      : ""
 
     if (subcommand === "release") {
       if (!options.path) {
@@ -2207,7 +2210,17 @@ async function run() {
           context: "Run `btrain locks` to see all active lock paths.",
         })
       }
-      const removed = await forceReleaseLock(repoRoot, options.path)
+      if (scopedLane) {
+        const matchingLocks = (await listLocks(repoRoot)).filter((lock) => lock.path === options.path)
+        if (matchingLocks.some((lock) => lock.lane !== scopedLane)) {
+          throw new BtrainError({
+            message: `This btrain runner is scoped to lane ${scopedLane}; refusing to release a lock outside that lane.`,
+            reason: "A lane-locked runner cannot mutate another lane's lock state.",
+            fix: `Release only locks shown by \`btrain locks\` for lane ${scopedLane}.`,
+          })
+        }
+      }
+      const removed = await forceReleaseLock(repoRoot, options.path, { lane: scopedLane })
       console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
       return
     }
@@ -2230,7 +2243,8 @@ async function run() {
     }
 
     // Default: list locks
-    const locks = await listLocks(repoRoot)
+    const allLocks = await listLocks(repoRoot)
+    const locks = scopedLane ? allLocks.filter((lock) => lock.lane === scopedLane) : allLocks
     if (locks.length === 0) {
       console.log("No active locks.")
       return
