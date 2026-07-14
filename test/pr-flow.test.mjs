@@ -9,6 +9,7 @@ import {
   applyPrStatusToHandoff,
   classifyPrReviewState,
   formatPrStatusSummary,
+  selectReviewRequestHeadSha,
 } from "../src/brain_train/pr-flow.mjs"
 import {
   checkHandoff,
@@ -36,6 +37,28 @@ const prFlowConfig = {
     },
   },
 }
+
+describe("PR review request head selection", () => {
+  it("uses a pushed local head when the PR API still reports the previous commit", () => {
+    assert.equal(selectReviewRequestHeadSha({
+      prHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      prHeadRefName: "feature",
+      localBranch: "feature",
+      localHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      remoteHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+  })
+
+  it("does not mark an unpushed local commit for review", () => {
+    assert.equal(selectReviewRequestHeadSha({
+      prHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      prHeadRefName: "feature",
+      localBranch: "feature",
+      localHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      remoteHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+  })
+})
 
 describe("PR review flow classification", () => {
   it("classifies Codex current-head feedback and Unblocked stale feedback from ai_sales#143 shape", () => {

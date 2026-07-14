@@ -413,9 +413,34 @@ function buildReviewRequestBody(bot, { laneId = "", headSha = "" } = {}) {
   return `${bot.requestBody}\n\n<!-- btrain-pr-review ${attrs.join(" ")} -->`
 }
 
+export function selectReviewRequestHeadSha({
+  prHeadSha = "",
+  prHeadRefName = "",
+  localBranch = "",
+  localHeadSha = "",
+  remoteHeadSha = "",
+} = {}) {
+  const localBranchMatches = localBranch && localBranch === prHeadRefName
+  const localHeadIsPushed = commitMatches(localHeadSha, remoteHeadSha)
+  return localBranchMatches && localHeadIsPushed ? localHeadSha : prHeadSha
+}
+
 async function fetchPrHeadSha(repoRoot, prNumber) {
-  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid"], repoRoot)
-  return pr?.headRefOid || ""
+  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid,headRefName"], repoRoot)
+  const [localBranch, localHeadSha, remoteHeadSha] = await Promise.all([
+    gitText(["branch", "--show-current"], repoRoot).catch(() => ""),
+    gitText(["rev-parse", "HEAD"], repoRoot).catch(() => ""),
+    pr?.headRefName
+      ? gitText(["rev-parse", `refs/remotes/origin/${pr.headRefName}`], repoRoot).catch(() => "")
+      : "",
+  ])
+  return selectReviewRequestHeadSha({
+    prHeadSha: pr?.headRefOid || "",
+    prHeadRefName: pr?.headRefName || "",
+    localBranch,
+    localHeadSha,
+    remoteHeadSha,
+  })
 }
 
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
