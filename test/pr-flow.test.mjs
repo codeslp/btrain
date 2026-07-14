@@ -1,9 +1,23 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { promisify } from "node:util"
 import {
+  applyPrStatusToHandoff,
   classifyPrReviewState,
   formatPrStatusSummary,
 } from "../src/brain_train/pr-flow.mjs"
+import {
+  checkHandoff,
+  claimHandoff,
+  initRepo,
+  patchHandoff,
+} from "../src/brain_train/core.mjs"
+
+const execFileAsync = promisify(execFile)
 
 const prFlowConfig = {
   enabled: true,
@@ -242,5 +256,51 @@ describe("PR review flow classification", () => {
     })
 
     assert.equal(status.overall, "merged")
+  })
+})
+
+describe("PR review flow handoff application", () => {
+  it("infers the pinned runner identity when applying PR feedback", async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-"))
+    const previousHome = process.env.BRAIN_TRAIN_HOME
+    const previousAgent = process.env.BTRAIN_AGENT
+
+    try {
+      process.env.BRAIN_TRAIN_HOME = path.join(repoRoot, ".btrain-test-home")
+      process.env.BTRAIN_AGENT = "Codex"
+      await execFileAsync("git", ["init", repoRoot])
+      await initRepo(repoRoot, { agent: ["Codex", "Claude"] })
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# PR apply test\n", "utf8")
+      await claimHandoff(repoRoot, {
+        lane: "a",
+        task: "Apply bot feedback",
+        owner: "Codex",
+        reviewer: "Claude",
+        files: "README.md",
+      })
+      await patchHandoff(repoRoot, {
+        lane: "a",
+        actor: "Codex",
+        status: "pr-review",
+        pr: "22",
+      })
+
+      await applyPrStatusToHandoff(repoRoot, { lane: "a" }, {
+        overall: "feedback",
+        bots: [{ id: "codex", state: "feedback" }],
+        pr: { number: 22 },
+      })
+
+      const handoff = await checkHandoff(repoRoot)
+      const lane = handoff.lanes.find((candidate) => candidate._laneId === "a")
+      assert.equal(lane.status, "changes-requested")
+      assert.match(lane.lastUpdated, /^Codex /)
+    } finally {
+      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
+      else process.env.BRAIN_TRAIN_HOME = previousHome
+      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
+      else process.env.BTRAIN_AGENT = previousAgent
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
   })
 })

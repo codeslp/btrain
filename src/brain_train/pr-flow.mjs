@@ -430,9 +430,12 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   return posted
 }
 
-async function applyPrStatusToHandoff(repoRoot, options, status) {
-  const { laneId, prNumber } = await resolveLaneAndPr(repoRoot, options)
-  const actor = options.actor || "btrain"
+export async function applyPrStatusToHandoff(repoRoot, options, status) {
+  const { laneId, lane, prNumber } = await resolveLaneAndPr(repoRoot, options)
+  const actor = typeof options.actor === "string" && options.actor.trim()
+    ? options.actor.trim()
+    : undefined
+  const actorLabel = actor || lane.owner || "owner"
 
   if (status.overall === "merged") {
     await resolveHandoff(repoRoot, {
@@ -464,7 +467,7 @@ async function applyPrStatusToHandoff(repoRoot, options, status) {
       pr: prNumber,
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
-      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actor}"\`.`,
+      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actorLabel}"\`.`,
     })
     return "changes-requested"
   }

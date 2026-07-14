@@ -388,6 +388,9 @@ describe("installed CLI e2e", () => {
   it("keeps the installed bth wrapper inside its locked loop lane", async () => {
     const projectDir = await createProjectRepo(installState.btrainBin)
     cleanupDirs.push(projectDir)
+    const isolatedBinDir = path.join(projectDir, "isolated-bin")
+    await fs.mkdir(isolatedBinDir)
+    await fs.symlink(process.execPath, path.join(isolatedBinDir, "node"))
 
     for (const [lane, task, owner, file] of [
       ["a", "Installed bth lane A", "OwnerA", "src/a.ts"],
@@ -422,6 +425,7 @@ describe("installed CLI e2e", () => {
       BRAIN_TRAIN_AGENT: "OwnerB",
       BTRAIN_LANE: "b",
       BTRAIN_LANE_LOCKED: "1",
+      PATH: [isolatedBinDir, "/usr/bin", "/bin"].join(path.delimiter),
     })
     const scoped = await runCommand(installState.bthBin, ["--repo", projectDir], {
       cwd: projectDir,
