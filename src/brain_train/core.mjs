@@ -296,8 +296,18 @@ const CLAUDE_LOOP_WRITE_ALLOWED_TOOLS = [
   "Write",
   "Bash(git add:*)",
   "Bash(git commit:*)",
+  "Bash(git push:*)",
   "Bash(rtk git add:*)",
   "Bash(rtk git commit:*)",
+  "Bash(rtk git push:*)",
+  "Bash(btrain pr:*)",
+  "Bash(rtk btrain pr:*)",
+  "Bash(gh pr view:*)",
+  "Bash(gh pr checks:*)",
+  "Bash(gh pr merge:*)",
+  "Bash(rtk gh pr view:*)",
+  "Bash(rtk gh pr checks:*)",
+  "Bash(rtk gh pr merge:*)",
 ]
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
 const CODEX_SUBCOMMANDS = new Set([

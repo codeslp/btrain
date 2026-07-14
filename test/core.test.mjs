@@ -1268,7 +1268,7 @@ describe("btrain PR flow handoff lifecycle", () => {
   })
 
   it("btrain loop dispatches the lane owner from ready-for-pr", async () => {
-    const ownerScript = path.join(tmpDir, "owner-ready-for-pr.js")
+    const ownerScript = path.join(tmpDir, "claude")
     await writeExecutable(
       ownerScript,
       `#!/usr/bin/env node
@@ -1294,6 +1294,9 @@ console.log("ready-for-pr owner ran")
     assert.match(stdout, /selected agent:\s+TestBot/)
     assert.match(stdout, /reason: handoff status is ready-for-pr/)
     assert.match(stdout, /dispatch TestBot:/)
+    assert.match(stdout, /Bash\(rtk btrain pr:\*\)/)
+    assert.match(stdout, /Bash\(rtk git push:\*\)/)
+    assert.match(stdout, /Bash\(rtk gh pr merge:\*\)/)
   })
 
   it("final resolve releases locks after the PR phase completes", async () => {
