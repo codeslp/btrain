@@ -8664,7 +8664,9 @@ async function getRepoStatus(repoRoot, laneId = "") {
       config,
       decorateLaneStates(scopedLaneStates, status.locks),
     )
-    status.current = getMostRecentlyUpdatedState(status.lanes, status.current)
+    status.current = normalizedLaneId
+      ? status.lanes[0]
+      : getMostRecentlyUpdatedState(status.lanes, status.current)
     status.staleness = parseStaleness(status.current.lastUpdated)
     status.repurposeReady = status.lanes
       .filter((lane) => lane.repurposeReady)

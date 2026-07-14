@@ -3390,10 +3390,23 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.match(scopedUpdate.stdout, /--- lane b ---/)
       assert.doesNotMatch(scopedUpdate.stdout, /--- lane a ---/)
 
+      const newerOtherLane = await runBtrain(
+        ["handoff", "update", "--repo", repoDir, "--lane", "a", "--next", "Newer lane A update", "--actor", "OwnerA"],
+        repoDir,
+        { BTRAIN_AGENT: "OwnerA" },
+      )
+      assert.equal(newerOtherLane.code, 0, newerOtherLane.stderr)
+
       const scopedStatus = await runBtrain(["status", "--repo", repoDir], repoDir, scopedEnv)
       assert.equal(scopedStatus.code, 0, scopedStatus.stderr)
       assert.match(scopedStatus.stdout, /lane b: in-progress — Target lane task/)
       assert.doesNotMatch(scopedStatus.stdout, /lane a:/)
+
+      const scopedStatusJson = await runBtrain(["status", "--repo", repoDir, "--json"], repoDir, scopedEnv)
+      assert.equal(scopedStatusJson.code, 0, scopedStatusJson.stderr)
+      const [scopedRepoStatus] = JSON.parse(scopedStatusJson.stdout)
+      assert.equal(scopedRepoStatus.current._laneId, "b")
+      assert.equal(scopedRepoStatus.current.task, "Target lane task")
 
       const scopedRepair = await runBtrain(
         ["doctor", "--repo", repoDir, "--repair"],
