@@ -3061,6 +3061,12 @@ emit({
     assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk btrain review:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr view:*)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr diff:*)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr checks:*)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr view:*)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr diff:*)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr checks:*)"), stdout)
     assert.ok(stdout.includes("Bash(npm test:*)"), stdout)
     assert.ok(stdout.includes("Bash(node --test:*)"), stdout)
     assert.doesNotMatch(stdout, /--allowedTools=.*\bEdit\b/)
@@ -3295,7 +3301,7 @@ describe("btrain loop lane-scoped dispatch", () => {
     const repoDir = await makeLaneRepo()
     try {
       await claimTwoLanes(repoDir)
-      await setRunnerConfig(repoDir, ['"OwnerA" = "notify"', '"OwnerB" = "notify"'])
+      await setRunnerConfig(repoDir, ['"OwnerA" = "notify"', '"ownerb" = "claude -p"'])
 
       const unscoped = await runBtrain(["loop", "--repo", repoDir, "--dry-run"], repoDir)
       assert.notEqual(unscoped.code, 0)
@@ -3310,6 +3316,7 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.match(stdout, /handoff file: .*HANDOFF_B\.md/)
       assert.match(stdout, /task: Target lane task/)
       assert.match(stdout, /selected agent:\s+OwnerB/)
+      assert.match(stdout, /configured value: claude -p/)
       assert.match(stdout, /lane: b/)
       assert.doesNotMatch(stdout, /task: Default lane task/)
     } finally {

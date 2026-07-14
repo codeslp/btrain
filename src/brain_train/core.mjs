@@ -287,6 +287,12 @@ const CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS = [
   "Bash(rtk git diff:*)",
   "Bash(rtk git show:*)",
   "Bash(rtk git log:*)",
+  "Bash(gh pr view:*)",
+  "Bash(gh pr diff:*)",
+  "Bash(gh pr checks:*)",
+  "Bash(rtk gh pr view:*)",
+  "Bash(rtk gh pr diff:*)",
+  "Bash(rtk gh pr checks:*)",
   "Bash(rtk rg:*)",
   "Bash(rtk sed:*)",
   "Bash(npm test:*)",
@@ -309,10 +315,6 @@ const CLAUDE_LOOP_PR_ALLOWED_TOOLS = [
   "Bash(rtk git push:*)",
   "Bash(btrain pr:*)",
   "Bash(rtk btrain pr:*)",
-  "Bash(gh pr view:*)",
-  "Bash(gh pr checks:*)",
-  "Bash(rtk gh pr view:*)",
-  "Bash(rtk gh pr checks:*)",
 ]
 const CLAUDE_LOOP_MERGE_ALLOWED_TOOLS = [
   ...CLAUDE_LOOP_PR_ALLOWED_TOOLS,
@@ -6313,6 +6315,16 @@ function getAgentRunnerMap(config) {
   )
 }
 
+function getAgentRunnerValue(runnerMap, agentName) {
+  const exactValue = runnerMap[agentName]
+  if (exactValue) return exactValue
+
+  const normalizedAgentName = normalizeAgentName(agentName).toLowerCase()
+  return Object.entries(runnerMap).find(
+    ([configuredAgent]) => normalizeAgentName(configuredAgent).toLowerCase() === normalizedAgentName,
+  )?.[1]
+}
+
 function normalizeAgentName(value) {
   return typeof value === "string" ? value.trim() : ""
 }
@@ -6459,7 +6471,7 @@ function detectCurrentAgent(config, env = process.env) {
   const matches = configuredAgents.filter((agentName) => {
     const identityTokens = new Set([
       ...tokenizeAgentIdentity(agentName),
-      ...tokenizeAgentIdentity(runnerMap[agentName] || ""),
+      ...tokenizeAgentIdentity(getAgentRunnerValue(runnerMap, agentName) || ""),
     ])
     return runtimeHints.some((hint) => identityTokens.has(hint))
   })
@@ -7116,7 +7128,7 @@ function resolveLoopRunner(agentName, config, repoRoot, {
   permissionPhase = "read",
 } = {}) {
   const runnerMap = getAgentRunnerMap(config)
-  const configuredValue = runnerMap[agentName]
+  const configuredValue = getAgentRunnerValue(runnerMap, agentName)
 
   if (!configuredValue) {
     return {
@@ -8997,7 +9009,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
 
     const runnerMap = getAgentRunnerMap(config)
     for (const agentName of getCollaborationAgentNames(config)) {
-      if (!runnerMap[agentName]) {
+      if (!getAgentRunnerValue(runnerMap, agentName)) {
         warnings.push(
           `Active agent "${agentName}" has no configured runner in \`[agents.runners]\`; loop dispatch will fall back to notification mode.`,
         )
