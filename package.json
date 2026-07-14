@@ -8,8 +8,8 @@
     "bth": "./bth"
   },
   "scripts": {
-    "test": "node --test 'test/**/*.test.mjs'",
-    "test:e2e": "node --test test/e2e.test.mjs",
+    "test": "env -u BTRAIN_AGENT -u BRAIN_TRAIN_AGENT -u BTRAIN_LANE -u BTRAIN_LANE_LOCKED node --test 'test/**/*.test.mjs'",
+    "test:e2e": "env -u BTRAIN_AGENT -u BRAIN_TRAIN_AGENT -u BTRAIN_LANE -u BTRAIN_LANE_LOCKED node --test test/e2e.test.mjs",
     "btrain": "node src/brain_train/cli.mjs",
     "collab:append-handoff-history": "node scripts/handoff-history-watcher.mjs --once",
     "collab:register-handoff-watch": "bash scripts/register-handoff-watch-path.sh",
