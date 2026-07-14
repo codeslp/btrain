@@ -781,6 +781,7 @@ describe("btrain agents commands", () => {
     assert.ok(projectToml.includes('active = ["Opus 4.6", "Gemini 3.1"]'), projectToml)
     assert.ok(projectToml.includes('"Opus 4.6" = "claude -p"'), projectToml)
     assert.ok(projectToml.includes('"Gemini 3.1" = "gemini"'), projectToml)
+    assert.ok(!projectToml.includes('"GPT-5 Codex" ='), projectToml)
 
     const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
     assert.ok(agentsDoc.includes("Active collaborating agents: `Opus 4.6`, `Gemini 3.1`"), agentsDoc)
@@ -2896,6 +2897,40 @@ console.log("reviewer runner resolved the handoff")
     assert.ok(stdout.includes("final handoff: resolved"), stdout)
   })
 
+  it("allows a Claude lane owner to edit and commit implementation work", async () => {
+    const ownerRunner = path.join(tmpDir, "claude")
+    await writeExecutable(ownerRunner, "#!/usr/bin/env node\n")
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`, `"ReviewBot" = "notify"`])
+    await runBtrain(
+      [
+        "handoff", "claim", "--repo", tmpDir,
+        "--task", "Claude implementation",
+        "--owner", "OwnerBot",
+        "--reviewer", "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--dry-run"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.match(stdout, /--allowedTools=.*\bEdit\b/)
+    assert.match(stdout, /--allowedTools=.*\bWrite\b/)
+    assert.match(stdout, /Bash\(rtk git commit:\*\)/)
+
+    await runBtrain(
+      [
+        "handoff", "resolve", "--repo", tmpDir,
+        "--summary", "Clean up owner permission test",
+        "--actor", "OwnerBot",
+      ],
+      tmpDir,
+    )
+  })
+
   it("streams Claude progress events while the runner is still working", async () => {
     const ownerRunner = path.join(tmpDir, "owner-notify.js")
     const reviewerRunner = path.join(tmpDir, "claude")
@@ -2999,6 +3034,7 @@ emit({
     assert.ok(stdout.includes("--allowedTools="), stdout)
     assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)
+    assert.doesNotMatch(stdout, /--allowedTools=.*\bEdit\b/)
     assert.ok(stdout.includes("agent progress:"), stdout)
     assert.ok(stdout.includes("tool Bash: git status --short"), stdout)
     assert.ok(stdout.includes("tool result: M src/brain_train/core.mjs"), stdout)

@@ -266,7 +266,7 @@ const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
 const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
-const CLAUDE_LOOP_ALLOWED_TOOLS = [
+const CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS = [
   "Read",
   "Grep",
   "Glob",
@@ -289,7 +289,16 @@ const CLAUDE_LOOP_ALLOWED_TOOLS = [
   "Bash(rtk sed:*)",
   "Bash(rtk npm test:*)",
   "Bash(rtk node --test:*)",
-].join(" ")
+]
+const CLAUDE_LOOP_WRITE_ALLOWED_TOOLS = [
+  ...CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS,
+  "Edit",
+  "Write",
+  "Bash(git add:*)",
+  "Bash(git commit:*)",
+  "Bash(rtk git add:*)",
+  "Bash(rtk git commit:*)",
+]
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
 const CODEX_SUBCOMMANDS = new Set([
   "exec",
@@ -1982,22 +1991,33 @@ function syncAgentsSectionInToml(content, agentNames) {
     return `${nextContent.trimEnd()}\n\n[agents.runners]\n${buildAgentRunnerLines(collaborators)}\n`
   }
 
+  const activeRunnerNames = new Set(collaborators.map((agentName) => agentName.toLowerCase()))
+  const runnerBody = runnerBounds.lines.slice(runnerBounds.start + 1, runnerBounds.end)
+  const parseRunnerName = (line) => {
+    const key = line.match(/^\s*((?:"(?:\\.|[^"])*")|(?:[A-Za-z0-9_-]+))\s*=/)?.[1]
+    return key ? parseTomlKey(key).toLowerCase() : ""
+  }
+  const retainedRunnerBody = runnerBody.filter((line) => {
+    const runnerName = parseRunnerName(line)
+    return !runnerName || activeRunnerNames.has(runnerName)
+  })
   const existingRunnerNames = new Set(
-    runnerBounds.lines
-      .slice(runnerBounds.start + 1, runnerBounds.end)
-      .map((line) => line.match(/^\s*((?:"(?:\\.|[^"])*")|(?:[A-Za-z0-9_-]+))\s*=/)?.[1])
+    retainedRunnerBody
+      .map(parseRunnerName)
       .filter(Boolean)
-      .map((key) => parseTomlKey(key)),
   )
   const missingRunnerLines = collaborators
-    .filter((agentName) => !existingRunnerNames.has(agentName))
+    .filter((agentName) => !existingRunnerNames.has(agentName.toLowerCase()))
     .map(renderAgentRunnerEntry)
 
-  if (missingRunnerLines.length > 0) {
-    const lines = [...runnerBounds.lines]
-    lines.splice(runnerBounds.end, 0, ...missingRunnerLines)
-    nextContent = lines.join("\n")
-  }
+  const lines = [...runnerBounds.lines]
+  lines.splice(
+    runnerBounds.start + 1,
+    runnerBounds.end - runnerBounds.start - 1,
+    ...retainedRunnerBody,
+    ...missingRunnerLines,
+  )
+  nextContent = lines.join("\n")
 
   return nextContent
 }
@@ -6961,7 +6981,7 @@ function stripRunnerFlag(args, ...names) {
   return stripped
 }
 
-function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
+function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName, allowWrites = false }) {
   const tokens = parseShellWords(runnerValue)
   if (tokens.length === 0) {
     return null
@@ -7028,7 +7048,10 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
       args.push("--include-partial-messages")
     }
     if (!hasRunnerArg(args, "--allowedTools", "--allowed-tools")) {
-      args.push(`--allowedTools=${CLAUDE_LOOP_ALLOWED_TOOLS}`)
+      const allowedTools = allowWrites
+        ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
+        : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
+      args.push(`--allowedTools=${allowedTools.join(" ")}`)
     }
     if (!placeholderPrompt) {
       args.push(prompt)
@@ -7051,7 +7074,7 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
   }
 }
 
-function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT } = {}) {
+function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT, allowWrites = false } = {}) {
   const runnerMap = getAgentRunnerMap(config)
   const configuredValue = runnerMap[agentName]
 
@@ -7077,6 +7100,7 @@ function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT }
     repoRoot,
     prompt,
     agentName,
+    allowWrites,
   })
 
   if (!cliRunner) {
@@ -7694,7 +7718,10 @@ async function runLoop({
 
     const before = current
     const beforeFingerprint = serializeCurrentState(before)
-    const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt: loopPrompt })
+    const runner = resolveLoopRunner(agentName, config, repoRoot, {
+      prompt: loopPrompt,
+      allowWrites: before.status !== "needs-review",
+    })
     const roundStartedAt = Date.now()
     emitLoopBlock(onEvent, "selected agent:", [
       `${agentName}`,
