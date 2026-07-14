@@ -1604,21 +1604,21 @@ async function run() {
     if (subcommand === "claim") {
       await claimHandoff(repoRoot, options)
       await maybeAutoStartDashboard(repoRoot)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return
     }
 
     if (subcommand === "update") {
       await patchHandoff(repoRoot, options)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return
     }
 
     if (subcommand === "resolve") {
       await resolveHandoff(repoRoot, options)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       const reminderActor = resolveReminderActor(options, result)
       const reminderLines = buildAssignedWorkReminderLines(result, reminderActor)
@@ -1633,7 +1633,7 @@ async function run() {
 
     if (subcommand === "request-changes") {
       await requestChangesHandoff(repoRoot, options)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return
     }
@@ -1899,6 +1899,7 @@ async function run() {
         mode: options.mode,
         base: options.base,
         head: options.head,
+        lane: options.lane,
       })
       console.log(formatReviewRunResult(result))
       if (result.status === "failed") {

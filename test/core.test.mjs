@@ -3374,6 +3374,15 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.notEqual(escaped.code, 0)
       assert.match(escaped.stderr, /scoped to lane b; refusing explicit --lane a/)
 
+      const scopedUpdate = await runBtrain(
+        ["handoff", "update", "--repo", repoDir, "--next", "Lane B scoped update", "--actor", "OwnerB"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.equal(scopedUpdate.code, 0, scopedUpdate.stderr)
+      assert.match(scopedUpdate.stdout, /--- lane b ---/)
+      assert.doesNotMatch(scopedUpdate.stdout, /--- lane a ---/)
+
       const scopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir, scopedEnv)
       assert.equal(scopedLocks.code, 0, scopedLocks.stderr)
       assert.match(scopedLocks.stdout, /lane b: src\/lane-b\.ts/)
@@ -3398,6 +3407,61 @@ describe("btrain loop lane-scoped dispatch", () => {
       const unscopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir)
       assert.equal(unscopedLocks.code, 0, unscopedLocks.stderr)
       assert.match(unscopedLocks.stdout, /lane a: src\/lane-a\.ts/)
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
+  it("scopes parallel review state and pathspecs to the locked loop lane", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      const reviewScript = path.join(repoDir, "capture-review.py")
+      const capturePath = path.join(repoDir, "review-args.json")
+      await fs.writeFile(
+        reviewScript,
+        `import json, pathlib, sys
+args = sys.argv[1:]
+pathlib.Path(args[args.index("--output") + 1]).write_text("# scoped review\\n")
+pathlib.Path(${JSON.stringify(capturePath)}).write_text(json.dumps(args))
+`,
+        "utf8",
+      )
+      const configPath = path.join(repoDir, ".btrain", "project.toml")
+      const config = await fs.readFile(configPath, "utf8")
+      await fs.writeFile(
+        configPath,
+        config.replace("[reviews]", `[reviews]\nparallel_script = ${JSON.stringify(reviewScript)}`),
+        "utf8",
+      )
+
+      const scopedReview = await runBtrain(
+        ["review", "run", "--repo", repoDir, "--mode", "parallel"],
+        repoDir,
+        {
+          BTRAIN_AGENT: "Reviewer",
+          BRAIN_TRAIN_AGENT: "Reviewer",
+          BTRAIN_LANE: "b",
+          BTRAIN_LANE_LOCKED: "1",
+        },
+      )
+      assert.equal(scopedReview.code, 0, scopedReview.stderr)
+
+      const args = JSON.parse(await fs.readFile(capturePath, "utf8"))
+      assert.ok(args.includes("--file"), JSON.stringify(args))
+      assert.ok(args.includes("src/lane-b.ts"), JSON.stringify(args))
+      assert.ok(!args.includes("src/lane-a.ts"), JSON.stringify(args))
+
+      const reviewFiles = await fs.readdir(path.join(repoDir, ".btrain", "reviews"))
+      const metadataPath = path.join(
+        repoDir,
+        ".btrain",
+        "reviews",
+        reviewFiles.find((entry) => entry.endsWith(".json")),
+      )
+      const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"))
+      assert.equal(metadata.laneId, "b")
+      assert.equal(metadata.task, "Target lane task")
     } finally {
       await rmDir(repoDir)
     }

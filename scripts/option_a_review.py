@@ -293,6 +293,12 @@ def parse_args() -> argparse.Namespace:
     help="Repository root to diff. Defaults to the current directory.",
   )
   parser.add_argument(
+    "--file",
+    action="append",
+    default=[],
+    help="Limit the diff to this path. Repeat for multiple lane-locked paths.",
+  )
+  parser.add_argument(
     "--mode",
     default="parallel",
     choices=["parallel", "hybrid"],
@@ -315,9 +321,12 @@ def parse_args() -> argparse.Namespace:
 # Git helpers
 # ──────────────────────────────────────────────
 
-def get_diff(repo_root: str, base: str, head: str) -> str:
+def get_diff(repo_root: str, base: str, head: str, files: list[str] | None = None) -> str:
+  command = ["git", "-C", repo_root, "diff", "--unified=0", f"{base}...{head}"]
+  if files:
+    command.extend(["--", *files])
   result = subprocess.run(
-    ["git", "-C", repo_root, "diff", "--unified=0", f"{base}...{head}"],
+    command,
     check=True,
     capture_output=True,
     text=True,
@@ -607,7 +616,7 @@ def render_markdown(
 
 async def main() -> None:
   args = parse_args()
-  diff_text = get_diff(args.repo, args.base, args.head)
+  diff_text = get_diff(args.repo, args.base, args.head, args.file)
 
   path_triggers = args.path_triggers.split(",") if args.path_triggers else None
   content_triggers = args.content_triggers.split(",") if args.content_triggers else None

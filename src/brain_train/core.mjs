@@ -6635,7 +6635,7 @@ async function listReviewArtifacts(repoRoot) {
   })
 }
 
-async function runReview({ repoRoot, mode, base, head } = {}) {
+async function runReview({ repoRoot, mode, base, head, lane } = {}) {
   const config = await readProjectConfig(repoRoot)
   if (!config) {
     throw new BtrainError({
@@ -6645,7 +6645,10 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
     })
   }
 
-  const current = await readCurrentState(repoRoot)
+  const laneId = typeof lane === "string" ? lane.trim().toLowerCase() : ""
+  const current = laneId
+    ? (await checkHandoff(repoRoot, { laneId })).current
+    : await readCurrentState(repoRoot)
   const repoName = config?.name || normalizeRepoName(repoRoot)
   const repoPaths = getRepoPaths(repoRoot)
   const reviewConfig = getReviewConfig(config)
@@ -6718,6 +6721,9 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
       "--output", reportPath,
       "--mode", resolvedMode.mode === "hybrid" ? "hybrid" : "parallel",
     ]
+    for (const lockedFile of normalizePathList(current.lockedFiles)) {
+      scriptArgs.push("--file", lockedFile)
+    }
 
     // Pass hybrid triggers from project.toml to the review script
     if (resolvedMode.mode === "hybrid" && reviewConfig.hybridPathTriggers.length > 0) {
@@ -6773,6 +6779,8 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
     task: current.task || "",
     owner: current.owner || "",
     reviewer: current.reviewer || "",
+    laneId,
+    lockedFiles: normalizePathList(current.lockedFiles),
     runner: {
       command: "python3",
       scriptPath,
