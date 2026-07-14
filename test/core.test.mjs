@@ -3395,6 +3395,14 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.match(scopedStatus.stdout, /lane b: in-progress — Target lane task/)
       assert.doesNotMatch(scopedStatus.stdout, /lane a:/)
 
+      const scopedRepair = await runBtrain(
+        ["doctor", "--repo", repoDir, "--repair"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(scopedRepair.code, 0)
+      assert.match(scopedRepair.stderr, /scoped to lane b; refusing repo-wide doctor --repair/)
+
       const scopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir, scopedEnv)
       assert.equal(scopedLocks.code, 0, scopedLocks.stderr)
       assert.match(scopedLocks.stdout, /lane b: src\/lane-b\.ts/)

@@ -2071,6 +2071,16 @@ async function run() {
 
   if (command === "doctor") {
     const options = parseOptions(rest)
+    const scopedLane = process.env.BTRAIN_LANE_LOCKED === "1" && typeof options.lane === "string"
+      ? options.lane.trim().toLowerCase()
+      : ""
+    if (options.repair && scopedLane) {
+      throw new BtrainError({
+        message: `This btrain runner is scoped to lane ${scopedLane}; refusing repo-wide doctor --repair.`,
+        reason: "Doctor repairs can mutate handoffs, workflow events, and locks in every lane.",
+        fix: "Run `btrain doctor` without --repair, or run the repair from an unscoped operator session.",
+      })
+    }
     const repoRoot = options.repo ? path.resolve(options.repo) : null
     const results = await doctor({ repoRoot, repair: !!options.repair, skipFeedback: !!options["skip-feedback"] })
     console.log(`btrain home: ${getBrainTrainHome()}`)
