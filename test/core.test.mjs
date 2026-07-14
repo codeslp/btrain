@@ -3061,6 +3061,8 @@ emit({
     assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk btrain review:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)
+    assert.ok(stdout.includes("Bash(npm test:*)"), stdout)
+    assert.ok(stdout.includes("Bash(node --test:*)"), stdout)
     assert.doesNotMatch(stdout, /--allowedTools=.*\bEdit\b/)
     assert.ok(stdout.includes("agent progress:"), stdout)
     assert.ok(stdout.includes("tool Bash: git status --short"), stdout)
@@ -3387,6 +3389,11 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.equal(scopedUpdate.code, 0, scopedUpdate.stderr)
       assert.match(scopedUpdate.stdout, /--- lane b ---/)
       assert.doesNotMatch(scopedUpdate.stdout, /--- lane a ---/)
+
+      const scopedStatus = await runBtrain(["status", "--repo", repoDir], repoDir, scopedEnv)
+      assert.equal(scopedStatus.code, 0, scopedStatus.stderr)
+      assert.match(scopedStatus.stdout, /lane b: in-progress — Target lane task/)
+      assert.doesNotMatch(scopedStatus.stdout, /lane a:/)
 
       const scopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir, scopedEnv)
       assert.equal(scopedLocks.code, 0, scopedLocks.stderr)

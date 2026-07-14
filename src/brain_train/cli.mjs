@@ -2048,8 +2048,13 @@ async function run() {
 
   if (command === "status") {
     const options = parseOptions(rest)
-    const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const statuses = await getStatus({ repoRoot })
+    const lane = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
+    const repoRoot = options.repo
+      ? path.resolve(options.repo)
+      : lane
+        ? await resolveRepoRoot()
+        : null
+    const statuses = await getStatus({ repoRoot, lane })
     if (options.json) {
       console.log(JSON.stringify(statuses, null, 2))
       return

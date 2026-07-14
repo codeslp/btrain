@@ -289,6 +289,8 @@ const CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS = [
   "Bash(rtk git log:*)",
   "Bash(rtk rg:*)",
   "Bash(rtk sed:*)",
+  "Bash(npm test:*)",
+  "Bash(node --test:*)",
   "Bash(rtk npm test:*)",
   "Bash(rtk node --test:*)",
 ]
@@ -8620,7 +8622,7 @@ async function listRepos() {
   return getRegisteredRepos({ includeDisabled: true })
 }
 
-async function getRepoStatus(repoRoot) {
+async function getRepoStatus(repoRoot, laneId = "") {
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const currentState = await readCurrentState(repoRoot)
@@ -8647,11 +8649,20 @@ async function getRepoStatus(repoRoot) {
   // Add lane info if enabled
   const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
-    status.locks = await listLocks(repoRoot)
+    const normalizedLaneId = typeof laneId === "string" ? laneId.trim().toLowerCase() : ""
+    if (normalizedLaneId) {
+      getLaneHandoffPath(repoRoot, config, normalizedLaneId)
+    }
+    const allLocks = await listLocks(repoRoot)
+    status.locks = normalizedLaneId ? getLaneLocks(allLocks, normalizedLaneId) : allLocks
+    const laneStates = await readAllLaneStates(repoRoot, config)
+    const scopedLaneStates = normalizedLaneId
+      ? laneStates.filter((lane) => lane._laneId === normalizedLaneId)
+      : laneStates
     status.lanes = await attachLatestCgraphMetadataToStates(
       repoRoot,
       config,
-      decorateLaneStates(await readAllLaneStates(repoRoot, config), status.locks),
+      decorateLaneStates(scopedLaneStates, status.locks),
     )
     status.current = getMostRecentlyUpdatedState(status.lanes, status.current)
     status.staleness = parseStaleness(status.current.lastUpdated)
@@ -8881,9 +8892,9 @@ async function getStartupSnapshot(repoRoot) {
   }
 }
 
-async function getStatus({ repoRoot } = {}) {
+async function getStatus({ repoRoot, lane } = {}) {
   if (repoRoot) {
-    return [await getRepoStatus(repoRoot)]
+    return [await getRepoStatus(repoRoot, lane)]
   }
 
   const repos = await getRegisteredRepos()
@@ -8905,7 +8916,7 @@ async function getStatus({ repoRoot } = {}) {
       continue
     }
 
-    statuses.push(await getRepoStatus(repo.path))
+    statuses.push(await getRepoStatus(repo.path, lane))
   }
 
   return statuses
