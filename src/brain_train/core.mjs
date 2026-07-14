@@ -266,6 +266,30 @@ const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
 const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
+const CLAUDE_LOOP_ALLOWED_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Bash(btrain handoff:*)",
+  "Bash(btrain locks:*)",
+  "Bash(btrain status:*)",
+  "Bash(bth:*)",
+  "Bash(rtk btrain handoff:*)",
+  "Bash(rtk btrain locks:*)",
+  "Bash(rtk btrain status:*)",
+  "Bash(git status:*)",
+  "Bash(git diff:*)",
+  "Bash(git show:*)",
+  "Bash(git log:*)",
+  "Bash(rtk git status:*)",
+  "Bash(rtk git diff:*)",
+  "Bash(rtk git show:*)",
+  "Bash(rtk git log:*)",
+  "Bash(rtk rg:*)",
+  "Bash(rtk sed:*)",
+  "Bash(rtk npm test:*)",
+  "Bash(rtk node --test:*)",
+].join(" ")
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
 const CODEX_SUBCOMMANDS = new Set([
   "exec",
@@ -6999,6 +7023,9 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
     }
     if (!hasRunnerArg(args, "--include-partial-messages")) {
       args.push("--include-partial-messages")
+    }
+    if (!hasRunnerArg(args, "--allowedTools", "--allowed-tools")) {
+      args.push(`--allowedTools=${CLAUDE_LOOP_ALLOWED_TOOLS}`)
     }
     if (!placeholderPrompt) {
       args.push(prompt)

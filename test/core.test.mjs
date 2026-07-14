@@ -2996,6 +2996,9 @@ emit({
 
     assert.equal(code, 0)
     assert.ok(stdout.includes("--output-format stream-json"), stdout)
+    assert.ok(stdout.includes("--allowedTools="), stdout)
+    assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)
     assert.ok(stdout.includes("agent progress:"), stdout)
     assert.ok(stdout.includes("tool Bash: git status --short"), stdout)
     assert.ok(stdout.includes("tool result: M src/brain_train/core.mjs"), stdout)
