@@ -212,6 +212,34 @@ describe("PR review flow classification", () => {
     assert.equal(status.bots.find((bot) => bot.id === "codex").state, "clear")
   })
 
+  it("classifies a matching-head Codex clear issue comment as clear", () => {
+    const head = "dddddddddddddddddddddddddddddddddddddddd"
+    const status = classifyPrReviewState({
+      pr: {
+        number: 14,
+        state: "OPEN",
+        headRefOid: head,
+      },
+      prFlowConfig,
+      rawComments: {
+        issueComments: [
+          {
+            id: 101,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: `Codex Review: Didn't find any major issues. Chef's kiss.\n\n**Reviewed commit:** \`dddddddddd\``,
+            created_at: "2026-07-14T21:12:35Z",
+          },
+        ],
+        reviewComments: [],
+        reviews: [],
+      },
+    })
+
+    const codexState = status.bots.find((bot) => bot.id === "codex")
+    assert.equal(codexState.state, "clear")
+    assert.equal(codexState.reviewedCommit, "dddddddddd")
+  })
+
   it("treats inline comments auto-anchored by GitHub to a new HEAD as stale, not current-head feedback", () => {
     const oldHead = "84e9bc6ba23cb233b7feab954e0b6fdb331895d9"
     const newHead = "0fac59295ce98ebd540cee314251671cf588acd5"
