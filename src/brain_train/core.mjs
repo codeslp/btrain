@@ -8999,7 +8999,10 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
   const scopedLane = normalizeAgentName(lane).toLowerCase()
   const laneConfigs = getLaneConfigs(config)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
-  const overrides = await listActiveOverrides(repoRoot)
+  const activeOverrides = await listActiveOverrides(repoRoot)
+  const overrides = scopedLane
+    ? activeOverrides.filter((record) => record.scope !== "lane" || record.laneId === scopedLane)
+    : activeOverrides
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
   const cgraph = await getDoctorCgraphSummary(repoRoot, config)
 
@@ -9112,8 +9115,12 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
         if (!Array.isArray(registry.locks)) {
           issues.push("`locks.json` is malformed: `locks` is not an array.")
         } else {
-          const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
-            .filter((laneState) => !scopedLane || laneState._laneId === scopedLane)
+          const laneStates = scopedLane
+            ? [decorateLaneState(
+                await readLaneState(repoRoot, config, scopedLane),
+                getLaneLocks(registry.locks, scopedLane),
+              )]
+            : decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
           for (const laneState of laneStates) {
             // Integrity issues (WS4)
             const integrityIssues = await analyzeLaneIntegrity(repoRoot, config, laneState)
