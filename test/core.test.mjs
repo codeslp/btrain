@@ -3058,6 +3058,8 @@ emit({
     assert.equal(code, 0)
     assert.ok(stdout.includes("--output-format stream-json"), stdout)
     assert.ok(stdout.includes("--allowedTools="), stdout)
+    assert.ok(stdout.includes("--allowedTools=Read,Grep,Glob,"), stdout)
+    assert.ok(!stdout.includes("--allowedTools=Read Grep Glob "), stdout)
     assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk btrain review:*)"), stdout)
     assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)

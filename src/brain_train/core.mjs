@@ -7100,7 +7100,7 @@ function normalizeLoopCliRunner(runnerValue, {
           : permissionPhase === "write"
             ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
             : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
-      args.push(`--allowedTools=${allowedTools.join(" ")}`)
+      args.push(`--allowedTools=${allowedTools.join(",")}`)
     }
     if (!placeholderPrompt) {
       args.push(prompt)
