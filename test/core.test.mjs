@@ -1888,6 +1888,36 @@ describe("btrain handoff reviewer intelligence", () => {
       await rmDir(localTmpDir)
     }
   })
+
+  it("does not treat stale runner mappings as active reviewer candidates", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      await runBtrain(["init", localTmpDir, "--agent", "SoloBot"], localTmpDir)
+      await disableLanes(localTmpDir)
+      await setRunnerConfig(localTmpDir, [
+        '"SoloBot" = "solo-runner"',
+        '"RemovedBot" = "removed-runner"',
+      ])
+
+      const result = await runBtrain(
+        ["handoff", "claim", "--repo", localTmpDir, "--task", "Ignore stale runner", "--owner", "SoloBot", "--reviewer", "any-other"],
+        localTmpDir,
+      )
+
+      assert.notEqual(result.code, 0)
+      assert.ok(
+        result.stderr.includes('Could not infer a reviewer different from "SoloBot"'),
+        result.stderr,
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
 })
 
 describe("btrain handoff agent verification", () => {

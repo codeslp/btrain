@@ -6362,8 +6362,13 @@ function getConfiguredAgentNames(config) {
   addAgent(config?.agents?.writer_default)
   addAgent(config?.agents?.reviewer_default)
 
-  for (const agentName of Object.keys(getAgentRunnerMap(config))) {
-    addAgent(agentName)
+  // Runner mappings describe how to launch agents, not who currently
+  // collaborates on the repo. Keep them only as a legacy fallback for configs
+  // that predate the active/default collaborator roster.
+  if (agentNames.length === 0) {
+    for (const agentName of Object.keys(getAgentRunnerMap(config))) {
+      addAgent(agentName)
+    }
   }
 
   return agentNames
