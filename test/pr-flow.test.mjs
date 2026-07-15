@@ -1,9 +1,24 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { promisify } from "node:util"
 import {
+  applyPrStatusToHandoff,
   classifyPrReviewState,
   formatPrStatusSummary,
+  selectReviewRequestHeadSha,
 } from "../src/brain_train/pr-flow.mjs"
+import {
+  checkHandoff,
+  claimHandoff,
+  initRepo,
+  patchHandoff,
+} from "../src/brain_train/core.mjs"
+
+const execFileAsync = promisify(execFile)
 
 const prFlowConfig = {
   enabled: true,
@@ -22,6 +37,28 @@ const prFlowConfig = {
     },
   },
 }
+
+describe("PR review request head selection", () => {
+  it("uses a pushed local head when the PR API still reports the previous commit", () => {
+    assert.equal(selectReviewRequestHeadSha({
+      prHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      prHeadRefName: "feature",
+      localBranch: "feature",
+      localHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      remoteHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+  })
+
+  it("does not mark an unpushed local commit for review", () => {
+    assert.equal(selectReviewRequestHeadSha({
+      prHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      prHeadRefName: "feature",
+      localBranch: "feature",
+      localHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      remoteHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+  })
+})
 
 describe("PR review flow classification", () => {
   it("classifies Codex current-head feedback and Unblocked stale feedback from ai_sales#143 shape", () => {
@@ -175,6 +212,34 @@ describe("PR review flow classification", () => {
     assert.equal(status.bots.find((bot) => bot.id === "codex").state, "clear")
   })
 
+  it("classifies a matching-head Codex clear issue comment as clear", () => {
+    const head = "dddddddddddddddddddddddddddddddddddddddd"
+    const status = classifyPrReviewState({
+      pr: {
+        number: 14,
+        state: "OPEN",
+        headRefOid: head,
+      },
+      prFlowConfig,
+      rawComments: {
+        issueComments: [
+          {
+            id: 101,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: `Codex Review: Didn't find any major issues. Chef's kiss.\n\n**Reviewed commit:** \`dddddddddd\``,
+            created_at: "2026-07-14T21:12:35Z",
+          },
+        ],
+        reviewComments: [],
+        reviews: [],
+      },
+    })
+
+    const codexState = status.bots.find((bot) => bot.id === "codex")
+    assert.equal(codexState.state, "clear")
+    assert.equal(codexState.reviewedCommit, "dddddddddd")
+  })
+
   it("treats inline comments auto-anchored by GitHub to a new HEAD as stale, not current-head feedback", () => {
     const oldHead = "84e9bc6ba23cb233b7feab954e0b6fdb331895d9"
     const newHead = "0fac59295ce98ebd540cee314251671cf588acd5"
@@ -242,5 +307,51 @@ describe("PR review flow classification", () => {
     })
 
     assert.equal(status.overall, "merged")
+  })
+})
+
+describe("PR review flow handoff application", () => {
+  it("infers the pinned runner identity when applying PR feedback", async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-"))
+    const previousHome = process.env.BRAIN_TRAIN_HOME
+    const previousAgent = process.env.BTRAIN_AGENT
+
+    try {
+      process.env.BRAIN_TRAIN_HOME = path.join(repoRoot, ".btrain-test-home")
+      process.env.BTRAIN_AGENT = "Codex"
+      await execFileAsync("git", ["init", repoRoot])
+      await initRepo(repoRoot, { agent: ["Codex", "Claude"] })
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# PR apply test\n", "utf8")
+      await claimHandoff(repoRoot, {
+        lane: "a",
+        task: "Apply bot feedback",
+        owner: "Codex",
+        reviewer: "Claude",
+        files: "README.md",
+      })
+      await patchHandoff(repoRoot, {
+        lane: "a",
+        actor: "Codex",
+        status: "pr-review",
+        pr: "22",
+      })
+
+      await applyPrStatusToHandoff(repoRoot, { lane: "a" }, {
+        overall: "feedback",
+        bots: [{ id: "codex", state: "feedback" }],
+        pr: { number: 22 },
+      })
+
+      const handoff = await checkHandoff(repoRoot)
+      const lane = handoff.lanes.find((candidate) => candidate._laneId === "a")
+      assert.equal(lane.status, "changes-requested")
+      assert.match(lane.lastUpdated, /^Codex /)
+    } finally {
+      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
+      else process.env.BRAIN_TRAIN_HOME = previousHome
+      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
+      else process.env.BTRAIN_AGENT = previousAgent
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
   })
 })

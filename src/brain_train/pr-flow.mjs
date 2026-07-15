@@ -47,7 +47,7 @@ function commitMatches(left, right) {
 }
 
 function extractReviewedCommit(body) {
-  const match = /reviewed commit:\s*`?([0-9a-f]{7,40})`?/i.exec(String(body || ""))
+  const match = /reviewed commit:\s*(?:\*\*)?\s*`?([0-9a-f]{7,40})`?/i.exec(String(body || ""))
   return match ? match[1] : ""
 }
 
@@ -104,7 +104,7 @@ function bodyIndicatesClear(body) {
   const text = String(body || "")
   const count = issueCountFromBody(text)
   if (count === 0) return true
-  return /no (issues|findings|suggestions)|looks good|approved/i.test(text)
+  return /no (issues|findings|suggestions)|did(?: not|n't) find any (?:major )?(issues|findings|suggestions)|looks good|approved/i.test(text)
 }
 
 function bodyIndicatesFeedback(body) {
@@ -144,10 +144,13 @@ export function classifyBotReview({
 }) {
   const botInline = (reviewComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
   const botReviews = (reviews || []).filter((review) => loginMatches(bot, review.user?.login))
+  const botIssueComments = (issueComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
   const currentInline = botInline.filter((comment) => commitMatches(inlineReviewedCommit(comment), headSha))
   const currentReviews = botReviews.filter((review) => commitMatches(reviewCommit(review), headSha))
+  const currentIssueComments = botIssueComments.filter((comment) => commitMatches(reviewCommit(comment), headSha))
   const latestCurrentReview = newest(currentReviews)
-  const latestActivity = newest([...botInline, ...botReviews])
+  const latestCurrentIssueComment = newest(currentIssueComments)
+  const latestActivity = newest([...botInline, ...botReviews, ...botIssueComments])
   const staleInline = botInline.filter((comment) => !commitMatches(inlineReviewedCommit(comment), headSha))
   const clearReaction = newest((issueComments || []).filter((comment) => (
     isMarkedReviewRequest(comment, bot, headSha)
@@ -188,6 +191,31 @@ export function classifyBotReview({
         staleFeedbackCount: staleInline.length,
         feedback: [],
         summary: `${bot.id} review is clear on the current head`,
+      }
+    }
+  }
+
+  if (latestCurrentIssueComment) {
+    if (bodyIndicatesFeedback(latestCurrentIssueComment.body)) {
+      return {
+        id: bot.id,
+        state: "feedback",
+        reviewedCommit: reviewCommit(latestCurrentIssueComment) || headSha,
+        feedbackCount: 1,
+        staleFeedbackCount: staleInline.length,
+        feedback: summarizeFeedbackItems([latestCurrentIssueComment]),
+        summary: `${bot.id} issue comment reported feedback on the current head`,
+      }
+    }
+    if (bodyIndicatesClear(latestCurrentIssueComment.body)) {
+      return {
+        id: bot.id,
+        state: "clear",
+        reviewedCommit: reviewCommit(latestCurrentIssueComment) || headSha,
+        feedbackCount: 0,
+        staleFeedbackCount: staleInline.length,
+        feedback: [],
+        summary: `${bot.id} issue comment is clear on the current head`,
       }
     }
   }
@@ -413,9 +441,34 @@ function buildReviewRequestBody(bot, { laneId = "", headSha = "" } = {}) {
   return `${bot.requestBody}\n\n<!-- btrain-pr-review ${attrs.join(" ")} -->`
 }
 
+export function selectReviewRequestHeadSha({
+  prHeadSha = "",
+  prHeadRefName = "",
+  localBranch = "",
+  localHeadSha = "",
+  remoteHeadSha = "",
+} = {}) {
+  const localBranchMatches = localBranch && localBranch === prHeadRefName
+  const localHeadIsPushed = commitMatches(localHeadSha, remoteHeadSha)
+  return localBranchMatches && localHeadIsPushed ? localHeadSha : prHeadSha
+}
+
 async function fetchPrHeadSha(repoRoot, prNumber) {
-  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid"], repoRoot)
-  return pr?.headRefOid || ""
+  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid,headRefName"], repoRoot)
+  const [localBranch, localHeadSha, remoteHeadSha] = await Promise.all([
+    gitText(["branch", "--show-current"], repoRoot).catch(() => ""),
+    gitText(["rev-parse", "HEAD"], repoRoot).catch(() => ""),
+    pr?.headRefName
+      ? gitText(["rev-parse", `refs/remotes/origin/${pr.headRefName}`], repoRoot).catch(() => "")
+      : "",
+  ])
+  return selectReviewRequestHeadSha({
+    prHeadSha: pr?.headRefOid || "",
+    prHeadRefName: pr?.headRefName || "",
+    localBranch,
+    localHeadSha,
+    remoteHeadSha,
+  })
 }
 
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
@@ -430,9 +483,12 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   return posted
 }
 
-async function applyPrStatusToHandoff(repoRoot, options, status) {
-  const { laneId, prNumber } = await resolveLaneAndPr(repoRoot, options)
-  const actor = options.actor || "btrain"
+export async function applyPrStatusToHandoff(repoRoot, options, status) {
+  const { laneId, lane, prNumber } = await resolveLaneAndPr(repoRoot, options)
+  const actor = typeof options.actor === "string" && options.actor.trim()
+    ? options.actor.trim()
+    : undefined
+  const actorLabel = actor || lane.owner || "owner"
 
   if (status.overall === "merged") {
     await resolveHandoff(repoRoot, {
@@ -464,7 +520,7 @@ async function applyPrStatusToHandoff(repoRoot, options, status) {
       pr: prNumber,
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
-      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actor}"\`.`,
+      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actorLabel}"\`.`,
     })
     return "changes-requested"
   }

@@ -596,6 +596,9 @@ describe("dynamic collaborator bootstrap", () => {
       projectToml.includes('active = ["Opus 4.6", "GPT-5 Codex", "Gemini 3.1"]'),
       projectToml,
     )
+    assert.ok(projectToml.includes('"Opus 4.6" = "claude -p"'), projectToml)
+    assert.ok(projectToml.includes('"GPT-5 Codex" = "codex"'), projectToml)
+    assert.ok(projectToml.includes('"Gemini 3.1" = "gemini"'), projectToml)
     assert.ok(projectToml.includes("[lanes.f]"), projectToml)
 
     for (const laneId of ["A", "B", "C", "D", "E", "F"]) {
@@ -683,6 +686,8 @@ describe("dynamic collaborator migration", () => {
 
     const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
     assert.ok(projectToml.includes('active = ["GPT-5 Codex", "Opus 4.6"]'), projectToml)
+    assert.ok(projectToml.includes('"GPT-5 Codex" = "codex"'), projectToml)
+    assert.ok(projectToml.includes('"Opus 4.6" = "claude -p"'), projectToml)
     assert.ok(projectToml.includes('writer_default = "GPT-5 Codex"'), projectToml)
     assert.ok(projectToml.includes('reviewer_default = "Opus 4.6"'), projectToml)
 
@@ -732,14 +737,24 @@ describe("btrain agents commands", () => {
   })
 
   it("agents add appends collaborators and scaffolds newly required lanes", async () => {
+    const configPath = path.join(tmpDir, ".btrain", "project.toml")
+    const initialConfig = await fs.readFile(configPath, "utf8")
+    await fs.writeFile(
+      configPath,
+      initialConfig.replace('"GPT-5 Codex" = "codex"', '"GPT-5 Codex" = "custom-codex"'),
+      "utf8",
+    )
+
     const { code, stderr } = await runBtrain(
       ["agents", "add", "--repo", tmpDir, "--agent", "Opus 4.6"],
       tmpDir,
     )
     assert.equal(code, 0, stderr)
 
-    const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+    const projectToml = await fs.readFile(configPath, "utf8")
     assert.ok(projectToml.includes('active = ["GPT-5 Codex", "Opus 4.6"]'), projectToml)
+    assert.ok(projectToml.includes('"GPT-5 Codex" = "custom-codex"'), projectToml)
+    assert.ok(projectToml.includes('"Opus 4.6" = "claude -p"'), projectToml)
     assert.ok(projectToml.includes("per_agent = 3"), projectToml)
     assert.ok(projectToml.includes("[lanes.f]"), projectToml)
 
@@ -764,6 +779,9 @@ describe("btrain agents commands", () => {
 
     const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
     assert.ok(projectToml.includes('active = ["Opus 4.6", "Gemini 3.1"]'), projectToml)
+    assert.ok(projectToml.includes('"Opus 4.6" = "claude -p"'), projectToml)
+    assert.ok(projectToml.includes('"Gemini 3.1" = "gemini"'), projectToml)
+    assert.ok(!projectToml.includes('"GPT-5 Codex" ='), projectToml)
 
     const agentsDoc = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
     assert.ok(agentsDoc.includes("Active collaborating agents: `Opus 4.6`, `Gemini 3.1`"), agentsDoc)
@@ -1250,7 +1268,7 @@ describe("btrain PR flow handoff lifecycle", () => {
   })
 
   it("btrain loop dispatches the lane owner from ready-for-pr", async () => {
-    const ownerScript = path.join(tmpDir, "owner-ready-for-pr.js")
+    const ownerScript = path.join(tmpDir, "claude")
     await writeExecutable(
       ownerScript,
       `#!/usr/bin/env node
@@ -1276,6 +1294,32 @@ console.log("ready-for-pr owner ran")
     assert.match(stdout, /selected agent:\s+TestBot/)
     assert.match(stdout, /reason: handoff status is ready-for-pr/)
     assert.match(stdout, /dispatch TestBot:/)
+    assert.match(stdout, /Bash\(rtk btrain pr \*\)/)
+    assert.match(stdout, /Bash\(rtk git push \*\)/)
+    assert.doesNotMatch(stdout, /Bash\(rtk gh pr merge \*\)/)
+  })
+
+  it("only exposes Claude merge tools once the lane is ready-to-merge", async () => {
+    const updated = await runBtrain(
+      [
+        "handoff", "update", "--repo", tmpDir,
+        "--lane", "a",
+        "--status", "ready-to-merge",
+        "--pr", "22",
+        "--actor", "TestBot",
+      ],
+      tmpDir,
+    )
+    assert.equal(updated.code, 0, updated.stderr)
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run", "--poll-interval", "0.05"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.match(stdout, /reason: handoff status is ready-to-merge/)
+    assert.match(stdout, /Bash\(rtk gh pr merge \*\)/)
   })
 
   it("final resolve releases locks after the PR phase completes", async () => {
@@ -1844,6 +1888,36 @@ describe("btrain handoff reviewer intelligence", () => {
       await rmDir(localTmpDir)
     }
   })
+
+  it("does not treat stale runner mappings as active reviewer candidates", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      await runBtrain(["init", localTmpDir, "--agent", "SoloBot"], localTmpDir)
+      await disableLanes(localTmpDir)
+      await setRunnerConfig(localTmpDir, [
+        '"SoloBot" = "solo-runner"',
+        '"RemovedBot" = "removed-runner"',
+      ])
+
+      const result = await runBtrain(
+        ["handoff", "claim", "--repo", localTmpDir, "--task", "Ignore stale runner", "--owner", "SoloBot", "--reviewer", "any-other"],
+        localTmpDir,
+      )
+
+      assert.notEqual(result.code, 0)
+      assert.ok(
+        result.stderr.includes('Could not infer a reviewer different from "SoloBot"'),
+        result.stderr,
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
 })
 
 describe("btrain handoff agent verification", () => {
@@ -2085,6 +2159,27 @@ describe("btrain doctor", () => {
   it("reports healthy for a freshly initialized repo", async () => {
     const { stdout } = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
     assert.ok(stdout.includes("healthy: yes"), `Expected healthy repo: ${stdout}`)
+  })
+
+  it("warns when an active agent has no configured runner", async () => {
+    const repoDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", repoDir])
+      await runBtrain(
+        ["init", repoDir, "--agent", "Claude", "--agent", "GPT"],
+        repoDir,
+      )
+      await setRunnerConfig(repoDir, ['"Claude" = "claude -p"'])
+
+      const { stdout } = await runBtrain(["doctor", "--repo", repoDir], repoDir)
+      assert.match(stdout, /Active agent "GPT" has no configured runner/)
+      assert.match(stdout, /\[agents\.runners\]/)
+    } finally {
+      await rmDir(repoDir)
+    }
   })
 
   it("surfaces stale resolved handoffs as repurpose-ready", async () => {
@@ -2858,6 +2953,41 @@ console.log("reviewer runner resolved the handoff")
     assert.ok(stdout.includes("final handoff: resolved"), stdout)
   })
 
+  it("allows a Claude lane owner to edit and commit implementation work", async () => {
+    const ownerRunner = path.join(tmpDir, "claude")
+    await writeExecutable(ownerRunner, "#!/usr/bin/env node\n")
+    await setRunnerConfig(tmpDir, [`"OwnerBot" = "${ownerRunner}"`, `"ReviewBot" = "notify"`])
+    await runBtrain(
+      [
+        "handoff", "claim", "--repo", tmpDir,
+        "--task", "Claude implementation",
+        "--owner", "OwnerBot",
+        "--reviewer", "ReviewBot",
+      ],
+      tmpDir,
+    )
+
+    const { stdout, code } = await runBtrain(
+      ["loop", "--repo", tmpDir, "--dry-run"],
+      tmpDir,
+    )
+
+    assert.equal(code, 0, stdout)
+    assert.match(stdout, /--tools=Read,Grep,Glob,Bash,Edit,Write/)
+    assert.match(stdout, /--allowedTools=.*\bEdit\b/)
+    assert.match(stdout, /--allowedTools=.*\bWrite\b/)
+    assert.match(stdout, /Bash\(rtk git commit \*\)/)
+
+    await runBtrain(
+      [
+        "handoff", "resolve", "--repo", tmpDir,
+        "--summary", "Clean up owner permission test",
+        "--actor", "OwnerBot",
+      ],
+      tmpDir,
+    )
+  })
+
   it("streams Claude progress events while the runner is still working", async () => {
     const ownerRunner = path.join(tmpDir, "owner-notify.js")
     const reviewerRunner = path.join(tmpDir, "claude")
@@ -2958,6 +3088,24 @@ emit({
 
     assert.equal(code, 0)
     assert.ok(stdout.includes("--output-format stream-json"), stdout)
+    assert.ok(stdout.includes("--tools=Read,Grep,Glob,Bash"), stdout)
+    assert.doesNotMatch(stdout, /--tools=[^\s]*\b(?:Edit|Write)\b/)
+    assert.ok(stdout.includes("--allowedTools="), stdout)
+    assert.ok(stdout.includes("--allowedTools=Read,Grep,Glob,"), stdout)
+    assert.ok(!stdout.includes("--allowedTools=Read Grep Glob "), stdout)
+    assert.ok(stdout.includes("Bash(btrain handoff *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk btrain review *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk git diff *)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr view *)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr diff *)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr checks *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr view *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr diff *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr checks *)"), stdout)
+    assert.ok(stdout.includes("Bash(npm test *)"), stdout)
+    assert.ok(stdout.includes("Bash(node --test *)"), stdout)
+    assert.doesNotMatch(stdout, /Bash\([^)]*:\*\)/)
+    assert.doesNotMatch(stdout, /--allowedTools=.*\bEdit\b/)
     assert.ok(stdout.includes("agent progress:"), stdout)
     assert.ok(stdout.includes("tool Bash: git status --short"), stdout)
     assert.ok(stdout.includes("tool result: M src/brain_train/core.mjs"), stdout)
@@ -3122,6 +3270,381 @@ fs.writeFileSync(handoffPath, updated)
     assert.ok(stdout.includes("loop exit: handoff already resolved"), stdout)
     assert.ok(stdout.includes("status: noop"), stdout)
     assert.ok(stdout.includes("final handoff: resolved"), stdout)
+  })
+})
+
+describe("btrain loop lane-scoped dispatch", () => {
+  async function makeLaneRepo() {
+    const repoDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", repoDir])
+    await runBtrain(["init", repoDir], repoDir)
+    await fs.mkdir(path.join(repoDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(repoDir, "src", "lane-a.ts"), "export const laneA = true\n", "utf8")
+    await fs.writeFile(path.join(repoDir, "src", "lane-b.ts"), "export const laneB = true\n", "utf8")
+    return repoDir
+  }
+
+  async function claimTwoLanes(repoDir) {
+    let result = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        repoDir,
+        "--lane",
+        "a",
+        "--task",
+        "Default lane task",
+        "--owner",
+        "OwnerA",
+        "--reviewer",
+        "ReviewerA",
+        "--files",
+        "src/lane-a.ts",
+      ],
+      repoDir,
+      { BTRAIN_AGENT: "OwnerA" },
+    )
+    assert.equal(result.code, 0, result.stderr)
+
+    result = await runBtrain(
+      [
+        "handoff",
+        "claim",
+        "--repo",
+        repoDir,
+        "--lane",
+        "b",
+        "--task",
+        "Target lane task",
+        "--owner",
+        "OwnerB",
+        "--reviewer",
+        "ReviewerB",
+        "--files",
+        "src/lane-b.ts",
+      ],
+      repoDir,
+      { BTRAIN_AGENT: "OwnerB" },
+    )
+    assert.equal(result.code, 0, result.stderr)
+  }
+
+  it("uses --lane for state selection and dry-run dispatch", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      await setRunnerConfig(repoDir, ['"OwnerA" = "notify"', '"ownerb" = "claude -p"'])
+
+      const unscoped = await runBtrain(["loop", "--repo", repoDir, "--dry-run"], repoDir)
+      assert.notEqual(unscoped.code, 0)
+      assert.match(unscoped.stderr, /requires --lane when \[lanes\] is enabled/)
+
+      const { stdout, code } = await runBtrain(
+        ["loop", "--repo", repoDir, "--lane", "b", "--dry-run"],
+        repoDir,
+      )
+
+      assert.equal(code, 0, stdout)
+      assert.match(stdout, /handoff file: .*HANDOFF_B\.md/)
+      assert.match(stdout, /task: Target lane task/)
+      assert.match(stdout, /selected agent:\s+OwnerB/)
+      assert.match(stdout, /configured value: claude -p/)
+      assert.match(stdout, /lane: b/)
+      assert.doesNotMatch(stdout, /task: Default lane task/)
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
+  it("dispatches the assigned repair owner for repair-needed lanes", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      await setRunnerConfig(repoDir, ['"OwnerA" = "notify"', '"OwnerB" = "notify"'])
+      const repair = await runBtrain(
+        [
+          "handoff",
+          "update",
+          "--repo",
+          repoDir,
+          "--lane",
+          "b",
+          "--status",
+          "repair-needed",
+          "--reason-code",
+          "state-conflict",
+          "--actor",
+          "OwnerB",
+        ],
+        repoDir,
+        { BTRAIN_AGENT: "OwnerB" },
+      )
+      assert.equal(repair.code, 0, repair.stderr)
+
+      const { stdout, code } = await runBtrain(
+        ["loop", "--repo", repoDir, "--lane", "b", "--dry-run"],
+        repoDir,
+      )
+
+      assert.equal(code, 0, stdout)
+      assert.match(stdout, /current handoff: status=repair-needed/)
+      assert.match(stdout, /selected agent:\s+OwnerB/)
+      assert.match(stdout, /repair owner acts next/)
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
+  it("defaults child btrain commands to the locked loop lane", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      const scopedEnv = {
+        BTRAIN_AGENT: "OwnerB",
+        BRAIN_TRAIN_AGENT: "OwnerB",
+        BTRAIN_LANE: "b",
+        BTRAIN_LANE_LOCKED: "1",
+      }
+
+      const scoped = await runBtrain(["handoff", "--repo", repoDir], repoDir, scopedEnv)
+      assert.equal(scoped.code, 0, scoped.stderr)
+      assert.match(scoped.stdout, /--- lane b ---/)
+      assert.match(scoped.stdout, /task: Target lane task/)
+      assert.doesNotMatch(scoped.stdout, /--- lane a ---/)
+
+      const escaped = await runBtrain(
+        ["handoff", "--repo", repoDir, "--lane", "a"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(escaped.code, 0)
+      assert.match(escaped.stderr, /scoped to lane b; refusing explicit --lane a/)
+
+      const scopedUpdate = await runBtrain(
+        ["handoff", "update", "--repo", repoDir, "--next", "Lane B scoped update", "--actor", "OwnerB"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.equal(scopedUpdate.code, 0, scopedUpdate.stderr)
+      assert.match(scopedUpdate.stdout, /--- lane b ---/)
+      assert.doesNotMatch(scopedUpdate.stdout, /--- lane a ---/)
+
+      const newerOtherLane = await runBtrain(
+        ["handoff", "update", "--repo", repoDir, "--lane", "a", "--next", "Newer lane A update", "--actor", "OwnerA"],
+        repoDir,
+        { BTRAIN_AGENT: "OwnerA" },
+      )
+      assert.equal(newerOtherLane.code, 0, newerOtherLane.stderr)
+
+      const scopedStatus = await runBtrain(["status", "--repo", repoDir], repoDir, scopedEnv)
+      assert.equal(scopedStatus.code, 0, scopedStatus.stderr)
+      assert.match(scopedStatus.stdout, /lane b: in-progress — Target lane task/)
+      assert.doesNotMatch(scopedStatus.stdout, /lane a:/)
+
+      const scopedStatusJson = await runBtrain(["status", "--repo", repoDir, "--json"], repoDir, scopedEnv)
+      assert.equal(scopedStatusJson.code, 0, scopedStatusJson.stderr)
+      const [scopedRepoStatus] = JSON.parse(scopedStatusJson.stdout)
+      assert.equal(scopedRepoStatus.current._laneId, "b")
+      assert.equal(scopedRepoStatus.current.task, "Target lane task")
+
+      const laneARepair = await runBtrain(
+        [
+          "handoff", "update", "--repo", repoDir, "--lane", "a",
+          "--status", "repair-needed", "--reason-code", "state-conflict",
+          "--reason-tag", "test", "--actor", "OwnerA",
+        ],
+        repoDir,
+        { BTRAIN_AGENT: "OwnerA" },
+      )
+      assert.equal(laneARepair.code, 0, laneARepair.stderr)
+
+      const scopedDoctor = await runBtrain(["doctor"], repoDir, scopedEnv)
+      assert.equal(scopedDoctor.stderr, "")
+      assert.match(scopedDoctor.stdout, new RegExp(repoDir.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+      assert.doesNotMatch(scopedDoctor.stdout, /Lane a is `repair-needed`/)
+
+      const scopedRepair = await runBtrain(
+        ["doctor", "--repo", repoDir, "--repair"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(scopedRepair.code, 0)
+      assert.match(scopedRepair.stderr, /scoped to lane b; refusing repo-wide doctor --repair/)
+
+      const scopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir, scopedEnv)
+      assert.equal(scopedLocks.code, 0, scopedLocks.stderr)
+      assert.match(scopedLocks.stdout, /lane b: src\/lane-b\.ts/)
+      assert.doesNotMatch(scopedLocks.stdout, /lane a: src\/lane-a\.ts/)
+
+      const crossLaneRelease = await runBtrain(
+        ["locks", "release", "--repo", repoDir, "--path", "src/lane-a.ts"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(crossLaneRelease.code, 0)
+      assert.match(crossLaneRelease.stderr, /scoped to lane b; refusing to release a lock outside that lane/)
+
+      const ownLaneRelease = await runBtrain(
+        ["locks", "release", "--repo", repoDir, "--path", "src/lane-b.ts"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.equal(ownLaneRelease.code, 0, ownLaneRelease.stderr)
+      assert.match(ownLaneRelease.stdout, /Released lock: src\/lane-b\.ts/)
+
+      const unscopedLocks = await runBtrain(["locks", "--repo", repoDir], repoDir)
+      assert.equal(unscopedLocks.code, 0, unscopedLocks.stderr)
+      assert.match(unscopedLocks.stdout, /lane a: src\/lane-a\.ts/)
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
+  it("scopes parallel review state and pathspecs to the locked loop lane", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      const reviewScript = path.join(repoDir, "capture-review.py")
+      const capturePath = path.join(repoDir, "review-args.json")
+      await fs.writeFile(
+        reviewScript,
+        `import json, pathlib, sys
+args = sys.argv[1:]
+pathlib.Path(args[args.index("--output") + 1]).write_text("# scoped review\\n")
+pathlib.Path(${JSON.stringify(capturePath)}).write_text(json.dumps(args))
+`,
+        "utf8",
+      )
+      const configPath = path.join(repoDir, ".btrain", "project.toml")
+      const config = await fs.readFile(configPath, "utf8")
+      await fs.writeFile(
+        configPath,
+        config.replace("[reviews]", `[reviews]\nparallel_script = ${JSON.stringify(reviewScript)}`),
+        "utf8",
+      )
+
+      const scopedReview = await runBtrain(
+        ["review", "run", "--repo", repoDir, "--mode", "parallel"],
+        repoDir,
+        {
+          BTRAIN_AGENT: "Reviewer",
+          BRAIN_TRAIN_AGENT: "Reviewer",
+          BTRAIN_LANE: "b",
+          BTRAIN_LANE_LOCKED: "1",
+        },
+      )
+      assert.equal(scopedReview.code, 0, scopedReview.stderr)
+
+      const args = JSON.parse(await fs.readFile(capturePath, "utf8"))
+      assert.ok(args.includes("--file"), JSON.stringify(args))
+      assert.ok(args.includes("src/lane-b.ts"), JSON.stringify(args))
+      assert.ok(!args.includes("src/lane-a.ts"), JSON.stringify(args))
+
+      const reviewFiles = await fs.readdir(path.join(repoDir, ".btrain", "reviews"))
+      const metadataPath = path.join(
+        repoDir,
+        ".btrain",
+        "reviews",
+        reviewFiles.find((entry) => entry.endsWith(".json")),
+      )
+      const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"))
+      assert.equal(metadata.laneId, "b")
+      assert.equal(metadata.task, "Target lane task")
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
+  it("pins child identity and lane scope and records a trace", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      const runnerPath = path.join(repoDir, "scoped-runner.js")
+      const capturePath = path.join(repoDir, "runner-env.json")
+      await writeExecutable(
+        runnerPath,
+        `#!/usr/bin/env node
+const fs = require("node:fs")
+const path = require("node:path")
+fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({
+  agent: process.env.BTRAIN_AGENT,
+  legacyAgent: process.env.BRAIN_TRAIN_AGENT,
+  lane: process.env.BTRAIN_LANE,
+  laneLocked: process.env.BTRAIN_LANE_LOCKED,
+}), "utf8")
+const handoffPath = path.join(".claude", "collab", "HANDOFF_" + process.env.BTRAIN_LANE.toUpperCase() + ".md")
+const content = fs.readFileSync(handoffPath, "utf8")
+fs.writeFileSync(handoffPath, content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerB 2026-07-14T12:00:00.000Z"))
+console.log("resolved scoped lane")
+`,
+      )
+      await setRunnerConfig(repoDir, [`"OwnerA" = "notify"`, `"OwnerB" = "${runnerPath}"`])
+
+      const { stdout, code } = await runBtrain(
+        ["loop", "--repo", repoDir, "--lane", "b", "--max-rounds", "1", "--timeout", "2"],
+        repoDir,
+      )
+
+      assert.equal(code, 0, stdout)
+      assert.match(stdout, /final handoff: resolved/)
+      assert.deepEqual(JSON.parse(await fs.readFile(capturePath, "utf8")), {
+        agent: "OwnerB",
+        legacyAgent: "OwnerB",
+        lane: "b",
+        laneLocked: "1",
+      })
+
+      const traces = await readJsonLines(path.join(repoDir, ".btrain", "harness", "index.jsonl"))
+      assert.equal(traces.length, 1)
+      assert.equal(traces[0].kind, "loop-dispatch")
+      assert.equal(traces[0].outcome, "pass")
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
+  it("treats a timed-out runner as successful when the scoped handoff already resolved", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      const runnerPath = path.join(repoDir, "resolve-then-hang.js")
+      await writeExecutable(
+        runnerPath,
+        `#!/usr/bin/env node
+const fs = require("node:fs")
+const path = require("node:path")
+const handoffPath = path.join(".claude", "collab", "HANDOFF_" + process.env.BTRAIN_LANE.toUpperCase() + ".md")
+const content = fs.readFileSync(handoffPath, "utf8")
+fs.writeFileSync(handoffPath, content
+  .replace("Status: in-progress", "Status: resolved")
+  .replace(/Last Updated: .*$/, "Last Updated: OwnerB 2026-07-14T12:00:01.000Z"))
+setTimeout(() => {}, 2000)
+`,
+      )
+      await setRunnerConfig(repoDir, [`"OwnerA" = "notify"`, `"OwnerB" = "${runnerPath}"`])
+
+      const { stdout, code } = await runBtrain(
+        ["loop", "--repo", repoDir, "--lane", "b", "--max-rounds", "1", "--timeout", "0.5"],
+        repoDir,
+      )
+
+      assert.equal(code, 0, stdout)
+      assert.match(stdout, /runner timed out after the handoff changed/)
+      assert.match(stdout, /status: completed/)
+      assert.match(stdout, /final handoff: resolved/)
+
+      const traces = await readJsonLines(path.join(repoDir, ".btrain", "harness", "index.jsonl"))
+      assert.equal(traces.length, 1)
+      assert.equal(traces[0].outcome, "pass")
+    } finally {
+      await rmDir(repoDir)
+    }
   })
 })
 

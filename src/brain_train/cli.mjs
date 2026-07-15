@@ -106,7 +106,8 @@ Usage:
   btrain harness trace show --run-id <id> [--repo <path>]                        Show one harness trace bundle summary
   btrain harness eval list [--repo <path>] [--category <name>]                   List bundled and repo-local benchmark scenarios
   btrain harness eval inspect --scenario <id> [--repo <path>]                    Inspect one benchmark scenario manifest
-  btrain loop [--repo <path>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]  Relay handoffs between configured agent runners
+  btrain loop [--repo <path>] [--lane <id>] [--dry-run] [--max-rounds <n>] [--timeout <sec>]
+                                                                                Relay one lane between configured agent runners
   btrain review run [--repo <path>] [--mode <manual|parallel|hybrid>] [--base <ref>]   Run the configured review workflow
   btrain review status [--repo <path>]                                           Show review mode and latest review artifact
   btrain review code --lane <id> [--repo <path>] [--base <ref>] [--head <ref>] [--format json|summary]
@@ -237,6 +238,20 @@ function parseOptions(args) {
       options[key] = [options[key], nextToken]
     }
     index += 1
+  }
+
+  const scopedLane = typeof process.env.BTRAIN_LANE === "string"
+    ? process.env.BTRAIN_LANE.trim().toLowerCase()
+    : ""
+  const explicitLane = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
+
+  if (scopedLane && process.env.BTRAIN_LANE_LOCKED === "1" && explicitLane && explicitLane !== scopedLane) {
+    throw new Error(
+      `This btrain runner is scoped to lane ${scopedLane}; refusing explicit --lane ${explicitLane}.`,
+    )
+  }
+  if (scopedLane && !explicitLane) {
+    options.lane = scopedLane
   }
 
   return options
@@ -1589,21 +1604,21 @@ async function run() {
     if (subcommand === "claim") {
       await claimHandoff(repoRoot, options)
       await maybeAutoStartDashboard(repoRoot)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return
     }
 
     if (subcommand === "update") {
       await patchHandoff(repoRoot, options)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return
     }
 
     if (subcommand === "resolve") {
       await resolveHandoff(repoRoot, options)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       const reminderActor = resolveReminderActor(options, result)
       const reminderLines = buildAssignedWorkReminderLines(result, reminderActor)
@@ -1618,7 +1633,7 @@ async function run() {
 
     if (subcommand === "request-changes") {
       await requestChangesHandoff(repoRoot, options)
-      const result = await checkHandoff(repoRoot)
+      const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return
     }
@@ -1884,6 +1899,7 @@ async function run() {
         mode: options.mode,
         base: options.base,
         head: options.head,
+        lane: options.lane,
       })
       console.log(formatReviewRunResult(result))
       if (result.status === "failed") {
@@ -1969,6 +1985,7 @@ async function run() {
     const repoRoot = await resolveRepoRoot(options.repo)
     const result = await runLoop({
       repoRoot,
+      lane: options.lane,
       dryRun: !!options["dry-run"],
       maxRounds: options["max-rounds"],
       timeout: options.timeout,
@@ -2031,8 +2048,13 @@ async function run() {
 
   if (command === "status") {
     const options = parseOptions(rest)
-    const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const statuses = await getStatus({ repoRoot })
+    const lane = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
+    const repoRoot = options.repo
+      ? path.resolve(options.repo)
+      : lane
+        ? await resolveRepoRoot()
+        : null
+    const statuses = await getStatus({ repoRoot, lane })
     if (options.json) {
       console.log(JSON.stringify(statuses, null, 2))
       return
@@ -2049,8 +2071,27 @@ async function run() {
 
   if (command === "doctor") {
     const options = parseOptions(rest)
-    const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const results = await doctor({ repoRoot, repair: !!options.repair, skipFeedback: !!options["skip-feedback"] })
+    const scopedLane = process.env.BTRAIN_LANE_LOCKED === "1" && typeof options.lane === "string"
+      ? options.lane.trim().toLowerCase()
+      : ""
+    if (options.repair && scopedLane) {
+      throw new BtrainError({
+        message: `This btrain runner is scoped to lane ${scopedLane}; refusing repo-wide doctor --repair.`,
+        reason: "Doctor repairs can mutate handoffs, workflow events, and locks in every lane.",
+        fix: "Run `btrain doctor` without --repair, or run the repair from an unscoped operator session.",
+      })
+    }
+    const repoRoot = options.repo
+      ? path.resolve(options.repo)
+      : scopedLane
+        ? await resolveRepoRoot()
+        : null
+    const results = await doctor({
+      repoRoot,
+      repair: !!options.repair,
+      skipFeedback: !!options["skip-feedback"],
+      lane: scopedLane,
+    })
     console.log(`btrain home: ${getBrainTrainHome()}`)
     console.log("")
     if (results.length === 0) {
@@ -2181,6 +2222,9 @@ async function run() {
     const subcommand = ["release", "release-lane"].includes(rest[0]) ? rest[0] : null
     const options = parseOptions(subcommand ? rest.slice(1) : rest)
     const repoRoot = await resolveRepoRoot(options.repo)
+    const scopedLane = process.env.BTRAIN_LANE_LOCKED === "1" && typeof options.lane === "string"
+      ? options.lane.trim().toLowerCase()
+      : ""
 
     if (subcommand === "release") {
       if (!options.path) {
@@ -2191,7 +2235,17 @@ async function run() {
           context: "Run `btrain locks` to see all active lock paths.",
         })
       }
-      const removed = await forceReleaseLock(repoRoot, options.path)
+      if (scopedLane) {
+        const matchingLocks = (await listLocks(repoRoot)).filter((lock) => lock.path === options.path)
+        if (matchingLocks.some((lock) => lock.lane !== scopedLane)) {
+          throw new BtrainError({
+            message: `This btrain runner is scoped to lane ${scopedLane}; refusing to release a lock outside that lane.`,
+            reason: "A lane-locked runner cannot mutate another lane's lock state.",
+            fix: `Release only locks shown by \`btrain locks\` for lane ${scopedLane}.`,
+          })
+        }
+      }
+      const removed = await forceReleaseLock(repoRoot, options.path, { lane: scopedLane })
       console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
       return
     }
@@ -2214,7 +2268,8 @@ async function run() {
     }
 
     // Default: list locks
-    const locks = await listLocks(repoRoot)
+    const allLocks = await listLocks(repoRoot)
+    const locks = scopedLane ? allLocks.filter((lock) => lock.lane === scopedLane) : allLocks
     if (locks.length === 0) {
       console.log("No active locks.")
       return

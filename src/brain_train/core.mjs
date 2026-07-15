@@ -20,6 +20,12 @@ import {
   normalizeTaskArtifactEnvelope,
 } from "./harness/task-envelope.mjs"
 import {
+  createTraceBundle,
+  finalizeTraceBundle,
+  recordTraceEvent,
+  writeTraceArtifact,
+} from "./harness/trace-bundle.mjs"
+import {
   createAdapter,
   failOpen,
   probeManifest,
@@ -260,6 +266,62 @@ const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
 const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
+function claudeBashPermissions(...commands) {
+  return commands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`])
+}
+
+const CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  ...claudeBashPermissions(
+    "btrain handoff",
+    "btrain locks",
+    "btrain review",
+    "btrain status",
+    "bth",
+    "rtk btrain handoff",
+    "rtk btrain locks",
+    "rtk btrain review",
+    "rtk btrain status",
+    "git status",
+    "git diff",
+    "git show",
+    "git log",
+    "rtk git status",
+    "rtk git diff",
+    "rtk git show",
+    "rtk git log",
+    "gh pr view",
+    "gh pr diff",
+    "gh pr checks",
+    "rtk gh pr view",
+    "rtk gh pr diff",
+    "rtk gh pr checks",
+    "rtk rg",
+    "rtk sed",
+    "npm test",
+    "node --test",
+    "rtk npm test",
+    "rtk node --test",
+  ),
+]
+const CLAUDE_LOOP_WRITE_ALLOWED_TOOLS = [
+  ...CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS,
+  "Edit",
+  "Write",
+  ...claudeBashPermissions("git add", "git commit", "rtk git add", "rtk git commit"),
+]
+const CLAUDE_LOOP_PR_ALLOWED_TOOLS = [
+  ...CLAUDE_LOOP_WRITE_ALLOWED_TOOLS,
+  ...claudeBashPermissions("git push", "rtk git push", "btrain pr", "rtk btrain pr"),
+]
+const CLAUDE_LOOP_MERGE_ALLOWED_TOOLS = [
+  ...CLAUDE_LOOP_PR_ALLOWED_TOOLS,
+  ...claudeBashPermissions("gh pr merge", "rtk gh pr merge"),
+]
+const CLAUDE_LOOP_READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "Bash"]
+const CLAUDE_LOOP_WRITE_TOOLS = [...CLAUDE_LOOP_READ_ONLY_TOOLS, "Edit", "Write"]
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
 const CODEX_SUBCOMMANDS = new Set([
   "exec",
@@ -1140,11 +1202,14 @@ async function listLocks(repoRoot) {
   return registry.locks
 }
 
-async function forceReleaseLock(repoRoot, lockPath) {
+async function forceReleaseLock(repoRoot, lockPath, options = {}) {
+  const laneId = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     const registry = await readLockRegistry(repoRoot)
     const before = registry.locks.length
-    registry.locks = registry.locks.filter((lock) => lock.path !== lockPath)
+    registry.locks = registry.locks.filter(
+      (lock) => lock.path !== lockPath || (laneId && lock.lane !== laneId),
+    )
     await writeLockRegistry(repoRoot, registry)
     return before - registry.locks.length
   })
@@ -1405,6 +1470,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.",
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
+  "- When `BTRAIN_LANE_LOCKED=1`, stay inside `BTRAIN_LANE`: do not inspect or mutate other lanes, and do not bypass repository review or merge gates with administrative commands.",
   "- After handing a lane to a peer, either continue on another lane or run `bth wait --lane <id>` so the current session wakes with fresh guidance when that lane changes.",
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
   "- Use `rtk` (Rust Token Killer) to execute shell commands when available to minimize token usage.",
@@ -1529,8 +1595,7 @@ const TEMPLATE_DEFAULTS = {
     'reviewer_default = "{{reviewerDefault}}"',
     "",
     "[agents.runners]",
-    '# "Opus 4.6" = "notify"',
-    '# "GPT-5 Codex" = "codex"',
+    "{{runnerLines}}",
     "",
     "[reviews]",
     "parallel_enabled = true",
@@ -1815,6 +1880,33 @@ function buildLaneSections(laneIds) {
   ]).join("\n").trimEnd()
 }
 
+function inferDefaultAgentRunner(agentName) {
+  const normalized = String(agentName || "").trim().toLowerCase()
+  if (normalized.includes("claude") || normalized.includes("opus")) {
+    return "claude -p"
+  }
+  if (normalized.includes("codex") || normalized.includes("gpt")) {
+    return "codex"
+  }
+  if (normalized.includes("gemini")) {
+    return "gemini"
+  }
+  return "notify"
+}
+
+function renderAgentRunnerEntry(agentName) {
+  return `"${escapeTomlString(agentName)}" = "${escapeTomlString(inferDefaultAgentRunner(agentName))}"`
+}
+
+function buildAgentRunnerLines(agentNames) {
+  const collaborators = normalizeStringList(agentNames)
+  if (collaborators.length === 0) {
+    return ['# "Claude" = "claude -p"', '# "GPT Codex" = "codex"'].join("\n")
+  }
+
+  return collaborators.map(renderAgentRunnerEntry).join("\n")
+}
+
 function buildProjectTemplateVariables(repoRoot, agentNames = [], timestamp = formatIsoTimestamp(), options = {}) {
   const collaborators = normalizeStringList(agentNames)
   const lanesPerAgent = normalizePositiveInteger(
@@ -1834,6 +1926,7 @@ function buildProjectTemplateVariables(repoRoot, agentNames = [], timestamp = fo
     activeAgentsToml: renderTomlArray(collaborators),
     writerDefault: collaborators[0] || "",
     reviewerDefault: collaborators[1] || "",
+    runnerLines: buildAgentRunnerLines(collaborators),
     lanesPerAgent,
     laneSections: buildLaneSections(getDerivedLaneIds(configSeed)),
   }
@@ -1915,6 +2008,39 @@ function syncAgentsSectionInToml(content, agentNames) {
     "reviewer_default",
     `reviewer_default = "${escapeTomlString(collaborators[1] || "")}"`,
   )
+
+  const runnerBounds = findTomlSectionBounds(nextContent, "agents.runners")
+  if (!runnerBounds) {
+    return `${nextContent.trimEnd()}\n\n[agents.runners]\n${buildAgentRunnerLines(collaborators)}\n`
+  }
+
+  const activeRunnerNames = new Set(collaborators.map((agentName) => agentName.toLowerCase()))
+  const runnerBody = runnerBounds.lines.slice(runnerBounds.start + 1, runnerBounds.end)
+  const parseRunnerName = (line) => {
+    const key = line.match(/^\s*((?:"(?:\\.|[^"])*")|(?:[A-Za-z0-9_-]+))\s*=/)?.[1]
+    return key ? parseTomlKey(key).toLowerCase() : ""
+  }
+  const retainedRunnerBody = runnerBody.filter((line) => {
+    const runnerName = parseRunnerName(line)
+    return !runnerName || activeRunnerNames.has(runnerName)
+  })
+  const existingRunnerNames = new Set(
+    retainedRunnerBody
+      .map(parseRunnerName)
+      .filter(Boolean)
+  )
+  const missingRunnerLines = collaborators
+    .filter((agentName) => !existingRunnerNames.has(agentName.toLowerCase()))
+    .map(renderAgentRunnerEntry)
+
+  const lines = [...runnerBounds.lines]
+  lines.splice(
+    runnerBounds.start + 1,
+    runnerBounds.end - runnerBounds.start - 1,
+    ...retainedRunnerBody,
+    ...missingRunnerLines,
+  )
+  nextContent = lines.join("\n")
 
   return nextContent
 }
@@ -4301,9 +4427,9 @@ async function analyzeLaneIntegrity(repoRoot, config, laneState) {
 
     if (currentStatus === "needs-review" && lastEventStatus === "resolved") {
       issues.push({
-        type: "invalid-transition",
-        message: `Lane ${laneId} jumped from \`resolved\` to \`needs-review\` without a claim or in-progress update.`,
-        reasonCode: "invalid-transition",
+      type: "invalid-transition",
+      message: `Lane ${laneId} jumped from \`resolved\` to \`needs-review\` without a claim or in-progress update.`,
+      reasonCode: "state-conflict",
       })
     }
   }
@@ -4313,7 +4439,7 @@ async function analyzeLaneIntegrity(repoRoot, config, laneState) {
     issues.push({
       type: "actor-mismatch",
       message: `Lane ${laneId} is \`${laneState.status}\` but owner "${laneState.owner}" is not in the active agent list.`,
-      reasonCode: "actor-mismatch",
+      reasonCode: "ownership-conflict",
     })
   }
 
@@ -4322,7 +4448,7 @@ async function analyzeLaneIntegrity(repoRoot, config, laneState) {
     issues.push({
       type: "contradictory-state",
       message: `Lane ${laneId} is \`${laneState.status}\` but has no active locks.`,
-      reasonCode: "contradictory-state",
+      reasonCode: "lock-mismatch",
     })
   }
 
@@ -6190,6 +6316,16 @@ function getAgentRunnerMap(config) {
   )
 }
 
+function getAgentRunnerValue(runnerMap, agentName) {
+  const exactValue = runnerMap[agentName]
+  if (exactValue) return exactValue
+
+  const normalizedAgentName = normalizeAgentName(agentName).toLowerCase()
+  return Object.entries(runnerMap).find(
+    ([configuredAgent]) => normalizeAgentName(configuredAgent).toLowerCase() === normalizedAgentName,
+  )?.[1]
+}
+
 function normalizeAgentName(value) {
   return typeof value === "string" ? value.trim() : ""
 }
@@ -6227,8 +6363,13 @@ function getConfiguredAgentNames(config) {
   addAgent(config?.agents?.writer_default)
   addAgent(config?.agents?.reviewer_default)
 
-  for (const agentName of Object.keys(getAgentRunnerMap(config))) {
-    addAgent(agentName)
+  // Runner mappings describe how to launch agents, not who currently
+  // collaborates on the repo. Keep them only as a legacy fallback for configs
+  // that predate the active/default collaborator roster.
+  if (agentNames.length === 0) {
+    for (const agentName of Object.keys(getAgentRunnerMap(config))) {
+      addAgent(agentName)
+    }
   }
 
   return agentNames
@@ -6336,7 +6477,7 @@ function detectCurrentAgent(config, env = process.env) {
   const matches = configuredAgents.filter((agentName) => {
     const identityTokens = new Set([
       ...tokenizeAgentIdentity(agentName),
-      ...tokenizeAgentIdentity(runnerMap[agentName] || ""),
+      ...tokenizeAgentIdentity(getAgentRunnerValue(runnerMap, agentName) || ""),
     ])
     return runtimeHints.some((hint) => identityTokens.has(hint))
   })
@@ -6516,7 +6657,7 @@ async function listReviewArtifacts(repoRoot) {
   })
 }
 
-async function runReview({ repoRoot, mode, base, head } = {}) {
+async function runReview({ repoRoot, mode, base, head, lane } = {}) {
   const config = await readProjectConfig(repoRoot)
   if (!config) {
     throw new BtrainError({
@@ -6526,7 +6667,10 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
     })
   }
 
-  const current = await readCurrentState(repoRoot)
+  const laneId = typeof lane === "string" ? lane.trim().toLowerCase() : ""
+  const current = laneId
+    ? (await checkHandoff(repoRoot, { laneId })).current
+    : await readCurrentState(repoRoot)
   const repoName = config?.name || normalizeRepoName(repoRoot)
   const repoPaths = getRepoPaths(repoRoot)
   const reviewConfig = getReviewConfig(config)
@@ -6599,6 +6743,9 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
       "--output", reportPath,
       "--mode", resolvedMode.mode === "hybrid" ? "hybrid" : "parallel",
     ]
+    for (const lockedFile of normalizePathList(current.lockedFiles)) {
+      scriptArgs.push("--file", lockedFile)
+    }
 
     // Pass hybrid triggers from project.toml to the review script
     if (resolvedMode.mode === "hybrid" && reviewConfig.hybridPathTriggers.length > 0) {
@@ -6654,6 +6801,8 @@ async function runReview({ repoRoot, mode, base, head } = {}) {
     task: current.task || "",
     owner: current.owner || "",
     reviewer: current.reviewer || "",
+    laneId,
+    lockedFiles: normalizePathList(current.lockedFiles),
     runner: {
       command: "python3",
       scriptPath,
@@ -6717,6 +6866,9 @@ function getLoopActorForState(current) {
   }
   if (current.status === "changes-requested") {
     return current.owner || ""
+  }
+  if (current.status === "repair-needed") {
+    return current.repairOwner || current.owner || ""
   }
   if (current.status === "needs-review") {
     return current.reviewer || ""
@@ -6875,7 +7027,12 @@ function stripRunnerFlag(args, ...names) {
   return stripped
 }
 
-function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
+function normalizeLoopCliRunner(runnerValue, {
+  repoRoot,
+  prompt,
+  agentName,
+  permissionPhase = "read",
+}) {
   const tokens = parseShellWords(runnerValue)
   if (tokens.length === 0) {
     return null
@@ -6941,6 +7098,22 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
     if (!hasRunnerArg(args, "--include-partial-messages")) {
       args.push("--include-partial-messages")
     }
+    const allowedTools = permissionPhase === "merge"
+      ? CLAUDE_LOOP_MERGE_ALLOWED_TOOLS
+      : permissionPhase === "pr"
+        ? CLAUDE_LOOP_PR_ALLOWED_TOOLS
+        : permissionPhase === "write"
+          ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
+          : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
+    const availableTools = permissionPhase === "read"
+      ? CLAUDE_LOOP_READ_ONLY_TOOLS
+      : CLAUDE_LOOP_WRITE_TOOLS
+    if (!hasRunnerArg(args, "--tools")) {
+      args.push(`--tools=${availableTools.join(",")}`)
+    }
+    if (!hasRunnerArg(args, "--allowedTools", "--allowed-tools")) {
+      args.push(`--allowedTools=${allowedTools.join(",")}`)
+    }
     if (!placeholderPrompt) {
       args.push(prompt)
     }
@@ -6962,9 +7135,12 @@ function normalizeLoopCliRunner(runnerValue, { repoRoot, prompt, agentName }) {
   }
 }
 
-function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT } = {}) {
+function resolveLoopRunner(agentName, config, repoRoot, {
+  prompt = LOOP_PROMPT,
+  permissionPhase = "read",
+} = {}) {
   const runnerMap = getAgentRunnerMap(config)
-  const configuredValue = runnerMap[agentName]
+  const configuredValue = getAgentRunnerValue(runnerMap, agentName)
 
   if (!configuredValue) {
     return {
@@ -6988,6 +7164,7 @@ function resolveLoopRunner(agentName, config, repoRoot, { prompt = LOOP_PROMPT }
     repoRoot,
     prompt,
     agentName,
+    permissionPhase,
   })
 
   if (!cliRunner) {
@@ -7038,11 +7215,11 @@ function serializeCurrentState(current) {
   })
 }
 
-async function waitForHandoffChange(repoRoot, previousFingerprint, { timeoutMs, pollIntervalMs }) {
+async function waitForHandoffChange(readState, previousFingerprint, { timeoutMs, pollIntervalMs }) {
   const startedAt = Date.now()
 
   while (Date.now() - startedAt <= timeoutMs) {
-    const current = await readCurrentState(repoRoot)
+    const current = await readState()
     if (serializeCurrentState(current) !== previousFingerprint) {
       return { changed: true, current }
     }
@@ -7057,12 +7234,33 @@ async function waitForHandoffChange(repoRoot, previousFingerprint, { timeoutMs, 
 
   return {
     changed: false,
-    current: await readCurrentState(repoRoot),
+    current: await readState(),
   }
 }
 
+function buildLoopRunnerEnv(agentName, laneId = "") {
+  const env = {
+    ...process.env,
+    BTRAIN_AGENT: agentName,
+    BRAIN_TRAIN_AGENT: agentName,
+  }
 
-async function executeLoopCliRunnerWithStreaming(agentName, runner, { repoRoot, timeoutMs, onEvent }) {
+  if (laneId) {
+    env.BTRAIN_LANE = laneId
+    env.BTRAIN_LANE_LOCKED = "1"
+  } else {
+    delete env.BTRAIN_LANE
+    delete env.BTRAIN_LANE_LOCKED
+  }
+
+  return env
+}
+
+async function executeLoopCliRunnerWithStreaming(
+  agentName,
+  runner,
+  { repoRoot, laneId = "", timeoutMs, onEvent },
+) {
   const startedAt = formatIsoTimestamp()
   onEvent(`[${startedAt}] dispatch ${agentName}: ${runner.displayCommand}`)
 
@@ -7070,7 +7268,7 @@ async function executeLoopCliRunnerWithStreaming(agentName, runner, { repoRoot, 
     runner.streamMode === "codex-json" ? createCodexStreamObserver(onEvent) : createClaudeStreamObserver(onEvent)
   const child = spawn(runner.command, runner.args, {
     cwd: repoRoot,
-    env: process.env,
+    env: buildLoopRunnerEnv(agentName, laneId),
     stdio: ["ignore", "pipe", "pipe"],
   })
 
@@ -7162,7 +7360,11 @@ async function executeLoopCliRunnerWithStreaming(agentName, runner, { repoRoot, 
   }
 }
 
-async function executeLoopCliRunner(agentName, runner, { repoRoot, timeoutMs, onEvent }) {
+async function executeLoopCliRunner(
+  agentName,
+  runner,
+  { repoRoot, laneId = "", timeoutMs, onEvent },
+) {
   if (!(await isExecutableAvailable(runner.command))) {
     throw new BtrainError({
       message: `Runner command not found on PATH for ${agentName}: ${runner.command}`,
@@ -7174,6 +7376,7 @@ async function executeLoopCliRunner(agentName, runner, { repoRoot, timeoutMs, on
   if (runner.streamMode === "claude-stream-json" || runner.streamMode === "codex-json") {
     return executeLoopCliRunnerWithStreaming(agentName, runner, {
       repoRoot,
+      laneId,
       timeoutMs,
       onEvent,
     })
@@ -7185,7 +7388,7 @@ async function executeLoopCliRunner(agentName, runner, { repoRoot, timeoutMs, on
   try {
     const result = await execFileAsync(runner.command, runner.args, {
       cwd: repoRoot,
-      env: process.env,
+      env: buildLoopRunnerEnv(agentName, laneId),
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     })
@@ -7329,10 +7532,26 @@ function describeLoopAgentReason(current) {
   if (current.status === "changes-requested") {
     return "handoff status is changes-requested, so the writer acts next"
   }
+  if (current.status === "repair-needed") {
+    return "handoff status is repair-needed, so the assigned repair owner acts next"
+  }
   if (current.status === "needs-review") {
     return "handoff status is needs-review, so the peer reviewer acts next"
   }
   return `handoff status is ${current.status}`
+}
+
+function getLoopRunnerPermissionPhase(current) {
+  if (current.status === "needs-review") {
+    return "read"
+  }
+  if (current.status === "ready-to-merge") {
+    return "merge"
+  }
+  if (["ready-for-pr", "pr-review"].includes(current.status) || current.prNumber) {
+    return "pr"
+  }
+  return "write"
 }
 
 function emitLoopTransition(onEvent, before, after) {
@@ -7360,6 +7579,7 @@ async function runPush(agentName, { repoRoot, prompt, onEvent = () => {} } = {})
         onEvent(`push: dispatching ${agentName} via CLI runner: ${runner.displayCommand}`)
         const result = await executeLoopCliRunner(agentName, runner, {
           repoRoot,
+          laneId: "",
           timeoutMs: 15 * 1000, // short timeout for a one-shot push
           onEvent,
         })
@@ -7418,8 +7638,51 @@ async function pushAgentPrompt(agentName, { repoName = "", taskDescription = "",
   return { inboxPath, notified }
 }
 
+function classifyLoopTraceResult(result) {
+  if (["completed", "noop", "dry-run"].includes(result.status)) {
+    return { outcome: "pass", failureCategory: "" }
+  }
+  if (result.status === "timed-out") {
+    return { outcome: "fail", failureCategory: "timeout" }
+  }
+  if (result.status === "max-rounds-exceeded") {
+    return { outcome: "fail", failureCategory: "acknowledgement-missing" }
+  }
+  return { outcome: "error", failureCategory: "delivery-failure" }
+}
+
+async function finalizeLoopTrace(trace, result) {
+  if (!trace) {
+    return result
+  }
+
+  const classification = classifyLoopTraceResult(result)
+  await recordTraceEvent(trace.bundleDir, {
+    type: "loop-outcome",
+    status: result.status,
+    stopReason: result.stopReason,
+    roundsCompleted: result.roundsCompleted,
+  })
+  const artifact = await writeTraceArtifact(trace.bundleDir, "loop-result.json", result)
+  await finalizeTraceBundle(trace.bundleDir, {
+    repoRoot: result.repoRoot,
+    outcome: classification.outcome,
+    failureCategory: classification.failureCategory,
+    summary: result.stopReason,
+    metrics: {
+      roundsCompleted: result.roundsCompleted,
+      maxRounds: result.maxRounds,
+      dryRun: result.dryRun,
+    },
+    artifactRefs: [artifact.relPath],
+  })
+
+  return { ...result, traceRunId: trace.runId }
+}
+
 async function runLoop({
   repoRoot,
+  lane,
   maxRounds,
   timeout,
   pollInterval,
@@ -7444,15 +7707,53 @@ async function runLoop({
     "--poll-interval",
   )
   const history = []
-  const { handoffPath } = getConfiguredRepoPaths(repoRoot, config)
+  const laneId = typeof lane === "string" ? lane.trim().toLowerCase() : ""
+  const laneConfigs = getLaneConfigs(config)
+  if (laneConfigs && !laneId) {
+    throw new BtrainError({
+      message: "`btrain loop` requires --lane when [lanes] is enabled.",
+      reason: "A loop dispatch must pin one lane before selecting state or launching an agent.",
+      fix: `Use --lane with one of: ${laneConfigs.map((entry) => entry.id).join(", ")}.`,
+    })
+  }
+  const handoffPath = laneId
+    ? getLaneHandoffPath(repoRoot, config, laneId)
+    : getConfiguredRepoPaths(repoRoot, config).handoffPath
+  const readLoopState = () => readCurrentState(repoRoot, { config, handoffPath, laneId })
   const harnessProfile = await resolveActiveHarnessProfile(repoRoot, config)
-  const loopPrompt = harnessProfile.loop.dispatchPrompt || LOOP_PROMPT
-  let current = await readCurrentState(repoRoot)
+  const baseLoopPrompt = harnessProfile.loop.dispatchPrompt || LOOP_PROMPT
+  const loopPrompt = laneId ? `${baseLoopPrompt} --lane ${laneId}` : baseLoopPrompt
+  let current = await readLoopState()
+  const trace = dryRun
+    ? null
+    : await createTraceBundle({
+        repoRoot,
+        profileId: harnessProfile.configuredId,
+        kind: "loop-dispatch",
+        context: {
+          repoName,
+          laneId,
+          handoffPath,
+          task: current.task || "",
+        },
+      })
+  const finish = (result) => finalizeLoopTrace(trace, result)
+
+  if (trace) {
+    await recordTraceEvent(trace.bundleDir, {
+      type: "loop-start",
+      repoName,
+      laneId,
+      handoffPath,
+      status: current.status,
+    })
+  }
 
   onEvent(`loop start: ${repoName}`)
   emitLoopBlock(onEvent, "loop context:", [
     `repo root: ${repoRoot}`,
     `handoff file: ${handoffPath}`,
+    `lane: ${laneId || "(default)"}`,
     `task: ${current.task || "(none)"}`,
     `next action: ${current.nextAction || "(none)"}`,
   ])
@@ -7467,7 +7768,7 @@ async function runLoop({
 
   if (LOOP_TERMINAL_STATUSES.has(current.status)) {
     onEvent(`loop exit: handoff already ${current.status}`)
-    return {
+    return finish({
       repoName,
       repoRoot,
       status: "noop",
@@ -7478,7 +7779,7 @@ async function runLoop({
       roundsCompleted: 0,
       maxRounds: resolvedMaxRounds,
       dryRun,
-    }
+    })
   }
 
   for (let round = 1; round <= resolvedMaxRounds; round += 1) {
@@ -7486,7 +7787,7 @@ async function runLoop({
     onEvent(`round ${round}/${resolvedMaxRounds}`)
     if (!agentName) {
       onEvent(`loop exit: no agent is mapped to handoff status "${current.status}"`)
-      return {
+      return finish({
         repoName,
         repoRoot,
         status: "failed",
@@ -7497,12 +7798,15 @@ async function runLoop({
         roundsCompleted: history.length,
         maxRounds: resolvedMaxRounds,
         dryRun,
-      }
+      })
     }
 
     const before = current
     const beforeFingerprint = serializeCurrentState(before)
-    const runner = resolveLoopRunner(agentName, config, repoRoot, { prompt: loopPrompt })
+    const runner = resolveLoopRunner(agentName, config, repoRoot, {
+      prompt: loopPrompt,
+      permissionPhase: getLoopRunnerPermissionPhase(before),
+    })
     const roundStartedAt = Date.now()
     emitLoopBlock(onEvent, "selected agent:", [
       `${agentName}`,
@@ -7519,6 +7823,17 @@ async function runLoop({
       `prompt: ${loopPrompt}`,
       runner.type === "cli" ? `command: ${runner.displayCommand}` : "",
     ])
+    if (trace) {
+      await recordTraceEvent(trace.bundleDir, {
+        type: "loop-dispatch",
+        round,
+        agentName,
+        laneId,
+        runnerType: runner.type,
+        command: runner.displayCommand,
+        status: before.status,
+      })
+    }
 
     if (dryRun) {
       const eventLine =
@@ -7536,7 +7851,7 @@ async function runLoop({
         before,
         after: before,
       })
-      return {
+      return finish({
         repoName,
         repoRoot,
         status: "dry-run",
@@ -7547,7 +7862,7 @@ async function runLoop({
         roundsCompleted: history.length,
         maxRounds: resolvedMaxRounds,
         dryRun,
-      }
+      })
     }
 
     if (runner.type === "notify") {
@@ -7566,7 +7881,7 @@ async function runLoop({
           `inbox: wrote pending prompt → ${pushResult.inboxPath}${pushResult.notified ? " (notification sent)" : ""}`,
         )
       }
-      const waitResult = await waitForHandoffChange(repoRoot, beforeFingerprint, {
+      const waitResult = await waitForHandoffChange(readLoopState, beforeFingerprint, {
         timeoutMs,
         pollIntervalMs,
       })
@@ -7588,7 +7903,7 @@ async function runLoop({
       if (!waitResult.changed) {
         onEvent(`[${completedAt}] timeout waiting for ${agentName}`)
         onEvent(`final observed handoff: ${formatLoopState(waitResult.current)}`)
-        return {
+        return finish({
           repoName,
           repoRoot,
           status: "timed-out",
@@ -7599,7 +7914,7 @@ async function runLoop({
           roundsCompleted: history.length,
           maxRounds: resolvedMaxRounds,
           dryRun,
-        }
+        })
       }
 
       onEvent(`[${completedAt}] detected handoff change from ${agentName}`)
@@ -7610,12 +7925,13 @@ async function runLoop({
       try {
         dispatchResult = await executeLoopCliRunner(agentName, runner, {
           repoRoot,
+          laneId,
           timeoutMs,
           onEvent,
         })
       } catch (error) {
         onEvent(`loop error: ${error.message}`)
-        return {
+        return finish({
           repoName,
           repoRoot,
           status: "failed",
@@ -7626,7 +7942,7 @@ async function runLoop({
           roundsCompleted: history.length,
           maxRounds: resolvedMaxRounds,
           dryRun,
-        }
+        })
       }
 
       emitLoopOutput(
@@ -7640,99 +7956,124 @@ async function runLoop({
         dispatchResult.stderr,
       )
 
+      let transitionHandledAfterTimeout = false
       if (dispatchResult.status !== "completed") {
-        const failedCurrent = await readCurrentState(repoRoot)
+        const failedCurrent = await readLoopState()
         onEvent(`post-dispatch handoff: ${formatLoopState(failedCurrent)}`)
-        history.push({
-          round,
-          agentName,
-          runnerType: "cli",
-          command: runner.displayCommand,
-          status: dispatchResult.status,
-          exitCode: dispatchResult.exitCode,
-          startedAt: dispatchResult.startedAt,
-          completedAt: dispatchResult.completedAt,
-          before,
-          after: failedCurrent,
-        })
-        return {
-          repoName,
-          repoRoot,
-          status: dispatchResult.status,
-          stopReason:
-            dispatchResult.status === "timed-out"
-              ? `Timed out running ${agentName}.`
-              : `Runner failed for ${agentName}.`,
-          initialCurrent: history[0]?.before || before,
-          finalCurrent: failedCurrent,
-          history,
-          roundsCompleted: history.length,
-          maxRounds: resolvedMaxRounds,
-          dryRun,
-        }
-      }
+        const handoffChanged = serializeCurrentState(failedCurrent) !== beforeFingerprint
 
-      let nextCurrent = await readCurrentState(repoRoot)
-      if (serializeCurrentState(nextCurrent) === beforeFingerprint) {
-        const elapsedMs = Date.now() - roundStartedAt
-        const remainingMs = Math.max(0, timeoutMs - elapsedMs)
-        onEvent(
-          `handoff unchanged after process exit; waiting up to ${formatLoopSeconds(remainingMs)} for an external update...`,
-        )
-        const waitResult = await waitForHandoffChange(repoRoot, beforeFingerprint, {
-          timeoutMs: remainingMs,
-          pollIntervalMs,
-        })
-        nextCurrent = waitResult.current
-        if (!waitResult.changed) {
-          onEvent(`no handoff change detected before timeout`)
-          onEvent(`final observed handoff: ${formatLoopState(nextCurrent)}`)
+        if (dispatchResult.status === "timed-out" && handoffChanged) {
+          onEvent(`runner timed out after the handoff changed; accepting the observed transition`)
+          emitLoopTransition(onEvent, before, failedCurrent)
           history.push({
             round,
             agentName,
             runnerType: "cli",
             command: runner.displayCommand,
-            status: "timed-out",
+            status: "completed",
+            runnerStatus: "timed-out",
             exitCode: dispatchResult.exitCode,
             startedAt: dispatchResult.startedAt,
-            completedAt: formatIsoTimestamp(),
+            completedAt: dispatchResult.completedAt,
             before,
-            after: nextCurrent,
+            after: failedCurrent,
           })
-          return {
+          current = failedCurrent
+          transitionHandledAfterTimeout = true
+        } else {
+          history.push({
+            round,
+            agentName,
+            runnerType: "cli",
+            command: runner.displayCommand,
+            status: dispatchResult.status,
+            exitCode: dispatchResult.exitCode,
+            startedAt: dispatchResult.startedAt,
+            completedAt: dispatchResult.completedAt,
+            before,
+            after: failedCurrent,
+          })
+          return finish({
             repoName,
             repoRoot,
-            status: "timed-out",
-            stopReason: `Timed out waiting for ${agentName} to update the handoff.`,
+            status: dispatchResult.status,
+            stopReason:
+              dispatchResult.status === "timed-out"
+                ? `Timed out running ${agentName}.`
+                : `Runner failed for ${agentName}.`,
             initialCurrent: history[0]?.before || before,
-            finalCurrent: nextCurrent,
+            finalCurrent: failedCurrent,
             history,
             roundsCompleted: history.length,
             maxRounds: resolvedMaxRounds,
             dryRun,
-          }
+          })
         }
       }
 
-      emitLoopTransition(onEvent, before, nextCurrent)
-      history.push({
-        round,
-        agentName,
-        runnerType: "cli",
-        command: runner.displayCommand,
-        status: "completed",
-        exitCode: dispatchResult.exitCode,
-        startedAt: dispatchResult.startedAt,
-        completedAt: dispatchResult.completedAt,
-        before,
-        after: nextCurrent,
-      })
-      current = nextCurrent
+      if (!transitionHandledAfterTimeout) {
+        let nextCurrent = await readLoopState()
+        if (serializeCurrentState(nextCurrent) === beforeFingerprint) {
+          const elapsedMs = Date.now() - roundStartedAt
+          const remainingMs = Math.max(0, timeoutMs - elapsedMs)
+          onEvent(
+            `handoff unchanged after process exit; waiting up to ${formatLoopSeconds(remainingMs)} for an external update...`,
+          )
+          const waitResult = await waitForHandoffChange(readLoopState, beforeFingerprint, {
+            timeoutMs: remainingMs,
+            pollIntervalMs,
+          })
+          nextCurrent = waitResult.current
+          if (!waitResult.changed) {
+            onEvent(`no handoff change detected before timeout`)
+            onEvent(`final observed handoff: ${formatLoopState(nextCurrent)}`)
+            history.push({
+              round,
+              agentName,
+              runnerType: "cli",
+              command: runner.displayCommand,
+              status: "timed-out",
+              exitCode: dispatchResult.exitCode,
+              startedAt: dispatchResult.startedAt,
+              completedAt: formatIsoTimestamp(),
+              before,
+              after: nextCurrent,
+            })
+            return finish({
+              repoName,
+              repoRoot,
+              status: "timed-out",
+              stopReason: `Timed out waiting for ${agentName} to update the handoff.`,
+              initialCurrent: history[0]?.before || before,
+              finalCurrent: nextCurrent,
+              history,
+              roundsCompleted: history.length,
+              maxRounds: resolvedMaxRounds,
+              dryRun,
+            })
+          }
+        }
+
+        emitLoopTransition(onEvent, before, nextCurrent)
+        history.push({
+          round,
+          agentName,
+          runnerType: "cli",
+          command: runner.displayCommand,
+          status: "completed",
+          exitCode: dispatchResult.exitCode,
+          startedAt: dispatchResult.startedAt,
+          completedAt: dispatchResult.completedAt,
+          before,
+          after: nextCurrent,
+        })
+        current = nextCurrent
+      }
     }
 
     if (LOOP_TERMINAL_STATUSES.has(current.status)) {
       onEvent(`loop exit: handoff reached ${current.status}`)
-      return {
+      return finish({
         repoName,
         repoRoot,
         status: "completed",
@@ -7743,23 +8084,23 @@ async function runLoop({
         roundsCompleted: history.length,
         maxRounds: resolvedMaxRounds,
         dryRun,
-      }
+      })
     }
   }
 
   onEvent(`loop exit: reached max rounds (${resolvedMaxRounds}) before the handoff resolved`)
-  return {
+  return finish({
     repoName,
     repoRoot,
     status: "max-rounds-exceeded",
     stopReason: `Reached max rounds (${resolvedMaxRounds}) before the handoff resolved.`,
     initialCurrent: history[0]?.before || current,
-    finalCurrent: await readCurrentState(repoRoot),
+    finalCurrent: await readLoopState(),
     history,
     roundsCompleted: history.length,
     maxRounds: resolvedMaxRounds,
     dryRun,
-  }
+  })
 }
 
 async function getRegisteredRepos({ includeDisabled = false } = {}) {
@@ -8305,7 +8646,7 @@ async function listRepos() {
   return getRegisteredRepos({ includeDisabled: true })
 }
 
-async function getRepoStatus(repoRoot) {
+async function getRepoStatus(repoRoot, laneId = "") {
   const config = await readProjectConfig(repoRoot)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const currentState = await readCurrentState(repoRoot)
@@ -8332,13 +8673,24 @@ async function getRepoStatus(repoRoot) {
   // Add lane info if enabled
   const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
-    status.locks = await listLocks(repoRoot)
+    const normalizedLaneId = typeof laneId === "string" ? laneId.trim().toLowerCase() : ""
+    if (normalizedLaneId) {
+      getLaneHandoffPath(repoRoot, config, normalizedLaneId)
+    }
+    const allLocks = await listLocks(repoRoot)
+    status.locks = normalizedLaneId ? getLaneLocks(allLocks, normalizedLaneId) : allLocks
+    const laneStates = await readAllLaneStates(repoRoot, config)
+    const scopedLaneStates = normalizedLaneId
+      ? laneStates.filter((lane) => lane._laneId === normalizedLaneId)
+      : laneStates
     status.lanes = await attachLatestCgraphMetadataToStates(
       repoRoot,
       config,
-      decorateLaneStates(await readAllLaneStates(repoRoot, config), status.locks),
+      decorateLaneStates(scopedLaneStates, status.locks),
     )
-    status.current = getMostRecentlyUpdatedState(status.lanes, status.current)
+    status.current = normalizedLaneId
+      ? status.lanes[0]
+      : getMostRecentlyUpdatedState(status.lanes, status.current)
     status.staleness = parseStaleness(status.current.lastUpdated)
     status.repurposeReady = status.lanes
       .filter((lane) => lane.repurposeReady)
@@ -8566,9 +8918,9 @@ async function getStartupSnapshot(repoRoot) {
   }
 }
 
-async function getStatus({ repoRoot } = {}) {
+async function getStatus({ repoRoot, lane } = {}) {
   if (repoRoot) {
-    return [await getRepoStatus(repoRoot)]
+    return [await getRepoStatus(repoRoot, lane)]
   }
 
   const repos = await getRegisteredRepos()
@@ -8590,7 +8942,7 @@ async function getStatus({ repoRoot } = {}) {
       continue
     }
 
-    statuses.push(await getRepoStatus(repo.path))
+    statuses.push(await getRepoStatus(repo.path, lane))
   }
 
   return statuses
@@ -8638,14 +8990,19 @@ function checkFeedbackLogHealth(content) {
   return warnings
 }
 
-async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {}) {
+async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane = "" } = {}) {
   const issues = []
   const warnings = []
   const repurposeReady = []
   const managedTemplate = await getManagedBlockTemplate(repoRoot)
   const config = await readProjectConfig(repoRoot)
+  const scopedLane = normalizeAgentName(lane).toLowerCase()
+  const laneConfigs = getLaneConfigs(config)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
-  const overrides = await listActiveOverrides(repoRoot)
+  const activeOverrides = await listActiveOverrides(repoRoot)
+  const overrides = scopedLane
+    ? activeOverrides.filter((record) => record.scope !== "lane" || record.laneId === scopedLane)
+    : activeOverrides
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
   const cgraph = await getDoctorCgraphSummary(repoRoot, config)
 
@@ -8666,10 +9023,21 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
     if (!SUPPORTED_REVIEW_MODES.has(mode)) {
       warnings.push(`\`.btrain/project.toml\` sets unsupported review mode "${mode}".`)
     }
+
+    const runnerMap = getAgentRunnerMap(config)
+    for (const agentName of getCollaborationAgentNames(config)) {
+      if (!getAgentRunnerValue(runnerMap, agentName)) {
+        warnings.push(
+          `Active agent "${agentName}" has no configured runner in \`[agents.runners]\`; loop dispatch will fall back to notification mode.`,
+        )
+      }
+    }
   }
 
-  if (!(await pathExists(repoPaths.handoffPath))) {
-    issues.push(`Missing handoff file: ${repoPaths.handoffPath}`)
+  if (!scopedLane || !laneConfigs) {
+    if (!(await pathExists(repoPaths.handoffPath))) {
+      issues.push(`Missing handoff file: ${repoPaths.handoffPath}`)
+    }
   }
 
   if (!(await pathExists(repoPaths.agentsPath))) {
@@ -8694,7 +9062,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
     }
   }
 
-  if (await pathExists(repoPaths.handoffPath)) {
+  if ((!scopedLane || !laneConfigs) && await pathExists(repoPaths.handoffPath)) {
     const handoffContent = await readText(repoPaths.handoffPath)
     if (!findSectionBounds(handoffContent, "Current")) {
       warnings.push("`" + path.basename(repoPaths.handoffPath) + "` is missing a `## Current` section.")
@@ -8719,19 +9087,21 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
   }
 
   // Lane-specific checks
-  const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
-    for (const lane of laneConfigs) {
-      const laneHandoffPath = path.isAbsolute(lane.handoffPath)
-        ? lane.handoffPath
-        : path.resolve(repoRoot, lane.handoffPath)
+    const inspectedLaneConfigs = scopedLane
+      ? laneConfigs.filter((entry) => entry.id === scopedLane)
+      : laneConfigs
+    for (const laneConfig of inspectedLaneConfigs) {
+      const laneHandoffPath = path.isAbsolute(laneConfig.handoffPath)
+        ? laneConfig.handoffPath
+        : path.resolve(repoRoot, laneConfig.handoffPath)
 
       if (!(await pathExists(laneHandoffPath))) {
-        issues.push(`Missing lane ${lane.id} handoff file: ${laneHandoffPath}. Run \`btrain init .\`.`)
+        issues.push(`Missing lane ${laneConfig.id} handoff file: ${laneHandoffPath}. Run \`btrain init .\`.`)
       } else {
         const content = await readText(laneHandoffPath)
         if (!findSectionBounds(content, "Current")) {
-          warnings.push(`Lane ${lane.id} handoff is missing a \`## Current\` section.`)
+          warnings.push(`Lane ${laneConfig.id} handoff is missing a \`## Current\` section.`)
         }
       }
     }
@@ -8745,7 +9115,12 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
         if (!Array.isArray(registry.locks)) {
           issues.push("`locks.json` is malformed: `locks` is not an array.")
         } else {
-          const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
+          const laneStates = scopedLane
+            ? [decorateLaneState(
+                await readLaneState(repoRoot, config, scopedLane),
+                getLaneLocks(registry.locks, scopedLane),
+              )]
+            : decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
           for (const laneState of laneStates) {
             // Integrity issues (WS4)
             const integrityIssues = await analyzeLaneIntegrity(repoRoot, config, laneState)
@@ -8803,20 +9178,22 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
           }
 
           // Check for cross-lane overlapping locks
-          const laneIds = [...new Set(registry.locks.map((l) => l.lane))]
-          for (const laneId of laneIds) {
-            const otherLocks = registry.locks.filter((l) => l.lane !== laneId)
-            const thisLaneLocks = registry.locks.filter((l) => l.lane === laneId)
-            for (const lock of thisLaneLocks) {
-              const conflicts = checkLockConflicts(
-                { locks: otherLocks },
-                "__check__",
-                [lock.path],
-              )
-              if (conflicts.length > 0) {
-                warnings.push(
-                  `Lock overlap: lane ${lock.lane} (\`${lock.path}\`) conflicts with lane ${conflicts[0].lockedBy} (\`${conflicts[0].path}\`).`,
+          if (!scopedLane) {
+            const laneIds = [...new Set(registry.locks.map((l) => l.lane))]
+            for (const laneId of laneIds) {
+              const otherLocks = registry.locks.filter((l) => l.lane !== laneId)
+              const thisLaneLocks = registry.locks.filter((l) => l.lane === laneId)
+              for (const lock of thisLaneLocks) {
+                const conflicts = checkLockConflicts(
+                  { locks: otherLocks },
+                  "__check__",
+                  [lock.path],
                 )
+                if (conflicts.length > 0) {
+                  warnings.push(
+                    `Lock overlap: lane ${lock.lane} (\`${lock.path}\`) conflicts with lane ${conflicts[0].lockedBy} (\`${conflicts[0].path}\`).`,
+                  )
+                }
               }
             }
           }
@@ -8859,9 +9236,9 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
   }
 }
 
-async function doctor({ repoRoot, repair = false, skipFeedback = false } = {}) {
+async function doctor({ repoRoot, repair = false, skipFeedback = false, lane = "" } = {}) {
   if (repoRoot) {
-    return [await doctorRepo(repoRoot, { repair, skipFeedback })]
+    return [await doctorRepo(repoRoot, { repair, skipFeedback, lane })]
   }
 
   const repos = await getRegisteredRepos()

@@ -1,4 +1,8 @@
 #!/usr/bin/env sh
 # bth — shorthand for `btrain handoff`
 # Passes all arguments through: `bth wait --lane a` → `btrain handoff wait --lane a`
+BTH_BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$BTH_BIN_DIR/btrain" ]; then
+  exec "$BTH_BIN_DIR/btrain" handoff "$@"
+fi
 exec btrain handoff "$@"
