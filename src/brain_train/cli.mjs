@@ -2081,8 +2081,17 @@ async function run() {
         fix: "Run `btrain doctor` without --repair, or run the repair from an unscoped operator session.",
       })
     }
-    const repoRoot = options.repo ? path.resolve(options.repo) : null
-    const results = await doctor({ repoRoot, repair: !!options.repair, skipFeedback: !!options["skip-feedback"] })
+    const repoRoot = options.repo
+      ? path.resolve(options.repo)
+      : scopedLane
+        ? await resolveRepoRoot()
+        : null
+    const results = await doctor({
+      repoRoot,
+      repair: !!options.repair,
+      skipFeedback: !!options["skip-feedback"],
+      lane: scopedLane,
+    })
     console.log(`btrain home: ${getBrainTrainHome()}`)
     console.log("")
     if (results.length === 0) {

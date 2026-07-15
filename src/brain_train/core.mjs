@@ -266,60 +266,59 @@ const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
 const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
+function claudeBashPermissions(...commands) {
+  return commands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`])
+}
+
 const CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS = [
   "Read",
   "Grep",
   "Glob",
-  "Bash(btrain handoff:*)",
-  "Bash(btrain locks:*)",
-  "Bash(btrain review:*)",
-  "Bash(btrain status:*)",
-  "Bash(bth:*)",
-  "Bash(rtk btrain handoff:*)",
-  "Bash(rtk btrain locks:*)",
-  "Bash(rtk btrain review:*)",
-  "Bash(rtk btrain status:*)",
-  "Bash(git status:*)",
-  "Bash(git diff:*)",
-  "Bash(git show:*)",
-  "Bash(git log:*)",
-  "Bash(rtk git status:*)",
-  "Bash(rtk git diff:*)",
-  "Bash(rtk git show:*)",
-  "Bash(rtk git log:*)",
-  "Bash(gh pr view:*)",
-  "Bash(gh pr diff:*)",
-  "Bash(gh pr checks:*)",
-  "Bash(rtk gh pr view:*)",
-  "Bash(rtk gh pr diff:*)",
-  "Bash(rtk gh pr checks:*)",
-  "Bash(rtk rg:*)",
-  "Bash(rtk sed:*)",
-  "Bash(npm test:*)",
-  "Bash(node --test:*)",
-  "Bash(rtk npm test:*)",
-  "Bash(rtk node --test:*)",
+  ...claudeBashPermissions(
+    "btrain handoff",
+    "btrain locks",
+    "btrain review",
+    "btrain status",
+    "bth",
+    "rtk btrain handoff",
+    "rtk btrain locks",
+    "rtk btrain review",
+    "rtk btrain status",
+    "git status",
+    "git diff",
+    "git show",
+    "git log",
+    "rtk git status",
+    "rtk git diff",
+    "rtk git show",
+    "rtk git log",
+    "gh pr view",
+    "gh pr diff",
+    "gh pr checks",
+    "rtk gh pr view",
+    "rtk gh pr diff",
+    "rtk gh pr checks",
+    "rtk rg",
+    "rtk sed",
+    "npm test",
+    "node --test",
+    "rtk npm test",
+    "rtk node --test",
+  ),
 ]
 const CLAUDE_LOOP_WRITE_ALLOWED_TOOLS = [
   ...CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS,
   "Edit",
   "Write",
-  "Bash(git add:*)",
-  "Bash(git commit:*)",
-  "Bash(rtk git add:*)",
-  "Bash(rtk git commit:*)",
+  ...claudeBashPermissions("git add", "git commit", "rtk git add", "rtk git commit"),
 ]
 const CLAUDE_LOOP_PR_ALLOWED_TOOLS = [
   ...CLAUDE_LOOP_WRITE_ALLOWED_TOOLS,
-  "Bash(git push:*)",
-  "Bash(rtk git push:*)",
-  "Bash(btrain pr:*)",
-  "Bash(rtk btrain pr:*)",
+  ...claudeBashPermissions("git push", "rtk git push", "btrain pr", "rtk btrain pr"),
 ]
 const CLAUDE_LOOP_MERGE_ALLOWED_TOOLS = [
   ...CLAUDE_LOOP_PR_ALLOWED_TOOLS,
-  "Bash(gh pr merge:*)",
-  "Bash(rtk gh pr merge:*)",
+  ...claudeBashPermissions("gh pr merge", "rtk gh pr merge"),
 ]
 const CLAUDE_LOOP_READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 const CLAUDE_LOOP_WRITE_TOOLS = [...CLAUDE_LOOP_READ_ONLY_TOOLS, "Edit", "Write"]
@@ -8991,12 +8990,14 @@ function checkFeedbackLogHealth(content) {
   return warnings
 }
 
-async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {}) {
+async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane = "" } = {}) {
   const issues = []
   const warnings = []
   const repurposeReady = []
   const managedTemplate = await getManagedBlockTemplate(repoRoot)
   const config = await readProjectConfig(repoRoot)
+  const scopedLane = normalizeAgentName(lane).toLowerCase()
+  const laneConfigs = getLaneConfigs(config)
   const repoPaths = getConfiguredRepoPaths(repoRoot, config)
   const overrides = await listActiveOverrides(repoRoot)
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
@@ -9030,8 +9031,10 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
     }
   }
 
-  if (!(await pathExists(repoPaths.handoffPath))) {
-    issues.push(`Missing handoff file: ${repoPaths.handoffPath}`)
+  if (!scopedLane || !laneConfigs) {
+    if (!(await pathExists(repoPaths.handoffPath))) {
+      issues.push(`Missing handoff file: ${repoPaths.handoffPath}`)
+    }
   }
 
   if (!(await pathExists(repoPaths.agentsPath))) {
@@ -9056,7 +9059,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
     }
   }
 
-  if (await pathExists(repoPaths.handoffPath)) {
+  if ((!scopedLane || !laneConfigs) && await pathExists(repoPaths.handoffPath)) {
     const handoffContent = await readText(repoPaths.handoffPath)
     if (!findSectionBounds(handoffContent, "Current")) {
       warnings.push("`" + path.basename(repoPaths.handoffPath) + "` is missing a `## Current` section.")
@@ -9081,19 +9084,21 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
   }
 
   // Lane-specific checks
-  const laneConfigs = getLaneConfigs(config)
   if (laneConfigs) {
-    for (const lane of laneConfigs) {
-      const laneHandoffPath = path.isAbsolute(lane.handoffPath)
-        ? lane.handoffPath
-        : path.resolve(repoRoot, lane.handoffPath)
+    const inspectedLaneConfigs = scopedLane
+      ? laneConfigs.filter((entry) => entry.id === scopedLane)
+      : laneConfigs
+    for (const laneConfig of inspectedLaneConfigs) {
+      const laneHandoffPath = path.isAbsolute(laneConfig.handoffPath)
+        ? laneConfig.handoffPath
+        : path.resolve(repoRoot, laneConfig.handoffPath)
 
       if (!(await pathExists(laneHandoffPath))) {
-        issues.push(`Missing lane ${lane.id} handoff file: ${laneHandoffPath}. Run \`btrain init .\`.`)
+        issues.push(`Missing lane ${laneConfig.id} handoff file: ${laneHandoffPath}. Run \`btrain init .\`.`)
       } else {
         const content = await readText(laneHandoffPath)
         if (!findSectionBounds(content, "Current")) {
-          warnings.push(`Lane ${lane.id} handoff is missing a \`## Current\` section.`)
+          warnings.push(`Lane ${laneConfig.id} handoff is missing a \`## Current\` section.`)
         }
       }
     }
@@ -9108,6 +9113,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
           issues.push("`locks.json` is malformed: `locks` is not an array.")
         } else {
           const laneStates = decorateLaneStates(await readAllLaneStates(repoRoot, config), registry.locks)
+            .filter((laneState) => !scopedLane || laneState._laneId === scopedLane)
           for (const laneState of laneStates) {
             // Integrity issues (WS4)
             const integrityIssues = await analyzeLaneIntegrity(repoRoot, config, laneState)
@@ -9165,20 +9171,22 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
           }
 
           // Check for cross-lane overlapping locks
-          const laneIds = [...new Set(registry.locks.map((l) => l.lane))]
-          for (const laneId of laneIds) {
-            const otherLocks = registry.locks.filter((l) => l.lane !== laneId)
-            const thisLaneLocks = registry.locks.filter((l) => l.lane === laneId)
-            for (const lock of thisLaneLocks) {
-              const conflicts = checkLockConflicts(
-                { locks: otherLocks },
-                "__check__",
-                [lock.path],
-              )
-              if (conflicts.length > 0) {
-                warnings.push(
-                  `Lock overlap: lane ${lock.lane} (\`${lock.path}\`) conflicts with lane ${conflicts[0].lockedBy} (\`${conflicts[0].path}\`).`,
+          if (!scopedLane) {
+            const laneIds = [...new Set(registry.locks.map((l) => l.lane))]
+            for (const laneId of laneIds) {
+              const otherLocks = registry.locks.filter((l) => l.lane !== laneId)
+              const thisLaneLocks = registry.locks.filter((l) => l.lane === laneId)
+              for (const lock of thisLaneLocks) {
+                const conflicts = checkLockConflicts(
+                  { locks: otherLocks },
+                  "__check__",
+                  [lock.path],
                 )
+                if (conflicts.length > 0) {
+                  warnings.push(
+                    `Lock overlap: lane ${lock.lane} (\`${lock.path}\`) conflicts with lane ${conflicts[0].lockedBy} (\`${conflicts[0].path}\`).`,
+                  )
+                }
               }
             }
           }
@@ -9221,9 +9229,9 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false } = {
   }
 }
 
-async function doctor({ repoRoot, repair = false, skipFeedback = false } = {}) {
+async function doctor({ repoRoot, repair = false, skipFeedback = false, lane = "" } = {}) {
   if (repoRoot) {
-    return [await doctorRepo(repoRoot, { repair, skipFeedback })]
+    return [await doctorRepo(repoRoot, { repair, skipFeedback, lane })]
   }
 
   const repos = await getRegisteredRepos()

@@ -1294,9 +1294,9 @@ console.log("ready-for-pr owner ran")
     assert.match(stdout, /selected agent:\s+TestBot/)
     assert.match(stdout, /reason: handoff status is ready-for-pr/)
     assert.match(stdout, /dispatch TestBot:/)
-    assert.match(stdout, /Bash\(rtk btrain pr:\*\)/)
-    assert.match(stdout, /Bash\(rtk git push:\*\)/)
-    assert.doesNotMatch(stdout, /Bash\(rtk gh pr merge:\*\)/)
+    assert.match(stdout, /Bash\(rtk btrain pr \*\)/)
+    assert.match(stdout, /Bash\(rtk git push \*\)/)
+    assert.doesNotMatch(stdout, /Bash\(rtk gh pr merge \*\)/)
   })
 
   it("only exposes Claude merge tools once the lane is ready-to-merge", async () => {
@@ -1319,7 +1319,7 @@ console.log("ready-for-pr owner ran")
 
     assert.equal(code, 0, stdout)
     assert.match(stdout, /reason: handoff status is ready-to-merge/)
-    assert.match(stdout, /Bash\(rtk gh pr merge:\*\)/)
+    assert.match(stdout, /Bash\(rtk gh pr merge \*\)/)
   })
 
   it("final resolve releases locks after the PR phase completes", async () => {
@@ -2976,7 +2976,7 @@ console.log("reviewer runner resolved the handoff")
     assert.match(stdout, /--tools=Read,Grep,Glob,Bash,Edit,Write/)
     assert.match(stdout, /--allowedTools=.*\bEdit\b/)
     assert.match(stdout, /--allowedTools=.*\bWrite\b/)
-    assert.match(stdout, /Bash\(rtk git commit:\*\)/)
+    assert.match(stdout, /Bash\(rtk git commit \*\)/)
 
     await runBtrain(
       [
@@ -3093,17 +3093,18 @@ emit({
     assert.ok(stdout.includes("--allowedTools="), stdout)
     assert.ok(stdout.includes("--allowedTools=Read,Grep,Glob,"), stdout)
     assert.ok(!stdout.includes("--allowedTools=Read Grep Glob "), stdout)
-    assert.ok(stdout.includes("Bash(btrain handoff:*)"), stdout)
-    assert.ok(stdout.includes("Bash(rtk btrain review:*)"), stdout)
-    assert.ok(stdout.includes("Bash(rtk git diff:*)"), stdout)
-    assert.ok(stdout.includes("Bash(gh pr view:*)"), stdout)
-    assert.ok(stdout.includes("Bash(gh pr diff:*)"), stdout)
-    assert.ok(stdout.includes("Bash(gh pr checks:*)"), stdout)
-    assert.ok(stdout.includes("Bash(rtk gh pr view:*)"), stdout)
-    assert.ok(stdout.includes("Bash(rtk gh pr diff:*)"), stdout)
-    assert.ok(stdout.includes("Bash(rtk gh pr checks:*)"), stdout)
-    assert.ok(stdout.includes("Bash(npm test:*)"), stdout)
-    assert.ok(stdout.includes("Bash(node --test:*)"), stdout)
+    assert.ok(stdout.includes("Bash(btrain handoff *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk btrain review *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk git diff *)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr view *)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr diff *)"), stdout)
+    assert.ok(stdout.includes("Bash(gh pr checks *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr view *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr diff *)"), stdout)
+    assert.ok(stdout.includes("Bash(rtk gh pr checks *)"), stdout)
+    assert.ok(stdout.includes("Bash(npm test *)"), stdout)
+    assert.ok(stdout.includes("Bash(node --test *)"), stdout)
+    assert.doesNotMatch(stdout, /Bash\([^)]*:\*\)/)
     assert.doesNotMatch(stdout, /--allowedTools=.*\bEdit\b/)
     assert.ok(stdout.includes("agent progress:"), stdout)
     assert.ok(stdout.includes("tool Bash: git status --short"), stdout)
@@ -3449,6 +3450,22 @@ describe("btrain loop lane-scoped dispatch", () => {
       const [scopedRepoStatus] = JSON.parse(scopedStatusJson.stdout)
       assert.equal(scopedRepoStatus.current._laneId, "b")
       assert.equal(scopedRepoStatus.current.task, "Target lane task")
+
+      const laneARepair = await runBtrain(
+        [
+          "handoff", "update", "--repo", repoDir, "--lane", "a",
+          "--status", "repair-needed", "--reason-code", "state-conflict",
+          "--reason-tag", "test", "--actor", "OwnerA",
+        ],
+        repoDir,
+        { BTRAIN_AGENT: "OwnerA" },
+      )
+      assert.equal(laneARepair.code, 0, laneARepair.stderr)
+
+      const scopedDoctor = await runBtrain(["doctor"], repoDir, scopedEnv)
+      assert.equal(scopedDoctor.stderr, "")
+      assert.match(scopedDoctor.stdout, new RegExp(repoDir.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+      assert.doesNotMatch(scopedDoctor.stdout, /Lane a is `repair-needed`/)
 
       const scopedRepair = await runBtrain(
         ["doctor", "--repo", repoDir, "--repair"],
