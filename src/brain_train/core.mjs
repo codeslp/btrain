@@ -321,6 +321,8 @@ const CLAUDE_LOOP_MERGE_ALLOWED_TOOLS = [
   "Bash(gh pr merge:*)",
   "Bash(rtk gh pr merge:*)",
 ]
+const CLAUDE_LOOP_READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "Bash"]
+const CLAUDE_LOOP_WRITE_TOOLS = [...CLAUDE_LOOP_READ_ONLY_TOOLS, "Edit", "Write"]
 const LOOP_TERMINAL_STATUSES = new Set(["resolved", "idle"])
 const CODEX_SUBCOMMANDS = new Set([
   "exec",
@@ -7097,14 +7099,20 @@ function normalizeLoopCliRunner(runnerValue, {
     if (!hasRunnerArg(args, "--include-partial-messages")) {
       args.push("--include-partial-messages")
     }
+    const allowedTools = permissionPhase === "merge"
+      ? CLAUDE_LOOP_MERGE_ALLOWED_TOOLS
+      : permissionPhase === "pr"
+        ? CLAUDE_LOOP_PR_ALLOWED_TOOLS
+        : permissionPhase === "write"
+          ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
+          : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
+    const availableTools = permissionPhase === "read"
+      ? CLAUDE_LOOP_READ_ONLY_TOOLS
+      : CLAUDE_LOOP_WRITE_TOOLS
+    if (!hasRunnerArg(args, "--tools")) {
+      args.push(`--tools=${availableTools.join(",")}`)
+    }
     if (!hasRunnerArg(args, "--allowedTools", "--allowed-tools")) {
-      const allowedTools = permissionPhase === "merge"
-        ? CLAUDE_LOOP_MERGE_ALLOWED_TOOLS
-        : permissionPhase === "pr"
-          ? CLAUDE_LOOP_PR_ALLOWED_TOOLS
-          : permissionPhase === "write"
-            ? CLAUDE_LOOP_WRITE_ALLOWED_TOOLS
-            : CLAUDE_LOOP_READ_ONLY_ALLOWED_TOOLS
       args.push(`--allowedTools=${allowedTools.join(",")}`)
     }
     if (!placeholderPrompt) {

@@ -2973,6 +2973,7 @@ console.log("reviewer runner resolved the handoff")
     )
 
     assert.equal(code, 0, stdout)
+    assert.match(stdout, /--tools=Read,Grep,Glob,Bash,Edit,Write/)
     assert.match(stdout, /--allowedTools=.*\bEdit\b/)
     assert.match(stdout, /--allowedTools=.*\bWrite\b/)
     assert.match(stdout, /Bash\(rtk git commit:\*\)/)
@@ -3087,6 +3088,8 @@ emit({
 
     assert.equal(code, 0)
     assert.ok(stdout.includes("--output-format stream-json"), stdout)
+    assert.ok(stdout.includes("--tools=Read,Grep,Glob,Bash"), stdout)
+    assert.doesNotMatch(stdout, /--tools=[^\s]*\b(?:Edit|Write)\b/)
     assert.ok(stdout.includes("--allowedTools="), stdout)
     assert.ok(stdout.includes("--allowedTools=Read,Grep,Glob,"), stdout)
     assert.ok(!stdout.includes("--allowedTools=Read Grep Glob "), stdout)
