@@ -333,10 +333,11 @@ btrain scaffolds a `.claude/collab/FEEDBACK_LOG.md` during init and monitors it 
 
 ## Bundled Skills
 
-`btrain init` scaffolds these skills into `.claude/skills/` and `.agents/skills/` (skip with `--core-only`). Re-run `btrain sync-skills --force --skill <name>` to refresh an existing local mirror from the bundled source; omit `--skill` to sync the whole bundle, and omit `--force` to preserve local edits while restoring missing files.
+`btrain init` scaffolds these skills into `.claude/skills/` and `.agents/skills/` (skip with `--core-only`). Re-running `init` restores missing files but preserves existing skill content. Use `btrain sync-skills --force --skill <name>` to refresh an existing mirror from the bundled source; omit `--skill` to sync the whole bundle, and omit `--force` to preserve local edits while restoring missing files. Skill sync also refreshes the shared Unblocked helper required by the context-aware workflows.
 
 | Skill | Purpose |
 |-------|---------|
+| `context-scout` | Risk-tier organizational context gathering with a standard btrain receipt |
 | `feedback-triage` | Triage user-reported feedback into log, drive test-first resolution |
 | `bug-fix` | Test-first bug investigation for developer-found bugs |
 | `pre-handoff` | Quality gate before `needs-review` — catches placeholders, empty diffs |

@@ -6,6 +6,11 @@ reviewer_default = "codex"
 writer_default = "claude"
 active = ["claude", "codex", "gemini"]
 
+[agents.runners]
+"claude" = "claude -p"
+"codex" = "codex"
+"gemini" = "gemini"
+
 [lanes]
 per_agent = 3
 enabled = true

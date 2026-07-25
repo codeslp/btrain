@@ -161,6 +161,7 @@ const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "optio
 const BUNDLED_SKILLS_DIR = path.join(PACKAGE_ROOT, ".claude", "skills")
 const BUNDLED_AGENT_SKILLS_DIR = path.join(PACKAGE_ROOT, ".agents", "skills")
 const BUNDLED_AGENTCHATTR_DIR = path.join(PACKAGE_ROOT, "agentchattr")
+const UNBLOCKED_CONTEXT_HELPER_LABEL = "unblocked-context-helper"
 const BUNDLED_DEV_TOOLS = [
   {
     label: "dashboard",
@@ -183,7 +184,7 @@ const BUNDLED_DEV_TOOLS = [
     targetParts: ["scripts", "register-handoff-watch-path.sh"],
   },
   {
-    label: "unblocked-context-helper",
+    label: UNBLOCKED_CONTEXT_HELPER_LABEL,
     sourcePath: path.join(PACKAGE_ROOT, ".claude", "scripts", "unblocked-context.sh"),
     targetParts: [".claude", "scripts", "unblocked-context.sh"],
   },
@@ -1404,6 +1405,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.",
   "- When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.",
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
+  "- Use the `context-scout` skill to classify organizational context as `none`, `targeted`, or `deep`; use `--unblocked-context` on targeted/deep claims and record provider failures as explicit soft gaps.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
   "- After handing a lane to a peer, either continue on another lane or run `bth wait --lane <id>` so the current session wakes with fresh guidance when that lane changes.",
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
@@ -1759,13 +1761,16 @@ async function syncBundledSkillTargets(repoPaths) {
   }
 }
 
-async function syncBundledDevTools(repoRoot) {
+async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null } = {}) {
   const copiedTools = []
   const missingTools = []
   const selfTools = []
   let copiedFileCount = 0
 
   for (const tool of BUNDLED_DEV_TOOLS) {
+    if (labels && !labels.has(tool.label)) {
+      continue
+    }
     if (!(await pathExists(tool.sourcePath))) {
       missingTools.push(tool.label)
       continue
@@ -1778,6 +1783,7 @@ async function syncBundledDevTools(repoRoot) {
     }
 
     const copiedForTool = await copyMissingTree(tool.sourcePath, targetPath, {
+      overwrite,
       shouldSkip: tool.shouldSkip,
     })
     copiedFileCount += copiedForTool
@@ -8239,12 +8245,17 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       ...claude.copiedSkills,
       ...agents.copiedSkills,
     ])).sort()
+    const supportTools = await syncBundledDevTools(absoluteRepoRoot, {
+      overwrite,
+      labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
+    })
 
     results.push({
       name: repo.name,
       path: absoluteRepoRoot,
       copiedSkills,
-      status: copiedSkills.length > 0 ? "updated" : "unchanged",
+      copiedTools: supportTools.copiedTools,
+      status: copiedSkills.length > 0 || supportTools.copiedTools.length > 0 ? "updated" : "unchanged",
     })
   }
 

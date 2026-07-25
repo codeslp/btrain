@@ -2,7 +2,8 @@
 name: speckit-plan
 description: Generate technical implementation plans from feature specifications.
   Use after creating a spec to define architecture, tech stack, and implementation
-  phases. Creates plan.md with detailed technical design.
+  phases. Use context-scout at deep tier for prior decisions, connected systems, and
+  rejected approaches. Creates plan.md with detailed technical design.
 compatibility: Requires spec-kit project structure with .specify/ directory
 metadata:
   author: github-spec-kit
@@ -45,7 +46,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - For each dependency → best practices task
    - For each integration → patterns task
 
-2. **Pull cited context first (Unblocked), then dispatch agents only for residuals**:
+2. **Invoke `context-scout` at `deep` tier, then dispatch agents only for residuals**:
 
    For broad multi-source synthesis covering all unknowns at once:
 
@@ -72,6 +73,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Decision: [what was chosen]
    - Rationale: [why chosen]
    - Alternatives considered: [what else evaluated]
+   - Context receipt: [questions, cited sources, constraints, gaps, durable writeback]
 
 **Output**: research.md with all NEEDS CLARIFICATION resolved
 
@@ -91,7 +93,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Skip if project is purely internal (build scripts, one-off tools, etc.)
 
 3. **Agent context update**:
-   - Run `.specify/scripts/bash/update-agent-context.sh Codex`
+   - Run `.specify/scripts/bash/update-agent-context.sh claude`
    - These scripts detect which AI agent is in use
    - Update the appropriate agent-specific context file
    - Add only new technology from current plan

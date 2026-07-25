@@ -1,6 +1,6 @@
 ---
 name: code-simplifier
-description: Simplifies recently changed code and surfaces architecture-deepening opportunities while preserving behavior. Use before handoff, after implementation, or when code feels shallow, over-coupled, hard to test, or hard for agents to navigate.
+description: Simplifies recently changed code and surfaces architecture-deepening opportunities while preserving behavior. Use context-scout at targeted tier when prior implementations or rejected refactors may matter. Use before handoff, after implementation, or when code feels shallow, over-coupled, hard to test, or hard for agents to navigate.
 ---
 
 # Code Simplifier
@@ -23,7 +23,9 @@ Produce code that is readable, explicit, maintainable, and easier to test throug
 1. Identify the work scope:
    - Recently modified files via `git diff --name-only` against the branch base or recent commits.
    - Any domain docs that already exist: `CONTEXT.md`, `CONTEXT-MAP.md`, and relevant `docs/adr/` entries. If absent, proceed silently.
-   - **Prior implementation context (Unblocked)**: before adding or reshaping abstractions, search for existing helpers, rejected refactors, and code patterns in nearby repos:
+   - **Prior implementation context**: invoke `context-scout` at `targeted` tier before
+     adding or reshaping abstractions, then search for existing helpers, rejected refactors,
+     and code patterns in nearby repos:
      ```bash
      .claude/scripts/unblocked-context.sh search-code \
        "<changed modules> helper abstraction adapter pattern" --limit 8

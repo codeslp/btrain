@@ -352,6 +352,14 @@ describe("btrain init", () => {
 
   it("copies the bundled skill pack by default and excludes the multispeaker skill", async () => {
     await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "skills", "context-scout", "SKILL.md")),
+      "Claude-facing context-scout skill should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".agents", "skills", "context-scout", "SKILL.md")),
+      "Codex-facing context-scout skill should exist",
+    )
+    await assert.doesNotReject(
       fs.access(path.join(tmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
       "pre-handoff skill should exist",
     )
@@ -434,6 +442,7 @@ describe("btrain init", () => {
     assert.ok(content.includes("Always use CLI commands"), "Missing CLI-first rule")
     assert.ok(content.includes("Run `btrain handoff` before acting"), "Missing handoff identity check rule")
     assert.ok(content.includes("Before editing, do a short pre-flight review"), "Missing pre-flight review rule")
+    assert.ok(content.includes("Use the `context-scout` skill"), "Missing risk-based context rule")
   })
 
   it("HANDOFF_A.md has idle status", async () => {
@@ -552,6 +561,48 @@ describe("btrain init", () => {
       await assert.doesNotReject(
         fs.access(restoredUnblockedHelperPath),
         "missing Unblocked helper should be restored",
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("forced context-scout sync refreshes the skill and its Unblocked helper dependency", async () => {
+    const localTmpDir = await makeTmpDir()
+    const sourceHelperPath = path.resolve(".claude/scripts/unblocked-context.sh")
+    const sourceClaudeSkillPath = path.resolve(".claude/skills/context-scout/SKILL.md")
+    const sourceAgentSkillPath = path.resolve(".agents/skills/context-scout/SKILL.md")
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const targetHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      const targetClaudeSkillPath = path.join(localTmpDir, ".claude", "skills", "context-scout", "SKILL.md")
+      const targetAgentSkillPath = path.join(localTmpDir, ".agents", "skills", "context-scout", "SKILL.md")
+      await fs.writeFile(targetHelperPath, "stale helper\n", "utf8")
+      await fs.writeFile(targetClaudeSkillPath, "stale Claude skill\n", "utf8")
+      await fs.writeFile(targetAgentSkillPath, "stale Codex skill\n", "utf8")
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "context-scout",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /tools: unblocked-context-helper/)
+      assert.equal(await fs.readFile(targetHelperPath, "utf8"), await fs.readFile(sourceHelperPath, "utf8"))
+      assert.equal(
+        await fs.readFile(targetClaudeSkillPath, "utf8"),
+        await fs.readFile(sourceClaudeSkillPath, "utf8"),
+      )
+      assert.equal(
+        await fs.readFile(targetAgentSkillPath, "utf8"),
+        await fs.readFile(sourceAgentSkillPath, "utf8"),
       )
     } finally {
       await rmDir(localTmpDir)

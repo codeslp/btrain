@@ -1,6 +1,6 @@
 ---
 name: secure-by-default
-description: Run a server-side trust-boundary check whenever a change touches auth, rate limits, permissions, entitlements, payments, admin actions, or any mutating API route. Use it to catch client-only security controls before handoff, especially when the frontend appears to enforce the rule already.
+description: Run a server-side trust-boundary check whenever a change touches auth, rate limits, permissions, entitlements, payments, admin actions, or any mutating API route. Use context-scout at targeted tier for analogous boundaries and prior security decisions. Use it to catch client-only security controls before handoff, especially when the frontend appears to enforce the rule already.
 ---
 
 # Secure By Default
@@ -14,7 +14,9 @@ Catch security logic that only exists in the client and force enforcement at the
 ## Workflow
 
 1. List each new or changed mutating endpoint.
-2. **Prior security context (Unblocked)** — before judging the new shape, search for prior auth/payment/admin incidents, accepted patterns, and rejected approaches touching the same boundary:
+2. **Invoke `context-scout` at `targeted` tier** — before judging the new shape, search for
+   prior auth/payment/admin incidents, accepted patterns, and rejected approaches touching
+   the same boundary:
    ```bash
    .claude/scripts/unblocked-context.sh research \
      "<endpoint names> auth permissions rate-limit entitlement payment admin security" \

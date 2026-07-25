@@ -124,7 +124,7 @@ Usage:
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
   btrain register <repo-path>                                                    Register an existing repo without bootstrapping it
   btrain sync-templates [--repo <path>] [--dry-run]                              Sync managed AGENTS/CLAUDE blocks from templates
-  btrain sync-skills [--repo <path>] [--force] [--skill <name>]                  Sync bundled skills across registered repos
+  btrain sync-skills [--repo <path>] [--force] [--skill <name>]                  Sync bundled skills and their helper dependency across registered repos
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
@@ -2006,6 +2006,9 @@ async function run() {
       }
       if (repoResult.copiedSkills?.length > 0) {
         console.log(`  skills: ${repoResult.copiedSkills.join(", ")}`)
+      }
+      if (repoResult.copiedTools?.length > 0) {
+        console.log(`  tools: ${repoResult.copiedTools.join(", ")}`)
       }
       console.log("")
     }
