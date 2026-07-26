@@ -614,21 +614,33 @@ function stripRemotePrefixes(ref) {
 export async function resolvePrBaseBranch(
   base,
   fallback = "main",
-  { isBranchName = isValidBranchName, isRemoteBranch = async () => false } = {},
+  { isBranchName = isValidBranchName, isRemoteBranch = async () => false, strict = false } = {},
 ) {
   const fallbackBranch = stripRemotePrefixes(String(fallback || "").trim()) || "main"
+  // strict is for explicit user overrides (--base): a base that cannot be
+  // used is an error, never a silent retarget. Fallback is reserved for
+  // machine-written lane Base metadata.
+  const reject = (reason) => {
+    if (strict) {
+      throw new Error(`Base "${String(base ?? "")}" ${reason}. Pass --base <branch> naming a branch that exists on origin.`)
+    }
+    return fallbackBranch
+  }
   const ref = String(base || "").trim()
   if (!ref || /\s/.test(ref)) {
-    return fallbackBranch
+    return reject("is not a branch name")
   }
   const branch = stripRemotePrefixes(ref)
   if (branch === "HEAD" || !(await isBranchName(branch))) {
-    return fallbackBranch
+    return reject("is not a valid branch name")
   }
   // Well-formed is not enough: tags, commit SHAs, and unpushed branches all
   // pass check-ref-format, but gh requires a branch that exists on the
   // remote. Only the remote itself can confirm that.
-  return (await isRemoteBranch(branch)) ? branch : fallbackBranch
+  if (!(await isRemoteBranch(branch))) {
+    return reject("is not a branch on origin")
+  }
+  return branch
 }
 
 export async function runPrCreate(repoRoot, options = {}) {
@@ -661,9 +673,10 @@ export async function runPrCreate(repoRoot, options = {}) {
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.
-  const base = await resolvePrBaseBranch(options.base || lane.base, prFlowConfig.base, {
-    isRemoteBranch: (name) => remoteBranchExists(repoRoot, name),
-  })
+  const isRemoteBranch = (name) => remoteBranchExists(repoRoot, name)
+  const base = options.base
+    ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, strict: true })
+    : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch })
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", "-u", "origin", branch], {
       cwd: repoRoot,

@@ -87,6 +87,16 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(await resolvePrBaseBranch("HEAD~1", "refs/heads/develop"), "develop")
     assert.equal(await resolvePrBaseBranch(undefined, ""), "main")
   })
+
+  it("rejects an invalid explicit base in strict mode instead of retargeting", async () => {
+    const missingRemote = { isRemoteBranch: async () => false, strict: true }
+    await assert.rejects(() => resolvePrBaseBranch("no-such-branch", "main", missingRemote), /no-such-branch/)
+    await assert.rejects(() => resolvePrBaseBranch("HEAD~1", "main", { strict: true }), /HEAD~1/)
+    assert.equal(
+      await resolvePrBaseBranch("release/1.2", "main", { isRemoteBranch: async () => true, strict: true }),
+      "release/1.2",
+    )
+  })
 })
 
 describe("remoteBranchExists", () => {
