@@ -566,16 +566,48 @@ function buildPrBody(lane) {
   return lines.join("\n")
 }
 
-// gh needs the base to exist on the remote; local remote-tracking refs are
-// not proof either way (single-branch clones and stale fetches miss branches
-// that do exist), so ask the remote itself.
+// The PR base lives on the repository gh targets, which in fork workflows is
+// not the push remote. Mirror gh's resolution: the remote marked by
+// `gh repo set-default` (remote.<name>.gh-resolved), else upstream, github,
+// origin, else the first remote.
+async function resolveBaseRemote(repoRoot) {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", repoRoot, "config", "--get-regexp", "^remote\\..+\\.gh-resolved$"],
+      { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
+    )
+    const marked = stdout.split("\n").map((line) => line.trim()).filter(Boolean)[0]
+    if (marked) {
+      return marked.split(".").slice(1, -1).join(".")
+    }
+  } catch {
+    // no gh-resolved marker configured
+  }
+  const { stdout } = await execFileAsync("git", ["-C", repoRoot, "remote"], {
+    cwd: repoRoot,
+    maxBuffer: GH_MAX_BUFFER,
+  })
+  const remotes = stdout.split("\n").map((line) => line.trim()).filter(Boolean)
+  for (const candidate of ["upstream", "github", "origin"]) {
+    if (remotes.includes(candidate)) {
+      return candidate
+    }
+  }
+  return remotes[0] || "origin"
+}
+
+// gh needs the base to exist on the PR target remote; local remote-tracking
+// refs are not proof either way (single-branch clones and stale fetches miss
+// branches that do exist), so ask the remote itself.
 export async function remoteBranchExists(repoRoot, name) {
+  const remote = await resolveBaseRemote(repoRoot)
   try {
     // The full refs/heads/ pattern forces an exact match — a bare name also
     // matches nested branches sharing the suffix (release/<name>).
     await execFileAsync(
       "git",
-      ["-C", repoRoot, "ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${name}`],
+      ["-C", repoRoot, "ls-remote", "--exit-code", "--heads", remote, `refs/heads/${name}`],
       { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
     )
     return true

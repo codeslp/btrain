@@ -138,6 +138,51 @@ describe("remoteBranchExists", () => {
     }
   })
 
+  it("queries the PR target remote, not the fork push remote, when both exist", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const target = path.join(dir, "target.git")
+      const fork = path.join(dir, "fork.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", target])
+      await run("git", ["init", "--bare", "--initial-branch=main", fork])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", target, "main", "main:release/next"])
+      await run("git", ["-C", seed, "push", fork, "main"])
+      await run("git", ["clone", "--origin", "origin", fork, work])
+      await run("git", ["-C", work, "remote", "add", "upstream", target])
+
+      assert.equal(await remoteBranchExists(work, "release/next"), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("honors the gh set-default marker when picking the target remote", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const target = path.join(dir, "target.git")
+      const other = path.join(dir, "other.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", target])
+      await run("git", ["init", "--bare", "--initial-branch=main", other])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", target, "main", "main:only-on-default"])
+      await run("git", ["-C", seed, "push", other, "main"])
+      await run("git", ["clone", "--origin", "origin", target, work])
+      await run("git", ["-C", work, "remote", "add", "upstream", other])
+      await run("git", ["-C", work, "config", "remote.origin.gh-resolved", "base"])
+
+      assert.equal(await remoteBranchExists(work, "only-on-default"), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it("rethrows operational lookup failures instead of reporting the branch absent", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
     try {
