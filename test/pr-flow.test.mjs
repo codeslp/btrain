@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import {
   classifyPrReviewState,
   formatPrStatusSummary,
+  resolvePrBaseBranch,
 } from "../src/brain_train/pr-flow.mjs"
 
 const prFlowConfig = {
@@ -22,6 +23,26 @@ const prFlowConfig = {
     },
   },
 }
+
+describe("resolvePrBaseBranch", () => {
+  it("strips remote-tracking prefixes so gh pr create receives a branch name", () => {
+    assert.equal(resolvePrBaseBranch("origin/main"), "main")
+    assert.equal(resolvePrBaseBranch("refs/heads/main"), "main")
+    assert.equal(resolvePrBaseBranch("refs/remotes/origin/main"), "main")
+  })
+
+  it("passes plain branch names through, including slashed branch names", () => {
+    assert.equal(resolvePrBaseBranch("main"), "main")
+    assert.equal(resolvePrBaseBranch("release/1.2"), "release/1.2")
+    assert.equal(resolvePrBaseBranch("codex/pr-review-flow"), "codex/pr-review-flow")
+  })
+
+  it("falls back when the lane base is prose or empty rather than a ref", () => {
+    assert.equal(resolvePrBaseBranch("Branch 001-refs forked from main at af14b47", "main"), "main")
+    assert.equal(resolvePrBaseBranch("", "main"), "main")
+    assert.equal(resolvePrBaseBranch(undefined, "main"), "main")
+  })
+})
 
 describe("PR review flow classification", () => {
   it("classifies Codex current-head feedback and Unblocked stale feedback from ai_sales#143 shape", () => {

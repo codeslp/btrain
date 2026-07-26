@@ -566,6 +566,17 @@ function buildPrBody(lane) {
   return lines.join("\n")
 }
 
+export function resolvePrBaseBranch(base, fallback = "main") {
+  const ref = String(base || "").trim()
+  if (!ref || /\s/.test(ref)) {
+    return fallback
+  }
+  return ref
+    .replace(/^refs\/remotes\/origin\//, "")
+    .replace(/^refs\/heads\//, "")
+    .replace(/^origin\//, "")
+}
+
 export async function runPrCreate(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
@@ -594,7 +605,9 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
 
-  const base = options.base || lane.base || prFlowConfig.base
+  // Lane Base fields often hold diff refs ("origin/main") or prose, but
+  // `gh pr create --base` only accepts a branch name on the remote.
+  const base = resolvePrBaseBranch(options.base || lane.base, prFlowConfig.base)
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", "-u", "origin", branch], {
       cwd: repoRoot,
