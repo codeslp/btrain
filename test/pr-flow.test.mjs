@@ -1,10 +1,18 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import {
   classifyPrReviewState,
   formatPrStatusSummary,
+  remoteBranchExists,
   resolvePrBaseBranch,
 } from "../src/brain_train/pr-flow.mjs"
+
+const run = promisify(execFile)
 
 const prFlowConfig = {
   enabled: true,
@@ -70,6 +78,27 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(await resolvePrBaseBranch("", "origin/main"), "main")
     assert.equal(await resolvePrBaseBranch("HEAD~1", "refs/heads/develop"), "develop")
     assert.equal(await resolvePrBaseBranch(undefined, ""), "main")
+  })
+})
+
+describe("remoteBranchExists", () => {
+  it("finds a remote branch even when local remote-tracking refs never fetched it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const origin = path.join(dir, "origin.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", origin])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", origin, "main", "main:af14b47"])
+      await run("git", ["clone", "--branch", "main", "--single-branch", origin, work])
+
+      assert.equal(await remoteBranchExists(work, "af14b47"), true)
+      assert.equal(await remoteBranchExists(work, "no-such-branch"), false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

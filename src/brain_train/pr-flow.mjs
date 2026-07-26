@@ -566,13 +566,14 @@ function buildPrBody(lane) {
   return lines.join("\n")
 }
 
-// gh needs the base to exist on the remote; a branch only under refs/heads
-// is not proof (runPrCreate pushes only the head branch).
-async function remoteBranchExists(repoRoot, name) {
+// gh needs the base to exist on the remote; local remote-tracking refs are
+// not proof either way (single-branch clones and stale fetches miss branches
+// that do exist), so ask the remote itself.
+export async function remoteBranchExists(repoRoot, name) {
   try {
     await execFileAsync(
       "git",
-      ["-C", repoRoot, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${name}`],
+      ["-C", repoRoot, "ls-remote", "--exit-code", "--heads", "origin", name],
       { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
     )
     return true
