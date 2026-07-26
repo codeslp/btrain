@@ -591,8 +591,9 @@ export async function resolvePrBaseBranch(base, fallback = "main", isBranch = as
     .replace(/^refs\/heads\//, "")
     .replace(/^origin\//, "")
   // Lane Base fields may hold rev expressions (HEAD~1, main@{upstream}) —
-  // valid for diffing but not branch names gh accepts.
-  if (/^HEAD$/i.test(branch) || /[~^]|@\{/.test(branch)) {
+  // valid for diffing but not branch names gh accepts. Only uppercase HEAD
+  // is reserved; git permits "head" as an ordinary branch name.
+  if (branch === "HEAD" || /[~^]|@\{/.test(branch)) {
     return fallback
   }
   // An all-hex name is ambiguous: a commit SHA or a branch that happens to be

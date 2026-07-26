@@ -50,6 +50,11 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(await resolvePrBaseBranch("main@{upstream}", "main"), "main")
   })
 
+  it("preserves a branch literally named head — only uppercase HEAD is reserved", async () => {
+    assert.equal(await resolvePrBaseBranch("head", "main"), "head")
+    assert.equal(await resolvePrBaseBranch("Head", "main"), "Head")
+  })
+
   it("distinguishes hex-named branches from commit SHAs via the isBranch predicate", async () => {
     const isBranch = async (name) => name === "af14b47"
     assert.equal(await resolvePrBaseBranch("af14b47", "main", isBranch), "af14b47")
