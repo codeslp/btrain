@@ -4522,6 +4522,29 @@ describe("handoff history launch-agent rename compatibility", () => {
   })
 })
 
+describe("Claude workflow authorization", () => {
+  it("checks the triggering actor association inside every supported event branch", async () => {
+    const workflow = await fs.readFile(path.resolve(".github/workflows/claude.yml"), "utf8")
+    const workflowLines = workflow.split("\n")
+
+    for (const [eventName, payload] of [
+      ["issue_comment", "comment"],
+      ["pull_request_review_comment", "comment"],
+      ["pull_request_review", "review"],
+      ["issues", "issue"],
+    ]) {
+      const eventBranch = workflowLines.find((line) =>
+        line.includes(`github.event_name == '${eventName}'`),
+      )
+      assert.ok(eventBranch, `${eventName} must have an authorization branch`)
+      assert.ok(
+        eventBranch.includes(`github.event.${payload}.author_association`),
+        `${eventName} must authorize its triggering actor`,
+      )
+    }
+  })
+})
+
 // ──────────────────────────────────────────────
 // Regression: prose Base field with embedded SHA
 // ──────────────────────────────────────────────
@@ -4593,6 +4616,72 @@ describe("needs-review with human-readable Base field", () => {
     // because listDiffPathsFromBase passes the full prose string to git rev-parse
     assert.equal(result.code, 0, `Expected success but got: ${result.stderr}`)
     assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+  })
+})
+
+describe("needs-review changed-path counting", () => {
+  it("requires code-simplifier for the union of committed and uncommitted locked paths", async () => {
+    const tmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", tmpDir], tmpDir)
+      await configureGitIdentity(tmpDir)
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, "src", "committed.ts"), "export const committed = 0\n", "utf8")
+      await fs.writeFile(path.join(tmpDir, "src", "uncommitted.ts"), "export const uncommitted = 0\n", "utf8")
+      await runGit(["add", "."], tmpDir)
+      await runGit(["commit", "-m", "initial"], tmpDir)
+      const { stdout: base } = await runGit(["rev-parse", "HEAD"], tmpDir)
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Count disjoint changed paths",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/committed.ts,src/uncommitted.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "committed.ts"), "export const committed = 1\n", "utf8")
+      await runGit(["add", "src/committed.ts"], tmpDir)
+      await runGit(["commit", "-m", "change committed path"], tmpDir)
+      await fs.writeFile(path.join(tmpDir, "src", "uncommitted.ts"), "export const uncommitted = 1\n", "utf8")
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            actor: "WriterBot",
+            base,
+            changed: ["src/committed.ts - committed change", "src/uncommitted.ts - uncommitted change"],
+            verification: ["node --test test/core.test.mjs"],
+            gap: ["None"],
+            why: ["Both locked paths changed."],
+            reviewAsk: ["Verify the changed-path union."],
+          }),
+          "--lane",
+          "a",
+        ],
+        tmpDir,
+      )
+
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /code-simplifier pass \(required for multi-file changes\)/)
+    } finally {
+      await rmDir(tmpDir)
+    }
   })
 })
 

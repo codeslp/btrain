@@ -3108,10 +3108,7 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
 
     if (baseRef) {
       const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
-      // Use the larger of uncommitted and committed-since-base counts
-      // so the simplifier gate fires when there are many committed files
-      // even if only one remains uncommitted.
-      effectiveChangedCount = Math.max(effectiveChangedCount, baseDiffPaths.length)
+      effectiveChangedCount = new Set([...changedPaths, ...baseDiffPaths]).size
       if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
         issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
       }
