@@ -43,11 +43,14 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(await resolvePrBaseBranch(undefined, "main"), "main")
   })
 
-  it("falls back for rev expressions that gh cannot use as a base branch", async () => {
+  it("falls back for anything git check-ref-format rejects as a branch name", async () => {
     assert.equal(await resolvePrBaseBranch("HEAD", "main"), "main")
     assert.equal(await resolvePrBaseBranch("HEAD~1", "main"), "main")
     assert.equal(await resolvePrBaseBranch("head^2", "main"), "main")
     assert.equal(await resolvePrBaseBranch("main@{upstream}", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main...HEAD", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main..feature", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main:package.json", "main"), "main")
   })
 
   it("preserves a branch literally named head — only uppercase HEAD is reserved", async () => {
@@ -55,12 +58,18 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(await resolvePrBaseBranch("Head", "main"), "Head")
   })
 
-  it("distinguishes hex-named branches from commit SHAs via the isBranch predicate", async () => {
-    const isBranch = async (name) => name === "af14b47"
-    assert.equal(await resolvePrBaseBranch("af14b47", "main", isBranch), "af14b47")
-    assert.equal(await resolvePrBaseBranch("origin/af14b47", "main", isBranch), "af14b47")
-    assert.equal(await resolvePrBaseBranch("e36d6d39df58a2f1c0b7a9d4e5f60718293a4b5c", "main", isBranch), "main")
+  it("distinguishes hex-named remote branches from commit SHAs via isRemoteBranch", async () => {
+    const isRemoteBranch = async (name) => name === "af14b47"
+    assert.equal(await resolvePrBaseBranch("af14b47", "main", { isRemoteBranch }), "af14b47")
+    assert.equal(await resolvePrBaseBranch("origin/af14b47", "main", { isRemoteBranch }), "af14b47")
+    assert.equal(await resolvePrBaseBranch("e36d6d39df58a2f1c0b7a9d4e5f60718293a4b5c", "main", { isRemoteBranch }), "main")
     assert.equal(await resolvePrBaseBranch("af14b47", "main"), "main")
+  })
+
+  it("normalizes the configured fallback branch too", async () => {
+    assert.equal(await resolvePrBaseBranch("", "origin/main"), "main")
+    assert.equal(await resolvePrBaseBranch("HEAD~1", "refs/heads/develop"), "develop")
+    assert.equal(await resolvePrBaseBranch(undefined, ""), "main")
   })
 })
 

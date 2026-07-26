@@ -566,41 +566,62 @@ function buildPrBody(lane) {
   return lines.join("\n")
 }
 
+// gh needs the base to exist on the remote; a branch only under refs/heads
+// is not proof (runPrCreate pushes only the head branch).
 async function remoteBranchExists(repoRoot, name) {
-  for (const ref of [`refs/remotes/origin/${name}`, `refs/heads/${name}`]) {
-    try {
-      await execFileAsync("git", ["-C", repoRoot, "show-ref", "--verify", "--quiet", ref], {
-        cwd: repoRoot,
-        maxBuffer: GH_MAX_BUFFER,
-      })
-      return true
-    } catch {
-      // ref does not exist; try the next form
-    }
+  try {
+    await execFileAsync(
+      "git",
+      ["-C", repoRoot, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${name}`],
+      { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
+    )
+    return true
+  } catch {
+    return false
   }
-  return false
 }
 
-export async function resolvePrBaseBranch(base, fallback = "main", isBranch = async () => false) {
-  const ref = String(base || "").trim()
-  if (!ref || /\s/.test(ref)) {
-    return fallback
+// Positive validation: git itself decides what a branch name is. Rejects
+// uppercase HEAD, rev expressions (HEAD~1, main@{upstream}), ranges
+// (main...HEAD), and object expressions (main:path) while permitting
+// ordinary names like "head" or "af14b47". check-ref-format needs no repo.
+async function isValidBranchName(name) {
+  try {
+    await execFileAsync("git", ["check-ref-format", "--branch", name], {
+      maxBuffer: GH_MAX_BUFFER,
+    })
+    return true
+  } catch {
+    return false
   }
-  const branch = ref
+}
+
+function stripRemotePrefixes(ref) {
+  return ref
     .replace(/^refs\/remotes\/origin\//, "")
     .replace(/^refs\/heads\//, "")
     .replace(/^origin\//, "")
-  // Lane Base fields may hold rev expressions (HEAD~1, main@{upstream}) —
-  // valid for diffing but not branch names gh accepts. Only uppercase HEAD
-  // is reserved; git permits "head" as an ordinary branch name.
-  if (branch === "HEAD" || /[~^]|@\{/.test(branch)) {
-    return fallback
+}
+
+export async function resolvePrBaseBranch(
+  base,
+  fallback = "main",
+  { isBranchName = isValidBranchName, isRemoteBranch = async () => false } = {},
+) {
+  const fallbackBranch = stripRemotePrefixes(String(fallback || "").trim()) || "main"
+  const ref = String(base || "").trim()
+  if (!ref || /\s/.test(ref)) {
+    return fallbackBranch
+  }
+  const branch = stripRemotePrefixes(ref)
+  if (branch === "HEAD" || !(await isBranchName(branch))) {
+    return fallbackBranch
   }
   // An all-hex name is ambiguous: a commit SHA or a branch that happens to be
-  // named like one. Only an existing branch survives; spelling alone decides
-  // nothing.
+  // named like one. Only a branch that exists on the remote survives;
+  // spelling alone decides nothing.
   if (/^[0-9a-f]{7,40}$/i.test(branch)) {
-    return (await isBranch(branch)) ? branch : fallback
+    return (await isRemoteBranch(branch)) ? branch : fallbackBranch
   }
   return branch
 }
@@ -635,11 +656,9 @@ export async function runPrCreate(repoRoot, options = {}) {
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.
-  const base = await resolvePrBaseBranch(
-    options.base || lane.base,
-    prFlowConfig.base,
-    (name) => remoteBranchExists(repoRoot, name),
-  )
+  const base = await resolvePrBaseBranch(options.base || lane.base, prFlowConfig.base, {
+    isRemoteBranch: (name) => remoteBranchExists(repoRoot, name),
+  })
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", "-u", "origin", branch], {
       cwd: repoRoot,
