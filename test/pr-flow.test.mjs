@@ -42,6 +42,15 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(resolvePrBaseBranch("", "main"), "main")
     assert.equal(resolvePrBaseBranch(undefined, "main"), "main")
   })
+
+  it("falls back for commit-style refs that gh cannot use as a base branch", () => {
+    assert.equal(resolvePrBaseBranch("HEAD", "main"), "main")
+    assert.equal(resolvePrBaseBranch("HEAD~1", "main"), "main")
+    assert.equal(resolvePrBaseBranch("head^2", "main"), "main")
+    assert.equal(resolvePrBaseBranch("main@{upstream}", "main"), "main")
+    assert.equal(resolvePrBaseBranch("af14b47", "main"), "main")
+    assert.equal(resolvePrBaseBranch("e36d6d39df58a2f1c0b7a9d4e5f60718293a4b5c", "main"), "main")
+  })
 })
 
 describe("PR review flow classification", () => {

@@ -571,10 +571,16 @@ export function resolvePrBaseBranch(base, fallback = "main") {
   if (!ref || /\s/.test(ref)) {
     return fallback
   }
-  return ref
+  const branch = ref
     .replace(/^refs\/remotes\/origin\//, "")
     .replace(/^refs\/heads\//, "")
     .replace(/^origin\//, "")
+  // Lane Base fields may hold commit-style refs (HEAD~1, bare SHAs, rev
+  // expressions) — valid for diffing but not branch names gh accepts.
+  if (/^HEAD$/i.test(branch) || /[~^]|@\{/.test(branch) || /^[0-9a-f]{7,40}$/i.test(branch)) {
+    return fallback
+  }
+  return branch
 }
 
 export async function runPrCreate(repoRoot, options = {}) {
