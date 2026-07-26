@@ -91,11 +91,43 @@ describe("remoteBranchExists", () => {
       await run("git", ["init", "--bare", "--initial-branch=main", origin])
       await run("git", ["init", "--initial-branch=main", seed])
       await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
-      await run("git", ["-C", seed, "push", origin, "main", "main:af14b47"])
+      await run("git", ["-C", seed, "push", origin, "main", "main:af14b47", "main:release/deadbeef"])
       await run("git", ["clone", "--branch", "main", "--single-branch", origin, work])
 
       assert.equal(await remoteBranchExists(work, "af14b47"), true)
       assert.equal(await remoteBranchExists(work, "no-such-branch"), false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("requires an exact refs/heads match — nested branches sharing a suffix do not count", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const origin = path.join(dir, "origin.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", origin])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", origin, "main", "main:release/deadbeef"])
+      await run("git", ["clone", "--branch", "main", "--single-branch", origin, work])
+
+      assert.equal(await remoteBranchExists(work, "deadbeef"), false)
+      assert.equal(await remoteBranchExists(work, "release/deadbeef"), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("rethrows operational lookup failures instead of reporting the branch absent", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--initial-branch=main", work])
+      await run("git", ["-C", work, "remote", "add", "origin", path.join(dir, "no-such-remote.git")])
+
+      await assert.rejects(() => remoteBranchExists(work, "af14b47"))
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

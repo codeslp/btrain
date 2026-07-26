@@ -571,14 +571,21 @@ function buildPrBody(lane) {
 // that do exist), so ask the remote itself.
 export async function remoteBranchExists(repoRoot, name) {
   try {
+    // The full refs/heads/ pattern forces an exact match — a bare name also
+    // matches nested branches sharing the suffix (release/<name>).
     await execFileAsync(
       "git",
-      ["-C", repoRoot, "ls-remote", "--exit-code", "--heads", "origin", name],
+      ["-C", repoRoot, "ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${name}`],
       { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
     )
     return true
-  } catch {
-    return false
+  } catch (error) {
+    // ls-remote --exit-code reserves 2 for "no matching refs"; anything else
+    // (auth, network, bad remote) is an operational failure, not absence.
+    if (error?.code === 2) {
+      return false
+    }
+    throw error
   }
 }
 
