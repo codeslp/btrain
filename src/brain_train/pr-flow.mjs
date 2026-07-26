@@ -600,8 +600,8 @@ async function resolveBaseRemote(repoRoot) {
 // gh needs the base to exist on the PR target remote; local remote-tracking
 // refs are not proof either way (single-branch clones and stale fetches miss
 // branches that do exist), so ask the remote itself.
-export async function remoteBranchExists(repoRoot, name) {
-  const remote = await resolveBaseRemote(repoRoot)
+export async function remoteBranchExists(repoRoot, name, baseRemote = null) {
+  const remote = baseRemote || (await resolveBaseRemote(repoRoot))
   try {
     // The full refs/heads/ pattern forces an exact match — a bare name also
     // matches nested branches sharing the suffix (release/<name>).
@@ -636,25 +636,28 @@ async function isValidBranchName(name) {
   }
 }
 
-function stripRemotePrefixes(ref) {
+function stripRemotePrefixes(ref, remote = "origin") {
+  const escaped = remote.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   return ref
+    .replace(new RegExp(`^refs/remotes/${escaped}/`), "")
     .replace(/^refs\/remotes\/origin\//, "")
     .replace(/^refs\/heads\//, "")
+    .replace(new RegExp(`^${escaped}/`), "")
     .replace(/^origin\//, "")
 }
 
 export async function resolvePrBaseBranch(
   base,
   fallback = "main",
-  { isBranchName = isValidBranchName, isRemoteBranch = async () => false, strict = false } = {},
+  { isBranchName = isValidBranchName, isRemoteBranch = async () => false, remote = "origin", strict = false } = {},
 ) {
-  const fallbackBranch = stripRemotePrefixes(String(fallback || "").trim()) || "main"
+  const fallbackBranch = stripRemotePrefixes(String(fallback || "").trim(), remote) || "main"
   // strict is for explicit user overrides (--base): a base that cannot be
   // used is an error, never a silent retarget. Fallback is reserved for
   // machine-written lane Base metadata.
   const reject = (reason) => {
     if (strict) {
-      throw new Error(`Base "${String(base ?? "")}" ${reason}. Pass --base <branch> naming a branch that exists on origin.`)
+      throw new Error(`Base "${String(base ?? "")}" ${reason}. Pass --base <branch> naming a branch that exists on ${remote}.`)
     }
     return fallbackBranch
   }
@@ -662,7 +665,7 @@ export async function resolvePrBaseBranch(
   if (!ref || /\s/.test(ref)) {
     return reject("is not a branch name")
   }
-  const branch = stripRemotePrefixes(ref)
+  const branch = stripRemotePrefixes(ref, remote)
   if (branch === "HEAD" || !(await isBranchName(branch))) {
     return reject("is not a valid branch name")
   }
@@ -670,7 +673,7 @@ export async function resolvePrBaseBranch(
   // pass check-ref-format, but gh requires a branch that exists on the
   // remote. Only the remote itself can confirm that.
   if (!(await isRemoteBranch(branch))) {
-    return reject("is not a branch on origin")
+    return reject(`is not a branch on ${remote}`)
   }
   return branch
 }
@@ -705,10 +708,11 @@ export async function runPrCreate(repoRoot, options = {}) {
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.
-  const isRemoteBranch = (name) => remoteBranchExists(repoRoot, name)
+  const baseRemote = await resolveBaseRemote(repoRoot)
+  const isRemoteBranch = (name) => remoteBranchExists(repoRoot, name, baseRemote)
   const base = options.base
-    ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, strict: true })
-    : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch })
+    ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote, strict: true })
+    : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote })
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", "-u", "origin", branch], {
       cwd: repoRoot,

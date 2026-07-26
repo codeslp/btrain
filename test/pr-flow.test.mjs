@@ -88,6 +88,14 @@ describe("resolvePrBaseBranch", () => {
     assert.equal(await resolvePrBaseBranch(undefined, ""), "main")
   })
 
+  it("strips the selected base remote's prefix, not just origin", async () => {
+    const opts = { isRemoteBranch: async () => true, remote: "upstream" }
+    assert.equal(await resolvePrBaseBranch("upstream/release/next", "main", opts), "release/next")
+    assert.equal(await resolvePrBaseBranch("refs/remotes/upstream/develop", "main", opts), "develop")
+    assert.equal(await resolvePrBaseBranch("origin/main", "main", opts), "main")
+    assert.equal(await resolvePrBaseBranch("", "upstream/main", { remote: "upstream" }), "main")
+  })
+
   it("rejects an invalid explicit base in strict mode instead of retargeting", async () => {
     const missingRemote = { isRemoteBranch: async () => false, strict: true }
     await assert.rejects(() => resolvePrBaseBranch("no-such-branch", "main", missingRemote), /no-such-branch/)
