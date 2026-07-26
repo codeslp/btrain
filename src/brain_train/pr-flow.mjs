@@ -625,13 +625,10 @@ export async function resolvePrBaseBranch(
   if (branch === "HEAD" || !(await isBranchName(branch))) {
     return fallbackBranch
   }
-  // An all-hex name is ambiguous: a commit SHA or a branch that happens to be
-  // named like one. Only a branch that exists on the remote survives;
-  // spelling alone decides nothing.
-  if (/^[0-9a-f]{7,40}$/i.test(branch)) {
-    return (await isRemoteBranch(branch)) ? branch : fallbackBranch
-  }
-  return branch
+  // Well-formed is not enough: tags, commit SHAs, and unpushed branches all
+  // pass check-ref-format, but gh requires a branch that exists on the
+  // remote. Only the remote itself can confirm that.
+  return (await isRemoteBranch(branch)) ? branch : fallbackBranch
 }
 
 export async function runPrCreate(repoRoot, options = {}) {

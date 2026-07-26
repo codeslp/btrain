@@ -32,17 +32,25 @@ const prFlowConfig = {
   },
 }
 
+const anyRemoteBranch = { isRemoteBranch: async () => true }
+
 describe("resolvePrBaseBranch", () => {
   it("strips remote-tracking prefixes so gh pr create receives a branch name", async () => {
-    assert.equal(await resolvePrBaseBranch("origin/main"), "main")
-    assert.equal(await resolvePrBaseBranch("refs/heads/main"), "main")
-    assert.equal(await resolvePrBaseBranch("refs/remotes/origin/main"), "main")
+    assert.equal(await resolvePrBaseBranch("origin/main", "main", anyRemoteBranch), "main")
+    assert.equal(await resolvePrBaseBranch("refs/heads/main", "main", anyRemoteBranch), "main")
+    assert.equal(await resolvePrBaseBranch("refs/remotes/origin/main", "main", anyRemoteBranch), "main")
   })
 
-  it("passes plain branch names through, including slashed branch names", async () => {
-    assert.equal(await resolvePrBaseBranch("main"), "main")
-    assert.equal(await resolvePrBaseBranch("release/1.2"), "release/1.2")
-    assert.equal(await resolvePrBaseBranch("codex/pr-review-flow"), "codex/pr-review-flow")
+  it("passes remote branch names through, including slashed branch names", async () => {
+    assert.equal(await resolvePrBaseBranch("main", "main", anyRemoteBranch), "main")
+    assert.equal(await resolvePrBaseBranch("release/1.2", "main", anyRemoteBranch), "release/1.2")
+    assert.equal(await resolvePrBaseBranch("codex/pr-review-flow", "main", anyRemoteBranch), "codex/pr-review-flow")
+  })
+
+  it("falls back for well-formed names that are not branches on the remote (tags, unpushed branches)", async () => {
+    const isRemoteBranch = async () => false
+    assert.equal(await resolvePrBaseBranch("v1.2.3", "main", { isRemoteBranch }), "main")
+    assert.equal(await resolvePrBaseBranch("not-pushed-yet", "main", { isRemoteBranch }), "main")
   })
 
   it("falls back when the lane base is prose or empty rather than a ref", async () => {
@@ -62,8 +70,8 @@ describe("resolvePrBaseBranch", () => {
   })
 
   it("preserves a branch literally named head — only uppercase HEAD is reserved", async () => {
-    assert.equal(await resolvePrBaseBranch("head", "main"), "head")
-    assert.equal(await resolvePrBaseBranch("Head", "main"), "Head")
+    assert.equal(await resolvePrBaseBranch("head", "main", anyRemoteBranch), "head")
+    assert.equal(await resolvePrBaseBranch("Head", "main", anyRemoteBranch), "Head")
   })
 
   it("distinguishes hex-named remote branches from commit SHAs via isRemoteBranch", async () => {
