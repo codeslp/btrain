@@ -25,31 +25,37 @@ const prFlowConfig = {
 }
 
 describe("resolvePrBaseBranch", () => {
-  it("strips remote-tracking prefixes so gh pr create receives a branch name", () => {
-    assert.equal(resolvePrBaseBranch("origin/main"), "main")
-    assert.equal(resolvePrBaseBranch("refs/heads/main"), "main")
-    assert.equal(resolvePrBaseBranch("refs/remotes/origin/main"), "main")
+  it("strips remote-tracking prefixes so gh pr create receives a branch name", async () => {
+    assert.equal(await resolvePrBaseBranch("origin/main"), "main")
+    assert.equal(await resolvePrBaseBranch("refs/heads/main"), "main")
+    assert.equal(await resolvePrBaseBranch("refs/remotes/origin/main"), "main")
   })
 
-  it("passes plain branch names through, including slashed branch names", () => {
-    assert.equal(resolvePrBaseBranch("main"), "main")
-    assert.equal(resolvePrBaseBranch("release/1.2"), "release/1.2")
-    assert.equal(resolvePrBaseBranch("codex/pr-review-flow"), "codex/pr-review-flow")
+  it("passes plain branch names through, including slashed branch names", async () => {
+    assert.equal(await resolvePrBaseBranch("main"), "main")
+    assert.equal(await resolvePrBaseBranch("release/1.2"), "release/1.2")
+    assert.equal(await resolvePrBaseBranch("codex/pr-review-flow"), "codex/pr-review-flow")
   })
 
-  it("falls back when the lane base is prose or empty rather than a ref", () => {
-    assert.equal(resolvePrBaseBranch("Branch 001-refs forked from main at af14b47", "main"), "main")
-    assert.equal(resolvePrBaseBranch("", "main"), "main")
-    assert.equal(resolvePrBaseBranch(undefined, "main"), "main")
+  it("falls back when the lane base is prose or empty rather than a ref", async () => {
+    assert.equal(await resolvePrBaseBranch("Branch 001-refs forked from main at af14b47", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("", "main"), "main")
+    assert.equal(await resolvePrBaseBranch(undefined, "main"), "main")
   })
 
-  it("falls back for commit-style refs that gh cannot use as a base branch", () => {
-    assert.equal(resolvePrBaseBranch("HEAD", "main"), "main")
-    assert.equal(resolvePrBaseBranch("HEAD~1", "main"), "main")
-    assert.equal(resolvePrBaseBranch("head^2", "main"), "main")
-    assert.equal(resolvePrBaseBranch("main@{upstream}", "main"), "main")
-    assert.equal(resolvePrBaseBranch("af14b47", "main"), "main")
-    assert.equal(resolvePrBaseBranch("e36d6d39df58a2f1c0b7a9d4e5f60718293a4b5c", "main"), "main")
+  it("falls back for rev expressions that gh cannot use as a base branch", async () => {
+    assert.equal(await resolvePrBaseBranch("HEAD", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("HEAD~1", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("head^2", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main@{upstream}", "main"), "main")
+  })
+
+  it("distinguishes hex-named branches from commit SHAs via the isBranch predicate", async () => {
+    const isBranch = async (name) => name === "af14b47"
+    assert.equal(await resolvePrBaseBranch("af14b47", "main", isBranch), "af14b47")
+    assert.equal(await resolvePrBaseBranch("origin/af14b47", "main", isBranch), "af14b47")
+    assert.equal(await resolvePrBaseBranch("e36d6d39df58a2f1c0b7a9d4e5f60718293a4b5c", "main", isBranch), "main")
+    assert.equal(await resolvePrBaseBranch("af14b47", "main"), "main")
   })
 })
 

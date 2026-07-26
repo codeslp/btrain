@@ -566,7 +566,22 @@ function buildPrBody(lane) {
   return lines.join("\n")
 }
 
-export function resolvePrBaseBranch(base, fallback = "main") {
+async function remoteBranchExists(repoRoot, name) {
+  for (const ref of [`refs/remotes/origin/${name}`, `refs/heads/${name}`]) {
+    try {
+      await execFileAsync("git", ["-C", repoRoot, "show-ref", "--verify", "--quiet", ref], {
+        cwd: repoRoot,
+        maxBuffer: GH_MAX_BUFFER,
+      })
+      return true
+    } catch {
+      // ref does not exist; try the next form
+    }
+  }
+  return false
+}
+
+export async function resolvePrBaseBranch(base, fallback = "main", isBranch = async () => false) {
   const ref = String(base || "").trim()
   if (!ref || /\s/.test(ref)) {
     return fallback
@@ -575,10 +590,16 @@ export function resolvePrBaseBranch(base, fallback = "main") {
     .replace(/^refs\/remotes\/origin\//, "")
     .replace(/^refs\/heads\//, "")
     .replace(/^origin\//, "")
-  // Lane Base fields may hold commit-style refs (HEAD~1, bare SHAs, rev
-  // expressions) — valid for diffing but not branch names gh accepts.
-  if (/^HEAD$/i.test(branch) || /[~^]|@\{/.test(branch) || /^[0-9a-f]{7,40}$/i.test(branch)) {
+  // Lane Base fields may hold rev expressions (HEAD~1, main@{upstream}) —
+  // valid for diffing but not branch names gh accepts.
+  if (/^HEAD$/i.test(branch) || /[~^]|@\{/.test(branch)) {
     return fallback
+  }
+  // An all-hex name is ambiguous: a commit SHA or a branch that happens to be
+  // named like one. Only an existing branch survives; spelling alone decides
+  // nothing.
+  if (/^[0-9a-f]{7,40}$/i.test(branch)) {
+    return (await isBranch(branch)) ? branch : fallback
   }
   return branch
 }
@@ -613,7 +634,11 @@ export async function runPrCreate(repoRoot, options = {}) {
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.
-  const base = resolvePrBaseBranch(options.base || lane.base, prFlowConfig.base)
+  const base = await resolvePrBaseBranch(
+    options.base || lane.base,
+    prFlowConfig.base,
+    (name) => remoteBranchExists(repoRoot, name),
+  )
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", "-u", "origin", branch], {
       cwd: repoRoot,
