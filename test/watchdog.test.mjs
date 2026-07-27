@@ -71,7 +71,7 @@ describe("btrain watchdog repairs", () => {
     
     const handoffResult = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
     assert.ok(handoffResult.stdout.includes("status: repair-needed"), `Expected status to be repair-needed: ${handoffResult.stdout}`)
-    assert.ok(handoffResult.stdout.includes("reason code: invalid-transition"), `Expected reason code invalid-transition: ${handoffResult.stdout}`)
+    assert.ok(handoffResult.stdout.includes("reason code: state-conflict"), `Expected reason code state-conflict: ${handoffResult.stdout}`)
   })
 
   it("detects and repairs actor mismatches (owner not in active list)", async () => {
@@ -94,7 +94,7 @@ describe("btrain watchdog repairs", () => {
     
     const handoffResult = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
     assert.ok(handoffResult.stdout.includes("status: repair-needed"), `Expected status to be repair-needed: ${handoffResult.stdout}`)
-    assert.ok(handoffResult.stdout.includes("reason code: actor-mismatch"), `Expected reason code actor-mismatch: ${handoffResult.stdout}`)
+    assert.ok(handoffResult.stdout.includes("reason code: ownership-conflict"), `Expected reason code ownership-conflict: ${handoffResult.stdout}`)
   })
 
   it("detects and repairs contradictory state (needs-review with zero locks)", async () => {
@@ -115,7 +115,14 @@ describe("btrain watchdog repairs", () => {
     
     const handoffResult = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "c"], tmpDir)
     assert.ok(handoffResult.stdout.includes("status: repair-needed"), `Expected status to be repair-needed: ${handoffResult.stdout}`)
-    assert.ok(handoffResult.stdout.includes("reason code: contradictory-state"), `Expected reason code contradictory-state: ${handoffResult.stdout}`)
+    assert.ok(handoffResult.stdout.includes("reason code: lock-mismatch"), `Expected reason code lock-mismatch: ${handoffResult.stdout}`)
+
+    const recoveryResult = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "c", "--files", "README.md", "--actor", "btrain doctor"],
+      tmpDir,
+      { BTRAIN_AGENT: "btrain doctor" },
+    )
+    assert.equal(recoveryResult.code, 0, recoveryResult.stderr)
   })
 
   it("assigns repair-needed to same-family fallback when original actor is unavailable", async () => {
