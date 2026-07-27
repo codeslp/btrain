@@ -3606,6 +3606,9 @@ describe("btrain loop lane-scoped dispatch", () => {
         ["sync-templates", "--repo", repoDir],
         ["hooks", "--repo", repoDir],
         ["override", "grant", "--action", "push", "--requested-by", "OwnerB", "--confirmed-by", "human", "--reason", "test"],
+        ["repos", "remove", repoDir],
+        ["register", repoDir],
+        ["hcleanup", "--repo", repoDir],
       ]) {
         const result = await runBtrain(args, repoDir, scopedEnv)
         assert.notEqual(result.code, 0, `lane-locked ${args[0]} must be rejected`)

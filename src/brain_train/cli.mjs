@@ -1447,13 +1447,16 @@ async function runDashboardCommand(repoRoot, subcommand, options) {
   }
 }
 
-const LANE_LOCKED_BLOCKED_COMMANDS = new Set([
-  "init",
-  "agents",
-  "sync-skills",
-  "sync-templates",
-  "hooks",
-  "override",
+// Lane-locked runners get an allowlist, not a blocklist: new repo-wide
+// commands are locked out by default instead of silently escaping the lane.
+const LANE_LOCKED_ALLOWED_COMMANDS = new Set([
+  "handoff",
+  "pr",
+  "status",
+  "locks",
+  "doctor",
+  "review",
+  "traces",
 ])
 
 async function run() {
@@ -1464,14 +1467,14 @@ async function run() {
     return
   }
 
-  // A lane-locked runner is pinned to one lane's work. Repo-wide
-  // administrative mutations can change the roster, scaffold or remove
-  // lanes, or bypass workflow gates, so they are rejected outright.
+  // A lane-locked runner is pinned to one lane's work: only lane-scoped
+  // workflow commands are permitted. Everything else — registry, roster,
+  // scaffolding, hooks, overrides, cleanup — is out of scope by default.
   // (`doctor --repair` has its own lane-scoped guard in its handler.)
-  if (process.env.BTRAIN_LANE_LOCKED === "1" && LANE_LOCKED_BLOCKED_COMMANDS.has(command)) {
+  if (process.env.BTRAIN_LANE_LOCKED === "1" && !LANE_LOCKED_ALLOWED_COMMANDS.has(command)) {
     throw new BtrainError({
       message: `\`btrain ${command}\` is not available in a lane-locked session.`,
-      reason: "BTRAIN_LANE_LOCKED=1 pins this runner to a single lane; repo-wide administrative mutations are out of scope.",
+      reason: "BTRAIN_LANE_LOCKED=1 pins this runner to a single lane; only lane-scoped workflow commands are permitted.",
       fix: "Run this command from an unscoped session, or unset BTRAIN_LANE_LOCKED if this runner should manage the repository.",
     })
   }
