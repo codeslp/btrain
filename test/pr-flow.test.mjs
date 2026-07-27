@@ -238,6 +238,30 @@ describe("resolvePushedHeadSha", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it("rejects a push remote that is not the PR's head repository", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const remote = path.join(dir, "acme", "widgets.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", remote])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", remote, "main"])
+      await run("git", ["clone", "--origin", "github", remote, work])
+      const { stdout: sha } = await run("git", ["-C", work, "rev-parse", "HEAD"])
+
+      assert.equal(await resolvePushedHeadSha(work, "main", "acme/widgets"), sha.trim())
+      assert.equal(
+        await resolvePushedHeadSha(work, "main", "someone-else/other-repo"),
+        "",
+        "a local branch pushing to an unrelated repository must not supply the PR head",
+      )
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("PR review request head selection", () => {

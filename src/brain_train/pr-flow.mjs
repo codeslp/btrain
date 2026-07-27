@@ -453,28 +453,60 @@ export function selectReviewRequestHeadSha({
   return localBranchMatches && localHeadIsPushed ? localHeadSha : prHeadSha
 }
 
+function normalizeRepoSlug(url) {
+  const match = /(?:[:/])([^/:]+)\/([^/]+?)(?:\.git)?\/?$/.exec(String(url || "").trim())
+  return match ? `${match[1]}/${match[2]}`.toLowerCase() : ""
+}
+
+async function remoteNameForRef(repoRoot, ref) {
+  if (ref.startsWith("refs/remotes/")) {
+    return ref.split("/")[2] || ""
+  }
+  const symbolic = await gitText(["rev-parse", "--symbolic-full-name", ref], repoRoot).catch(() => "")
+  return symbolic.startsWith("refs/remotes/") ? symbolic.split("/")[2] || "" : ""
+}
+
 // The PR branch may be pushed through any remote (github, upstream, a fork
 // remote), so let git resolve the branch's configured push target instead of
-// assuming origin.
-export async function resolvePushedHeadSha(repoRoot, branchName) {
+// assuming origin — but a matching branch name on an unrelated repository is
+// not the PR head, so when the PR's head repo is known the remote must
+// actually point at it.
+export async function resolvePushedHeadSha(repoRoot, branchName, expectedHeadSlug = "") {
   if (!branchName) {
     return ""
   }
+  const expected = String(expectedHeadSlug || "").trim().toLowerCase()
   for (const ref of [`${branchName}@{push}`, `${branchName}@{upstream}`, `refs/remotes/origin/${branchName}`]) {
     const sha = await gitText(["rev-parse", "--verify", "--quiet", ref], repoRoot).catch(() => "")
-    if (sha) {
-      return sha
+    if (!sha) {
+      continue
     }
+    if (expected) {
+      const remoteName = await remoteNameForRef(repoRoot, ref)
+      const remoteUrl = remoteName
+        ? await gitText(["remote", "get-url", remoteName], repoRoot).catch(() => "")
+        : ""
+      if (normalizeRepoSlug(remoteUrl) !== expected) {
+        continue
+      }
+    }
+    return sha
   }
   return ""
 }
 
 async function fetchPrHeadSha(repoRoot, prNumber) {
-  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid,headRefName"], repoRoot)
+  const pr = await ghJson(
+    ["pr", "view", prNumber, "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner"],
+    repoRoot,
+  )
+  const headOwner = pr?.headRepositoryOwner?.login || ""
+  const headRepo = pr?.headRepository?.name || ""
+  const headSlug = headOwner && headRepo ? `${headOwner}/${headRepo}` : ""
   const [localBranch, localHeadSha, remoteHeadSha] = await Promise.all([
     gitText(["branch", "--show-current"], repoRoot).catch(() => ""),
     gitText(["rev-parse", "HEAD"], repoRoot).catch(() => ""),
-    resolvePushedHeadSha(repoRoot, pr?.headRefName || ""),
+    resolvePushedHeadSha(repoRoot, pr?.headRefName || "", headSlug),
   ])
   return selectReviewRequestHeadSha({
     prHeadSha: pr?.headRefOid || "",

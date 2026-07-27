@@ -1964,6 +1964,15 @@ async function run() {
       return
     }
 
+    // review status reads repo-wide review artifacts and the most recent
+    // handoff regardless of lane, so it stays outside a lane-locked scope.
+    if (process.env.BTRAIN_LANE_LOCKED === "1") {
+      throw new BtrainError({
+        message: "`btrain review status` is not available in a lane-locked session.",
+        reason: "It reads repo-wide review artifacts and handoff state across lanes.",
+        fix: "Use `btrain review code --lane <id>` or run review status from an unscoped session.",
+      })
+    }
     const result = await getReviewStatus(repoRoot)
     console.log(formatReviewStatus(result))
     return

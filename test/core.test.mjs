@@ -8,6 +8,7 @@ import {
   installGitHooks,
   isLockExpired,
   parseCsvList,
+  buildReviewArtifactId,
   checkLockConflicts,
   findAvailableLane,
   getLaneConfigs,
@@ -3588,6 +3589,14 @@ describe("btrain loop lane-scoped dispatch", () => {
     }
   })
 
+  it("gives concurrent lane reviews distinct artifact ids", () => {
+    const sameInstant = new Date("2026-07-27T12:00:00.000Z")
+    const laneA = buildReviewArtifactId("parallel", sameInstant, "a")
+    const laneB = buildReviewArtifactId("parallel", sameInstant, "b")
+    assert.notEqual(laneA, laneB, "two lanes reviewing in the same second must not share report paths")
+    assert.match(laneA, /review-.*-parallel/)
+  })
+
   it("rejects repo-wide administrative mutations from a lane-locked runner", async () => {
     const repoDir = await makeLaneRepo()
     try {
@@ -3618,6 +3627,10 @@ describe("btrain loop lane-scoped dispatch", () => {
       const repair = await runBtrain(["doctor", "--repo", repoDir, "--repair"], repoDir, scopedEnv)
       assert.notEqual(repair.code, 0, "lane-locked doctor --repair must be rejected")
       assert.match(repair.stderr, /refusing repo-wide doctor --repair/)
+
+      const reviewStatus = await runBtrain(["review", "status", "--repo", repoDir], repoDir, scopedEnv)
+      assert.notEqual(reviewStatus.code, 0, "lane-locked review status must be rejected")
+      assert.match(reviewStatus.stderr, /lane-locked/i, "review status reads repo-wide review artifacts")
 
       const readOnlyDoctor = await runBtrain(["doctor", "--repo", repoDir], repoDir, scopedEnv)
       assert.doesNotMatch(

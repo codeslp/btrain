@@ -6610,14 +6610,17 @@ function resolveReviewScriptPath(scriptPath, repoRoot) {
   return path.isAbsolute(scriptPath) ? scriptPath : path.resolve(repoRoot, scriptPath)
 }
 
-function buildReviewArtifactId(mode, date = new Date()) {
+export function buildReviewArtifactId(mode, date = new Date(), laneId = "") {
   const compactTimestamp = date
     .toISOString()
     .replace(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "Z")
     .replace("T", "-")
 
-  return `review-${compactTimestamp}-${mode}`
+  // Concurrent lanes can start reviews within the same second; the lane
+  // suffix keeps their report and metadata paths from colliding.
+  const laneSuffix = laneId ? `-lane-${laneId}` : ""
+  return `review-${compactTimestamp}-${mode}${laneSuffix}`
 }
 
 async function resolveGitRevision(repoRoot, ref) {
@@ -6719,7 +6722,7 @@ async function runReview({ repoRoot, mode, base, head, lane } = {}) {
   await ensureDir(repoPaths.reviewsDir)
 
   const startedAt = formatIsoTimestamp()
-  const artifactId = buildReviewArtifactId(resolvedMode.mode)
+  const artifactId = buildReviewArtifactId(resolvedMode.mode, new Date(), laneId)
   const reportPath = path.join(repoPaths.reviewsDir, `${artifactId}.md`)
   const metadataPath = path.join(repoPaths.reviewsDir, `${artifactId}.json`)
   const scriptPath = resolveReviewScriptPath(reviewConfig.parallelScript, repoRoot)
