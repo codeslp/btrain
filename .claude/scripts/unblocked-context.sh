@@ -10,6 +10,7 @@
 #   search-issues|search-prs|search-messages|search-code|search-documentation <query> [--limit N]
 #   query-issues|query-prs <query> [--projects X]... [--user-name Y] [--limit N]
 #   get-urls <url1> [url2 ...]
+#   get-rules <owner/repo> [--task T] [--language L] [--rule-id ID] [--paths P]...
 #
 # Notes:
 #   --effort is only valid on `research` (the CLI rejects it on search/query).
@@ -39,6 +40,8 @@ Subcommands:
   query-issues <query> [--projects X]... [--user-name Y] [--limit N]
   query-prs <query> [--projects X]... [--user-name Y] [--limit N]
   get-urls <url1> [url2 ...]
+  get-rules <owner/repo> [--task code-review|code-generation|code-questions]
+            [--language L] [--rule-id ID] [--paths P]...
 EOF
   exit 64
 }
@@ -174,6 +177,32 @@ case "$sub" in
     [ $# -lt 1 ] && usage
     args=(context-get-urls)
     for u in "$@"; do args+=(--urls "$u"); done
+    run_unblocked "." "${args[@]}"
+    ;;
+
+  get-rules)
+    [ $# -lt 1 ] && usage
+    repo_name="$1"; shift
+    task=""
+    language=""
+    rule_id=""
+    paths=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --task)     require_value "$1" "${2:-}"; task="$2"; shift 2 ;;
+        --language) require_value "$1" "${2:-}"; language="$2"; shift 2 ;;
+        --rule-id)  require_value "$1" "${2:-}"; rule_id="$2"; shift 2 ;;
+        --paths)    require_value "$1" "${2:-}"; paths+=("$2"); shift 2 ;;
+        *) echo "get-rules: unknown arg: $1" >&2; exit 64 ;;
+      esac
+    done
+    args=(context-get-rules --repo-name "$repo_name")
+    [ -n "$task" ] && args+=(--task "$task")
+    [ -n "$language" ] && args+=(--language "$language")
+    [ -n "$rule_id" ] && args+=(--rule-id "$rule_id")
+    if [ ${#paths[@]} -gt 0 ]; then
+      for p in "${paths[@]}"; do args+=(--paths "$p"); done
+    fi
     run_unblocked "." "${args[@]}"
     ;;
 

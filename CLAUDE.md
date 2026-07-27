@@ -8,7 +8,9 @@ This repo uses the `btrain` collaboration workflow.
 - When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.
 - When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.
 - If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.
+- Use the `context-scout` skill to classify organizational context as `none`, `targeted`, or `deep`; use `--unblocked-context` on targeted/deep claims and record provider failures as explicit soft gaps.
 - Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.
+- After handing a lane to a peer, either continue on another lane or run `bth wait --lane <id>` so the current session wakes with fresh guidance when that lane changes.
 - Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.
 - Use `rtk` (Rust Token Killer) to execute shell commands when available to minimize token usage.
 - Run `btrain status` or `btrain doctor` if the local workflow files look stale.
@@ -18,8 +20,8 @@ This repo uses the `btrain` collaboration workflow.
 
 ### Collaboration Setup
 
-- Active collaborating agents: `claude`, `codex`
-- Current lane target: 6 lane(s) (3 per collaborating agent): `a`, `b`, `c`, `d`, `e`, `f`
+- Active collaborating agents: `claude`, `codex`, `gemini`
+- Current lane target: 9 lane(s) (3 per collaborating agent): `a`, `b`, `c`, `d`, `e`, `f`, `g`, `h`, `i`
 - Change `[agents].active` or `[lanes].per_agent`, then run `btrain init`, `btrain agents set`, or `btrain agents add` to scaffold missing lanes and refresh docs.
 
 ### Multi-Lane Workflow

@@ -1,6 +1,6 @@
 ---
 name: pre-handoff
-description: Run a CLI-only quality gate immediately before any `btrain handoff update --status needs-review`. Use it whenever a lane is about to move to review, especially after docs-only work, multi-file changes, or rushed fixes, to catch placeholder reviewer context, empty diffs, skipped verification, and missing simplification passes.
+description: Run a CLI-only quality gate immediately before any `btrain handoff update --status needs-review`. Use it whenever a lane is about to move to review, especially after docs-only work, multi-file changes, or rushed fixes, to catch placeholder reviewer context, empty diffs, skipped verification, missing simplification passes, and missing risk-based context receipts.
 ---
 
 # Pre-Handoff
@@ -16,16 +16,15 @@ Block bad review handoffs before they reach the reviewer.
 1. Run `btrain handoff` and confirm the lane is yours, still `in-progress`, and the locked files match the work you actually did.
 2. If needed, run `btrain locks` or `btrain status` to confirm lane and lock state. Do not read `HANDOFF_*.md` directly.
 3. Check the locked-file diff with `git diff -- <locked files>`. If the diff is empty, whitespace-only, or superseded by a priority change, do not hand it off. Mark it stale or keep working.
-4. **Context check (Unblocked)** — surface prior PRs, open issues, and prior decisions that touch this lane so the reviewer doesn't have to dig. Use the shared helper, which always emits a JSON object (even when the CLI is missing or unauthed):
-   ```
-   .claude/scripts/unblocked-context.sh research \
-     "<lane task title> <one or two locked file paths>" \
-     --effort low --limit 5
-   ```
-   - For each relevant prior PR or open issue in the result, add a `--review-ask` like `Confirm this doesn't conflict with <title> (<url>)`.
-   - If a source surfaces design rationale or a rejected alternative, fold it into `--why` and cite the URL.
-   - If the JSON contains a `_skipped` field (CLI missing / unauthed / errored), record one `--gap` noting `Unblocked context check skipped: <reason>` and proceed. Do not block the handoff on it.
-   - For deeper synthesis on novel or risky changes, escalate to `--effort medium`. Skip on routine work — `low` is the default budget.
+4. **Context receipt gate** — classify the lane with `context-scout`:
+   - For `none`, record in `--preflight` why current local evidence fully answers the task.
+   - For `targeted` or `deep`, confirm the receipt names questions, cited sources,
+     constraints, gaps, and durable writeback. Reuse claim-time `--unblocked-context` when it
+     is still sufficient; otherwise run `btrain review context --lane <id>` or the helper.
+   - Turn relevant prior PRs/issues into `--review-ask` bullets. Fold cited rationale into
+     `--why` and record `_skipped`, timeouts, or missing authentication with `--gap`.
+   - Block when the tier requires context but there is neither a receipt nor an explicit
+     skip/gap. Provider availability itself remains a soft gate.
 5. **Code-review gate** — run `btrain review code` against the active lane diff:
    ```
    btrain review code --lane <id> --base <Base>
@@ -66,6 +65,7 @@ Block bad review handoffs before they reach the reviewer.
 - Do not move a lane to review with an empty or no-op diff.
 - Do not move a lane to review when `btrain review code --lane <id>` reports hard violations (`hardcoded-secret`, `cors-wildcard`). Fix the violation in the same lane or add a documented `// btrain-allow: <rule-id>` marker first.
 - Do not omit `Base` or `Specific review asks`.
+- Do not omit a required context receipt or an explicit provider/context gap.
 - Do not hand off superseded work. Resolve it stale and claim a real slice instead.
 - Do not silently skip the simplification pass on a multi-file code change.
 - Do not collapse the whole reviewer context into a single paragraph when repeatable `btrain` flags would make the review sharper.
@@ -75,7 +75,7 @@ Block bad review handoffs before they reach the reviewer.
 
 - Base
 - Pre-flight review
-- Context check (Unblocked sources cited, or skip reason)
+- Context tier, receipt, and provider status
 - Code-review gate result (hard / warn / skipped)
 - Changed files
 - Verification run

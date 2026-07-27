@@ -352,6 +352,14 @@ describe("btrain init", () => {
 
   it("copies the bundled skill pack by default and excludes the multispeaker skill", async () => {
     await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "skills", "context-scout", "SKILL.md")),
+      "Claude-facing context-scout skill should exist",
+    )
+    await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".agents", "skills", "context-scout", "SKILL.md")),
+      "Codex-facing context-scout skill should exist",
+    )
+    await assert.doesNotReject(
       fs.access(path.join(tmpDir, ".claude", "skills", "pre-handoff", "SKILL.md")),
       "pre-handoff skill should exist",
     )
@@ -434,6 +442,7 @@ describe("btrain init", () => {
     assert.ok(content.includes("Always use CLI commands"), "Missing CLI-first rule")
     assert.ok(content.includes("Run `btrain handoff` before acting"), "Missing handoff identity check rule")
     assert.ok(content.includes("Before editing, do a short pre-flight review"), "Missing pre-flight review rule")
+    assert.ok(content.includes("Use the `context-scout` skill"), "Missing risk-based context rule")
   })
 
   it("HANDOFF_A.md has idle status", async () => {
@@ -552,6 +561,186 @@ describe("btrain init", () => {
       await assert.doesNotReject(
         fs.access(restoredUnblockedHelperPath),
         "missing Unblocked helper should be restored",
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("forced context-scout sync refreshes the skill and its Unblocked helper dependency", async () => {
+    const localTmpDir = await makeTmpDir()
+    const sourceHelperPath = path.resolve(".claude/scripts/unblocked-context.sh")
+    const sourceClaudeSkillPath = path.resolve(".claude/skills/context-scout/SKILL.md")
+    const sourceAgentSkillPath = path.resolve(".agents/skills/context-scout/SKILL.md")
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const targetHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      const targetClaudeSkillPath = path.join(localTmpDir, ".claude", "skills", "context-scout", "SKILL.md")
+      const targetAgentSkillPath = path.join(localTmpDir, ".agents", "skills", "context-scout", "SKILL.md")
+      await fs.writeFile(targetHelperPath, "stale helper\n", "utf8")
+      await fs.writeFile(targetClaudeSkillPath, "stale Claude skill\n", "utf8")
+      await fs.writeFile(targetAgentSkillPath, "stale Codex skill\n", "utf8")
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "context-scout",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /tools: unblocked-context-helper/)
+      assert.equal(await fs.readFile(targetHelperPath, "utf8"), await fs.readFile(sourceHelperPath, "utf8"))
+      assert.equal(
+        await fs.readFile(targetClaudeSkillPath, "utf8"),
+        await fs.readFile(sourceClaudeSkillPath, "utf8"),
+      )
+      assert.equal(
+        await fs.readFile(targetAgentSkillPath, "utf8"),
+        await fs.readFile(sourceAgentSkillPath, "utf8"),
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("bundled skill surfaces target their own agent context and tier budgets", async () => {
+    const agentPlan = await fs.readFile(path.resolve(".agents/skills/speckit-plan/SKILL.md"), "utf8")
+    const claudePlan = await fs.readFile(path.resolve(".claude/skills/speckit-plan/SKILL.md"), "utf8")
+    assert.ok(agentPlan.includes("update-agent-context.sh codex"), "Codex surface must update the Codex context")
+    assert.ok(claudePlan.includes("update-agent-context.sh claude"), "Claude surface must update the Claude context")
+
+    for (const surface of [".claude", ".agents"]) {
+      const deployDebug = await fs.readFile(path.resolve(`${surface}/skills/deploy-debug/SKILL.md`), "utf8")
+      assert.ok(
+        deployDebug.includes("--effort low --limit 5"),
+        `${surface} deploy-debug targeted pass must use the targeted-tier budget`,
+      )
+      assert.ok(
+        !deployDebug.includes("--effort medium --limit 6"),
+        `${surface} deploy-debug must not over-run the targeted tier`,
+      )
+    }
+  })
+
+  it("every bundled skill that declares the targeted tier stays within its budget", async () => {
+    for (const surface of [".claude", ".agents"]) {
+      const skillsDir = path.resolve(`${surface}/skills`)
+      const entries = await fs.readdir(skillsDir)
+      for (const name of entries) {
+        let content
+        try {
+          content = await fs.readFile(path.join(skillsDir, name, "SKILL.md"), "utf8")
+        } catch {
+          continue
+        }
+        if (content.includes("`targeted` tier")) {
+          assert.ok(
+            !/--effort (medium|high)/.test(content),
+            `${surface}/${name} declares the targeted tier but runs a larger research pass`,
+          )
+        }
+      }
+    }
+  })
+
+  it("targeted sync installs the context-scout dependency for skills that mandate it", async () => {
+    const localTmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const claudeScout = path.join(localTmpDir, ".claude", "skills", "context-scout")
+      const agentScout = path.join(localTmpDir, ".agents", "skills", "context-scout")
+      await fs.rm(claudeScout, { recursive: true, force: true })
+      await fs.rm(agentScout, { recursive: true, force: true })
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "reflect",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      await assert.doesNotReject(
+        fs.access(path.join(claudeScout, "SKILL.md")),
+        "reflect mandates context-scout, so the sync must install the Claude mirror",
+      )
+      await assert.doesNotReject(
+        fs.access(path.join(agentScout, "SKILL.md")),
+        "reflect mandates context-scout, so the sync must install the Codex mirror",
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("targeted forced sync preserves a customized context-scout dependency", async () => {
+    const localTmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const claudeScout = path.join(localTmpDir, ".claude", "skills", "context-scout", "SKILL.md")
+      const agentScout = path.join(localTmpDir, ".agents", "skills", "context-scout", "SKILL.md")
+      await fs.writeFile(claudeScout, "# custom Claude scout\n", "utf8")
+      await fs.writeFile(agentScout, "# custom Codex scout\n", "utf8")
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "reflect",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(
+        await fs.readFile(claudeScout, "utf8"),
+        "# custom Claude scout\n",
+        "only reflect was selected, so its dependency must be installed when missing, never replaced",
+      )
+      assert.equal(await fs.readFile(agentScout, "utf8"), "# custom Codex scout\n")
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
+  it("forced sync of a helper-independent skill preserves a customized helper", async () => {
+    const localTmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const targetHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      await fs.writeFile(targetHelperPath, "# locally customized helper\n", "utf8")
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "bug-fix",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(
+        await fs.readFile(targetHelperPath, "utf8"),
+        "# locally customized helper\n",
+        "bug-fix does not depend on the helper, so --force must not replace it",
       )
     } finally {
       await rmDir(localTmpDir)
@@ -4471,6 +4660,39 @@ describe("handoff history launch-agent rename compatibility", () => {
   })
 })
 
+describe("Claude workflow authorization", () => {
+  it("checks the triggering actor association inside every supported event branch", async () => {
+    const workflow = await fs.readFile(path.resolve(".github/workflows/claude.yml"), "utf8")
+    const workflowLines = workflow.split("\n")
+
+    for (const [eventName, payload] of [
+      ["issue_comment", "comment"],
+      ["pull_request_review_comment", "comment"],
+      ["pull_request_review", "review"],
+      ["issues", "issue"],
+    ]) {
+      const eventBranch = workflowLines.find((line) =>
+        line.includes(`github.event_name == '${eventName}'`),
+      )
+      assert.ok(eventBranch, `${eventName} must have an authorization branch`)
+      assert.ok(
+        eventBranch.includes(`github.event.${payload}.author_association`),
+        `${eventName} must authorize its triggering actor`,
+      )
+    }
+  })
+
+  it("does not treat issue assignment as an invocation event", async () => {
+    const workflow = await fs.readFile(path.resolve(".github/workflows/claude.yml"), "utf8")
+    const issuesTypes = /issues:\s*\n\s+types:\s*\[([^\]]*)\]/.exec(workflow)
+    assert.ok(issuesTypes, "issues trigger must declare explicit types")
+    assert.ok(
+      !issuesTypes[1].includes("assigned"),
+      "assigned events fire for the assigner, who cannot be authorized via issue-author association",
+    )
+  })
+})
+
 // ──────────────────────────────────────────────
 // Regression: prose Base field with embedded SHA
 // ──────────────────────────────────────────────
@@ -4542,6 +4764,72 @@ describe("needs-review with human-readable Base field", () => {
     // because listDiffPathsFromBase passes the full prose string to git rev-parse
     assert.equal(result.code, 0, `Expected success but got: ${result.stderr}`)
     assert.ok(result.stdout.includes("status: needs-review"), result.stdout)
+  })
+})
+
+describe("needs-review changed-path counting", () => {
+  it("requires code-simplifier for the union of committed and uncommitted locked paths", async () => {
+    const tmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", tmpDir], tmpDir)
+      await configureGitIdentity(tmpDir)
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, "src", "committed.ts"), "export const committed = 0\n", "utf8")
+      await fs.writeFile(path.join(tmpDir, "src", "uncommitted.ts"), "export const uncommitted = 0\n", "utf8")
+      await runGit(["add", "."], tmpDir)
+      await runGit(["commit", "-m", "initial"], tmpDir)
+      const { stdout: base } = await runGit(["rev-parse", "HEAD"], tmpDir)
+
+      let result = await runBtrain(
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          tmpDir,
+          "--lane",
+          "a",
+          "--task",
+          "Count disjoint changed paths",
+          "--owner",
+          "WriterBot",
+          "--reviewer",
+          "ReviewerBot",
+          "--files",
+          "src/committed.ts,src/uncommitted.ts",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      await fs.writeFile(path.join(tmpDir, "src", "committed.ts"), "export const committed = 1\n", "utf8")
+      await runGit(["add", "src/committed.ts"], tmpDir)
+      await runGit(["commit", "-m", "change committed path"], tmpDir)
+      await fs.writeFile(path.join(tmpDir, "src", "uncommitted.ts"), "export const uncommitted = 1\n", "utf8")
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            actor: "WriterBot",
+            base,
+            changed: ["src/committed.ts - committed change", "src/uncommitted.ts - uncommitted change"],
+            verification: ["node --test test/core.test.mjs"],
+            gap: ["None"],
+            why: ["Both locked paths changed."],
+            reviewAsk: ["Verify the changed-path union."],
+          }),
+          "--lane",
+          "a",
+        ],
+        tmpDir,
+      )
+
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /code-simplifier pass \(required for multi-file changes\)/)
+    } finally {
+      await rmDir(tmpDir)
+    }
   })
 })
 

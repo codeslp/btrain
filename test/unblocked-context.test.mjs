@@ -92,6 +92,58 @@ describe("Unblocked context helper wrapper", () => {
       await rmDir(tmpDir)
     }
   })
+
+  it("forwards repository rule filters through get-rules", async () => {
+    const helperPath = path.resolve(".claude/scripts/unblocked-context.sh")
+    const tmpDir = await makeTmpDir()
+    const fakeBinDir = path.join(tmpDir, "bin")
+    const fakeUnblockedPath = path.join(fakeBinDir, "unblocked")
+
+    try {
+      await fs.mkdir(fakeBinDir, { recursive: true })
+      await fs.writeFile(fakeUnblockedPath, `#!/usr/bin/env bash
+node -e 'console.log(JSON.stringify({args: process.argv.slice(1)}))' "$@"
+`, "utf8")
+      await fs.chmod(fakeUnblockedPath, 0o755)
+
+      const result = await execFileAsync("bash", [
+        helperPath,
+        "get-rules",
+        "Rapid-Agency/mech_ai",
+        "--task",
+        "code-review",
+        "--language",
+        "typescript",
+        "--rule-id",
+        "trust-boundary",
+        "--paths",
+        "src/api/a.ts",
+        "--paths",
+        "src/api/b.ts",
+      ], {
+        cwd: path.resolve("."),
+        env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}` },
+      })
+
+      assert.deepEqual(JSON.parse(result.stdout).args, [
+        "context-get-rules",
+        "--repo-name",
+        "Rapid-Agency/mech_ai",
+        "--task",
+        "code-review",
+        "--language",
+        "typescript",
+        "--rule-id",
+        "trust-boundary",
+        "--paths",
+        "src/api/a.ts",
+        "--paths",
+        "src/api/b.ts",
+      ])
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
 })
 
 describe("btrain Unblocked context CLI integration", () => {

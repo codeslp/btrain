@@ -5,7 +5,8 @@ description: >
   TRIGGER when: user pastes app feedback, says "feedback", "user reported", "triage", "user issue",
   mentions the feedback log, or describes a problem a real user encountered.
   DO NOT TRIGGER when: developer finds a bug themselves during coding (use bug-fix skill instead),
-  or when discussing hypothetical improvements not from user feedback.
+  or when discussing hypothetical improvements not from user feedback. Use context-scout
+  at targeted tier to find duplicates, prior fixes, and relevant team decisions.
 ---
 
 # Feedback Triage
@@ -33,9 +34,11 @@ Turn raw user feedback into a triaged log entry, a failing reproduction test, an
 5. Present assessment to the user with reasoning (which files, why this category)
 6. **Do NOT write tests or code yet**
 
-### Step 2: Unblocked Dedup + Related-Context Check
+### Step 2: Targeted Context Receipt + Dedup Check
 
-Before logging a new entry, check whether the issue is already tracked or has related user discussion. Uses the shared helper:
+Invoke `context-scout` at `targeted` tier before logging a new entry. Check whether the issue
+is already tracked or has related user discussion, then retain the receipt with the feedback
+assessment. The focused commands below implement that pass:
 
 1. **Issue dedup** — structured query against connected issue trackers, scoped to the project:
    ```bash
@@ -110,6 +113,7 @@ Do NOT skip the reproduction test and jump straight to fixing. The test is the p
 After Step 1 (first pass):
 - Category + complexity assessment with reasoning
 - Relevant code paths identified
+- Context receipt with duplicates/prior fixes or an explicit provider gap
 - Entry appended to feedback log as `new`
 - Waiting for user confirmation
 

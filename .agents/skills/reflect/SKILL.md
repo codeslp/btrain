@@ -1,6 +1,6 @@
 ---
 name: reflect
-description: Run a concise, blameless post-failure reflection whenever a bug, bad handoff, deploy incident, misleading test, or spec mistake just happened. Use it to turn the failure into concrete workflow changes plus code, test, spec, or doc safeguards, and update the durable process note when needed.
+description: Run a concise, blameless post-failure reflection whenever a bug, bad handoff, deploy incident, misleading test, or spec mistake just happened. Use context-scout to find recurrence and earlier safeguards, turn the failure into concrete workflow changes plus code, test, spec, or doc safeguards, and update the durable process note when needed.
 ---
 
 # Reflect
@@ -29,8 +29,13 @@ Turn a failure into specific prevention steps. Avoid generic retrospective langu
    - one doc update
    - one workflow rule
 5. When the failure looks like recurring workflow drift, scan recent handoff history for placeholder text, protocol violations, or stale/no-op entries before writing conclusions.
-6. Before adding a new entry to the process doc, check if the failure pattern already exists. Strengthen the existing entry instead of duplicating it.
-7. Keep it blameless, concrete, and short.
+6. Invoke `context-scout` at `targeted` tier to find prior incidents, fixes, and safeguards.
+   Escalate to `deep` for repeated failures or cross-system incidents. Record provider skips
+   and continue with local process history.
+7. Before adding a new entry to the process doc, check if the failure pattern already exists. Strengthen the existing entry instead of duplicating it.
+8. Write durable prevention back to the relevant process doc, spec, runbook, issue, or PR;
+   do not leave the lesson only in a btrain handoff.
+9. Keep it blameless, concrete, and short.
 
 ## Default Output
 
@@ -38,6 +43,7 @@ Turn a failure into specific prevention steps. Avoid generic retrospective langu
 - Why it escaped
 - How we should work differently
 - What code/tests/spec/docs should change
+- Context receipt showing whether the pattern happened before
 - What is still unverified
 
 ## Persistent Notes

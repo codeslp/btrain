@@ -161,6 +161,7 @@ const DEFAULT_PARALLEL_REVIEW_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "optio
 const BUNDLED_SKILLS_DIR = path.join(PACKAGE_ROOT, ".claude", "skills")
 const BUNDLED_AGENT_SKILLS_DIR = path.join(PACKAGE_ROOT, ".agents", "skills")
 const BUNDLED_AGENTCHATTR_DIR = path.join(PACKAGE_ROOT, "agentchattr")
+const UNBLOCKED_CONTEXT_HELPER_LABEL = "unblocked-context-helper"
 const BUNDLED_DEV_TOOLS = [
   {
     label: "dashboard",
@@ -183,7 +184,7 @@ const BUNDLED_DEV_TOOLS = [
     targetParts: ["scripts", "register-handoff-watch-path.sh"],
   },
   {
-    label: "unblocked-context-helper",
+    label: UNBLOCKED_CONTEXT_HELPER_LABEL,
     sourcePath: path.join(PACKAGE_ROOT, ".claude", "scripts", "unblocked-context.sh"),
     targetParts: [".claude", "scripts", "unblocked-context.sh"],
   },
@@ -1404,6 +1405,7 @@ const MANAGED_BLOCK_TEMPLATE = [
   "- When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.",
   "- When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.",
   "- If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.",
+  "- Use the `context-scout` skill to classify organizational context as `none`, `targeted`, or `deep`; use `--unblocked-context` on targeted/deep claims and record provider failures as explicit soft gaps.",
   "- Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.",
   "- After handing a lane to a peer, either continue on another lane or run `bth wait --lane <id>` so the current session wakes with fresh guidance when that lane changes.",
   "- Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.",
@@ -1759,13 +1761,16 @@ async function syncBundledSkillTargets(repoPaths) {
   }
 }
 
-async function syncBundledDevTools(repoRoot) {
+async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null } = {}) {
   const copiedTools = []
   const missingTools = []
   const selfTools = []
   let copiedFileCount = 0
 
   for (const tool of BUNDLED_DEV_TOOLS) {
+    if (labels && !labels.has(tool.label)) {
+      continue
+    }
     if (!(await pathExists(tool.sourcePath))) {
       missingTools.push(tool.label)
       continue
@@ -1778,6 +1783,7 @@ async function syncBundledDevTools(repoRoot) {
     }
 
     const copiedForTool = await copyMissingTree(tool.sourcePath, targetPath, {
+      overwrite,
       shouldSkip: tool.shouldSkip,
     })
     copiedFileCount += copiedForTool
@@ -3102,10 +3108,7 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
 
     if (baseRef) {
       const baseDiffPaths = await listDiffPathsFromBase(repoRoot, base, pathspecs)
-      // Use the larger of uncommitted and committed-since-base counts
-      // so the simplifier gate fires when there are many committed files
-      // even if only one remains uncommitted.
-      effectiveChangedCount = Math.max(effectiveChangedCount, baseDiffPaths.length)
+      effectiveChangedCount = new Set([...changedPaths, ...baseDiffPaths]).size
       if (changedPaths.length === 0 && baseDiffPaths.length === 0) {
         issues.push(laneId ? "reviewable diff in locked files" : "reviewable diff")
       }
@@ -8199,6 +8202,22 @@ async function syncManagedFile(filePath, managedTemplate, { dryRun }) {
   return { path: filePath, status: dryRun ? "would-update" : "updated" }
 }
 
+async function bundledSkillReferences(skillName, needle) {
+  for (const dir of [BUNDLED_SKILLS_DIR, BUNDLED_AGENT_SKILLS_DIR]) {
+    try {
+      const content = await fs.readFile(path.join(dir, skillName, "SKILL.md"), "utf8")
+      if (content.includes(needle)) {
+        return true
+      }
+    } catch {
+      // bundled surface missing this skill; check the other one
+    }
+  }
+  return false
+}
+
+const CONTEXT_SCOUT_SKILL_NAME = "context-scout"
+
 async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
   const targetRepos = []
 
@@ -8235,16 +8254,50 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       }),
     ])
 
+    // A skill that mandates the context-scout workflow is unusable without
+    // it, so a targeted sync installs the dependency alongside the skill —
+    // install-if-missing only: --force applies to what the user selected,
+    // never to a dependency's local customizations.
+    const needsContextScout = Boolean(skillName)
+      && skillName !== CONTEXT_SCOUT_SKILL_NAME
+      && (await bundledSkillReferences(skillName, CONTEXT_SCOUT_SKILL_NAME))
+    const scout = needsContextScout
+      ? await Promise.all([
+        syncBundledSkills(repoPaths.skillsPath, {
+          sourceSkillsDir: BUNDLED_SKILLS_DIR,
+          skillName: CONTEXT_SCOUT_SKILL_NAME,
+          overwrite: false,
+        }),
+        syncBundledSkills(repoPaths.agentSkillsPath, {
+          sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
+          skillName: CONTEXT_SCOUT_SKILL_NAME,
+          overwrite: false,
+        }),
+      ])
+      : []
+
     const copiedSkills = Array.from(new Set([
       ...claude.copiedSkills,
       ...agents.copiedSkills,
+      ...scout.flatMap((surface) => surface.copiedSkills),
     ])).sort()
+    // A single-skill --force must not clobber a locally customized helper
+    // unless the selected skill itself uses it; dependency-only syncs and
+    // unrelated skills get install-if-missing, full syncs keep overwrite.
+    const helperOverwrite = overwrite
+      && (!skillName
+        || (await bundledSkillReferences(skillName, "unblocked-context.sh")))
+    const supportTools = await syncBundledDevTools(absoluteRepoRoot, {
+      overwrite: helperOverwrite,
+      labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
+    })
 
     results.push({
       name: repo.name,
       path: absoluteRepoRoot,
       copiedSkills,
-      status: copiedSkills.length > 0 ? "updated" : "unchanged",
+      copiedTools: supportTools.copiedTools,
+      status: copiedSkills.length > 0 || supportTools.copiedTools.length > 0 ? "updated" : "unchanged",
     })
   }
 
