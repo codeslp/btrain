@@ -504,9 +504,24 @@ export function selectReviewRequestHeadSha({
   return localBranchMatches && localHeadIsPushed ? localHeadSha : prHeadSha
 }
 
-function normalizeRepoSlug(url) {
-  const match = /(?:[:/])([^/:]+)\/([^/]+?)(?:\.git)?\/?$/.exec(String(url || "").trim())
-  return match ? `${match[1]}/${match[2]}`.toLowerCase() : ""
+// Normalize a remote URL to "host/owner/repo". Local paths and unknown
+// forms have no host and yield "" — they can never be a GitHub PR head repo.
+function normalizeRemoteTarget(url) {
+  const raw = String(url || "").trim()
+  const scpLike = /^[^@/]+@([^:/]+):(.+?)(?:\.git)?\/?$/.exec(raw)
+  if (scpLike) {
+    return `${scpLike[1]}/${scpLike[2]}`.toLowerCase()
+  }
+  try {
+    const parsed = new URL(raw)
+    const repoPath = parsed.pathname.replace(/^\/+/, "").replace(/\.git$/, "").replace(/\/+$/, "")
+    if (parsed.host && repoPath) {
+      return `${parsed.host}/${repoPath}`.toLowerCase()
+    }
+  } catch {
+    // not a URL — fall through
+  }
+  return ""
 }
 
 async function remoteNameForRef(repoRoot, ref) {
@@ -520,13 +535,13 @@ async function remoteNameForRef(repoRoot, ref) {
 // The PR branch may be pushed through any remote (github, upstream, a fork
 // remote), so let git resolve the branch's configured push target instead of
 // assuming origin — but a matching branch name on an unrelated repository is
-// not the PR head, so when the PR's head repo is known the remote must
-// actually point at it.
-export async function resolvePushedHeadSha(repoRoot, branchName, expectedHeadSlug = "") {
+// not the PR head, so when the PR's head repo is known the remote must point
+// at that exact host and slug.
+export async function resolvePushedHeadSha(repoRoot, branchName, expectedHeadTarget = "") {
   if (!branchName) {
     return ""
   }
-  const expected = String(expectedHeadSlug || "").trim().toLowerCase()
+  const expected = String(expectedHeadTarget || "").trim().toLowerCase()
   for (const ref of [`${branchName}@{push}`, `${branchName}@{upstream}`, `refs/remotes/origin/${branchName}`]) {
     const sha = await gitText(["rev-parse", "--verify", "--quiet", ref], repoRoot).catch(() => "")
     if (!sha) {
@@ -537,7 +552,7 @@ export async function resolvePushedHeadSha(repoRoot, branchName, expectedHeadSlu
       const remoteUrl = remoteName
         ? await gitText(["remote", "get-url", remoteName], repoRoot).catch(() => "")
         : ""
-      if (normalizeRepoSlug(remoteUrl) !== expected) {
+      if (normalizeRemoteTarget(remoteUrl) !== expected) {
         continue
       }
     }
@@ -548,16 +563,25 @@ export async function resolvePushedHeadSha(repoRoot, branchName, expectedHeadSlu
 
 async function fetchPrHeadSha(repoRoot, prNumber) {
   const pr = await ghJson(
-    ["pr", "view", prNumber, "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner"],
+    ["pr", "view", prNumber, "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner,url"],
     repoRoot,
   )
   const headOwner = pr?.headRepositoryOwner?.login || ""
   const headRepo = pr?.headRepository?.name || ""
-  const headSlug = headOwner && headRepo ? `${headOwner}/${headRepo}` : ""
+  let headTarget = ""
+  if (headOwner && headRepo) {
+    try {
+      // The head repo lives on the same host as the PR itself.
+      const host = new URL(String(pr?.url || "")).host
+      headTarget = host ? `${host}/${headOwner}/${headRepo}` : ""
+    } catch {
+      headTarget = ""
+    }
+  }
   const [localBranch, localHeadSha, remoteHeadSha] = await Promise.all([
     gitText(["branch", "--show-current"], repoRoot).catch(() => ""),
     gitText(["rev-parse", "HEAD"], repoRoot).catch(() => ""),
-    resolvePushedHeadSha(repoRoot, pr?.headRefName || "", headSlug),
+    resolvePushedHeadSha(repoRoot, pr?.headRefName || "", headTarget),
   ])
   return selectReviewRequestHeadSha({
     prHeadSha: pr?.headRefOid || "",

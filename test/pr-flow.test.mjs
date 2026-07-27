@@ -239,7 +239,7 @@ describe("resolvePushedHeadSha", () => {
     }
   })
 
-  it("rejects a push remote that is not the PR's head repository", async () => {
+  it("rejects a push remote that is not the PR's head repository, including by host", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
     try {
       const remote = path.join(dir, "acme", "widgets.git")
@@ -252,12 +252,27 @@ describe("resolvePushedHeadSha", () => {
       await run("git", ["clone", "--origin", "github", remote, work])
       const { stdout: sha } = await run("git", ["-C", work, "rev-parse", "HEAD"])
 
-      assert.equal(await resolvePushedHeadSha(work, "main", "acme/widgets"), sha.trim())
       assert.equal(
-        await resolvePushedHeadSha(work, "main", "someone-else/other-repo"),
+        await resolvePushedHeadSha(work, "main", "github.com/acme/widgets"),
         "",
-        "a local branch pushing to an unrelated repository must not supply the PR head",
+        "a local-path remote has no host and can never be the GitHub PR head repo",
       )
+
+      await run("git", ["-C", work, "remote", "set-url", "github", "https://github.com/acme/widgets.git"])
+      assert.equal(await resolvePushedHeadSha(work, "main", "github.com/acme/widgets"), sha.trim())
+      assert.equal(
+        await resolvePushedHeadSha(work, "main", "github.com/someone-else/other-repo"),
+        "",
+        "a same-named branch on an unrelated repository must not supply the PR head",
+      )
+
+      await run("git", ["-C", work, "remote", "set-url", "github", "git@ghe.internal:acme/widgets.git"])
+      assert.equal(
+        await resolvePushedHeadSha(work, "main", "github.com/acme/widgets"),
+        "",
+        "the same slug on a different host is a different repository",
+      )
+      assert.equal(await resolvePushedHeadSha(work, "main", "ghe.internal/acme/widgets"), sha.trim())
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

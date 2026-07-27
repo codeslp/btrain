@@ -3633,6 +3633,23 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.notEqual(reviewStatus.code, 0, "lane-locked review status must be rejected")
       assert.match(reviewStatus.stderr, /lane-locked/i, "review status reads repo-wide review artifacts")
 
+      const grant = await runBtrain(
+        [
+          "override", "grant", "--repo", repoDir, "--action", "needs-review", "--lane", "a",
+          "--requested-by", "OwnerA", "--confirmed-by", "human", "--reason", "scope test",
+        ],
+        repoDir,
+      )
+      assert.equal(grant.code, 0, grant.stderr)
+      const scopedStatusJson = await runBtrain(["status", "--repo", repoDir, "--json"], repoDir, scopedEnv)
+      assert.equal(scopedStatusJson.code, 0, scopedStatusJson.stderr)
+      const [scopedRepo] = JSON.parse(scopedStatusJson.stdout)
+      assert.deepEqual(
+        (scopedRepo.overrides || []).filter((record) => (record.laneId || "") !== "b"),
+        [],
+        "lane-locked status must not expose other lanes' override records",
+      )
+
       const otherRepo = await makeLaneRepo()
       try {
         const crossRepo = await runBtrain(

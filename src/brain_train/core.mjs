@@ -8741,6 +8741,10 @@ async function getRepoStatus(repoRoot, laneId = "") {
     }
     const allLocks = await listLocks(repoRoot)
     status.locks = normalizedLaneId ? getLaneLocks(allLocks, normalizedLaneId) : allLocks
+    if (normalizedLaneId) {
+      // A lane-scoped status must not expose other lanes' override records.
+      status.overrides = getLaneOverrides(status.overrides, normalizedLaneId)
+    }
     const laneStates = await readAllLaneStates(repoRoot, config)
     const scopedLaneStates = normalizedLaneId
       ? laneStates.filter((lane) => lane._laneId === normalizedLaneId)
