@@ -24,7 +24,7 @@ Debug the correct layer first.
    ```bash
    .claude/scripts/unblocked-context.sh research \
      "<service/deploy target> <decisive log line> deploy incident startup readiness" \
-     --effort medium --limit 6
+     --effort low --limit 5
    ```
    - Use matching incidents or PRs to choose the next validation step.
    - If the result has `_skipped`, record `Unblocked deploy context skipped: <reason>` and continue from logs. Do not hypothesize without the concrete log line from step 2.

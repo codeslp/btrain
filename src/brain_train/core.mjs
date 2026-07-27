@@ -8202,11 +8202,11 @@ async function syncManagedFile(filePath, managedTemplate, { dryRun }) {
   return { path: filePath, status: dryRun ? "would-update" : "updated" }
 }
 
-async function bundledSkillReferencesUnblockedHelper(skillName) {
+async function bundledSkillReferences(skillName, needle) {
   for (const dir of [BUNDLED_SKILLS_DIR, BUNDLED_AGENT_SKILLS_DIR]) {
     try {
       const content = await fs.readFile(path.join(dir, skillName, "SKILL.md"), "utf8")
-      if (content.includes("unblocked-context.sh")) {
+      if (content.includes(needle)) {
         return true
       }
     } catch {
@@ -8215,6 +8215,8 @@ async function bundledSkillReferencesUnblockedHelper(skillName) {
   }
   return false
 }
+
+const CONTEXT_SCOUT_SKILL_NAME = "context-scout"
 
 async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
   const targetRepos = []
@@ -8252,14 +8254,38 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       }),
     ])
 
+    // A skill that mandates the context-scout workflow is unusable without
+    // it, so a targeted sync installs the dependency alongside the skill.
+    const needsContextScout = Boolean(skillName)
+      && skillName !== CONTEXT_SCOUT_SKILL_NAME
+      && (await bundledSkillReferences(skillName, CONTEXT_SCOUT_SKILL_NAME))
+    const scout = needsContextScout
+      ? await Promise.all([
+        syncBundledSkills(repoPaths.skillsPath, {
+          sourceSkillsDir: BUNDLED_SKILLS_DIR,
+          skillName: CONTEXT_SCOUT_SKILL_NAME,
+          overwrite,
+        }),
+        syncBundledSkills(repoPaths.agentSkillsPath, {
+          sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
+          skillName: CONTEXT_SCOUT_SKILL_NAME,
+          overwrite,
+        }),
+      ])
+      : []
+
     const copiedSkills = Array.from(new Set([
       ...claude.copiedSkills,
       ...agents.copiedSkills,
+      ...scout.flatMap((surface) => surface.copiedSkills),
     ])).sort()
     // A single-skill --force must not clobber a locally customized helper
-    // unless the selected skill actually uses it; full syncs keep overwrite.
+    // unless the selected skill actually uses it (directly or via the
+    // context-scout dependency); full syncs keep overwrite.
     const helperOverwrite = overwrite
-      && (!skillName || (await bundledSkillReferencesUnblockedHelper(skillName)))
+      && (!skillName
+        || needsContextScout
+        || (await bundledSkillReferences(skillName, "unblocked-context.sh")))
     const supportTools = await syncBundledDevTools(absoluteRepoRoot, {
       overwrite: helperOverwrite,
       labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),

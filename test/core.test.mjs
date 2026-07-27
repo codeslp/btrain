@@ -609,6 +609,60 @@ describe("btrain init", () => {
     }
   })
 
+  it("bundled skill surfaces target their own agent context and tier budgets", async () => {
+    const agentPlan = await fs.readFile(path.resolve(".agents/skills/speckit-plan/SKILL.md"), "utf8")
+    const claudePlan = await fs.readFile(path.resolve(".claude/skills/speckit-plan/SKILL.md"), "utf8")
+    assert.ok(agentPlan.includes("update-agent-context.sh codex"), "Codex surface must update the Codex context")
+    assert.ok(claudePlan.includes("update-agent-context.sh claude"), "Claude surface must update the Claude context")
+
+    for (const surface of [".claude", ".agents"]) {
+      const deployDebug = await fs.readFile(path.resolve(`${surface}/skills/deploy-debug/SKILL.md`), "utf8")
+      assert.ok(
+        deployDebug.includes("--effort low --limit 5"),
+        `${surface} deploy-debug targeted pass must use the targeted-tier budget`,
+      )
+      assert.ok(
+        !deployDebug.includes("--effort medium --limit 6"),
+        `${surface} deploy-debug must not over-run the targeted tier`,
+      )
+    }
+  })
+
+  it("targeted sync installs the context-scout dependency for skills that mandate it", async () => {
+    const localTmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const claudeScout = path.join(localTmpDir, ".claude", "skills", "context-scout")
+      const agentScout = path.join(localTmpDir, ".agents", "skills", "context-scout")
+      await fs.rm(claudeScout, { recursive: true, force: true })
+      await fs.rm(agentScout, { recursive: true, force: true })
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "reflect",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      await assert.doesNotReject(
+        fs.access(path.join(claudeScout, "SKILL.md")),
+        "reflect mandates context-scout, so the sync must install the Claude mirror",
+      )
+      await assert.doesNotReject(
+        fs.access(path.join(agentScout, "SKILL.md")),
+        "reflect mandates context-scout, so the sync must install the Codex mirror",
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
   it("forced sync of a helper-independent skill preserves a customized helper", async () => {
     const localTmpDir = await makeTmpDir()
 
