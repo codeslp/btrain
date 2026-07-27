@@ -3588,6 +3588,45 @@ describe("btrain loop lane-scoped dispatch", () => {
     }
   })
 
+  it("rejects repo-wide administrative mutations from a lane-locked runner", async () => {
+    const repoDir = await makeLaneRepo()
+    try {
+      await claimTwoLanes(repoDir)
+      const scopedEnv = {
+        BTRAIN_AGENT: "OwnerB",
+        BRAIN_TRAIN_AGENT: "OwnerB",
+        BTRAIN_LANE: "b",
+        BTRAIN_LANE_LOCKED: "1",
+      }
+
+      for (const args of [
+        ["agents", "set", "--repo", repoDir, "--agent", "OwnerA", "--agent", "OwnerB"],
+        ["init", repoDir],
+        ["sync-skills", "--repo", repoDir],
+        ["sync-templates", "--repo", repoDir],
+        ["hooks", "--repo", repoDir],
+        ["override", "grant", "--action", "push", "--requested-by", "OwnerB", "--confirmed-by", "human", "--reason", "test"],
+      ]) {
+        const result = await runBtrain(args, repoDir, scopedEnv)
+        assert.notEqual(result.code, 0, `lane-locked ${args[0]} must be rejected`)
+        assert.match(result.stderr, /lane-locked/i, `lane-locked ${args[0]} must explain the refusal`)
+      }
+
+      const repair = await runBtrain(["doctor", "--repo", repoDir, "--repair"], repoDir, scopedEnv)
+      assert.notEqual(repair.code, 0, "lane-locked doctor --repair must be rejected")
+      assert.match(repair.stderr, /refusing repo-wide doctor --repair/)
+
+      const readOnlyDoctor = await runBtrain(["doctor", "--repo", repoDir], repoDir, scopedEnv)
+      assert.doesNotMatch(
+        readOnlyDoctor.stderr,
+        /lane-locked/i,
+        "read-only doctor diagnostics stay available in a lane-locked session",
+      )
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
   it("defaults child btrain commands to the locked loop lane", async () => {
     const repoDir = await makeLaneRepo()
     try {

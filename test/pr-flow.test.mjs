@@ -13,6 +13,7 @@ import {
   formatPrStatusSummary,
   remoteBranchExists,
   resolvePrBaseBranch,
+  resolvePushedHeadSha,
   selectReviewRequestHeadSha,
 } from "../src/brain_train/pr-flow.mjs"
 import {
@@ -211,6 +212,28 @@ describe("remoteBranchExists", () => {
       await run("git", ["-C", work, "remote", "add", "origin", path.join(dir, "no-such-remote.git")])
 
       await assert.rejects(() => remoteBranchExists(work, "af14b47"))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("resolvePushedHeadSha", () => {
+  it("resolves the branch's actual push remote instead of assuming origin", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const remote = path.join(dir, "remote.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", remote])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", remote, "main"])
+      await run("git", ["clone", "--origin", "github", remote, work])
+      const { stdout: sha } = await run("git", ["-C", work, "rev-parse", "HEAD"])
+
+      assert.equal(await resolvePushedHeadSha(work, "main"), sha.trim())
+      assert.equal(await resolvePushedHeadSha(work, "no-such-branch"), "")
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

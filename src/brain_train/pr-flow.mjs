@@ -453,14 +453,28 @@ export function selectReviewRequestHeadSha({
   return localBranchMatches && localHeadIsPushed ? localHeadSha : prHeadSha
 }
 
+// The PR branch may be pushed through any remote (github, upstream, a fork
+// remote), so let git resolve the branch's configured push target instead of
+// assuming origin.
+export async function resolvePushedHeadSha(repoRoot, branchName) {
+  if (!branchName) {
+    return ""
+  }
+  for (const ref of [`${branchName}@{push}`, `${branchName}@{upstream}`, `refs/remotes/origin/${branchName}`]) {
+    const sha = await gitText(["rev-parse", "--verify", "--quiet", ref], repoRoot).catch(() => "")
+    if (sha) {
+      return sha
+    }
+  }
+  return ""
+}
+
 async function fetchPrHeadSha(repoRoot, prNumber) {
   const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid,headRefName"], repoRoot)
   const [localBranch, localHeadSha, remoteHeadSha] = await Promise.all([
     gitText(["branch", "--show-current"], repoRoot).catch(() => ""),
     gitText(["rev-parse", "HEAD"], repoRoot).catch(() => ""),
-    pr?.headRefName
-      ? gitText(["rev-parse", `refs/remotes/origin/${pr.headRefName}`], repoRoot).catch(() => "")
-      : "",
+    resolvePushedHeadSha(repoRoot, pr?.headRefName || ""),
   ])
   return selectReviewRequestHeadSha({
     prHeadSha: pr?.headRefOid || "",
