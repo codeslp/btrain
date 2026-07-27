@@ -1,3 +1,4 @@
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { execFile, spawn } from "node:child_process"
@@ -87,7 +88,7 @@ async function waitForUrl(url, timeoutMs = 10_000) {
 
 function buildNpmEnv(baseDir) {
   return {
-    ...process.env,
+    ...withoutLaneScope(),
     npm_config_audit: "false",
     npm_config_cache: path.join(baseDir, ".npm-cache"),
     npm_config_fund: "false",
@@ -97,7 +98,7 @@ function buildNpmEnv(baseDir) {
 
 function buildProjectEnv(projectDir, overrides = {}) {
   return {
-    ...process.env,
+    ...withoutLaneScope(),
     BRAIN_TRAIN_HOME: path.join(projectDir, ".btrain-test-home"),
     ...overrides,
   }
