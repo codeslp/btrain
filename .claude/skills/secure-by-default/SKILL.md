@@ -20,7 +20,7 @@ Catch security logic that only exists in the client and force enforcement at the
    ```bash
    .claude/scripts/unblocked-context.sh research \
      "<endpoint names> auth permissions rate-limit entitlement payment admin security" \
-     --effort medium --limit 6
+     --effort low --limit 5
    ```
    - Use cited prior incidents or PRs to tighten the checklist for this lane.
    - If the result has `_skipped`, note `Unblocked security context skipped: <reason>` in the handoff gaps and continue with the local trust-boundary check.

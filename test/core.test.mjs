@@ -628,6 +628,27 @@ describe("btrain init", () => {
     }
   })
 
+  it("every bundled skill that declares the targeted tier stays within its budget", async () => {
+    for (const surface of [".claude", ".agents"]) {
+      const skillsDir = path.resolve(`${surface}/skills`)
+      const entries = await fs.readdir(skillsDir)
+      for (const name of entries) {
+        let content
+        try {
+          content = await fs.readFile(path.join(skillsDir, name, "SKILL.md"), "utf8")
+        } catch {
+          continue
+        }
+        if (content.includes("`targeted` tier")) {
+          assert.ok(
+            !/--effort (medium|high)/.test(content),
+            `${surface}/${name} declares the targeted tier but runs a larger research pass`,
+          )
+        }
+      }
+    }
+  })
+
   it("targeted sync installs the context-scout dependency for skills that mandate it", async () => {
     const localTmpDir = await makeTmpDir()
 
