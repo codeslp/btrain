@@ -8,8 +8,8 @@ This repo uses the `btrain` collaboration workflow.
 - When handing work to a reviewer, always fill the structured handoff fields: `Base`, `Pre-flight review`, `Files changed`, `Verification run`, `Remaining gaps`, `Why this was done`, and `Specific review asks`.
 - When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`; use `btrain pr create|poll|request-review` until GitHub bot feedback is clear and the PR is merged.
 - If the repo provides a `pre-handoff` skill, run it immediately before `btrain handoff update --status needs-review`.
+- Use the `context-scout` skill to classify organizational context as `none`, `targeted`, or `deep`; use `--unblocked-context` on targeted/deep claims and record provider failures as explicit soft gaps.
 - Run `btrain handoff` before acting so btrain can verify the current agent and tell you whose turn it is.
-- When `BTRAIN_LANE_LOCKED=1`, stay inside `BTRAIN_LANE`: do not inspect or mutate other lanes, and do not bypass repository review or merge gates with administrative commands.
 - After handing a lane to a peer, either continue on another lane or run `bth wait --lane <id>` so the current session wakes with fresh guidance when that lane changes.
 - Before editing, do a short pre-flight review of the locked files, nearby diff, and likely risk areas so you start from known problems.
 - Use `rtk` (Rust Token Killer) to execute shell commands when available to minimize token usage.

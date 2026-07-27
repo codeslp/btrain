@@ -53,10 +53,14 @@ You **MUST** consider the user input before proceeding (if not empty).
    ```bash
    .claude/scripts/unblocked-context.sh research \
      "<feature name> <one-sentence description> <key unknowns and tech choices>" \
-     --effort medium --limit 8
+     --effort high --limit 5
    ```
 
-   The returned `summary` plus cited `sources` often resolve multiple NEEDS CLARIFICATION items in one call, with citations you can copy into `research.md`. Cross-reference against existing ADRs, prior specs, and rejected alternatives before committing to a Decision.
+   Mine concrete identifiers from the strongest results, then expand only the decisive
+   sources with a focused `search-code` or `get-urls` call. The returned `summary` plus
+   cited `sources` often resolve multiple NEEDS CLARIFICATION items in one pass, with
+   citations you can copy into `research.md`. Cross-reference against existing ADRs,
+   prior specs, and rejected alternatives before committing to a Decision.
 
    If the JSON contains a `_skipped` field (helper missing / unauthed / errored), proceed straight to the agent dispatch path below.
 
