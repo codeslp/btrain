@@ -145,10 +145,14 @@ async function listHarnessRecords(paths) {
       const summary = JSON.parse(raw)
       const taskEnv = summary.taskEnvelope || {}
       const card = summary.agentCardRef || {}
+      const context = summary.context || {}
       records.push({
         kind: "harness",
         id: summary.runId || entry.name,
-        lane: taskEnv.laneId || "",
+        // Loop dispatches record their lane in the bundle context; task
+        // envelopes carry it for harness runs. Either makes the trace
+        // discoverable by lane.
+        lane: taskEnv.laneId || context.laneId || "",
         actor: card.agentName || taskEnv.actor || "",
         ts: summary.endedAt || summary.startedAt || "",
         outcome: summary.outcome || "",

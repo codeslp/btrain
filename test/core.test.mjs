@@ -3655,6 +3655,14 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.notEqual(foreignPr.code, 0, "lane-locked pr commands must not target another lane's PR")
       assert.match(foreignPr.stderr, /refusing --pr 11/)
 
+      const foreignPull = await runBtrain(
+        ["handoff", "pull-pr", "--repo", repoDir, "--pr", "11"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(foreignPull.code, 0, "lane-locked pull-pr must not target another lane's PR")
+      assert.match(foreignPull.stderr, /refusing --pr 11/)
+
       const readOnlyDoctor = await runBtrain(["doctor", "--repo", repoDir], repoDir, scopedEnv)
       assert.doesNotMatch(
         readOnlyDoctor.stderr,

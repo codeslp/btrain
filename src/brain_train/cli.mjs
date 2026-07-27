@@ -1690,6 +1690,22 @@ async function run() {
     }
 
     if (subcommand === "pull-pr") {
+      // Same binding as the `btrain pr` handlers: a lane-locked runner may
+      // only pull its own lane's PR, not inspect another lane's comments.
+      if (process.env.BTRAIN_LANE_LOCKED === "1") {
+        const laneState = await checkHandoff(repoRoot, { laneId: options.lane })
+        const linkedPr = String(laneState?.current?.prNumber || "").trim()
+        const explicitPr = String(options.pr || "").trim()
+        if (explicitPr && explicitPr !== linkedPr) {
+          throw new BtrainError({
+            message: linkedPr
+              ? `This btrain runner is scoped to lane ${options.lane} (PR #${linkedPr}); refusing --pr ${explicitPr}.`
+              : `This btrain runner is scoped to lane ${options.lane}, which has no linked PR; refusing --pr ${explicitPr}.`,
+            reason: "Pulling another lane's PR would contaminate this lane's comment log.",
+            fix: `Link the PR first with \`btrain handoff update --lane ${options.lane} --pr <number>\`, or run from an unscoped session.`,
+          })
+        }
+      }
       await pullPrComments(repoRoot, options)
       return
     }
