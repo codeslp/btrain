@@ -3632,6 +3632,19 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.notEqual(reviewStatus.code, 0, "lane-locked review status must be rejected")
       assert.match(reviewStatus.stderr, /lane-locked/i, "review status reads repo-wide review artifacts")
 
+      const otherRepo = await makeLaneRepo()
+      try {
+        const crossRepo = await runBtrain(
+          ["handoff", "--repo", otherRepo],
+          repoDir,
+          { ...scopedEnv, BTRAIN_REPO: path.resolve(repoDir) },
+        )
+        assert.notEqual(crossRepo.code, 0, "lane-locked runners must not target another repository")
+        assert.match(crossRepo.stderr, /pinned to/)
+      } finally {
+        await rmDir(otherRepo)
+      }
+
       const linkPr = await runBtrain(
         ["handoff", "update", "--repo", repoDir, "--pr", "10", "--actor", "OwnerB"],
         repoDir,
@@ -3829,6 +3842,7 @@ fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({
   legacyAgent: process.env.BRAIN_TRAIN_AGENT,
   lane: process.env.BTRAIN_LANE,
   laneLocked: process.env.BTRAIN_LANE_LOCKED,
+  repo: process.env.BTRAIN_REPO,
 }), "utf8")
 const handoffPath = path.join(".claude", "collab", "HANDOFF_" + process.env.BTRAIN_LANE.toUpperCase() + ".md")
 const content = fs.readFileSync(handoffPath, "utf8")
@@ -3852,6 +3866,7 @@ console.log("resolved scoped lane")
         legacyAgent: "OwnerB",
         lane: "b",
         laneLocked: "1",
+        repo: path.resolve(repoDir),
       })
 
       const traces = await readJsonLines(path.join(repoDir, ".btrain", "harness", "index.jsonl"))

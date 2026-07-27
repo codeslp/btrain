@@ -7244,7 +7244,7 @@ async function waitForHandoffChange(readState, previousFingerprint, { timeoutMs,
   }
 }
 
-function buildLoopRunnerEnv(agentName, laneId = "") {
+function buildLoopRunnerEnv(agentName, laneId = "", repoRoot = "") {
   const env = {
     ...process.env,
     BTRAIN_AGENT: agentName,
@@ -7254,9 +7254,15 @@ function buildLoopRunnerEnv(agentName, laneId = "") {
   if (laneId) {
     env.BTRAIN_LANE = laneId
     env.BTRAIN_LANE_LOCKED = "1"
+    // Pin the originating repository too: a lane lock is meaningless if the
+    // child can point --repo at another repo that has the same lane id.
+    if (repoRoot) {
+      env.BTRAIN_REPO = path.resolve(repoRoot)
+    }
   } else {
     delete env.BTRAIN_LANE
     delete env.BTRAIN_LANE_LOCKED
+    delete env.BTRAIN_REPO
   }
 
   return env
@@ -7274,7 +7280,7 @@ async function executeLoopCliRunnerWithStreaming(
     runner.streamMode === "codex-json" ? createCodexStreamObserver(onEvent) : createClaudeStreamObserver(onEvent)
   const child = spawn(runner.command, runner.args, {
     cwd: repoRoot,
-    env: buildLoopRunnerEnv(agentName, laneId),
+    env: buildLoopRunnerEnv(agentName, laneId, repoRoot),
     stdio: ["ignore", "pipe", "pipe"],
   })
 
@@ -7394,7 +7400,7 @@ async function executeLoopCliRunner(
   try {
     const result = await execFileAsync(runner.command, runner.args, {
       cwd: repoRoot,
-      env: buildLoopRunnerEnv(agentName, laneId),
+      env: buildLoopRunnerEnv(agentName, laneId, repoRoot),
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     })

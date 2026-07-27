@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises"
+import { realpathSync } from "node:fs"
 import path from "node:path"
 import {
   BtrainError,
@@ -254,7 +255,33 @@ function parseOptions(args) {
     options.lane = scopedLane
   }
 
+  // The lane lock also pins the originating repository: the same lane id in
+  // another repo is a different lane, so --repo must not escape the pin.
+  const pinnedRepo = process.env.BTRAIN_LANE_LOCKED === "1" && typeof process.env.BTRAIN_REPO === "string"
+    ? process.env.BTRAIN_REPO.trim()
+    : ""
+  if (pinnedRepo) {
+    const explicitRepo = typeof options.repo === "string" ? options.repo.trim() : ""
+    if (explicitRepo && canonicalRepoPath(explicitRepo) !== canonicalRepoPath(pinnedRepo)) {
+      throw new Error(
+        `This btrain runner is pinned to ${pinnedRepo}; refusing --repo ${explicitRepo}.`,
+      )
+    }
+    if (!explicitRepo) {
+      options.repo = pinnedRepo
+    }
+  }
+
   return options
+}
+
+function canonicalRepoPath(value) {
+  const resolved = path.resolve(String(value || ""))
+  try {
+    return realpathSync(resolved)
+  } catch {
+    return resolved
+  }
 }
 
 function parsePositiveSeconds(value, defaultValue, optionName) {
