@@ -5,8 +5,10 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  # `assigned` is intentionally not an invocation event: its actor is the
+  # assigner, who cannot be authorized via the issue author's association.
   issues:
-    types: [opened, assigned]
+    types: [opened]
   pull_request_review:
     types: [submitted]
 

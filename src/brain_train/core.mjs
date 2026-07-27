@@ -8202,6 +8202,20 @@ async function syncManagedFile(filePath, managedTemplate, { dryRun }) {
   return { path: filePath, status: dryRun ? "would-update" : "updated" }
 }
 
+async function bundledSkillReferencesUnblockedHelper(skillName) {
+  for (const dir of [BUNDLED_SKILLS_DIR, BUNDLED_AGENT_SKILLS_DIR]) {
+    try {
+      const content = await fs.readFile(path.join(dir, skillName, "SKILL.md"), "utf8")
+      if (content.includes("unblocked-context.sh")) {
+        return true
+      }
+    } catch {
+      // bundled surface missing this skill; check the other one
+    }
+  }
+  return false
+}
+
 async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
   const targetRepos = []
 
@@ -8242,8 +8256,12 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       ...claude.copiedSkills,
       ...agents.copiedSkills,
     ])).sort()
+    // A single-skill --force must not clobber a locally customized helper
+    // unless the selected skill actually uses it; full syncs keep overwrite.
+    const helperOverwrite = overwrite
+      && (!skillName || (await bundledSkillReferencesUnblockedHelper(skillName)))
     const supportTools = await syncBundledDevTools(absoluteRepoRoot, {
-      overwrite,
+      overwrite: helperOverwrite,
       labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
     })
 

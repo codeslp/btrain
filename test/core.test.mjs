@@ -608,6 +608,36 @@ describe("btrain init", () => {
       await rmDir(localTmpDir)
     }
   })
+
+  it("forced sync of a helper-independent skill preserves a customized helper", async () => {
+    const localTmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const targetHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      await fs.writeFile(targetHelperPath, "# locally customized helper\n", "utf8")
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "bug-fix",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(
+        await fs.readFile(targetHelperPath, "utf8"),
+        "# locally customized helper\n",
+        "bug-fix does not depend on the helper, so --force must not replace it",
+      )
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
 })
 
 describe("dynamic collaborator bootstrap", () => {
@@ -4542,6 +4572,16 @@ describe("Claude workflow authorization", () => {
         `${eventName} must authorize its triggering actor`,
       )
     }
+  })
+
+  it("does not treat issue assignment as an invocation event", async () => {
+    const workflow = await fs.readFile(path.resolve(".github/workflows/claude.yml"), "utf8")
+    const issuesTypes = /issues:\s*\n\s+types:\s*\[([^\]]*)\]/.exec(workflow)
+    assert.ok(issuesTypes, "issues trigger must declare explicit types")
+    assert.ok(
+      !issuesTypes[1].includes("assigned"),
+      "assigned events fire for the assigner, who cannot be authorized via issue-author association",
+    )
   })
 })
 
