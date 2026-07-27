@@ -244,6 +244,44 @@ describe("showTrace: dispatch by id prefix", () => {
     assert.equal(out.detail.raw.type, "claim")
   })
 
+  it("discovers loop-dispatch traces by the lane recorded in bundle context", async () => {
+    const bundle = await createTraceBundle({
+      repoRoot,
+      scenarioId: "loop-lane-discovery",
+      kind: "loop-dispatch",
+      startedAt: "2026-04-20T13:00:00.000Z",
+      context: { laneId: "z" },
+    })
+    await finalizeTraceBundle(bundle.bundleDir, {
+      repoRoot,
+      outcome: "pass",
+      summary: "loop lane discovery",
+      endedAt: "2026-04-20T13:01:00.000Z",
+    })
+
+    const listed = await listTraces({ repoRoot, lane: "z" })
+    assert.ok(
+      listed.records.some((record) => record.id === bundle.runId),
+      "a loop trace's context lane must make it discoverable via traces list --lane",
+    )
+    const shown = await showTrace({ repoRoot, id: bundle.runId, lane: "z" })
+    assert.equal(shown.kind, "harness")
+  })
+
+  it("rejects a lane-scoped lookup for a trace belonging to another lane", async () => {
+    const listed = await listTraces({ repoRoot, kind: "handoff" })
+    const hit = listed.records.find((r) => r.eventType === "claim")
+    assert.ok(hit, "claim record must be discoverable via list")
+
+    const scoped = await showTrace({ repoRoot, id: hit.id, lane: "c" })
+    assert.equal(scoped.kind, "handoff")
+
+    await assert.rejects(
+      () => showTrace({ repoRoot, id: hit.id, lane: "b" }),
+      /does not belong to lane b/,
+    )
+  })
+
   it("throws a structured error for an unknown id prefix", async () => {
     await assert.rejects(
       () => showTrace({ repoRoot, id: "xyz-nope" }),

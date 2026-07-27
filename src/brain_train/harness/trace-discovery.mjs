@@ -145,10 +145,14 @@ async function listHarnessRecords(paths) {
       const summary = JSON.parse(raw)
       const taskEnv = summary.taskEnvelope || {}
       const card = summary.agentCardRef || {}
+      const context = summary.context || {}
       records.push({
         kind: "harness",
         id: summary.runId || entry.name,
-        lane: taskEnv.laneId || "",
+        // Loop dispatches record their lane in the bundle context; task
+        // envelopes carry it for harness runs. Either makes the trace
+        // discoverable by lane.
+        lane: taskEnv.laneId || context.laneId || "",
         actor: card.agentName || taskEnv.actor || "",
         ts: summary.endedAt || summary.startedAt || "",
         outcome: summary.outcome || "",
@@ -237,13 +241,25 @@ function dispatchShowKind(id) {
   return "unknown"
 }
 
-export async function showTrace({ repoRoot, id } = {}) {
+export async function showTrace({ repoRoot, id, lane } = {}) {
   if (!id) {
     throw new BtrainError({
       message: "showTrace requires a trace id.",
       reason: "No id was provided.",
       fix: "Pass { repoRoot, id } where id comes from listTraces().records[].id.",
     })
+  }
+  // A lane-scoped lookup may only surface that lane's records; a known id
+  // from another lane must not escape the scope that `traces list` enforces.
+  if (lane) {
+    const scoped = await listTraces({ repoRoot, lane })
+    if (!scoped.records.some((record) => record.id === id)) {
+      throw new BtrainError({
+        message: `Trace "${id}" does not belong to lane ${lane}.`,
+        reason: "This lookup is scoped to a single lane and can only inspect that lane's traces.",
+        fix: `Run \`btrain traces list --lane ${lane}\` to see this lane's trace ids.`,
+      })
+    }
   }
   const paths = getPaths(repoRoot)
   const kind = dispatchShowKind(id)

@@ -1,3 +1,4 @@
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
@@ -20,7 +21,7 @@ const cleanupRepos = []
 async function createDashboardRepo(sharedHome) {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-dashboard-"))
   const env = {
-    ...process.env,
+    ...withoutLaneScope(),
     BRAIN_TRAIN_HOME: sharedHome || path.join(repoRoot, "global-home"),
   }
   cleanupRepos.push({ repoRoot, env })

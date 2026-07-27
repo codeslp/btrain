@@ -20,6 +20,9 @@ slugify_repo_name() {
 }
 
 REPO_NAME="$(basename "$ROOT_DIR")"
+if [ -f "$ROOT_DIR/package.json" ] && grep -Eq '"name"[[:space:]]*:[[:space:]]*"btrain"' "$ROOT_DIR/package.json"; then
+  REPO_NAME="btrain"
+fi
 DEFAULT_REPO_SLUG="$(slugify_repo_name "$REPO_NAME")"
 REPO_SLUG="${HANDOFF_AGENT_REPO_SLUG_OVERRIDE:-$DEFAULT_REPO_SLUG}"
 DEFAULT_LABEL="com.codeslp.handoff-history.${REPO_SLUG//_/-}"

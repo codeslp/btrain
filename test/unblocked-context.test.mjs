@@ -1,3 +1,4 @@
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
@@ -24,7 +25,7 @@ async function runBtrain(args, cwd) {
   try {
     const result = await execFileAsync("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
       cwd,
-      env: { ...process.env, BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home") },
+      env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home") },
       maxBuffer: 5 * 1024 * 1024,
     })
     return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
@@ -122,7 +123,7 @@ node -e 'console.log(JSON.stringify({args: process.argv.slice(1)}))' "$@"
         "src/api/b.ts",
       ], {
         cwd: path.resolve("."),
-        env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}` },
+        env: { ...withoutLaneScope(), PATH: `${fakeBinDir}:${process.env.PATH}` },
       })
 
       assert.deepEqual(JSON.parse(result.stdout).args, [

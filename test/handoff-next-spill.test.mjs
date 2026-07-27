@@ -1,3 +1,4 @@
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
@@ -27,7 +28,7 @@ async function runBtrain(args, cwd, envOverrides = {}) {
   try {
     const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
       cwd,
-      env: { ...process.env, BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"), ...envOverrides },
+      env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"), ...envOverrides },
       maxBuffer: 5 * 1024 * 1024,
     })
     return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }

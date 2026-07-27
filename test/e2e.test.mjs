@@ -1,3 +1,4 @@
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { execFile, spawn } from "node:child_process"
@@ -87,7 +88,7 @@ async function waitForUrl(url, timeoutMs = 10_000) {
 
 function buildNpmEnv(baseDir) {
   return {
-    ...process.env,
+    ...withoutLaneScope(),
     npm_config_audit: "false",
     npm_config_cache: path.join(baseDir, ".npm-cache"),
     npm_config_fund: "false",
@@ -97,7 +98,7 @@ function buildNpmEnv(baseDir) {
 
 function buildProjectEnv(projectDir, overrides = {}) {
   return {
-    ...process.env,
+    ...withoutLaneScope(),
     BRAIN_TRAIN_HOME: path.join(projectDir, ".btrain-test-home"),
     ...overrides,
   }
@@ -127,6 +128,7 @@ async function installPackedCli() {
 
   return {
     btrainBin: path.join(prefixDir, "bin", "btrain"),
+    bthBin: path.join(prefixDir, "bin", "bth"),
     workspaceDir,
   }
 }
@@ -382,6 +384,66 @@ describe("installed CLI e2e", () => {
 
     assert.equal(claimResult.code, 0, claimResult.stderr)
     assert.ok(claimResult.stdout.includes("peer reviewer: Opus 4.6"), claimResult.stdout)
+  })
+
+  it("keeps the installed bth wrapper inside its locked loop lane", async () => {
+    const projectDir = await createProjectRepo(installState.btrainBin)
+    cleanupDirs.push(projectDir)
+    const isolatedBinDir = path.join(projectDir, "isolated-bin")
+    await fs.mkdir(isolatedBinDir)
+    await fs.symlink(process.execPath, path.join(isolatedBinDir, "node"))
+
+    for (const [lane, task, owner, file] of [
+      ["a", "Installed bth lane A", "OwnerA", "src/a.ts"],
+      ["b", "Installed bth lane B", "OwnerB", "src/b.ts"],
+    ]) {
+      const claim = await runInstalledBtrain(
+        installState.btrainBin,
+        projectDir,
+        [
+          "handoff",
+          "claim",
+          "--repo",
+          projectDir,
+          "--lane",
+          lane,
+          "--task",
+          task,
+          "--owner",
+          owner,
+          "--reviewer",
+          "Reviewer",
+          "--files",
+          file,
+        ],
+        { BTRAIN_AGENT: owner },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+    }
+
+    const scopedEnv = buildProjectEnv(projectDir, {
+      BTRAIN_AGENT: "OwnerB",
+      BRAIN_TRAIN_AGENT: "OwnerB",
+      BTRAIN_LANE: "b",
+      BTRAIN_LANE_LOCKED: "1",
+      PATH: [isolatedBinDir, "/usr/bin", "/bin"].join(path.delimiter),
+    })
+    const scoped = await runCommand(installState.bthBin, ["--repo", projectDir], {
+      cwd: projectDir,
+      env: scopedEnv,
+    })
+    assert.equal(scoped.code, 0, scoped.stderr)
+    assert.match(scoped.stdout, /--- lane b ---/)
+    assert.match(scoped.stdout, /task: Installed bth lane B/)
+    assert.doesNotMatch(scoped.stdout, /--- lane a ---/)
+
+    const escaped = await runCommand(
+      installState.bthBin,
+      ["--repo", projectDir, "--lane", "a"],
+      { cwd: projectDir, env: scopedEnv },
+    )
+    assert.notEqual(escaped.code, 0)
+    assert.match(escaped.stderr, /scoped to lane b; refusing explicit --lane a/)
   })
 
   it("embeds client-side status mappings for dashboard rendering", async () => {

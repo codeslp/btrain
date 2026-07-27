@@ -1,16 +1,29 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
+import fs from "node:fs/promises"
 import { mkdtemp, rm } from "node:fs/promises"
+import os from "node:os"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import {
+  applyPrStatusToHandoff,
   classifyPrReviewState,
   formatPrStatusSummary,
   remoteBranchExists,
   resolvePrBaseBranch,
+  resolvePushedHeadSha,
+  selectReviewRequestHeadSha,
 } from "../src/brain_train/pr-flow.mjs"
+import {
+  checkHandoff,
+  claimHandoff,
+  initRepo,
+  patchHandoff,
+} from "../src/brain_train/core.mjs"
+
+const execFileAsync = promisify(execFile)
 
 const run = promisify(execFile)
 
@@ -205,6 +218,89 @@ describe("remoteBranchExists", () => {
   })
 })
 
+describe("resolvePushedHeadSha", () => {
+  it("resolves the branch's actual push remote instead of assuming origin", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const remote = path.join(dir, "remote.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", remote])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", remote, "main"])
+      await run("git", ["clone", "--origin", "github", remote, work])
+      const { stdout: sha } = await run("git", ["-C", work, "rev-parse", "HEAD"])
+
+      assert.equal(await resolvePushedHeadSha(work, "main"), sha.trim())
+      assert.equal(await resolvePushedHeadSha(work, "no-such-branch"), "")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a push remote that is not the PR's head repository, including by host", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const remote = path.join(dir, "acme", "widgets.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", remote])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", remote, "main"])
+      await run("git", ["clone", "--origin", "github", remote, work])
+      const { stdout: sha } = await run("git", ["-C", work, "rev-parse", "HEAD"])
+
+      assert.equal(
+        await resolvePushedHeadSha(work, "main", "github.com/acme/widgets"),
+        "",
+        "a local-path remote has no host and can never be the GitHub PR head repo",
+      )
+
+      await run("git", ["-C", work, "remote", "set-url", "github", "https://github.com/acme/widgets.git"])
+      assert.equal(await resolvePushedHeadSha(work, "main", "github.com/acme/widgets"), sha.trim())
+      assert.equal(
+        await resolvePushedHeadSha(work, "main", "github.com/someone-else/other-repo"),
+        "",
+        "a same-named branch on an unrelated repository must not supply the PR head",
+      )
+
+      await run("git", ["-C", work, "remote", "set-url", "github", "git@ghe.internal:acme/widgets.git"])
+      assert.equal(
+        await resolvePushedHeadSha(work, "main", "github.com/acme/widgets"),
+        "",
+        "the same slug on a different host is a different repository",
+      )
+      assert.equal(await resolvePushedHeadSha(work, "main", "ghe.internal/acme/widgets"), sha.trim())
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("PR review request head selection", () => {
+  it("uses a pushed local head when the PR API still reports the previous commit", () => {
+    assert.equal(selectReviewRequestHeadSha({
+      prHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      prHeadRefName: "feature",
+      localBranch: "feature",
+      localHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      remoteHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+  })
+
+  it("does not mark an unpushed local commit for review", () => {
+    assert.equal(selectReviewRequestHeadSha({
+      prHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      prHeadRefName: "feature",
+      localBranch: "feature",
+      localHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      remoteHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+  })
+})
+
 describe("PR review flow classification", () => {
   it("classifies Codex current-head feedback and Unblocked stale feedback from ai_sales#143 shape", () => {
     const status = classifyPrReviewState({
@@ -357,6 +453,87 @@ describe("PR review flow classification", () => {
     assert.equal(status.bots.find((bot) => bot.id === "codex").state, "clear")
   })
 
+  it("classifies a matching-head Codex clear issue comment as clear", () => {
+    const head = "dddddddddddddddddddddddddddddddddddddddd"
+    const status = classifyPrReviewState({
+      pr: {
+        number: 14,
+        state: "OPEN",
+        headRefOid: head,
+      },
+      prFlowConfig,
+      rawComments: {
+        issueComments: [
+          {
+            id: 101,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: `Codex Review: Didn't find any major issues. Chef's kiss.\n\n**Reviewed commit:** \`dddddddddd\``,
+            created_at: "2026-07-14T21:12:35Z",
+          },
+        ],
+        reviewComments: [],
+        reviews: [],
+      },
+    })
+
+    const codexState = status.bots.find((bot) => bot.id === "codex")
+    assert.equal(codexState.state, "clear")
+    assert.equal(codexState.reviewedCommit, "dddddddddd")
+  })
+
+  it("lets a newer clear reaction outrank an older same-head review verdict", () => {
+    const head = "dddddddddddddddddddddddddddddddddddddddd"
+    const status = classifyPrReviewState({
+      pr: {
+        number: 14,
+        state: "OPEN",
+        headRefOid: head,
+      },
+      prFlowConfig,
+      rawComments: {
+        issueComments: [
+          {
+            id: 200,
+            user: { login: "bfaris96" },
+            body: `@codex review\n\n<!-- btrain-pr-review bot=codex lane=a head=${head} -->`,
+            created_at: "2026-05-04T21:00:00Z",
+          },
+        ],
+        issueCommentReactions: {
+          200: [
+            {
+              content: "+1",
+              user: { login: "chatgpt-codex-connector[bot]" },
+              created_at: "2026-05-04T21:05:00Z",
+            },
+          ],
+        },
+        reviewComments: [],
+        reviews: [
+          {
+            id: 20,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: "changes requested",
+            state: "CHANGES_REQUESTED",
+            commit_id: head,
+            submitted_at: "2026-05-04T20:30:00Z",
+          },
+          {
+            id: 21,
+            user: { login: "unblocked[bot]" },
+            body: "0 issues found.",
+            state: "APPROVED",
+            commit_id: head,
+            submitted_at: "2026-05-04T20:31:00Z",
+          },
+        ],
+      },
+    })
+
+    assert.equal(status.bots.find((bot) => bot.id === "codex").state, "clear")
+    assert.equal(status.overall, "ready-to-merge")
+  })
+
   it("treats inline comments auto-anchored by GitHub to a new HEAD as stale, not current-head feedback", () => {
     const oldHead = "84e9bc6ba23cb233b7feab954e0b6fdb331895d9"
     const newHead = "0fac59295ce98ebd540cee314251671cf588acd5"
@@ -424,5 +601,51 @@ describe("PR review flow classification", () => {
     })
 
     assert.equal(status.overall, "merged")
+  })
+})
+
+describe("PR review flow handoff application", () => {
+  it("infers the pinned runner identity when applying PR feedback", async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-"))
+    const previousHome = process.env.BRAIN_TRAIN_HOME
+    const previousAgent = process.env.BTRAIN_AGENT
+
+    try {
+      process.env.BRAIN_TRAIN_HOME = path.join(repoRoot, ".btrain-test-home")
+      process.env.BTRAIN_AGENT = "Codex"
+      await execFileAsync("git", ["init", repoRoot])
+      await initRepo(repoRoot, { agent: ["Codex", "Claude"] })
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# PR apply test\n", "utf8")
+      await claimHandoff(repoRoot, {
+        lane: "a",
+        task: "Apply bot feedback",
+        owner: "Codex",
+        reviewer: "Claude",
+        files: "README.md",
+      })
+      await patchHandoff(repoRoot, {
+        lane: "a",
+        actor: "Codex",
+        status: "pr-review",
+        pr: "22",
+      })
+
+      await applyPrStatusToHandoff(repoRoot, { lane: "a" }, {
+        overall: "feedback",
+        bots: [{ id: "codex", state: "feedback" }],
+        pr: { number: 22 },
+      })
+
+      const handoff = await checkHandoff(repoRoot)
+      const lane = handoff.lanes.find((candidate) => candidate._laneId === "a")
+      assert.equal(lane.status, "changes-requested")
+      assert.match(lane.lastUpdated, /^Codex /)
+    } finally {
+      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
+      else process.env.BRAIN_TRAIN_HOME = previousHome
+      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
+      else process.env.BTRAIN_AGENT = previousAgent
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
   })
 })

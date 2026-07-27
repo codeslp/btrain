@@ -28,14 +28,19 @@ async function commitAll(tmpDir, message) {
 }
 
 async function runCli(args, cwd, envOverrides = {}) {
+  const env = { ...process.env }
+  for (const key of ["BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LANE", "BTRAIN_LANE_LOCKED"]) {
+    delete env[key]
+  }
+  Object.assign(env, {
+    BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"),
+    ...envOverrides,
+  })
+
   try {
     const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
       cwd,
-      env: {
-        ...process.env,
-        BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"),
-        ...envOverrides,
-      },
+      env,
       maxBuffer: 10 * 1024 * 1024,
     })
     return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: 0 }
