@@ -237,13 +237,25 @@ function dispatchShowKind(id) {
   return "unknown"
 }
 
-export async function showTrace({ repoRoot, id } = {}) {
+export async function showTrace({ repoRoot, id, lane } = {}) {
   if (!id) {
     throw new BtrainError({
       message: "showTrace requires a trace id.",
       reason: "No id was provided.",
       fix: "Pass { repoRoot, id } where id comes from listTraces().records[].id.",
     })
+  }
+  // A lane-scoped lookup may only surface that lane's records; a known id
+  // from another lane must not escape the scope that `traces list` enforces.
+  if (lane) {
+    const scoped = await listTraces({ repoRoot, lane })
+    if (!scoped.records.some((record) => record.id === id)) {
+      throw new BtrainError({
+        message: `Trace "${id}" does not belong to lane ${lane}.`,
+        reason: "This lookup is scoped to a single lane and can only inspect that lane's traces.",
+        fix: `Run \`btrain traces list --lane ${lane}\` to see this lane's trace ids.`,
+      })
+    }
   }
   const paths = getPaths(repoRoot)
   const kind = dispatchShowKind(id)

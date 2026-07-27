@@ -1874,7 +1874,7 @@ async function run() {
         fix: "btrain traces show <id> --repo . (ids come from `btrain traces list`)",
       })
     }
-    const result = await showTrace({ repoRoot, id })
+    const result = await showTrace({ repoRoot, id, lane: options.lane })
     console.log(formatTracesShowResult(result))
     return
   }

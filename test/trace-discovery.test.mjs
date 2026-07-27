@@ -244,6 +244,20 @@ describe("showTrace: dispatch by id prefix", () => {
     assert.equal(out.detail.raw.type, "claim")
   })
 
+  it("rejects a lane-scoped lookup for a trace belonging to another lane", async () => {
+    const listed = await listTraces({ repoRoot, kind: "handoff" })
+    const hit = listed.records.find((r) => r.eventType === "claim")
+    assert.ok(hit, "claim record must be discoverable via list")
+
+    const scoped = await showTrace({ repoRoot, id: hit.id, lane: "c" })
+    assert.equal(scoped.kind, "handoff")
+
+    await assert.rejects(
+      () => showTrace({ repoRoot, id: hit.id, lane: "b" }),
+      /does not belong to lane b/,
+    )
+  })
+
   it("throws a structured error for an unknown id prefix", async () => {
     await assert.rejects(
       () => showTrace({ repoRoot, id: "xyz-nope" }),

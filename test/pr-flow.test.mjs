@@ -466,6 +466,59 @@ describe("PR review flow classification", () => {
     assert.equal(codexState.reviewedCommit, "dddddddddd")
   })
 
+  it("lets a newer clear reaction outrank an older same-head review verdict", () => {
+    const head = "dddddddddddddddddddddddddddddddddddddddd"
+    const status = classifyPrReviewState({
+      pr: {
+        number: 14,
+        state: "OPEN",
+        headRefOid: head,
+      },
+      prFlowConfig,
+      rawComments: {
+        issueComments: [
+          {
+            id: 200,
+            user: { login: "bfaris96" },
+            body: `@codex review\n\n<!-- btrain-pr-review bot=codex lane=a head=${head} -->`,
+            created_at: "2026-05-04T21:00:00Z",
+          },
+        ],
+        issueCommentReactions: {
+          200: [
+            {
+              content: "+1",
+              user: { login: "chatgpt-codex-connector[bot]" },
+              created_at: "2026-05-04T21:05:00Z",
+            },
+          ],
+        },
+        reviewComments: [],
+        reviews: [
+          {
+            id: 20,
+            user: { login: "chatgpt-codex-connector[bot]" },
+            body: "changes requested",
+            state: "CHANGES_REQUESTED",
+            commit_id: head,
+            submitted_at: "2026-05-04T20:30:00Z",
+          },
+          {
+            id: 21,
+            user: { login: "unblocked[bot]" },
+            body: "0 issues found.",
+            state: "APPROVED",
+            commit_id: head,
+            submitted_at: "2026-05-04T20:31:00Z",
+          },
+        ],
+      },
+    })
+
+    assert.equal(status.bots.find((bot) => bot.id === "codex").state, "clear")
+    assert.equal(status.overall, "ready-to-merge")
+  })
+
   it("treats inline comments auto-anchored by GitHub to a new HEAD as stale, not current-head feedback", () => {
     const oldHead = "84e9bc6ba23cb233b7feab954e0b6fdb331895d9"
     const newHead = "0fac59295ce98ebd540cee314251671cf588acd5"

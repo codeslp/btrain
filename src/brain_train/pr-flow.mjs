@@ -87,6 +87,14 @@ function hasPositiveBotReaction(comment, bot, issueCommentReactions = {}) {
   ))
 }
 
+function positiveReactionTime(comment, bot, issueCommentReactions = {}) {
+  const reactions = issueCommentReactions[String(comment?.id)] || []
+  const times = reactions
+    .filter((reaction) => String(reaction?.content || "") === "+1" && loginMatches(bot, reaction?.user?.login))
+    .map((reaction) => new Date(reaction?.created_at || 0).getTime())
+  return times.length > 0 ? Math.max(...times) : itemTime(comment)
+}
+
 function itemTime(value) {
   return new Date(value?.submitted_at || value?.created_at || value?.updated_at || 0).getTime()
 }
@@ -157,78 +165,110 @@ export function classifyBotReview({
     && hasPositiveBotReaction(comment, bot, issueCommentReactions)
   )))
 
+  // A bot can leave several kinds of signal on the same head (inline
+  // findings, a formal review, an issue-comment verdict, a +1 reaction to a
+  // marked review request). The newest signal describes its current opinion;
+  // an older verdict must not mask a newer one.
+  const signalCandidates = []
+
   if (currentInline.length > 0) {
-    return {
-      id: bot.id,
-      state: "feedback",
-      reviewedCommit: headSha,
-      feedbackCount: currentInline.length,
-      staleFeedbackCount: staleInline.length,
-      feedback: summarizeFeedbackItems(currentInline),
-      summary: `${currentInline.length} current-head inline finding${currentInline.length === 1 ? "" : "s"}`,
-    }
+    signalCandidates.push({
+      time: itemTime(newest(currentInline)),
+      classify: () => ({
+        id: bot.id,
+        state: "feedback",
+        reviewedCommit: headSha,
+        feedbackCount: currentInline.length,
+        staleFeedbackCount: staleInline.length,
+        feedback: summarizeFeedbackItems(currentInline),
+        summary: `${currentInline.length} current-head inline finding${currentInline.length === 1 ? "" : "s"}`,
+      }),
+    })
   }
 
   if (latestCurrentReview) {
-    const reviewState = String(latestCurrentReview.state || "").toUpperCase()
-    if (reviewState === "CHANGES_REQUESTED" || bodyIndicatesFeedback(latestCurrentReview.body)) {
-      return {
-        id: bot.id,
-        state: "feedback",
-        reviewedCommit: reviewCommit(latestCurrentReview) || headSha,
-        feedbackCount: 1,
-        staleFeedbackCount: staleInline.length,
-        feedback: summarizeFeedbackItems([latestCurrentReview]),
-        summary: `${bot.id} review reported feedback on the current head`,
-      }
-    }
-    if (reviewState === "APPROVED" || bodyIndicatesClear(latestCurrentReview.body)) {
-      return {
-        id: bot.id,
-        state: "clear",
-        reviewedCommit: reviewCommit(latestCurrentReview) || headSha,
-        feedbackCount: 0,
-        staleFeedbackCount: staleInline.length,
-        feedback: [],
-        summary: `${bot.id} review is clear on the current head`,
-      }
-    }
+    signalCandidates.push({
+      time: itemTime(latestCurrentReview),
+      classify: () => {
+        const reviewState = String(latestCurrentReview.state || "").toUpperCase()
+        if (reviewState === "CHANGES_REQUESTED" || bodyIndicatesFeedback(latestCurrentReview.body)) {
+          return {
+            id: bot.id,
+            state: "feedback",
+            reviewedCommit: reviewCommit(latestCurrentReview) || headSha,
+            feedbackCount: 1,
+            staleFeedbackCount: staleInline.length,
+            feedback: summarizeFeedbackItems([latestCurrentReview]),
+            summary: `${bot.id} review reported feedback on the current head`,
+          }
+        }
+        if (reviewState === "APPROVED" || bodyIndicatesClear(latestCurrentReview.body)) {
+          return {
+            id: bot.id,
+            state: "clear",
+            reviewedCommit: reviewCommit(latestCurrentReview) || headSha,
+            feedbackCount: 0,
+            staleFeedbackCount: staleInline.length,
+            feedback: [],
+            summary: `${bot.id} review is clear on the current head`,
+          }
+        }
+        return null
+      },
+    })
   }
 
   if (latestCurrentIssueComment) {
-    if (bodyIndicatesFeedback(latestCurrentIssueComment.body)) {
-      return {
-        id: bot.id,
-        state: "feedback",
-        reviewedCommit: reviewCommit(latestCurrentIssueComment) || headSha,
-        feedbackCount: 1,
-        staleFeedbackCount: staleInline.length,
-        feedback: summarizeFeedbackItems([latestCurrentIssueComment]),
-        summary: `${bot.id} issue comment reported feedback on the current head`,
-      }
-    }
-    if (bodyIndicatesClear(latestCurrentIssueComment.body)) {
-      return {
-        id: bot.id,
-        state: "clear",
-        reviewedCommit: reviewCommit(latestCurrentIssueComment) || headSha,
-        feedbackCount: 0,
-        staleFeedbackCount: staleInline.length,
-        feedback: [],
-        summary: `${bot.id} issue comment is clear on the current head`,
-      }
-    }
+    signalCandidates.push({
+      time: itemTime(latestCurrentIssueComment),
+      classify: () => {
+        if (bodyIndicatesFeedback(latestCurrentIssueComment.body)) {
+          return {
+            id: bot.id,
+            state: "feedback",
+            reviewedCommit: reviewCommit(latestCurrentIssueComment) || headSha,
+            feedbackCount: 1,
+            staleFeedbackCount: staleInline.length,
+            feedback: summarizeFeedbackItems([latestCurrentIssueComment]),
+            summary: `${bot.id} issue comment reported feedback on the current head`,
+          }
+        }
+        if (bodyIndicatesClear(latestCurrentIssueComment.body)) {
+          return {
+            id: bot.id,
+            state: "clear",
+            reviewedCommit: reviewCommit(latestCurrentIssueComment) || headSha,
+            feedbackCount: 0,
+            staleFeedbackCount: staleInline.length,
+            feedback: [],
+            summary: `${bot.id} issue comment is clear on the current head`,
+          }
+        }
+        return null
+      },
+    })
   }
 
   if (clearReaction) {
-    return {
-      id: bot.id,
-      state: "clear",
-      reviewedCommit: headSha,
-      feedbackCount: 0,
-      staleFeedbackCount: staleInline.length,
-      feedback: [],
-      summary: `${bot.id} reacted +1 to the btrain review request on head ${shortSha(headSha)}`,
+    signalCandidates.push({
+      time: positiveReactionTime(clearReaction, bot, issueCommentReactions),
+      classify: () => ({
+        id: bot.id,
+        state: "clear",
+        reviewedCommit: headSha,
+        feedbackCount: 0,
+        staleFeedbackCount: staleInline.length,
+        feedback: [],
+        summary: `${bot.id} reacted +1 to the btrain review request on head ${shortSha(headSha)}`,
+      }),
+    })
+  }
+
+  signalCandidates.sort((a, b) => b.time - a.time)
+  for (const candidate of signalCandidates) {
+    const result = candidate.classify()
+    if (result) {
+      return result
     }
   }
 
@@ -360,7 +400,18 @@ async function resolveLaneAndPr(repoRoot, options) {
   if (!lane) {
     throw new Error(`Unknown lane: ${laneId}`)
   }
-  const prNumber = normalizePrNumber(options.pr || lane.prNumber)
+  const explicitPr = normalizePrNumber(options.pr)
+  const linkedPr = normalizePrNumber(lane.prNumber)
+  // A lane-locked runner may only operate on its own lane's PR: polling or
+  // re-reviewing another PR could resolve this lane against the wrong merge.
+  if (process.env.BTRAIN_LANE_LOCKED === "1" && explicitPr && explicitPr !== linkedPr) {
+    throw new Error(
+      linkedPr
+        ? `This btrain runner is scoped to lane ${laneId} (PR #${linkedPr}); refusing --pr ${explicitPr}.`
+        : `This btrain runner is scoped to lane ${laneId}, which has no linked PR; refusing --pr ${explicitPr}.`,
+    )
+  }
+  const prNumber = explicitPr || linkedPr
   if (!prNumber) {
     throw new Error("No PR linked. Pass --pr <number> or run `btrain pr create --lane <id>` first.")
   }
