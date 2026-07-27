@@ -663,6 +663,39 @@ describe("btrain init", () => {
     }
   })
 
+  it("targeted forced sync preserves a customized context-scout dependency", async () => {
+    const localTmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", localTmpDir], localTmpDir)
+      let result = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+
+      const claudeScout = path.join(localTmpDir, ".claude", "skills", "context-scout", "SKILL.md")
+      const agentScout = path.join(localTmpDir, ".agents", "skills", "context-scout", "SKILL.md")
+      await fs.writeFile(claudeScout, "# custom Claude scout\n", "utf8")
+      await fs.writeFile(agentScout, "# custom Codex scout\n", "utf8")
+
+      result = await runBtrain([
+        "sync-skills",
+        "--repo",
+        localTmpDir,
+        "--skill",
+        "reflect",
+        "--force",
+      ], localTmpDir)
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(
+        await fs.readFile(claudeScout, "utf8"),
+        "# custom Claude scout\n",
+        "only reflect was selected, so its dependency must be installed when missing, never replaced",
+      )
+      assert.equal(await fs.readFile(agentScout, "utf8"), "# custom Codex scout\n")
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
   it("forced sync of a helper-independent skill preserves a customized helper", async () => {
     const localTmpDir = await makeTmpDir()
 

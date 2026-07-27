@@ -8255,7 +8255,9 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
     ])
 
     // A skill that mandates the context-scout workflow is unusable without
-    // it, so a targeted sync installs the dependency alongside the skill.
+    // it, so a targeted sync installs the dependency alongside the skill —
+    // install-if-missing only: --force applies to what the user selected,
+    // never to a dependency's local customizations.
     const needsContextScout = Boolean(skillName)
       && skillName !== CONTEXT_SCOUT_SKILL_NAME
       && (await bundledSkillReferences(skillName, CONTEXT_SCOUT_SKILL_NAME))
@@ -8264,12 +8266,12 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
         syncBundledSkills(repoPaths.skillsPath, {
           sourceSkillsDir: BUNDLED_SKILLS_DIR,
           skillName: CONTEXT_SCOUT_SKILL_NAME,
-          overwrite,
+          overwrite: false,
         }),
         syncBundledSkills(repoPaths.agentSkillsPath, {
           sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
           skillName: CONTEXT_SCOUT_SKILL_NAME,
-          overwrite,
+          overwrite: false,
         }),
       ])
       : []
@@ -8280,11 +8282,10 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       ...scout.flatMap((surface) => surface.copiedSkills),
     ])).sort()
     // A single-skill --force must not clobber a locally customized helper
-    // unless the selected skill actually uses it (directly or via the
-    // context-scout dependency); full syncs keep overwrite.
+    // unless the selected skill itself uses it; dependency-only syncs and
+    // unrelated skills get install-if-missing, full syncs keep overwrite.
     const helperOverwrite = overwrite
       && (!skillName
-        || needsContextScout
         || (await bundledSkillReferences(skillName, "unblocked-context.sh")))
     const supportTools = await syncBundledDevTools(absoluteRepoRoot, {
       overwrite: helperOverwrite,
