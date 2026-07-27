@@ -566,6 +566,118 @@ function buildPrBody(lane) {
   return lines.join("\n")
 }
 
+// The PR base lives on the repository gh targets, which in fork workflows is
+// not the push remote. Mirror gh's resolution: the remote marked by
+// `gh repo set-default` (remote.<name>.gh-resolved), else upstream, github,
+// origin, else the first remote.
+async function resolveBaseRemote(repoRoot) {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", repoRoot, "config", "--get-regexp", "^remote\\..+\\.gh-resolved$"],
+      { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
+    )
+    const marked = stdout.split("\n").map((line) => line.trim()).filter(Boolean)[0]
+    if (marked) {
+      return marked.split(".").slice(1, -1).join(".")
+    }
+  } catch {
+    // no gh-resolved marker configured
+  }
+  const { stdout } = await execFileAsync("git", ["-C", repoRoot, "remote"], {
+    cwd: repoRoot,
+    maxBuffer: GH_MAX_BUFFER,
+  })
+  const remotes = stdout.split("\n").map((line) => line.trim()).filter(Boolean)
+  for (const candidate of ["upstream", "github", "origin"]) {
+    if (remotes.includes(candidate)) {
+      return candidate
+    }
+  }
+  return remotes[0] || "origin"
+}
+
+// gh needs the base to exist on the PR target remote; local remote-tracking
+// refs are not proof either way (single-branch clones and stale fetches miss
+// branches that do exist), so ask the remote itself.
+export async function remoteBranchExists(repoRoot, name, baseRemote = null) {
+  const remote = baseRemote || (await resolveBaseRemote(repoRoot))
+  try {
+    // The full refs/heads/ pattern forces an exact match — a bare name also
+    // matches nested branches sharing the suffix (release/<name>).
+    await execFileAsync(
+      "git",
+      ["-C", repoRoot, "ls-remote", "--exit-code", "--heads", remote, `refs/heads/${name}`],
+      { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
+    )
+    return true
+  } catch (error) {
+    // ls-remote --exit-code reserves 2 for "no matching refs"; anything else
+    // (auth, network, bad remote) is an operational failure, not absence.
+    if (error?.code === 2) {
+      return false
+    }
+    throw error
+  }
+}
+
+// Positive validation: git itself decides what a branch name is. Rejects
+// uppercase HEAD, rev expressions (HEAD~1, main@{upstream}), ranges
+// (main...HEAD), and object expressions (main:path) while permitting
+// ordinary names like "head" or "af14b47". check-ref-format needs no repo.
+async function isValidBranchName(name) {
+  try {
+    await execFileAsync("git", ["check-ref-format", "--branch", name], {
+      maxBuffer: GH_MAX_BUFFER,
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function stripRemotePrefixes(ref, remote = "origin") {
+  const escaped = remote.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return ref
+    .replace(new RegExp(`^refs/remotes/${escaped}/`), "")
+    .replace(/^refs\/remotes\/origin\//, "")
+    .replace(/^refs\/heads\//, "")
+    .replace(new RegExp(`^${escaped}/`), "")
+    .replace(/^origin\//, "")
+}
+
+export async function resolvePrBaseBranch(
+  base,
+  fallback = "main",
+  { isBranchName = isValidBranchName, isRemoteBranch = async () => false, remote = "origin", strict = false } = {},
+) {
+  const fallbackBranch = stripRemotePrefixes(String(fallback || "").trim(), remote) || "main"
+  // strict is for explicit user overrides (--base): a base that cannot be
+  // used is an error, never a silent retarget. Fallback is reserved for
+  // machine-written lane Base metadata.
+  const reject = (reason) => {
+    if (strict) {
+      throw new Error(`Base "${String(base ?? "")}" ${reason}. Pass --base <branch> naming a branch that exists on ${remote}.`)
+    }
+    return fallbackBranch
+  }
+  const ref = String(base || "").trim()
+  if (!ref || /\s/.test(ref)) {
+    return reject("is not a branch name")
+  }
+  const branch = stripRemotePrefixes(ref, remote)
+  if (branch === "HEAD" || !(await isBranchName(branch))) {
+    return reject("is not a valid branch name")
+  }
+  // Well-formed is not enough: tags, commit SHAs, and unpushed branches all
+  // pass check-ref-format, but gh requires a branch that exists on the
+  // remote. Only the remote itself can confirm that.
+  if (!(await isRemoteBranch(branch))) {
+    return reject(`is not a branch on ${remote}`)
+  }
+  return branch
+}
+
 export async function runPrCreate(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
@@ -594,7 +706,13 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
 
-  const base = options.base || lane.base || prFlowConfig.base
+  // Lane Base fields often hold diff refs ("origin/main") or prose, but
+  // `gh pr create --base` only accepts a branch name on the remote.
+  const baseRemote = await resolveBaseRemote(repoRoot)
+  const isRemoteBranch = (name) => remoteBranchExists(repoRoot, name, baseRemote)
+  const base = options.base
+    ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote, strict: true })
+    : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote })
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", "-u", "origin", branch], {
       cwd: repoRoot,

@@ -1,9 +1,18 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import {
   classifyPrReviewState,
   formatPrStatusSummary,
+  remoteBranchExists,
+  resolvePrBaseBranch,
 } from "../src/brain_train/pr-flow.mjs"
+
+const run = promisify(execFile)
 
 const prFlowConfig = {
   enabled: true,
@@ -22,6 +31,179 @@ const prFlowConfig = {
     },
   },
 }
+
+const anyRemoteBranch = { isRemoteBranch: async () => true }
+
+describe("resolvePrBaseBranch", () => {
+  it("strips remote-tracking prefixes so gh pr create receives a branch name", async () => {
+    assert.equal(await resolvePrBaseBranch("origin/main", "main", anyRemoteBranch), "main")
+    assert.equal(await resolvePrBaseBranch("refs/heads/main", "main", anyRemoteBranch), "main")
+    assert.equal(await resolvePrBaseBranch("refs/remotes/origin/main", "main", anyRemoteBranch), "main")
+  })
+
+  it("passes remote branch names through, including slashed branch names", async () => {
+    assert.equal(await resolvePrBaseBranch("main", "main", anyRemoteBranch), "main")
+    assert.equal(await resolvePrBaseBranch("release/1.2", "main", anyRemoteBranch), "release/1.2")
+    assert.equal(await resolvePrBaseBranch("codex/pr-review-flow", "main", anyRemoteBranch), "codex/pr-review-flow")
+  })
+
+  it("falls back for well-formed names that are not branches on the remote (tags, unpushed branches)", async () => {
+    const isRemoteBranch = async () => false
+    assert.equal(await resolvePrBaseBranch("v1.2.3", "main", { isRemoteBranch }), "main")
+    assert.equal(await resolvePrBaseBranch("not-pushed-yet", "main", { isRemoteBranch }), "main")
+  })
+
+  it("falls back when the lane base is prose or empty rather than a ref", async () => {
+    assert.equal(await resolvePrBaseBranch("Branch 001-refs forked from main at af14b47", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("", "main"), "main")
+    assert.equal(await resolvePrBaseBranch(undefined, "main"), "main")
+  })
+
+  it("falls back for anything git check-ref-format rejects as a branch name", async () => {
+    assert.equal(await resolvePrBaseBranch("HEAD", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("HEAD~1", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("head^2", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main@{upstream}", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main...HEAD", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main..feature", "main"), "main")
+    assert.equal(await resolvePrBaseBranch("main:package.json", "main"), "main")
+  })
+
+  it("preserves a branch literally named head — only uppercase HEAD is reserved", async () => {
+    assert.equal(await resolvePrBaseBranch("head", "main", anyRemoteBranch), "head")
+    assert.equal(await resolvePrBaseBranch("Head", "main", anyRemoteBranch), "Head")
+  })
+
+  it("distinguishes hex-named remote branches from commit SHAs via isRemoteBranch", async () => {
+    const isRemoteBranch = async (name) => name === "af14b47"
+    assert.equal(await resolvePrBaseBranch("af14b47", "main", { isRemoteBranch }), "af14b47")
+    assert.equal(await resolvePrBaseBranch("origin/af14b47", "main", { isRemoteBranch }), "af14b47")
+    assert.equal(await resolvePrBaseBranch("e36d6d39df58a2f1c0b7a9d4e5f60718293a4b5c", "main", { isRemoteBranch }), "main")
+    assert.equal(await resolvePrBaseBranch("af14b47", "main"), "main")
+  })
+
+  it("normalizes the configured fallback branch too", async () => {
+    assert.equal(await resolvePrBaseBranch("", "origin/main"), "main")
+    assert.equal(await resolvePrBaseBranch("HEAD~1", "refs/heads/develop"), "develop")
+    assert.equal(await resolvePrBaseBranch(undefined, ""), "main")
+  })
+
+  it("strips the selected base remote's prefix, not just origin", async () => {
+    const opts = { isRemoteBranch: async () => true, remote: "upstream" }
+    assert.equal(await resolvePrBaseBranch("upstream/release/next", "main", opts), "release/next")
+    assert.equal(await resolvePrBaseBranch("refs/remotes/upstream/develop", "main", opts), "develop")
+    assert.equal(await resolvePrBaseBranch("origin/main", "main", opts), "main")
+    assert.equal(await resolvePrBaseBranch("", "upstream/main", { remote: "upstream" }), "main")
+  })
+
+  it("rejects an invalid explicit base in strict mode instead of retargeting", async () => {
+    const missingRemote = { isRemoteBranch: async () => false, strict: true }
+    await assert.rejects(() => resolvePrBaseBranch("no-such-branch", "main", missingRemote), /no-such-branch/)
+    await assert.rejects(() => resolvePrBaseBranch("HEAD~1", "main", { strict: true }), /HEAD~1/)
+    assert.equal(
+      await resolvePrBaseBranch("release/1.2", "main", { isRemoteBranch: async () => true, strict: true }),
+      "release/1.2",
+    )
+  })
+})
+
+describe("remoteBranchExists", () => {
+  it("finds a remote branch even when local remote-tracking refs never fetched it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const origin = path.join(dir, "origin.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", origin])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", origin, "main", "main:af14b47", "main:release/deadbeef"])
+      await run("git", ["clone", "--branch", "main", "--single-branch", origin, work])
+
+      assert.equal(await remoteBranchExists(work, "af14b47"), true)
+      assert.equal(await remoteBranchExists(work, "no-such-branch"), false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("requires an exact refs/heads match — nested branches sharing a suffix do not count", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const origin = path.join(dir, "origin.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", origin])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", origin, "main", "main:release/deadbeef"])
+      await run("git", ["clone", "--branch", "main", "--single-branch", origin, work])
+
+      assert.equal(await remoteBranchExists(work, "deadbeef"), false)
+      assert.equal(await remoteBranchExists(work, "release/deadbeef"), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("queries the PR target remote, not the fork push remote, when both exist", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const target = path.join(dir, "target.git")
+      const fork = path.join(dir, "fork.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", target])
+      await run("git", ["init", "--bare", "--initial-branch=main", fork])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", target, "main", "main:release/next"])
+      await run("git", ["-C", seed, "push", fork, "main"])
+      await run("git", ["clone", "--origin", "origin", fork, work])
+      await run("git", ["-C", work, "remote", "add", "upstream", target])
+
+      assert.equal(await remoteBranchExists(work, "release/next"), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("honors the gh set-default marker when picking the target remote", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const target = path.join(dir, "target.git")
+      const other = path.join(dir, "other.git")
+      const seed = path.join(dir, "seed")
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--bare", "--initial-branch=main", target])
+      await run("git", ["init", "--bare", "--initial-branch=main", other])
+      await run("git", ["init", "--initial-branch=main", seed])
+      await run("git", ["-C", seed, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+      await run("git", ["-C", seed, "push", target, "main", "main:only-on-default"])
+      await run("git", ["-C", seed, "push", other, "main"])
+      await run("git", ["clone", "--origin", "origin", target, work])
+      await run("git", ["-C", work, "remote", "add", "upstream", other])
+      await run("git", ["-C", work, "config", "remote.origin.gh-resolved", "base"])
+
+      assert.equal(await remoteBranchExists(work, "only-on-default"), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("rethrows operational lookup failures instead of reporting the branch absent", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "btrain-pr-flow-"))
+    try {
+      const work = path.join(dir, "work")
+      await run("git", ["init", "--initial-branch=main", work])
+      await run("git", ["-C", work, "remote", "add", "origin", path.join(dir, "no-such-remote.git")])
+
+      await assert.rejects(() => remoteBranchExists(work, "af14b47"))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe("PR review flow classification", () => {
   it("classifies Codex current-head feedback and Unblocked stale feedback from ai_sales#143 shape", () => {
