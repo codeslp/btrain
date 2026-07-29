@@ -270,5 +270,25 @@ check(
     "ste-lint-input.md" in missing.stderr,
 )
 
+import tempfile  # noqa: E402
+
+with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tmp:
+    tmp.write(b"\xff\xfe invalid utf-8 \x9c\x81")
+    binary_path = tmp.name
+try:
+    binary = subprocess.run(
+        [sys.executable, str(_MOD_PATH), binary_path],
+        capture_output=True,
+        text=True,
+        env={**__import__("os").environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    check("undecodable input file still exits 0", binary.returncode == 0)
+    check(
+        "undecodable input file is reported on stderr",
+        binary_path in binary.stderr,
+    )
+finally:
+    __import__("os").unlink(binary_path)
+
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

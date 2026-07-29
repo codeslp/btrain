@@ -241,7 +241,7 @@ def main():
             try:
                 with open(path, encoding="utf-8") as fh:
                     inputs.append((path, fh.read()))
-            except OSError as err:
+            except (OSError, UnicodeDecodeError) as err:
                 # Advisory contract: report and continue, never fail the caller.
                 print(f"ste-lint: skipping {path}: {err}", file=sys.stderr)
     else:
