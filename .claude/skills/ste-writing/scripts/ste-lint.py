@@ -143,7 +143,11 @@ def strip_code(text):
 
 RE_LINE_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s+")
 RE_HEADING = re.compile(r"^\s*#+\s+")
-RE_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# End punctuation may be followed by closing markdown/quote markers.
+RE_SENT_SPLIT = re.compile(r"(?<=[.!?])[)*_\"'\]]*\s+")
+# A dot after these mid-sentence abbreviations is not end punctuation
+# when lowercase prose (or a parenthetical) continues after it.
+RE_ABBREV_DOT = re.compile(r"\b(e\.g|i\.e|vs|cf|etc|approx)\.(?=\s+[a-z(])", re.IGNORECASE)
 
 
 def sentences_of(text):
@@ -160,6 +164,8 @@ def sentences_of(text):
     buffer = []
 
     def emit(chunk):
+        # Protect abbreviation dots (one-dot leader) so they never split.
+        chunk = RE_ABBREV_DOT.sub(lambda m: m.group(1) + "․", chunk)
         for part in RE_SENT_SPLIT.split(chunk):
             part = part.strip()
             if re.search(r"\w", part):

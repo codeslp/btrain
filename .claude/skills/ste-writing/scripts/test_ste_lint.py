@@ -207,6 +207,31 @@ check(
     ste.lint(mixed_fence, 20)["total_violations"] == 0,
 )
 
+# A closing markdown marker after end punctuation still ends the sentence.
+closers = "**The system starts.** *Then it stops.* (It logs both.) Done."
+check(
+    "markdown closers do not block sentence splits",
+    ste.lint(closers, 20)["sentences"] == 4,
+    f"sentences={ste.lint(closers, 20)['sentences']}",
+)
+
+# Common abbreviations do not end a sentence, so a long sentence with
+# an embedded "e.g." cannot false-split into two short halves.
+abbrev = (
+    "Use short common words, e.g. start, use, and help, because they keep "
+    "every instruction readable for maintainers and tired reviewers alike."
+)
+abbrev_result = ste.lint(abbrev, 20)
+check(
+    "abbreviation stays inside its sentence",
+    abbrev_result["sentences"] == 1,
+    f"sentences={abbrev_result['sentences']}",
+)
+check(
+    "long sentence with abbreviation is still flagged",
+    abbrev_result["violations"]["long_sentences"] == 1,
+)
+
 # A heading is its own unit, never glued to the prose below it.
 headed = "# Deployment guide overview\nThe system starts now."
 check(
