@@ -239,8 +239,36 @@ for rule in ("contractions", "semicolons", "passive_voice", "banned_words",
              "marketing_adjectives", "phrasal_verbs", "hedge_phrases"):
     check(f"detects {rule}", v[rule] >= 1, f"{rule}={v[rule]}")
 
+# A fence indented four or more spaces is not a fence opener (CommonMark
+# treats it as indented code), so the prose after it is still linted.
+deep_indent = "    ```\nutilize the tool now\n"
+check(
+    "4-space-indented delimiter does not open a fence",
+    ste.lint(deep_indent, 20)["violations"]["banned_words"] == 1,
+)
+shallow_indent = "   ```\nutilize seamless\n   ```\nDone."
+check(
+    "3-space-indented fence still strips code",
+    ste.lint(shallow_indent, 20)["total_violations"] == 0,
+)
+
 # Empty input does not divide by zero.
 check("empty input scores 0", ste.lint("", 20)["per_100_words"] == 0.0)
+
+# Advisory contract: unreadable files never break the exit code.
+import subprocess  # noqa: E402
+
+missing = subprocess.run(
+    [sys.executable, str(_MOD_PATH), "/nonexistent/ste-lint-input.md"],
+    capture_output=True,
+    text=True,
+    env={**__import__("os").environ, "PYTHONDONTWRITEBYTECODE": "1"},
+)
+check("missing input file still exits 0", missing.returncode == 0)
+check(
+    "missing input file is reported on stderr",
+    "ste-lint-input.md" in missing.stderr,
+)
 
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

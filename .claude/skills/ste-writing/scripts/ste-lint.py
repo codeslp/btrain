@@ -82,8 +82,9 @@ RE_MARKETING = word_list_regex(MARKETING_ADJECTIVES)
 RE_HEDGES = word_list_regex(HEDGE_PHRASES)
 
 
-RE_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
-RE_FENCE_CLOSE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
+# CommonMark allows at most three spaces of fence indentation.
+RE_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+RE_FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*$")
 
 
 def strip_code(text):
@@ -237,8 +238,12 @@ def main():
     if args.files:
         inputs = []
         for path in args.files:
-            with open(path, encoding="utf-8") as fh:
-                inputs.append((path, fh.read()))
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    inputs.append((path, fh.read()))
+            except OSError as err:
+                # Advisory contract: report and continue, never fail the caller.
+                print(f"ste-lint: skipping {path}: {err}", file=sys.stderr)
     else:
         inputs = [("<stdin>", sys.stdin.read())]
 
