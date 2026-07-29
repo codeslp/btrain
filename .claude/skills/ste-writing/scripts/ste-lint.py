@@ -99,15 +99,20 @@ def strip_code(text):
             close = RE_FENCE_CLOSE.match(line)
             if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= fence[1]:
                 fence = None
+            # Blank the line so the block still separates surrounding prose.
+            lines.append("")
             continue
         match = RE_FENCE.match(line)
         if match:
             fence = (match.group(1)[0], len(match.group(1)))
+            lines.append("")
             continue
         lines.append(line)
     text = "\n".join(lines)
-    # A code span opens with a backtick run and closes on an equal-length run.
-    text = re.sub(r"(`+)[^\n]*?\1(?!`)", " ", text)
+    # A code span opens with a backtick run and closes on an equal-length
+    # run. It may cross line breaks but never a blank line (a blank line
+    # ends the enclosing block).
+    text = re.sub(r"(`+)(?:(?!\n[ \t]*\n)[\s\S])*?\1(?!`)", " ", text)
     text = re.sub(r"!?\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)", r"\1", text)
     text = re.sub(r"<https?://[^>\s]+>", " ", text)
     return text

@@ -174,6 +174,27 @@ check(
     "unclosed fence runs to end of input",
     ste.lint(unclosed, 20)["total_violations"] == 0,
 )
+# Removing a fenced block must keep the prose around it separated.
+around_fence = "The service starts now\n```\ncode here\n```\nand the log confirms it later."
+check(
+    "prose around a fence stays separate sentences",
+    ste.lint(around_fence, 20)["sentences"] == 2,
+    f"sentences={ste.lint(around_fence, 20)['sentences']}",
+)
+
+# Inline code spans may cross a single line break, but not a blank line.
+multiline_span = "Run ``utilize\nseamless`` now."
+check(
+    "multiline code span stripped",
+    ste.lint(multiline_span, 20)["total_violations"] == 0,
+    f"violations={ste.lint(multiline_span, 20)['violations']}",
+)
+stray_backticks = "A ` stray marker\n\nutilize ` here."
+check(
+    "span cannot cross a blank line",
+    ste.lint(stray_backticks, 20)["violations"]["banned_words"] == 1,
+)
+
 suffixed_close = "Use the tool.\n\n```\nutilize\n```python\nseamless robust\n```\nDone."
 check(
     "fence line with info string does not close an open fence",
