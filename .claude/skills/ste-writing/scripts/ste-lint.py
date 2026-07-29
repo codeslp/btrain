@@ -108,6 +108,11 @@ def strip_code(text):
             fence = (match.group(1)[0], len(match.group(1)))
             lines.append("")
             continue
+        if RE_QUOTE_MARKER.match(line):
+            # Quoted text from other authors is exempt from the skill.
+            # Blank it so the quote still separates surrounding prose.
+            lines.append("")
+            continue
         lines.append(line)
 
     # An indented (4+ space or tab) block after a blank line is code.
@@ -146,7 +151,7 @@ def strip_code(text):
     return text
 
 
-RE_LINE_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s+")
+RE_LINE_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 RE_HEADING = re.compile(r"^\s*#+\s+")
 # End punctuation may be followed by closing markdown/quote markers.
 RE_SENT_SPLIT = re.compile(r"(?<=[.!?])[)*_\"'\]]*\s+")
@@ -166,7 +171,9 @@ def sentences_of(text):
       continuation line after a list item — indented or lazy (CommonMark) —
       stays in that item's sentence until a blank line, new marker, or
       table row ends the block.
-    - Table rows are structured data and produce no sentences."""
+    - Table rows are structured data and produce no sentences. Blockquote
+      lines never reach this function: strip_code blanks them because
+      quoted text from other authors is exempt from the skill."""
     sents = []
     buffer = []
 
@@ -183,27 +190,17 @@ def sentences_of(text):
             emit(" ".join(buffer))
             buffer.clear()
 
-    in_quote = False
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("|"):
             flush()
-            in_quote = False
         elif RE_HEADING.match(line):
             # A heading is a complete unit; never glue it to what follows.
             flush()
             emit(RE_HEADING.sub("", line))
-            in_quote = False
-        elif RE_QUOTE_MARKER.match(line):
-            # Consecutive quote lines are soft wraps of one quoted passage.
-            if not in_quote:
-                flush()
-            buffer.append(RE_QUOTE_MARKER.sub("", line).strip())
-            in_quote = True
         elif RE_LINE_MARKER.match(line):
             flush()
             buffer.append(RE_LINE_MARKER.sub("", line).strip())
-            in_quote = False
         else:
             buffer.append(stripped)
     flush()
