@@ -148,6 +148,43 @@ check(
     "tilde-fenced code stripped",
     ste.lint(tilde_text, 20)["total_violations"] == 0,
 )
+nested_fence = "Use the tool.\n\n````md\n```\nutilize seamless; robust\n```\n````\nDone."
+check(
+    "longer fence swallows shorter fence inside it",
+    ste.lint(nested_fence, 20)["total_violations"] == 0,
+)
+unclosed = "Use the tool.\n\n```\nutilize seamless; robust don't"
+check(
+    "unclosed fence runs to end of input",
+    ste.lint(unclosed, 20)["total_violations"] == 0,
+)
+mixed_fence = "Use the tool.\n\n```\nseamless ~~~ utilize\n```\nDone."
+check(
+    "tilde inside backtick fence does not close it",
+    ste.lint(mixed_fence, 20)["total_violations"] == 0,
+)
+
+# A heading is its own unit, never glued to the prose below it.
+headed = "# Deployment guide overview\nThe system starts now."
+check(
+    "heading and following prose are separate sentences",
+    ste.lint(headed, 20)["sentences"] == 2,
+    f"sentences={ste.lint(headed, 20)['sentences']}",
+)
+
+# Link destinations are not prose; link text is.
+linked = "Read the [deployment guide](https://example.com/utilize-seamless;robust) now."
+link_result = ste.lint(linked, 20)
+check(
+    "link destinations excluded from prose",
+    link_result["total_violations"] == 0,
+    f"violations={link_result['violations']}",
+)
+check(
+    "link text still counted as words",
+    link_result["words"] == 5,
+    f"words={link_result['words']}",
+)
 
 # Core violation classes are detected.
 sloppy = (

@@ -82,13 +82,35 @@ RE_MARKETING = word_list_regex(MARKETING_ADJECTIVES)
 RE_HEDGES = word_list_regex(HEDGE_PHRASES)
 
 
+RE_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
 def strip_code(text):
-    text = re.sub(r"```.*?```|~~~.*?~~~", " ", text, flags=re.DOTALL)
+    """Remove content that is not prose: fenced code (CommonMark pairing —
+    a fence closes only on the same character at the same or greater length,
+    and an unclosed fence runs to end of input), inline code, link and image
+    destinations (link text stays), and autolinks."""
+    lines = []
+    fence = None  # (char, length) of the open fence
+    for line in text.splitlines():
+        match = RE_FENCE.match(line)
+        if fence:
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if match:
+            fence = (match.group(1)[0], len(match.group(1)))
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
     text = re.sub(r"`[^`\n]+`", " ", text)
+    text = re.sub(r"!?\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)", r"\1", text)
+    text = re.sub(r"<https?://[^>\s]+>", " ", text)
     return text
 
 
 RE_LINE_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)]|#+|>)\s+")
+RE_HEADING = re.compile(r"^\s*#+\s+")
 RE_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
@@ -120,6 +142,10 @@ def sentences_of(text):
         stripped = line.strip()
         if not stripped or stripped.startswith("|"):
             flush()
+        elif RE_HEADING.match(line):
+            # A heading is a complete unit; never glue it to what follows.
+            flush()
+            emit(RE_HEADING.sub("", line))
         elif RE_LINE_MARKER.match(line):
             flush()
             buffer.append(RE_LINE_MARKER.sub("", line).strip())
