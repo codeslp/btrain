@@ -97,13 +97,13 @@ def sentences_of(text):
     - Adjacent prose lines are soft wraps of one sentence; join them so a
       hard-wrapped long sentence cannot escape the length check.
     - List items, headings, and blockquote lines are separate units, so
-      unpunctuated items never merge into one long pseudo-sentence. An
-      indented line after a list item is that item's soft-wrapped
-      continuation and stays in the same sentence.
+      unpunctuated items never merge into one long pseudo-sentence. A
+      continuation line after a list item — indented or lazy (CommonMark) —
+      stays in that item's sentence until a blank line, new marker, or
+      table row ends the block.
     - Table rows are structured data and produce no sentences."""
     sents = []
     buffer = []
-    buffer_is_item = False
 
     def emit(chunk):
         for part in RE_SENT_SPLIT.split(chunk):
@@ -112,11 +112,9 @@ def sentences_of(text):
                 sents.append(part)
 
     def flush():
-        nonlocal buffer_is_item
         if buffer:
             emit(" ".join(buffer))
             buffer.clear()
-        buffer_is_item = False
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -125,12 +123,7 @@ def sentences_of(text):
         elif RE_LINE_MARKER.match(line):
             flush()
             buffer.append(RE_LINE_MARKER.sub("", line).strip())
-            buffer_is_item = True
-        elif buffer_is_item and line[:1] in (" ", "\t"):
-            buffer.append(stripped)
         else:
-            if buffer_is_item:
-                flush()
             buffer.append(stripped)
     flush()
     return sents

@@ -100,9 +100,24 @@ check(
     "wrapped long list item is flagged",
     wrapped_item_result["violations"]["long_sentences"] == 1,
 )
-after_list = "- Short item here\nPlain prose sentence after the list."
+# A lazy (unindented) continuation is still part of the item (CommonMark).
+lazy_item = (
+    "- Run the deploy script with every flag that the release runbook names\n"
+    "and then confirm the health endpoint responds before you continue"
+)
+lazy_result = ste.lint(lazy_item, 20)
 check(
-    "unindented prose after a list stays separate",
+    "lazy list continuation is one sentence",
+    lazy_result["sentences"] == 1,
+    f"sentences={lazy_result['sentences']}",
+)
+check(
+    "lazy long list item is flagged",
+    lazy_result["violations"]["long_sentences"] == 1,
+)
+after_list = "- Short item here\n\nPlain prose sentence after the list."
+check(
+    "prose after a blank-line block boundary stays separate",
     ste.lint(after_list, 20)["sentences"] == 2,
     f"sentences={ste.lint(after_list, 20)['sentences']}",
 )
