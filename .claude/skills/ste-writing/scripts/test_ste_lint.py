@@ -84,6 +84,29 @@ check(
     ste.lint(short_wrapped, 20)["sentences"] == 1,
 )
 
+# An indented continuation line belongs to its list item, so a long
+# wrapped item cannot evade the length check (codex PR finding).
+wrapped_item = (
+    "- Run the deploy script with every flag that the release runbook names\n"
+    "  and then confirm the health endpoint responds before you continue"
+)
+wrapped_item_result = ste.lint(wrapped_item, 20)
+check(
+    "wrapped list item is one sentence",
+    wrapped_item_result["sentences"] == 1,
+    f"sentences={wrapped_item_result['sentences']}",
+)
+check(
+    "wrapped long list item is flagged",
+    wrapped_item_result["violations"]["long_sentences"] == 1,
+)
+after_list = "- Short item here\nPlain prose sentence after the list."
+check(
+    "unindented prose after a list stays separate",
+    ste.lint(after_list, 20)["sentences"] == 2,
+    f"sentences={ste.lint(after_list, 20)['sentences']}",
+)
+
 # A wide table row is structured data, not a long sentence.
 wide_row = "| " + " | ".join("column value here" for _ in range(10)) + " |"
 check(
@@ -105,6 +128,11 @@ check(
 code_text = "Use the tool.\n\n```\nutilize seamless; robust don't\n```\nRun `utilize --seamlessly` now."
 code_result = ste.lint(code_text, 20)
 check("code blocks stripped", code_result["total_violations"] == 0)
+tilde_text = "Use the tool.\n\n~~~\nutilize seamless; robust don't\n~~~\nDone."
+check(
+    "tilde-fenced code stripped",
+    ste.lint(tilde_text, 20)["total_violations"] == 0,
+)
 
 # Core violation classes are detected.
 sloppy = (

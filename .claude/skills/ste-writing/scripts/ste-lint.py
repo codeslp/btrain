@@ -83,7 +83,7 @@ RE_HEDGES = word_list_regex(HEDGE_PHRASES)
 
 
 def strip_code(text):
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"```.*?```|~~~.*?~~~", " ", text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", " ", text)
     return text
 
@@ -97,10 +97,13 @@ def sentences_of(text):
     - Adjacent prose lines are soft wraps of one sentence; join them so a
       hard-wrapped long sentence cannot escape the length check.
     - List items, headings, and blockquote lines are separate units, so
-      unpunctuated items never merge into one long pseudo-sentence.
+      unpunctuated items never merge into one long pseudo-sentence. An
+      indented line after a list item is that item's soft-wrapped
+      continuation and stays in the same sentence.
     - Table rows are structured data and produce no sentences."""
     sents = []
-    prose = []
+    buffer = []
+    buffer_is_item = False
 
     def emit(chunk):
         for part in RE_SENT_SPLIT.split(chunk):
@@ -109,21 +112,26 @@ def sentences_of(text):
                 sents.append(part)
 
     def flush():
-        if prose:
-            emit(" ".join(prose))
-            prose.clear()
+        nonlocal buffer_is_item
+        if buffer:
+            emit(" ".join(buffer))
+            buffer.clear()
+        buffer_is_item = False
 
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped:
-            flush()
-        elif stripped.startswith("|"):
+        if not stripped or stripped.startswith("|"):
             flush()
         elif RE_LINE_MARKER.match(line):
             flush()
-            emit(RE_LINE_MARKER.sub("", line))
+            buffer.append(RE_LINE_MARKER.sub("", line).strip())
+            buffer_is_item = True
+        elif buffer_is_item and line[:1] in (" ", "\t"):
+            buffer.append(stripped)
         else:
-            prose.append(stripped)
+            if buffer_is_item:
+                flush()
+            buffer.append(stripped)
     flush()
     return sents
 
