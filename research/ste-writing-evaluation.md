@@ -88,3 +88,5 @@ line).
     definition pattern and are excluded, though their text is prose.
   - A list item's indented follow-on paragraph after a blank line can be
     misread as an indented code block and excluded.
+  - Table rows written without a leading pipe (`a | b`) are linted as prose
+    instead of being excluded as table data.
