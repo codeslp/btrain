@@ -80,3 +80,11 @@ line).
   conservatively by design.
 - The 50-74% upstream improvement has not yet been reproduced locally on live
   agent output; the trial period exists to gather that evidence.
+- Open markdown edge cases from PR #25 review, accepted rather than fixed
+  (each fix in this area traded one corner case for another):
+  - Lazy blockquote continuations (a quote line wrapped without a `>` marker)
+    are linted as prose instead of being exempt.
+  - GitHub footnote definitions (`[^1]: note text`) match the reference-link
+    definition pattern and are excluded, though their text is prose.
+  - A list item's indented follow-on paragraph after a blank line can be
+    misread as an indented code block and excluded.
