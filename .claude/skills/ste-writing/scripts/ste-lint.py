@@ -153,7 +153,8 @@ RE_SENT_SPLIT = re.compile(r"(?<=[.!?])[)*_\"'\]]*\s+")
 # A dot after these mid-sentence abbreviations is not end punctuation
 # when lowercase prose continues after it. The lookahead is scoped
 # case-sensitive so an uppercase sentence opener still ends the sentence.
-RE_ABBREV_DOT = re.compile(r"\b(e\.g|i\.e|vs|cf|etc|approx)\.(?=\s+(?-i:[a-z]))", re.IGNORECASE)
+RE_ABBREV_DOT = re.compile(r"\b(e\.g|i\.e|vs|cf|etc|approx)\.(?=\s+(?-i:[a-z0-9]))", re.IGNORECASE)
+RE_QUOTE_MARKER = re.compile(r"^\s*>\s+")
 
 
 def sentences_of(text):
@@ -182,17 +183,27 @@ def sentences_of(text):
             emit(" ".join(buffer))
             buffer.clear()
 
+    in_quote = False
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("|"):
             flush()
+            in_quote = False
         elif RE_HEADING.match(line):
             # A heading is a complete unit; never glue it to what follows.
             flush()
             emit(RE_HEADING.sub("", line))
+            in_quote = False
+        elif RE_QUOTE_MARKER.match(line):
+            # Consecutive quote lines are soft wraps of one quoted passage.
+            if not in_quote:
+                flush()
+            buffer.append(RE_QUOTE_MARKER.sub("", line).strip())
+            in_quote = True
         elif RE_LINE_MARKER.match(line):
             flush()
             buffer.append(RE_LINE_MARKER.sub("", line).strip())
+            in_quote = False
         else:
             buffer.append(stripped)
     flush()

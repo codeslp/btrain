@@ -249,6 +249,31 @@ check(
     f"violations={ste.lint(mismatched_span, 20)['violations']}",
 )
 
+# Soft-wrapped blockquote lines are one sentence, and a long quoted
+# sentence cannot evade the length check by wrapping.
+quoted = (
+    "> The deploy script must run with every flag that the release\n"
+    "> runbook names before the health endpoint gets checked at all."
+)
+quoted_result = ste.lint(quoted, 20)
+check(
+    "soft-wrapped blockquote is one sentence",
+    quoted_result["sentences"] == 1,
+    f"sentences={quoted_result['sentences']}",
+)
+check(
+    "long wrapped blockquote sentence is flagged",
+    quoted_result["violations"]["long_sentences"] == 1,
+)
+
+# An abbreviation before a numeric continuation stays mid-sentence.
+abbrev_num = "Keep instructions short, i.e. 20 words or fewer for every step."
+check(
+    "abbreviation before a number stays inside its sentence",
+    ste.lint(abbrev_num, 20)["sentences"] == 1,
+    f"sentences={ste.lint(abbrev_num, 20)['sentences']}",
+)
+
 # A heading is its own unit, never glued to the prose below it.
 headed = "# Deployment guide overview\nThe system starts now."
 check(
