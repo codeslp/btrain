@@ -113,6 +113,10 @@ def strip_code(text):
             # Blank it so the quote still separates surrounding prose.
             lines.append("")
             continue
+        if RE_LINK_DEF.match(line):
+            # A reference-link definition is a destination, not prose.
+            lines.append("")
+            continue
         lines.append(line)
 
     # An indented (4+ space or tab) block after a blank line is code.
@@ -148,6 +152,8 @@ def strip_code(text):
         text,
     )
     text = re.sub(r"<https?://[^>\s]+>", " ", text)
+    # Reference-style link: keep the text, drop the label.
+    text = re.sub(r"!?\[([^\]]*)\]\[[^\]]*\]", r"\1", text)
     return text
 
 
@@ -159,7 +165,8 @@ RE_SENT_SPLIT = re.compile(r"(?<=[.!?])[)*_\"'\]]*\s+")
 # when lowercase prose continues after it. The lookahead is scoped
 # case-sensitive so an uppercase sentence opener still ends the sentence.
 RE_ABBREV_DOT = re.compile(r"\b(e\.g|i\.e|vs|cf|etc|approx)\.(?=\s+(?-i:[a-z0-9]))", re.IGNORECASE)
-RE_QUOTE_MARKER = re.compile(r"^\s*>\s+")
+RE_QUOTE_MARKER = re.compile(r"^ {0,3}>")
+RE_LINK_DEF = re.compile(r"^ {0,3}\[[^\]]+\]:\s+\S+.*$")
 
 
 def sentences_of(text):

@@ -263,6 +263,12 @@ check(
     quoted_result["sentences"] == 0,
     f"sentences={quoted_result['sentences']}",
 )
+no_space_quote = ">We utilize seamless robust tooling here."
+check(
+    "blockquote without a space after the marker is exempt",
+    ste.lint(no_space_quote, 20)["total_violations"] == 0,
+    f"violations={ste.lint(no_space_quote, 20)['violations']}",
+)
 around_quote = "The report said it plainly.\n> utilize seamless\nWe disagreed with the quote."
 check(
     "prose around a blockquote stays separate and linted",
@@ -312,6 +318,21 @@ check(
     "link text still counted as words",
     link_result["words"] == 5,
     f"words={link_result['words']}",
+)
+ref_link = (
+    "See [the guide][g] now.\n\n"
+    '[g]: https://example.com/utilize-seamless "Utilize Seamless"'
+)
+ref_result = ste.lint(ref_link, 20)
+check(
+    "reference link definition and label excluded from prose",
+    ref_result["total_violations"] == 0,
+    f"violations={ref_result['violations']}",
+)
+check(
+    "reference link text still counted as words",
+    ref_result["words"] == 4,
+    f"words={ref_result['words']}",
 )
 paren_link = "See [the guide](https://example.com/utilize(seamless)robust) now."
 check(
