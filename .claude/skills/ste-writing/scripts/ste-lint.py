@@ -123,10 +123,15 @@ def strip_code(text):
         out.append(line)
         prev_blank = is_blank
     text = "\n".join(out)
-    # A code span opens with a backtick run and closes on an equal-length
-    # run. It may cross line breaks but never a blank line (a blank line
-    # ends the enclosing block).
-    text = re.sub(r"(`+)(?:(?!\n[ \t]*\n)[\s\S])*?\1(?!`)", " ", text)
+    # A code span opens with a backtick run and closes on an exactly
+    # equal-length run (no backtick on either side, so a longer run's
+    # suffix never matches). It may cross line breaks but never a blank
+    # line (a blank line ends the enclosing block).
+    text = re.sub(
+        r"(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)",
+        " ",
+        text,
+    )
     # Link destination: <angle-bracketed>, or a path with one level of
     # balanced parentheses; optional quoted title.
     text = re.sub(
@@ -146,8 +151,9 @@ RE_HEADING = re.compile(r"^\s*#+\s+")
 # End punctuation may be followed by closing markdown/quote markers.
 RE_SENT_SPLIT = re.compile(r"(?<=[.!?])[)*_\"'\]]*\s+")
 # A dot after these mid-sentence abbreviations is not end punctuation
-# when lowercase prose (or a parenthetical) continues after it.
-RE_ABBREV_DOT = re.compile(r"\b(e\.g|i\.e|vs|cf|etc|approx)\.(?=\s+[a-z(])", re.IGNORECASE)
+# when lowercase prose continues after it. The lookahead is scoped
+# case-sensitive so an uppercase sentence opener still ends the sentence.
+RE_ABBREV_DOT = re.compile(r"\b(e\.g|i\.e|vs|cf|etc|approx)\.(?=\s+(?-i:[a-z]))", re.IGNORECASE)
 
 
 def sentences_of(text):

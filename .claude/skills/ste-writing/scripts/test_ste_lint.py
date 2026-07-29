@@ -232,6 +232,23 @@ check(
     abbrev_result["violations"]["long_sentences"] == 1,
 )
 
+# An abbreviation followed by an uppercase opener ends its sentence.
+abbrev_end = "Use Linux, etc. Restart the service."
+check(
+    "sentence-ending abbreviation still splits",
+    ste.lint(abbrev_end, 20)["sentences"] == 2,
+    f"sentences={ste.lint(abbrev_end, 20)['sentences']}",
+)
+
+# Mismatched backtick runs are not a code span (CommonMark leaves them
+# literal), so their content stays prose.
+mismatched_span = "Use ``utilize``` now."
+check(
+    "mismatched backtick runs stay prose",
+    ste.lint(mismatched_span, 20)["violations"]["banned_words"] == 1,
+    f"violations={ste.lint(mismatched_span, 20)['violations']}",
+)
+
 # A heading is its own unit, never glued to the prose below it.
 headed = "# Deployment guide overview\nThe system starts now."
 check(
