@@ -8,7 +8,9 @@ description: Write or rewrite non-code prose in Simplified Technical English (ad
 Adapted from ASD-STE100 Simplified Technical English via woosal1337's ep01 experiment
 (https://github.com/woosal1337/blog/tree/main/videos/ep01-the-cure-for-ai-slop).
 Upstream code is MIT-licensed; see the NOTICE file in this skill's directory.
-Cross-model tests there cut lint violations 50-74% versus baseline prose.
+The evidence, expressiveness-risk analysis, adoption decision, and known
+limitations live in `research/ste-writing-evaluation.md` — ground any change
+to this skill in that doc.
 
 ## Goal
 
