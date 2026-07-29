@@ -63,6 +63,16 @@ check(
     "markdown table is not a long paragraph",
     ste.lint(table, 20)["violations"]["long_paragraphs"] == 0,
 )
+check(
+    "headings are not list items for block detection",
+    not ste.is_list_block("# One\n## Two\n### Three"),
+)
+heading_block = "\n".join(f"#{'#' * (i % 3)} Heading {i}" for i in range(7)) + "\nProse line."
+check(
+    "heading-heavy block is not exempt from the paragraph cap",
+    ste.lint(heading_block, 20)["violations"]["long_paragraphs"] == 1,
+    f"long_paragraphs={ste.lint(heading_block, 20)['violations']['long_paragraphs']}",
+)
 
 # A genuinely long sentence is still flagged.
 long_sentence = "The system " + "very " * 25 + "slowly starts."
@@ -143,6 +153,12 @@ check(
 code_text = "Use the tool.\n\n```\nutilize seamless; robust don't\n```\nRun `utilize --seamlessly` now."
 code_result = ste.lint(code_text, 20)
 check("code blocks stripped", code_result["total_violations"] == 0)
+double_span = "Run ``seamless ` utilize`` now."
+check(
+    "multi-backtick code span stripped",
+    ste.lint(double_span, 20)["total_violations"] == 0,
+    f"violations={ste.lint(double_span, 20)['violations']}",
+)
 tilde_text = "Use the tool.\n\n~~~\nutilize seamless; robust don't\n~~~\nDone."
 check(
     "tilde-fenced code stripped",

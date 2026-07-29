@@ -103,13 +103,14 @@ def strip_code(text):
             continue
         lines.append(line)
     text = "\n".join(lines)
-    text = re.sub(r"`[^`\n]+`", " ", text)
+    # A code span opens with a backtick run and closes on an equal-length run.
+    text = re.sub(r"(`+)[^\n]*?\1(?!`)", " ", text)
     text = re.sub(r"!?\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)", r"\1", text)
     text = re.sub(r"<https?://[^>\s]+>", " ", text)
     return text
 
 
-RE_LINE_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)]|#+|>)\s+")
+RE_LINE_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s+")
 RE_HEADING = re.compile(r"^\s*#+\s+")
 RE_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
