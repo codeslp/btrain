@@ -83,6 +83,7 @@ RE_HEDGES = word_list_regex(HEDGE_PHRASES)
 
 
 RE_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+RE_FENCE_CLOSE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
 
 
 def strip_code(text):
@@ -93,11 +94,13 @@ def strip_code(text):
     lines = []
     fence = None  # (char, length) of the open fence
     for line in text.splitlines():
-        match = RE_FENCE.match(line)
         if fence:
-            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1]:
+            # Only a bare delimiter (no info string) closes an open fence.
+            close = RE_FENCE_CLOSE.match(line)
+            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= fence[1]:
                 fence = None
             continue
+        match = RE_FENCE.match(line)
         if match:
             fence = (match.group(1)[0], len(match.group(1)))
             continue

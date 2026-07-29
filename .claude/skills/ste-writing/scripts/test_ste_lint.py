@@ -174,6 +174,12 @@ check(
     "unclosed fence runs to end of input",
     ste.lint(unclosed, 20)["total_violations"] == 0,
 )
+suffixed_close = "Use the tool.\n\n```\nutilize\n```python\nseamless robust\n```\nDone."
+check(
+    "fence line with info string does not close an open fence",
+    ste.lint(suffixed_close, 20)["total_violations"] == 0,
+    f"violations={ste.lint(suffixed_close, 20)['violations']}",
+)
 mixed_fence = "Use the tool.\n\n```\nseamless ~~~ utilize\n```\nDone."
 check(
     "tilde inside backtick fence does not close it",
