@@ -215,6 +215,20 @@ check(
     f"sentences={ste.lint(headed, 20)['sentences']}",
 )
 
+# Indented (4-space) code blocks after a blank line are code, not prose.
+indented_code = "Prose stays here.\n\n    utilize seamless robust code\n    more(code); here\n\nDone."
+indented_result = ste.lint(indented_code, 20)
+check(
+    "indented code block excluded from prose",
+    indented_result["total_violations"] == 0,
+    f"violations={indented_result['violations']}",
+)
+check(
+    "prose around indented code stays separate",
+    indented_result["sentences"] == 2,
+    f"sentences={indented_result['sentences']}",
+)
+
 # Link destinations are not prose; link text is.
 linked = "Read the [deployment guide](https://example.com/utilize-seamless;robust) now."
 link_result = ste.lint(linked, 20)
@@ -227,6 +241,18 @@ check(
     "link text still counted as words",
     link_result["words"] == 5,
     f"words={link_result['words']}",
+)
+paren_link = "See [the guide](https://example.com/utilize(seamless)robust) now."
+check(
+    "parenthesized link destination fully stripped",
+    ste.lint(paren_link, 20)["total_violations"] == 0,
+    f"violations={ste.lint(paren_link, 20)['violations']}",
+)
+angle_link = "See [the guide](<https://example.com/utilize seamless robust>) now."
+check(
+    "angle-bracket link destination fully stripped",
+    ste.lint(angle_link, 20)["total_violations"] == 0,
+    f"violations={ste.lint(angle_link, 20)['violations']}",
 )
 
 # Core violation classes are detected.

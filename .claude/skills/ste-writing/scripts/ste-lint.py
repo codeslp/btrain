@@ -109,12 +109,34 @@ def strip_code(text):
             lines.append("")
             continue
         lines.append(line)
-    text = "\n".join(lines)
+
+    # An indented (4+ space or tab) block after a blank line is code.
+    # Blank the lines so the block still separates surrounding prose.
+    out = []
+    prev_blank = True
+    for line in lines:
+        is_blank = not line.strip()
+        indented = bool(re.match(r"^(?: {4,}|\t)", line))
+        if indented and prev_blank and not is_blank:
+            out.append("")
+            continue  # prev_blank stays True, so the block continues
+        out.append(line)
+        prev_blank = is_blank
+    text = "\n".join(out)
     # A code span opens with a backtick run and closes on an equal-length
     # run. It may cross line breaks but never a blank line (a blank line
     # ends the enclosing block).
     text = re.sub(r"(`+)(?:(?!\n[ \t]*\n)[\s\S])*?\1(?!`)", " ", text)
-    text = re.sub(r"!?\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)", r"\1", text)
+    # Link destination: <angle-bracketed>, or a path with one level of
+    # balanced parentheses; optional quoted title.
+    text = re.sub(
+        r"!?\[([^\]]*)\]\("
+        r"(?:<[^>\n]*>|[^()\s]*(?:\([^()\s]*\)[^()\s]*)*)"
+        r"(?:\s+(?:\"[^\"]*\"|'[^']*'))?"
+        r"\)",
+        r"\1",
+        text,
+    )
     text = re.sub(r"<https?://[^>\s]+>", " ", text)
     return text
 
@@ -230,7 +252,13 @@ def report(name, result):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("files", nargs="*", help="files to lint; stdin when omitted")
-    ap.add_argument("--strict", action="store_true", help="20-word sentence limit (default 25)")
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="apply the 20-word instruction limit to every sentence (default is "
+        "the 25-word descriptive limit; a heuristic cannot tell instructions "
+        "from descriptions, so strict mode over-flags conservatively)",
+    )
     ap.add_argument("--json", action="store_true", help="emit JSON")
     args = ap.parse_args()
 
