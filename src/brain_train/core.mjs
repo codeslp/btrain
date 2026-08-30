@@ -7329,12 +7329,15 @@ async function executeLoopCliRunnerWithStreaming(
     spawnError = error
   })
 
+  let forceKillHandle = null
   if (timeoutMs > 0) {
     timeoutHandle = setTimeout(() => {
       timedOut = true
       child.kill("SIGTERM")
-      setTimeout(() => {
-        if (!child.killed) {
+      // child.killed is true as soon as SIGTERM is *sent*, not when the
+      // process exits. Check whether it is still running before SIGKILL.
+      forceKillHandle = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
           child.kill("SIGKILL")
         }
       }, 1000)
@@ -7347,6 +7350,9 @@ async function executeLoopCliRunnerWithStreaming(
 
   if (timeoutHandle) {
     clearTimeout(timeoutHandle)
+  }
+  if (forceKillHandle) {
+    clearTimeout(forceKillHandle)
   }
 
   observer.flush()

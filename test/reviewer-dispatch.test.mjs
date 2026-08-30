@@ -94,6 +94,7 @@ if (action === "fail") {
   process.exit(1)
 }
 if (action === "hang") {
+  process.on("SIGTERM", () => {})
   setInterval(() => {}, 1000)
   return
 }
