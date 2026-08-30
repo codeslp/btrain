@@ -7828,7 +7828,14 @@ async function finishPatchWithReviewerDispatch(repoRoot, {
     })
   }
 
-  return updatedCurrent
+  if (dispatch.status === "skipped") {
+    return updatedCurrent
+  }
+
+  const handoffPath = laneId
+    ? getLaneHandoffPath(repoRoot, config, laneId)
+    : getConfiguredRepoPaths(repoRoot, config).handoffPath
+  return readCurrentState(repoRoot, { config, handoffPath, laneId })
 }
 
 async function runLoop({
