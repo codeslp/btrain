@@ -34,6 +34,7 @@ async function runCli(args, cwd, envOverrides = {}) {
   }
   Object.assign(env, {
     BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"),
+    BTRAIN_NO_REVIEW_DISPATCH: "1",
     ...envOverrides,
   })
 

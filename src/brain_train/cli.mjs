@@ -92,7 +92,7 @@ Usage:
   btrain handoff show-next [--lane <id>] [--repo <path>]                         Print the full Next Action body, expanding any .btrain/handoff-notes/ pointer
   btrain handoff claim --task <text> --owner <name> [--reviewer <name|any-other>] [--pr <number|url>] [options]
                                                                               Claim a new task. --pr links a GH PR; --unblocked-context records a soft claim-time context check.
-  btrain handoff update [--pr <number|url>] [options]                            Update the current handoff state. Use --pr to link or relink the PR after the lane is claimed.
+  btrain handoff update [--pr <number|url>] [--no-dispatch] [options]              Update the current handoff state. Use --pr to link or relink the PR after the lane is claimed.
   btrain handoff request-changes [--summary <text>] [--next <text>] [--actor <name>]
                                                                               Return review findings to the writer
   btrain handoff resolve [--summary <text>] [--next <text>] [--actor <name>]    Resolve the current handoff
@@ -188,6 +188,7 @@ Handoff/Lane Options:
   --bots <list>     PR review bots to request. Defaults to all configured required bots.
   --apply           For \`btrain pr poll\`, update the lane status from the PR classification.
   --final           For \`handoff resolve\`, fully resolve instead of advancing local approval into PR flow.
+  --no-dispatch     For \`handoff update --status needs-review\`, write the lane but do not spawn the reviewer runner.
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
@@ -200,7 +201,8 @@ Notes:
   - \`loop\` reads the active harness profile from \`[harness].active_profile\` in \`.btrain/project.toml\`; new repos default to the bundled \`default\` profile.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
   - \`loop\` uses \`[agents.runners]\` in \`.btrain/project.toml\` and dispatches \`bth\`; the lane delegation packet is surfaced via \`btrain handoff\`, not embedded in the prompt.
-  - \`review run\` automates \`parallel\` and \`hybrid\` modes. \`manual\` mode reports a no-op.
+  - Entering \`needs-review\` starts that same loop dispatch for the peer reviewer when they have a CLI runner. \`notify\` runners are not spawned. Pass \`--no-dispatch\` or set \`BTRAIN_NO_REVIEW_DISPATCH=1\` to keep waiting without spawning.
+  - \`review run\` automates \`parallel\` and \`hybrid\` modes. \`manual\` mode reports a no-op and does not control reviewer dispatch.
   - \`sync-templates\` only updates the managed blocks in \`AGENTS.md\` and \`CLAUDE.md\`.
   - When \`[lanes]\` is configured in project.toml, agents can work concurrently on separate lanes.
   - \`override grant\` writes a pending audited override under \`.btrain/overrides/\`; push overrides are consumed automatically by the managed pre-push hook.
@@ -1661,7 +1663,10 @@ async function run() {
     }
 
     if (subcommand === "update") {
-      await patchHandoff(repoRoot, options)
+      await patchHandoff(repoRoot, {
+        ...options,
+        onEvent: (line) => console.log(line),
+      })
       const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return

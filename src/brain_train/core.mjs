@@ -267,6 +267,7 @@ const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
 const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
+const BTRAIN_LOOP_ACTIVE_ENV = "BTRAIN_LOOP_ACTIVE"
 function claudeBashPermissions(...commands) {
   return commands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`])
 }
@@ -5261,7 +5262,7 @@ async function patchHandoff(repoRoot, options) {
             })
           : null
 
-      return updateHandoff(repoRoot, updates, {
+      const updatedCurrent = await updateHandoff(repoRoot, updates, {
         actorLabel: resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
@@ -5284,6 +5285,14 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
+      })
+      return finishPatchWithReviewerDispatch(repoRoot, {
+        previousStatus: existingCurrent.status,
+        nextStatus,
+        laneId,
+        config,
+        options,
+        updatedCurrent,
       })
     }
   }
@@ -5410,7 +5419,7 @@ async function patchHandoff(repoRoot, options) {
         })
       : null
 
-  return updateHandoff(repoRoot, updates, {
+  const updatedCurrent = await updateHandoff(repoRoot, updates, {
     actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
     delegationPacketSectionText:
       delegationPacketUpdated
@@ -5431,6 +5440,14 @@ async function patchHandoff(repoRoot, options) {
       repairAttempts: updates.repairAttempts || 0,
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
+  })
+  return finishPatchWithReviewerDispatch(repoRoot, {
+    previousStatus: existingCurrent.status,
+    nextStatus,
+    laneId,
+    config,
+    options,
+    updatedCurrent,
   })
 }
 
@@ -7249,6 +7266,7 @@ function buildLoopRunnerEnv(agentName, laneId = "", repoRoot = "") {
     ...process.env,
     BTRAIN_AGENT: agentName,
     BRAIN_TRAIN_AGENT: agentName,
+    [BTRAIN_LOOP_ACTIVE_ENV]: "1",
   }
 
   if (laneId) {
@@ -7690,6 +7708,123 @@ async function finalizeLoopTrace(trace, result) {
   })
 
   return { ...result, traceRunId: trace.runId }
+}
+
+function isTruthyEnvFlag(value) {
+  if (value === undefined || value === null) {
+    return false
+  }
+  const normalized = String(value).trim().toLowerCase()
+  return normalized === "1" || normalized === "true" || normalized === "yes"
+}
+
+function classifyNeedsReviewDispatch(result, previousStatus = "needs-review") {
+  const finalStatus = result.finalCurrent?.status || previousStatus
+  if (result.status === "failed" || result.status === "timed-out") {
+    return { status: result.status, finalStatus }
+  }
+  if (finalStatus && finalStatus !== "needs-review") {
+    return { status: "completed", finalStatus }
+  }
+  return { status: "failed", finalStatus }
+}
+
+async function dispatchNeedsReviewReviewer(repoRoot, {
+  laneId = "",
+  config,
+  timeout,
+  pollInterval,
+  onEvent = () => {},
+  skip = false,
+} = {}) {
+  if (skip || isTruthyEnvFlag(process.env.BTRAIN_NO_REVIEW_DISPATCH)) {
+    return { status: "skipped", reason: "disabled" }
+  }
+  if (isTruthyEnvFlag(process.env[BTRAIN_LOOP_ACTIVE_ENV])) {
+    return { status: "skipped", reason: "loop-active" }
+  }
+
+  const projectConfig = config || await readProjectConfig(repoRoot)
+  const handoffPath = laneId
+    ? getLaneHandoffPath(repoRoot, projectConfig, laneId)
+    : getConfiguredRepoPaths(repoRoot, projectConfig).handoffPath
+  const current = await readCurrentState(repoRoot, { config: projectConfig, handoffPath, laneId })
+  const agentName = current.reviewer || ""
+  if (!agentName) {
+    return { status: "skipped", reason: "no-reviewer" }
+  }
+
+  const harnessProfile = await resolveActiveHarnessProfile(repoRoot, projectConfig)
+  const baseLoopPrompt = harnessProfile.loop.dispatchPrompt || LOOP_PROMPT
+  const loopPrompt = laneId ? `${baseLoopPrompt} --lane ${laneId}` : baseLoopPrompt
+  const runner = resolveLoopRunner(agentName, projectConfig, repoRoot, {
+    prompt: loopPrompt,
+    permissionPhase: getLoopRunnerPermissionPhase(current),
+  })
+
+  if (runner.type !== "cli") {
+    onEvent(`reviewer dispatch skipped: notify runner for ${agentName} is not spawned`)
+    return {
+      status: "skipped",
+      reason: runner.fallback ? "notify-fallback" : "notify-runner",
+      agentName,
+      runnerType: "notify",
+    }
+  }
+
+  const result = await runLoop({
+    repoRoot,
+    lane: laneId || undefined,
+    maxRounds: 1,
+    timeout,
+    pollInterval,
+    dryRun: false,
+    onEvent,
+  })
+  const classified = classifyNeedsReviewDispatch(result, current.status)
+  return {
+    status: classified.status,
+    loopStatus: result.status,
+    agentName,
+    runnerType: "cli",
+    command: runner.displayCommand,
+    finalStatus: classified.finalStatus,
+    stopReason: result.stopReason,
+  }
+}
+
+async function finishPatchWithReviewerDispatch(repoRoot, {
+  previousStatus,
+  nextStatus,
+  laneId = "",
+  config,
+  options = {},
+  updatedCurrent,
+}) {
+  if (nextStatus !== "needs-review" || previousStatus === "needs-review") {
+    return updatedCurrent
+  }
+
+  const onEvent = typeof options.onEvent === "function" ? options.onEvent : () => {}
+  const dispatch = await dispatchNeedsReviewReviewer(repoRoot, {
+    laneId,
+    config,
+    timeout: options.timeout,
+    pollInterval: options["poll-interval"],
+    onEvent,
+    skip: options["no-dispatch"] === true,
+  })
+
+  if (dispatch.status === "failed" || dispatch.status === "timed-out") {
+    const loopHint = laneId ? `btrain loop --lane ${laneId}` : "btrain loop"
+    throw new BtrainError({
+      message: `Reviewer dispatch ${dispatch.status} for ${dispatch.agentName || "the reviewer"}.`,
+      reason: dispatch.stopReason || "The reviewer runner exited without updating the lane.",
+      fix: `The lane remains \`needs-review\` (not approved). Inspect the runner output, then re-run \`${loopHint}\` or complete the review with \`btrain handoff resolve\` / \`request-changes\`.`,
+    })
+  }
+
+  return updatedCurrent
 }
 
 async function runLoop({
