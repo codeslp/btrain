@@ -7290,6 +7290,24 @@ function buildLoopRunnerEnv(agentName, laneId = "", repoRoot = "") {
   return env
 }
 
+
+function signalProcessTree(child, signal) {
+  if (!child?.pid) {
+    return
+  }
+  try {
+    process.kill(-child.pid, signal)
+    return
+  } catch {
+    // Not a process-group leader, or already exited.
+  }
+  try {
+    child.kill(signal)
+  } catch {
+    // Already exited.
+  }
+}
+
 async function executeLoopCliRunnerWithStreaming(
   agentName,
   runner,
@@ -7304,6 +7322,7 @@ async function executeLoopCliRunnerWithStreaming(
     cwd: repoRoot,
     env: buildLoopRunnerEnv(agentName, laneId, repoRoot),
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   })
 
   let timedOut = false
@@ -7333,12 +7352,12 @@ async function executeLoopCliRunnerWithStreaming(
   if (timeoutMs > 0) {
     timeoutHandle = setTimeout(() => {
       timedOut = true
-      child.kill("SIGTERM")
+      signalProcessTree(child, "SIGTERM")
       // child.killed is true as soon as SIGTERM is *sent*, not when the
       // process exits. Check whether it is still running before SIGKILL.
       forceKillHandle = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGKILL")
+          signalProcessTree(child, "SIGKILL")
         }
       }, 1000)
     }, timeoutMs)
@@ -7779,6 +7798,17 @@ async function dispatchNeedsReviewReviewer(repoRoot, {
       reason: runner.fallback ? "notify-fallback" : "notify-runner",
       agentName,
       runnerType: "notify",
+    }
+  }
+
+  const latest = await readCurrentState(repoRoot, { config: projectConfig, handoffPath, laneId })
+  if (latest.status !== "needs-review") {
+    onEvent(`reviewer dispatch skipped: lane is ${latest.status}`)
+    return {
+      status: "skipped",
+      reason: "status-changed",
+      agentName,
+      finalStatus: latest.status,
     }
   }
 

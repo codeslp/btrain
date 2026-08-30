@@ -95,6 +95,10 @@ if (action === "fail") {
 }
 if (action === "hang") {
   process.on("SIGTERM", () => {})
+  const { spawn } = require("node:child_process")
+  spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+    stdio: ["ignore", "inherit", "inherit"],
+  })
   setInterval(() => {}, 1000)
   return
 }
