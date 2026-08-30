@@ -15,5 +15,10 @@ export function withoutLaneScope(env = process.env) {
   for (const key of LANE_SCOPE_KEYS) {
     delete clean[key]
   }
+  // Existing tests must not auto-spawn configured claude/codex CLIs when a
+  // lane enters needs-review. Opt in with BTRAIN_NO_REVIEW_DISPATCH=0.
+  if (clean.BTRAIN_NO_REVIEW_DISPATCH === undefined) {
+    clean.BTRAIN_NO_REVIEW_DISPATCH = "1"
+  }
   return clean
 }

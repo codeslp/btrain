@@ -267,6 +267,7 @@ const DEFAULT_LOOP_MAX_ROUNDS = 10
 const DEFAULT_LOOP_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_LOOP_POLL_INTERVAL_MS = 2 * 1000
 const LOOP_PROMPT = FALLBACK_LOOP_DISPATCH_PROMPT
+const BTRAIN_LOOP_ACTIVE_ENV = "BTRAIN_LOOP_ACTIVE"
 function claudeBashPermissions(...commands) {
   return commands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`])
 }
@@ -5051,6 +5052,10 @@ async function patchHandoff(repoRoot, options) {
   }
 
   validateHandoffStatus(options.status)
+  if (options.status === "needs-review" && options["no-dispatch"] !== true) {
+    normalizePositiveDuration(options.timeout, DEFAULT_LOOP_TIMEOUT_MS, "--timeout")
+    normalizePositiveDuration(options["poll-interval"], DEFAULT_LOOP_POLL_INTERVAL_MS, "--poll-interval")
+  }
 
   const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
   const configuredAgents = getConfiguredAgentNames(config)
@@ -5261,7 +5266,7 @@ async function patchHandoff(repoRoot, options) {
             })
           : null
 
-      return updateHandoff(repoRoot, updates, {
+      const updatedCurrent = await updateHandoff(repoRoot, updates, {
         actorLabel: resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
@@ -5284,6 +5289,14 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
+      })
+      return finishPatchWithReviewerDispatch(repoRoot, {
+        previousStatus: existingCurrent.status,
+        nextStatus,
+        laneId,
+        config,
+        options,
+        updatedCurrent,
       })
     }
   }
@@ -5410,7 +5423,7 @@ async function patchHandoff(repoRoot, options) {
         })
       : null
 
-  return updateHandoff(repoRoot, updates, {
+  const updatedCurrent = await updateHandoff(repoRoot, updates, {
     actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
     delegationPacketSectionText:
       delegationPacketUpdated
@@ -5431,6 +5444,14 @@ async function patchHandoff(repoRoot, options) {
       repairAttempts: updates.repairAttempts || 0,
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
+  })
+  return finishPatchWithReviewerDispatch(repoRoot, {
+    previousStatus: existingCurrent.status,
+    nextStatus,
+    laneId,
+    config,
+    options,
+    updatedCurrent,
   })
 }
 
@@ -7249,6 +7270,7 @@ function buildLoopRunnerEnv(agentName, laneId = "", repoRoot = "") {
     ...process.env,
     BTRAIN_AGENT: agentName,
     BRAIN_TRAIN_AGENT: agentName,
+    [BTRAIN_LOOP_ACTIVE_ENV]: "1",
   }
 
   if (laneId) {
@@ -7268,6 +7290,41 @@ function buildLoopRunnerEnv(agentName, laneId = "", repoRoot = "") {
   return env
 }
 
+
+function signalProcessTree(child, signal) {
+  if (!child?.pid) {
+    return
+  }
+  // Spawned with detached:true so the child is a process-group leader. A
+  // negative pid signals the whole group, including descendants that may
+  // still hold inherited stdout/stderr pipes after the direct child dies.
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal)
+      return
+    } catch (error) {
+      if (error.code === "ESRCH") {
+        return
+      }
+    }
+  }
+  try {
+    child.kill(signal)
+  } catch (error) {
+    if (error.code !== "ESRCH") {
+      // Best-effort: the process may already be exiting.
+    }
+  }
+}
+
+function destroyLoopRunnerStdio(child) {
+  for (const stream of [child.stdout, child.stderr]) {
+    if (stream && !stream.destroyed) {
+      stream.destroy()
+    }
+  }
+}
+
 async function executeLoopCliRunnerWithStreaming(
   agentName,
   runner,
@@ -7282,6 +7339,8 @@ async function executeLoopCliRunnerWithStreaming(
     cwd: repoRoot,
     env: buildLoopRunnerEnv(agentName, laneId, repoRoot),
     stdio: ["ignore", "pipe", "pipe"],
+    // New process group so timeout can signal descendants, not just this child.
+    detached: process.platform !== "win32",
   })
 
   let timedOut = false
@@ -7307,13 +7366,19 @@ async function executeLoopCliRunnerWithStreaming(
     spawnError = error
   })
 
+  let forceKillHandle = null
   if (timeoutMs > 0) {
     timeoutHandle = setTimeout(() => {
       timedOut = true
-      child.kill("SIGTERM")
-      setTimeout(() => {
-        if (!child.killed) {
-          child.kill("SIGKILL")
+      signalProcessTree(child, "SIGTERM")
+      // child.killed is true as soon as SIGTERM is *sent*, not when the
+      // process exits. Check whether it is still running before SIGKILL.
+      forceKillHandle = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          signalProcessTree(child, "SIGKILL")
+          // Descendants outside our group can keep inherited pipes open,
+          // which blocks Node's close event. Drop our ends so await returns.
+          destroyLoopRunnerStdio(child)
         }
       }, 1000)
     }, timeoutMs)
@@ -7325,6 +7390,9 @@ async function executeLoopCliRunnerWithStreaming(
 
   if (timeoutHandle) {
     clearTimeout(timeoutHandle)
+  }
+  if (forceKillHandle) {
+    clearTimeout(forceKillHandle)
   }
 
   observer.flush()
@@ -7690,6 +7758,149 @@ async function finalizeLoopTrace(trace, result) {
   })
 
   return { ...result, traceRunId: trace.runId }
+}
+
+function isTruthyEnvFlag(value) {
+  if (value === undefined || value === null) {
+    return false
+  }
+  const normalized = String(value).trim().toLowerCase()
+  return normalized === "1" || normalized === "true" || normalized === "yes"
+}
+
+function classifyNeedsReviewDispatch(result, previousStatus = "needs-review") {
+  const finalStatus = result.finalCurrent?.status || previousStatus
+  if (finalStatus && finalStatus !== "needs-review") {
+    return { status: "completed", finalStatus }
+  }
+  if (result.status === "failed" || result.status === "timed-out") {
+    return { status: result.status, finalStatus }
+  }
+  return { status: "failed", finalStatus }
+}
+
+async function dispatchNeedsReviewReviewer(repoRoot, {
+  laneId = "",
+  config,
+  timeout,
+  pollInterval,
+  onEvent = () => {},
+  skip = false,
+} = {}) {
+  if (skip || isTruthyEnvFlag(process.env.BTRAIN_NO_REVIEW_DISPATCH)) {
+    return { status: "skipped", reason: "disabled" }
+  }
+  if (isTruthyEnvFlag(process.env[BTRAIN_LOOP_ACTIVE_ENV])) {
+    return { status: "skipped", reason: "loop-active" }
+  }
+
+  const projectConfig = config || await readProjectConfig(repoRoot)
+  const handoffPath = laneId
+    ? getLaneHandoffPath(repoRoot, projectConfig, laneId)
+    : getConfiguredRepoPaths(repoRoot, projectConfig).handoffPath
+  const current = await readCurrentState(repoRoot, { config: projectConfig, handoffPath, laneId })
+  const agentName = current.reviewer || ""
+  if (!agentName) {
+    return { status: "skipped", reason: "no-reviewer" }
+  }
+
+  const harnessProfile = await resolveActiveHarnessProfile(repoRoot, projectConfig)
+  const baseLoopPrompt = harnessProfile.loop.dispatchPrompt || LOOP_PROMPT
+  const loopPrompt = laneId ? `${baseLoopPrompt} --lane ${laneId}` : baseLoopPrompt
+  const runner = resolveLoopRunner(agentName, projectConfig, repoRoot, {
+    prompt: loopPrompt,
+    permissionPhase: getLoopRunnerPermissionPhase(current),
+  })
+
+  if (runner.type !== "cli") {
+    onEvent(`reviewer dispatch skipped: notify runner for ${agentName} is not spawned`)
+    return {
+      status: "skipped",
+      reason: runner.fallback ? "notify-fallback" : "notify-runner",
+      agentName,
+      runnerType: "notify",
+    }
+  }
+
+  // Another reviewer may have resolved/request-changes after we captured the
+  // runner above. Re-read before runLoop so we do not dispatch the owner for a
+  // newer status (ready-for-pr, changes-requested, ...). Return completed so
+  // finishPatchWithReviewerDispatch re-reads and surfaces the current state
+  // instead of the stale needs-review snapshot from updateHandoff.
+  const latest = await readCurrentState(repoRoot, { config: projectConfig, handoffPath, laneId })
+  if (latest.status !== "needs-review") {
+    onEvent(`reviewer dispatch skipped: lane already ${latest.status}`)
+    return {
+      status: "completed",
+      reason: "status-changed",
+      agentName,
+      runnerType: "cli",
+      command: runner.displayCommand,
+      finalStatus: latest.status,
+      stopReason: `Lane moved to ${latest.status} before reviewer dispatch.`,
+    }
+  }
+
+  const result = await runLoop({
+    repoRoot,
+    lane: laneId || undefined,
+    maxRounds: 1,
+    timeout,
+    pollInterval,
+    dryRun: false,
+    onEvent,
+  })
+  const classified = classifyNeedsReviewDispatch(result, current.status)
+  return {
+    status: classified.status,
+    loopStatus: result.status,
+    agentName,
+    runnerType: "cli",
+    command: runner.displayCommand,
+    finalStatus: classified.finalStatus,
+    stopReason: result.stopReason,
+  }
+}
+
+async function finishPatchWithReviewerDispatch(repoRoot, {
+  previousStatus,
+  nextStatus,
+  laneId = "",
+  config,
+  options = {},
+  updatedCurrent,
+}) {
+  if (nextStatus !== "needs-review" || previousStatus === "needs-review") {
+    return updatedCurrent
+  }
+
+  const onEvent = typeof options.onEvent === "function" ? options.onEvent : () => {}
+  const dispatch = await dispatchNeedsReviewReviewer(repoRoot, {
+    laneId,
+    config,
+    timeout: options.timeout,
+    pollInterval: options["poll-interval"],
+    onEvent,
+    skip: options["no-dispatch"] === true,
+  })
+
+  if (dispatch.status === "failed" || dispatch.status === "timed-out") {
+    const loopHint = laneId ? `btrain loop --lane ${laneId}` : "btrain loop"
+    throw new BtrainError({
+      message: `Reviewer dispatch ${dispatch.status} for ${dispatch.agentName || "the reviewer"}.`,
+      reason: dispatch.stopReason || "The reviewer runner exited without updating the lane.",
+      fix: `The lane remains \`needs-review\` (not approved). Inspect the runner output, then re-run \`${loopHint}\` or complete the review with \`btrain handoff resolve\` / \`request-changes\`.`,
+    })
+  }
+
+  if (dispatch.status === "skipped") {
+    return updatedCurrent
+  }
+
+  const handoffPath = laneId
+    ? getLaneHandoffPath(repoRoot, config, laneId)
+    : getConfiguredRepoPaths(repoRoot, config).handoffPath
+  return readCurrentState(repoRoot, { config, handoffPath, laneId })
 }
 
 async function runLoop({
