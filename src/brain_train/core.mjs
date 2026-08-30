@@ -5052,6 +5052,10 @@ async function patchHandoff(repoRoot, options) {
   }
 
   validateHandoffStatus(options.status)
+  if (options.status === "needs-review" && options["no-dispatch"] !== true) {
+    normalizePositiveDuration(options.timeout, DEFAULT_LOOP_TIMEOUT_MS, "--timeout")
+    normalizePositiveDuration(options["poll-interval"], DEFAULT_LOOP_POLL_INTERVAL_MS, "--poll-interval")
+  }
 
   const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
   const configuredAgents = getConfiguredAgentNames(config)

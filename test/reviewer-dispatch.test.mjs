@@ -167,6 +167,23 @@ async function readLane(tmpDir) {
 }
 
 describe("needs-review reviewer dispatch", () => {
+  it("rejects invalid dispatch timeout before writing needs-review", async () => {
+    const { tmpDir } = await setupRepo()
+    try {
+      const args = needsReviewArgs(tmpDir)
+      const timeoutIndex = args.indexOf("--timeout")
+      args[timeoutIndex + 1] = "0"
+      const result = await runBtrain(args, tmpDir)
+      assert.notEqual(result.code, 0)
+      assert.match(`${result.stdout}\n${result.stderr}`, /--timeout must be a positive number/)
+      const content = await readLane(tmpDir)
+      assert.match(content, /Status: in-progress/)
+      assert.doesNotMatch(content, /Status: needs-review/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
   it("spawns a claude -p reviewer and resolves the lane on approval", async () => {
     const { tmpDir } = await setupRepo()
     try {
