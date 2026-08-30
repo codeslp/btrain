@@ -95,7 +95,15 @@ if (action === "fail") {
 }
 if (action === "hang") {
   process.on("SIGTERM", () => {})
+  setInterval(() => {}, 1000)
+  return
+}
+if (action === "hang-tree") {
+  // Parent ignores SIGTERM and spawns a descendant that inherits stdout/stderr.
+  // Killing only the direct child leaves the descendant holding pipes open so
+  // Node's close event never fires unless the whole process group is signaled.
   const { spawn } = require("node:child_process")
+  process.on("SIGTERM", () => {})
   spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
     stdio: ["ignore", "inherit", "inherit"],
   })
@@ -324,6 +332,90 @@ describe("needs-review reviewer dispatch", () => {
       assert.match(content, /Status: needs-review/)
       assert.doesNotMatch(content, /Status: resolved/)
     } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("times out even when a reviewer descendant inherits stdout/stderr", async () => {
+    const { tmpDir } = await setupRepo()
+    try {
+      const args = needsReviewArgs(tmpDir)
+      const timeoutIndex = args.indexOf("--timeout")
+      args[timeoutIndex + 1] = "0.4"
+      const started = Date.now()
+      const result = await Promise.race([
+        runBtrain(args, tmpDir, { REVIEWER_ACTION: "hang-tree" }),
+        new Promise((resolve) =>
+          setTimeout(
+            () => resolve({ code: -1, stdout: "", stderr: "TEST_WALL_TIMEOUT" }),
+            8000,
+          ),
+        ),
+      ])
+      const elapsedMs = Date.now() - started
+      assert.notEqual(result.stderr, "TEST_WALL_TIMEOUT", "dispatch hung past wall timeout; process tree was not reaped")
+      assert.notEqual(result.code, 0)
+      assert.match(`${result.stdout}\n${result.stderr}`, /Reviewer dispatch timed-out|Timed out/)
+      assert.ok(elapsedMs < 7000, `expected timeout path to finish promptly, took ${elapsedMs}ms`)
+      const content = await readLane(tmpDir)
+      assert.match(content, /Status: needs-review/)
+      assert.doesNotMatch(content, /Status: resolved/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("returns the newer lane state when status leaves needs-review before dispatch", async () => {
+    const { tmpDir } = await setupRepo()
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    const spawnMark = path.join(tmpDir, "spawned.txt")
+    let poller
+    try {
+      poller = execFile(
+        process.execPath,
+        [
+          "-e",
+          `const fs = require("node:fs");
+const p = process.argv[1];
+const deadline = Date.now() + 20000;
+while (Date.now() < deadline) {
+  try {
+    let text = fs.readFileSync(p, "utf8");
+    if (text.includes("Status: needs-review")) {
+      text = text.replace("Status: needs-review", "Status: ready-for-pr");
+      fs.writeFileSync(p, text);
+      process.exit(0);
+    }
+  } catch {}
+}
+process.exit(1);`,
+          handoffPath,
+        ],
+        () => {},
+      )
+
+      const args = needsReviewArgs(tmpDir)
+      const timeoutIndex = args.indexOf("--timeout")
+      args[timeoutIndex + 1] = "2"
+      const started = Date.now()
+      const result = await runBtrain(args, tmpDir, {
+        REVIEWER_SPAWN_MARK: spawnMark,
+        REVIEWER_ACTION: "resolve",
+      })
+      const elapsedMs = Date.now() - started
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stdout, /status: ready-for-pr|lane already ready-for-pr/)
+      assert.doesNotMatch(result.stdout, /status: needs-review/)
+      // Must not fall into owner notify-wait for the full timeout budget.
+      assert.ok(elapsedMs < 1800, `expected early return after status change, took ${elapsedMs}ms`)
+      const content = await readLane(tmpDir)
+      assert.match(content, /Status: ready-for-pr/)
+      assert.doesNotMatch(content, /Status: needs-review/)
+      assert.doesNotMatch(content, /Status: resolved/)
+    } finally {
+      if (poller?.pid) {
+        try { process.kill(poller.pid, "SIGKILL") } catch {}
+      }
       await rmDir(tmpDir)
     }
   })

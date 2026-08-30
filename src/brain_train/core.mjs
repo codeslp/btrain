@@ -7295,16 +7295,33 @@ function signalProcessTree(child, signal) {
   if (!child?.pid) {
     return
   }
-  try {
-    process.kill(-child.pid, signal)
-    return
-  } catch {
-    // Not a process-group leader, or already exited.
+  // Spawned with detached:true so the child is a process-group leader. A
+  // negative pid signals the whole group, including descendants that may
+  // still hold inherited stdout/stderr pipes after the direct child dies.
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal)
+      return
+    } catch (error) {
+      if (error.code === "ESRCH") {
+        return
+      }
+    }
   }
   try {
     child.kill(signal)
-  } catch {
-    // Already exited.
+  } catch (error) {
+    if (error.code !== "ESRCH") {
+      // Best-effort: the process may already be exiting.
+    }
+  }
+}
+
+function destroyLoopRunnerStdio(child) {
+  for (const stream of [child.stdout, child.stderr]) {
+    if (stream && !stream.destroyed) {
+      stream.destroy()
+    }
   }
 }
 
@@ -7322,7 +7339,8 @@ async function executeLoopCliRunnerWithStreaming(
     cwd: repoRoot,
     env: buildLoopRunnerEnv(agentName, laneId, repoRoot),
     stdio: ["ignore", "pipe", "pipe"],
-    detached: true,
+    // New process group so timeout can signal descendants, not just this child.
+    detached: process.platform !== "win32",
   })
 
   let timedOut = false
@@ -7358,6 +7376,9 @@ async function executeLoopCliRunnerWithStreaming(
       forceKillHandle = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
           signalProcessTree(child, "SIGKILL")
+          // Descendants outside our group can keep inherited pipes open,
+          // which blocks Node's close event. Drop our ends so await returns.
+          destroyLoopRunnerStdio(child)
         }
       }, 1000)
     }, timeoutMs)
@@ -7801,14 +7822,22 @@ async function dispatchNeedsReviewReviewer(repoRoot, {
     }
   }
 
+  // Another reviewer may have resolved/request-changes after we captured the
+  // runner above. Re-read before runLoop so we do not dispatch the owner for a
+  // newer status (ready-for-pr, changes-requested, ...). Return completed so
+  // finishPatchWithReviewerDispatch re-reads and surfaces the current state
+  // instead of the stale needs-review snapshot from updateHandoff.
   const latest = await readCurrentState(repoRoot, { config: projectConfig, handoffPath, laneId })
   if (latest.status !== "needs-review") {
-    onEvent(`reviewer dispatch skipped: lane is ${latest.status}`)
+    onEvent(`reviewer dispatch skipped: lane already ${latest.status}`)
     return {
-      status: "skipped",
+      status: "completed",
       reason: "status-changed",
       agentName,
+      runnerType: "cli",
+      command: runner.displayCommand,
       finalStatus: latest.status,
+      stopReason: `Lane moved to ${latest.status} before reviewer dispatch.`,
     }
   }
 
