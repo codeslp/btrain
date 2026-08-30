@@ -7720,11 +7720,11 @@ function isTruthyEnvFlag(value) {
 
 function classifyNeedsReviewDispatch(result, previousStatus = "needs-review") {
   const finalStatus = result.finalCurrent?.status || previousStatus
-  if (result.status === "failed" || result.status === "timed-out") {
-    return { status: result.status, finalStatus }
-  }
   if (finalStatus && finalStatus !== "needs-review") {
     return { status: "completed", finalStatus }
+  }
+  if (result.status === "failed" || result.status === "timed-out") {
+    return { status: result.status, finalStatus }
   }
   return { status: "failed", finalStatus }
 }

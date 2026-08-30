@@ -112,6 +112,9 @@ if (result.status) {
   if (result.stderr) process.stderr.write(result.stderr)
   process.exit(result.status)
 }
+if (process.env.REVIEWER_EXIT_AFTER) {
+  process.exit(Number(process.env.REVIEWER_EXIT_AFTER) || 1)
+}
 `
 }
 
@@ -241,6 +244,22 @@ describe("needs-review reviewer dispatch", () => {
       assert.equal(await fs.access(claudeBin).then(() => true, () => false), true)
       const content = await readLane(tmpDir)
       assert.match(content, /Status: needs-review/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("accepts a completed review even if the reviewer CLI then exits nonzero", async () => {
+    const { tmpDir } = await setupRepo()
+    try {
+      const result = await runBtrain(needsReviewArgs(tmpDir), tmpDir, {
+        REVIEWER_ACTION: "resolve",
+        REVIEWER_EXIT_AFTER: "1",
+      })
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stdout, /status: resolved/)
+      const content = await readLane(tmpDir)
+      assert.match(content, /Status: resolved/)
     } finally {
       await rmDir(tmpDir)
     }
