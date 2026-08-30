@@ -1,9 +1,10 @@
 # Spec: Multi-Lane Handoffs with File Locking
 
 **Status**: Implemented
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Author**: btrain
 **Date**: 2026-03-15
+**Updated**: 2026-08-29
 
 ## Summary
 
@@ -53,8 +54,12 @@ Each lane has its own independent handoff file with the standard `## Current` se
 ### Lock Enforcement
 
 1. **On claim**: `btrain handoff claim --files` acquires locks; conflicts with other lanes are rejected
-2. **On resolve**: `btrain handoff resolve --lane` auto-releases that lane's locks
+2. **On terminal resolve**: `btrain handoff resolve --lane` auto-releases that lane's locks only when the lane actually becomes `resolved`
 3. **Pre-commit hook**: Blocks commits touching files locked by another lane
+
+When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`. It does **not** release locks. Locks stay held through `ready-for-pr`, `pr-review`, and `ready-to-merge`, and are released when the PR merges or closes (or via `btrain locks release-lane`).
+
+This PR-flow retention contract is the intended behavior for PR-flow-enabled repositories, including this one. Spec 002's original resolve-releases rule still applies only to terminal `resolved` (no PR-flow, or after the PR has merged or closed).
 
 ## CLI Commands
 
@@ -65,7 +70,7 @@ All `handoff` subcommands accept `--lane <id>`:
 | `btrain handoff` | Shows all lanes' status and guidance |
 | `btrain handoff claim --lane a` | Claims a task on lane A |
 | `btrain handoff update --lane a` | Updates lane A's state |
-| `btrain handoff resolve --lane a` | Resolves lane A, releases its locks |
+| `btrain handoff resolve --lane a` | Local approval or terminal resolve. Releases locks only when the lane becomes `resolved`; in PR-flow, local approval keeps locks through merge or close. |
 | `btrain locks` | Lists all active file locks |
 | `btrain locks release --path <p>` | Force-releases a specific lock |
 | `btrain locks release-lane --lane <id>` | Releases all locks for a lane |
