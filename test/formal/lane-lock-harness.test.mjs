@@ -11,12 +11,12 @@
 //   BTRAIN_FORMAL_SEED=<n>      reproduce a recorded run
 //   BTRAIN_FORMAL_TRACE_DIR=<p> where failing traces are written
 //
-// Expected baseline while the designated drift exists (spec 014, Current
-// Bootstrap Gaps; modeling brief, Known Incidents): the CONTRACT mode fails
-// with a shrunk counterexample — that is the harness detecting the
-// designated close-without-merge / unaudited-release drift, i.e. a
-// `validation_mismatch` verdict. The IMPLEMENTATION mode mirrors known
-// drift and hunts for undesignated divergences.
+// Expected baseline while designated drift exists (spec 014, Current
+// Bootstrap Gaps; modeling brief, Known Incidents): CONTRACT mode allows
+// classified drift and fails on any new `validation_mismatch`.
+// IMPLEMENTATION mode mirrors known drift and hunts for undesignated
+// divergences. Deterministic todo witnesses keep designated contract gaps
+// visible until the implementation is repaired.
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
