@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.3
+**Version**: 0.1.4
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-31
@@ -177,8 +177,16 @@ or harness must declare one of two outcomes in its review packet.
 ### No semantic impact
 
 The author records a short rationale, keeps the approved model stable, and runs
-the prose-to-model pin check. Examples include formatting, comments, equivalent
-refactors, and test-only changes that do not alter observed modeled behavior.
+the prose-to-model pin check. The remaining evidence depends on what the change
+touches:
+
+- Code-free edits require the pin check only. Examples include prose
+  formatting, comment changes, documentation edits, and test-only changes that
+  do not alter observed modeled behavior.
+- Changes that touch a modeled implementation entry point, such as equivalent
+  refactors, must also run focused implementation validation before review.
+  The pin check never exercises code. Validation is what detects a mistakenly
+  non-equivalent refactor.
 
 ### Semantic impact
 
@@ -190,7 +198,8 @@ under the failure policy below.
 
 An implementation change without an intended-behavior change keeps the model
 stable. Its primary formal question is whether the new implementation still
-conforms to the approved model.
+conforms to the approved model. Focused implementation validation answers that
+question before review.
 
 ## Lifecycle
 
@@ -226,6 +235,8 @@ patch before any selective adoption into btrain.
 ### Audit cadence
 
 - Every relevant change: formal-impact declaration and pin check.
+- Implementation change touching a modeled entry point: focused implementation
+  validation before review.
 - High-risk semantic change: focused TLC, focused Specula validation, and
   independent model review before handoff.
 - Every PR affecting a committed model or modeled behavior: exact-head pin,
