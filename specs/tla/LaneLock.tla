@@ -2,9 +2,9 @@
 \* Bounded model of the designated btrain lane/lock contract (spec 014
 \* Phase 1). The model encodes INTENDED behavior only: transitions that the
 \* designated prose forbids (final-resolve bypass, unaudited release,
-\* close-without-merge to repair-needed) do not exist here. The FR-6
-\* harness (test/formal/) compares the implementation against the same
-\* contract and ledgers the known drift.
+\* close-without-merge to repair-needed, repair resolution before FR-18
+\* escalation) do not exist here. The FR-6 harness (test/formal/) compares
+\* the implementation against the same contract and ledgers the known drift.
 \*
 \* Actor authority is encoded by construction: each action exists only for
 \* the actor the contract designates, so every behavior TLC explores is an
@@ -34,16 +34,22 @@ ActiveStatuses == Statuses \ {"idle", "resolved"}
 PrFlowStatuses == {"ready-for-pr", "pr-review", "ready-to-merge"}
 TerminalStatuses == {"idle", "resolved"}
 
-VARIABLES
-  status,     \* lane -> status string
-  owner,      \* lane -> agent or NoAgent
-  reviewer,   \* lane -> agent or NoAgent
-  locked,     \* lane -> handoff locked-file record (SUBSET Paths)
-  registry,   \* lane -> lock-registry entries (SUBSET Paths)
-  uncovered,  \* lane -> TRUE after an audited force-release (coverage suspended)
-  prLinked    \* lane -> TRUE once a PR is linked
+\* FR-18 one-attempt budget: 0 = never repaired, 1 = first repair, 2 = a
+\* repeat entry that exhausted the budget and escalated to a human.
+MaxRepair == 2
 
-vars == <<status, owner, reviewer, locked, registry, uncovered, prLinked>>
+VARIABLES
+  status,      \* lane -> status string
+  owner,       \* lane -> agent or NoAgent
+  reviewer,    \* lane -> agent or NoAgent
+  locked,      \* lane -> handoff locked-file record (SUBSET Paths)
+  registry,    \* lane -> lock-registry entries (SUBSET Paths)
+  uncovered,   \* lane -> TRUE after an audited force-release
+  prLinked,    \* lane -> TRUE once a PR is linked
+  repairCount  \* lane -> 0..MaxRepair repair entries (2 = escalated)
+
+vars == <<status, owner, reviewer, locked, registry, uncovered, prLinked,
+          repairCount>>
 
 NoConflictWithOthers(l, fs) ==
   \A m \in Lanes \ {l} : \A p \in fs, q \in registry[m] : ~Conflicts(p, q)
@@ -56,6 +62,7 @@ Init ==
   /\ registry = [l \in Lanes |-> {}]
   /\ uncovered = [l \in Lanes |-> FALSE]
   /\ prLinked = [l \in Lanes |-> FALSE]
+  /\ repairCount = [l \in Lanes |-> 0]
 
 \* spec 002 CLI Commands: claim requires an idle or resolved lane, files,
 \* exclusive locks, and a peer reviewer distinct from the owner.
@@ -70,45 +77,51 @@ Claim(l, o, r, fs) ==
   /\ registry' = [registry EXCEPT ![l] = fs]
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
   /\ prLinked' = [prLinked EXCEPT ![l] = FALSE]
+  /\ repairCount' = [repairCount EXCEPT ![l] = 0]
 
 \* spec 005 status model / FR-7: the owner hands off from in-progress or,
 \* after rework, from changes-requested. Locks are retained.
 ToNeedsReview(l) ==
   /\ status[l] \in {"in-progress", "changes-requested"}
   /\ status' = [status EXCEPT ![l] = "needs-review"]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount>>
 
 \* spec 005 FR-2/FR-3/FR-5/FR-10: the reviewer returns findings; the lane
 \* stays active with the same owner, reviewer, and locks.
 RequestChanges(l) ==
   /\ status[l] = "needs-review"
   /\ status' = [status EXCEPT ![l] = "changes-requested"]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount>>
 
 \* spec 002 v1.1.2: peer resolve at needs-review is local approval — the
 \* reviewer advances the lane to nonterminal ready-for-pr; locks retained.
 PeerResolve(l) ==
   /\ status[l] = "needs-review"
   /\ status' = [status EXCEPT ![l] = "ready-for-pr"]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount>>
 
 \* spec 002 PR-flow actors: the owner creates or links the PR.
 LinkPr(l) ==
   /\ status[l] = "ready-for-pr"
   /\ status' = [status EXCEPT ![l] = "pr-review"]
   /\ prLinked' = [prLinked EXCEPT ![l] = TRUE]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, repairCount>>
 
 \* btrain pr poll --apply outcomes (spec 002 PR-flow states).
 PrClear(l) ==
   /\ status[l] = "pr-review"
   /\ status' = [status EXCEPT ![l] = "ready-to-merge"]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount>>
 
 PrFeedback(l) ==
   /\ status[l] \in {"pr-review", "ready-to-merge"}
   /\ status' = [status EXCEPT ![l] = "changes-requested"]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount>>
 
 \* Terminal PR outcomes: merge and close-without-merge are both terminal
 \* resolved plus lock release (spec 002 v1.1.2; close is NOT repair-needed).
@@ -120,6 +133,7 @@ PrTerminal(l) ==
   /\ registry' = [registry EXCEPT ![l] = {}]
   /\ prLinked' = [prLinked EXCEPT ![l] = FALSE]
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
+  /\ repairCount' = [repairCount EXCEPT ![l] = 0]
   /\ UNCHANGED <<owner, reviewer>>
 
 \* Terminal resolve outside the review/PR flow: the owner or reviewer
@@ -131,32 +145,42 @@ AbandonResolve(l) ==
   /\ registry' = [registry EXCEPT ![l] = {}]
   /\ prLinked' = [prLinked EXCEPT ![l] = FALSE]
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
+  /\ repairCount' = [repairCount EXCEPT ![l] = 0]
   /\ UNCHANGED <<owner, reviewer>>
 
 \* spec 006 FR-4/FR-20 with the spec 014 designation: repair-needed enters
 \* only from an active status, for a workflow-integrity failure; locks are
-\* retained.
+\* retained. FR-18: each entry consumes budget; the second entry for the
+\* same unresolved problem escalates to a human (repairCount = MaxRepair).
 RepairEnter(l) ==
   /\ status[l] \in ActiveStatuses \ {"repair-needed"}
   /\ status' = [status EXCEPT ![l] = "repair-needed"]
+  /\ repairCount' = [repairCount EXCEPT
+       ![l] = IF repairCount[l] >= MaxRepair THEN MaxRepair
+              ELSE repairCount[l] + 1]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
 
 \* spec 006 FR-15 with the spec 014 designation: the responsible actor
-\* clears the repair and same-lane work continues.
+\* clears the repair and same-lane work continues. The budget count
+\* persists so a same-problem re-entry escalates.
 RepairClear(l) ==
   /\ status[l] = "repair-needed"
   /\ status' = [status EXCEPT ![l] = "in-progress"]
-  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked>>
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount>>
 
-\* spec 014 designation: repair may exit to resolved as a terminal
-\* disposition after FR-18 escalation. Terminal release applies.
+\* spec 014 designation: repair may exit to resolved only as a terminal
+\* disposition AFTER the FR-18 escalation decides the lane will not
+\* continue. Terminal release applies.
 RepairResolve(l) ==
   /\ status[l] = "repair-needed"
+  /\ repairCount[l] >= MaxRepair
   /\ status' = [status EXCEPT ![l] = "resolved"]
   /\ locked' = [locked EXCEPT ![l] = {}]
   /\ registry' = [registry EXCEPT ![l] = {}]
   /\ prLinked' = [prLinked EXCEPT ![l] = FALSE]
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
+  /\ repairCount' = [repairCount EXCEPT ![l] = 0]
   /\ UNCHANGED <<owner, reviewer>>
 
 \* spec 014 rescope designation: the owner replaces the lock set during
@@ -169,7 +193,7 @@ Rescope(l, fs) ==
   /\ locked' = [locked EXCEPT ![l] = fs]
   /\ registry' = [registry EXCEPT ![l] = fs]
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
-  /\ UNCHANGED <<status, owner, reviewer, prLinked>>
+  /\ UNCHANGED <<status, owner, reviewer, prLinked, repairCount>>
 
 \* spec 002 Force-release override + spec 006 FR-2c/FR-2d: an audited,
 \* human-confirmed override suspends matching lock coverage. The handoff
@@ -179,7 +203,7 @@ ForceRelease(l) ==
   /\ ~uncovered[l]
   /\ registry' = [registry EXCEPT ![l] = {}]
   /\ uncovered' = [uncovered EXCEPT ![l] = TRUE]
-  /\ UNCHANGED <<status, owner, reviewer, locked, prLinked>>
+  /\ UNCHANGED <<status, owner, reviewer, locked, prLinked, repairCount>>
 
 Next ==
   \/ \E l \in Lanes : \E o \in Agents, r \in Agents, fs \in FileSets : Claim(l, o, r, fs)
@@ -211,6 +235,7 @@ TypeOK ==
   /\ registry \in [Lanes -> SUBSET Paths]
   /\ uncovered \in [Lanes -> BOOLEAN]
   /\ prLinked \in [Lanes -> BOOLEAN]
+  /\ repairCount \in [Lanes -> 0..MaxRepair]
 
 \* spec 002 Lock Enforcement: no two lanes hold conflicting paths.
 Exclusivity ==
@@ -242,5 +267,13 @@ PrFlowRetention ==
   \A l \in Lanes :
     status[l] \in PrFlowStatuses =>
       (locked[l] # {} /\ (~uncovered[l] => registry[l] = locked[l]))
+
+\* spec 014 designation of spec 006 FR-18: a repair-needed lane resolves
+\* only after the escalation budget is exhausted. Every reachable resolved
+\* lane therefore has repairCount 0 (reset on the terminal transition), and
+\* no RepairResolve fires below MaxRepair — encoded structurally by the
+\* action guard; this invariant pins the count's bounds after resets.
+RepairBudgetBounded ==
+  \A l \in Lanes : status[l] \in TerminalStatuses => repairCount[l] = 0
 
 =============================================================================

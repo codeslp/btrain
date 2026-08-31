@@ -25,8 +25,8 @@ java -cp "$TLC_JAR" tlc2.TLC -config LaneLock.cfg -workers auto LaneLock.tla
 
 Expected: `Model checking completed. No error has been found.` The structured
 verdict is cached at `.tlc-results/LaneLock.json`, keyed by the `.tla`
-content hash. Baseline: 2,724,433 states generated, 277,681 distinct,
-depth 19, ~2 seconds.
+content hash. Baseline: 19,226,065 states generated, 2,060,833 distinct,
+depth 25, ~16 seconds.
 
 ## Pin check
 
@@ -63,6 +63,7 @@ design; widen only after the small model passes.
 | `ReviewerSeparation` | spec 014 Pilot Scope: owner and reviewer separation on active lanes |
 | `ActiveHasLocks` | designated active-lane lock requirement (spec 014 v0.1.9) |
 | `PrFlowRetention` | spec 002 v1.1.2: locks retained through `ready-for-pr`, `pr-review`, `ready-to-merge` |
+| `RepairBudgetBounded` | spec 014 designation of spec 006 FR-18: repair resolves only after the escalation budget is exhausted (structural guard on `RepairResolve`); terminal lanes carry a reset count |
 | `TypeOK` | state-space sanity, no prose claim |
 
 ### Verification hygiene
@@ -73,8 +74,8 @@ invariants are load-bearing, not vacuous.
 
 ### Known gaps
 
-- Repair-attempt counting and the spec 006 FR-18 one-retry escalation bound
-  are not modeled (no counter variable yet).
+- FR-18 is modeled as a per-lane `repairCount` (0..2) without reason
+  identity; distinct-reason repair sequences share one budget in the model.
 - The model pins spec 014's Normative-source prerequisite section, which
   names the spec 002/005/006 ranges by reference; the upstream sections are
   not directly pinned.

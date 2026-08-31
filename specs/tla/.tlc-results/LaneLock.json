@@ -1,13 +1,13 @@
 {
   "status": "pass",
-  "tla_content_sha256": "d847e373cf1b345424db5eda96dc9992b4c5ec1539b66a20e1c3c6e18c7c6d8b",
+  "tla_content_sha256": "85e01c8c2dcfe9e04b21ce264fee82c29ce71f814095fd19b2cc4e51a9b1ef09",
   "tlc_version": "2.19 (tla2tools v1.7.4)",
   "config": "LaneLock.cfg",
-  "states_generated": 2724433,
-  "distinct_states": 277681,
-  "depth": 19,
-  "wall_clock_seconds": 2,
-  "invariants": ["TypeOK", "Exclusivity", "CoverageForActive", "TerminalClean", "ReviewerSeparation", "ActiveHasLocks", "PrFlowRetention"],
-  "mutation_check": "Claim without NoConflictWithOthers violates Exclusivity (verified)",
-  "run_at": "2026-08-31T19:39:49Z"
+  "states_generated": 19226065,
+  "distinct_states": 2060833,
+  "depth": 25,
+  "wall_clock_seconds": 16,
+  "invariants": ["TypeOK", "Exclusivity", "CoverageForActive", "TerminalClean", "ReviewerSeparation", "ActiveHasLocks", "PrFlowRetention", "RepairBudgetBounded"],
+  "mutation_check": "Claim without NoConflictWithOthers violates Exclusivity (verified on the pre-repairCount revision)",
+  "run_at": "2026-08-31T20:06:15Z"
 }
