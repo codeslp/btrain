@@ -60,6 +60,10 @@ function emptyLane() {
     // Whether a handoff file exists for the lane. patchHandoff crashes on a
     // never-claimed lane, so the implementation mirror needs this.
     fileExists: false,
+    // FR-18 tracking: the last workflow-integrity reason and whether the
+    // contract now expects human escalation (same-reason re-entry).
+    repairReason: "",
+    escalationExpected: false,
   }
 }
 
@@ -152,13 +156,15 @@ export class LaneLockModel {
       lockedFiles: [...normalized].sort(),
       prNumber: "",
       fileExists: true,
+      repairReason: "",
+      escalationExpected: false,
     })
     this.#setRegistry(lane, normalized)
     return this.#accept()
   }
 
   // spec 002 PR-flow states and actors + spec 005 FR-7 / FR-11.
-  update({ lane, actor, status, pr }) {
+  update({ lane, actor, status, pr, reason }) {
     const s = this.lane(lane)
     if (status === "resolved") return this.#reject("resolved-via-update-forbidden")
     if (this.mode === "implementation" && this.#coverageMismatch(lane)) {
@@ -179,6 +185,7 @@ export class LaneLockModel {
       this.#setRegistry(lane, s.lockedFiles)
       s.status = status
       if (status === "needs-review") this.#reassignReviewer(s, actor)
+      if (status === "in-progress") s.escalationExpected = false
       if (pr) s.prNumber = String(pr)
       return this.#accept()
     }
@@ -211,8 +218,15 @@ export class LaneLockModel {
 
     if (status === "repair-needed") {
       // spec 006 FR-4: workflow-integrity failures move an active lane to
-      // repair-needed. FR-20: locks are retained.
+      // repair-needed. FR-20: locks are retained. FR-18 with the spec 014
+      // designation: re-entering for the same unresolved reason exhausts the
+      // one-attempt budget, so the contract expects human escalation.
       if (!ACTIVE_STATUSES.has(s.status)) return this.#reject("repair-from-inactive")
+      if (reason && reason === s.repairReason) {
+        s.escalationExpected = true
+      } else if (reason) {
+        s.repairReason = reason
+      }
       s.status = "repair-needed"
       return this.#accept()
     }
@@ -224,6 +238,9 @@ export class LaneLockModel {
       }
       if (actor !== s.owner) return this.#reject("in-progress-requires-owner")
       s.status = "in-progress"
+      // The FR-18 expectation is checked at the escalating re-entry itself;
+      // clearing the repair resets it (the reason memory persists).
+      s.escalationExpected = false
       return this.#accept()
     }
 
@@ -259,6 +276,13 @@ export class LaneLockModel {
     const prFlowHeld = s.status === "needs-review" || PR_FLOW_STATUSES.has(s.status)
     if (this.mode === "contract" && this.prFlowEnabled && final && prFlowHeld) {
       return this.#reject(KNOWN_DRIFTS.finalFromPrFlow)
+    }
+
+    // spec 002 v1.1.2 PR-flow retention: a PR-flow lane terminates through
+    // merge or closure, not through a direct plain resolve that would
+    // release retained locks early.
+    if (this.mode === "contract" && PR_FLOW_STATUSES.has(s.status)) {
+      return this.#reject("resolve-from-pr-flow-status")
     }
 
     if (this.prFlowEnabled && s.status === "needs-review" && !final) {
@@ -342,6 +366,47 @@ export class LaneLockModel {
     return this.#accept()
   }
 
+  // spec 014 rescope designation: `handoff update --files` replaces the
+  // lock set. Contract: owner only, during in-progress or changes-requested
+  // (guardian or human during repair per spec 006 FR-20 — the agent pool has
+  // no guardian, so generated repair rescopes are contract-rejected).
+  // Implementation mirror: patchHandoff with --files skips the lock-mismatch
+  // guard, requires a non-empty set for active lanes, re-acquires with a
+  // conflict check, and updates both records regardless of the actor.
+  rescope({ lane, actor, files }) {
+    const s = this.lane(lane)
+    const normalized = files.map(normalizePath).filter(Boolean)
+    if (this.mode === "implementation") {
+      if (!s.fileExists) return this.#reject("no-handoff-file")
+      if (s.status === "resolved") {
+        // patchHandoff computes nextStatus from the current status when
+        // --status is absent, and rejects resolved outright.
+        return this.#reject("resolved-via-update-forbidden")
+      }
+      if (!ACTIVE_STATUSES.has(s.status)) {
+        // patchHandoff's inactive branch releases both records.
+        s.lockedFiles = []
+        this.#releaseRegistry(lane)
+        return this.#accept()
+      }
+      if (normalized.length === 0) return this.#reject("active-status-needs-locks")
+      if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
+      s.lockedFiles = [...normalized].sort()
+      this.#setRegistry(lane, normalized)
+      return this.#accept()
+    }
+    if (s.status === "repair-needed") return this.#reject("repair-rescope-requires-guardian")
+    if (!["in-progress", "changes-requested"].includes(s.status)) {
+      return this.#reject("rescope-from-invalid-status")
+    }
+    if (actor !== s.owner) return this.#reject("rescope-requires-owner")
+    if (normalized.length === 0) return this.#reject("files-required")
+    if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
+    s.lockedFiles = [...normalized].sort()
+    this.#setRegistry(lane, normalized)
+    return this.#accept()
+  }
+
   // `btrain locks release-lane` without an override grant/consume.
   // Contract: invalid for active lanes (spec 002 Force-release override,
   // spec 006 FR-2c/FR-2d). Implementation: succeeds and leaves the handoff
@@ -357,19 +422,35 @@ export class LaneLockModel {
     return this.#accept()
   }
 
+  // Adopt the real system's observed state for one lane after a known,
+  // ledgered divergence, so a contract run can keep hunting for unknown
+  // divergences on the other lanes (harness tainting).
+  adoptReal(laneId, real) {
+    const s = this.lane(laneId)
+    s.status = real.status
+    s.owner = real.owner
+    s.reviewer = real.reviewer
+    s.lockedFiles = [...real.lockedFiles]
+    s.fileExists = true
+    this.#setRegistry(laneId, real.registry)
+  }
+
   // Invariants from the designated contract, checked over model state.
-  invariantViolations() {
+  // Lanes in `skip` carry adopted drift and are excluded.
+  invariantViolations(skip = new Set()) {
     const violations = []
     for (let i = 0; i < this.registry.length; i++) {
       for (let j = i + 1; j < this.registry.length; j++) {
         const a = this.registry[i]
         const b = this.registry[j]
+        if (skip.has(a.lane) || skip.has(b.lane)) continue
         if (a.lane !== b.lane && pathsConflict(a.path, b.path)) {
           violations.push(`exclusivity: ${a.lane}:${a.path} overlaps ${b.lane}:${b.path}`)
         }
       }
     }
     for (const [id, s] of this.lanes) {
+      if (skip.has(id)) continue
       const registryPaths = this.registryPaths(id)
       if (ACTIVE_STATUSES.has(s.status) && this.mode === "contract") {
         const expected = JSON.stringify([...s.lockedFiles].sort())

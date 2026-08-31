@@ -37,13 +37,18 @@ agent or provider credentials.
 
 | Test | Meaning | Expected today |
 | --- | --- | --- |
-| contract mode | Real behavior vs the designated contract | Must pass except for classified designated drift (close-without-merge, unaudited release, `--final` from PR-flow). A new mismatch fails the suite. |
+| contract mode (ledger gated) | Real behavior vs the designated contract; designated drift is ledgered, candidate findings are tallied, each divergent lane is adopted so the rest of the sequence stays checked | Must pass; a divergence outside the ledger fails as `validation_mismatch` |
+| candidate findings absent (todo) | Asserts the candidate tally is empty | Red while ledger candidates 4–10 exist; flips green as they are fixed or designated |
 | implementation mode | Real behavior vs a model that mirrors known drift | Must pass; a failure means a new, unknown divergence |
-| drift witnesses (todo) | Deterministic close-without-merge and `--final` sequences, contract asserted | Stay red until the JS is repaired; they do not todo the random property |
+| classifier check | Deterministic close-without-merge chain | Must pass: ledgers as designated drift, never as unknown |
+| FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
+| drift witnesses (todo) | Deterministic close-without-merge and `--final` sequences, contract asserted | Stay red until the JS is repaired |
 
-A contract-mode failure is a `validation_mismatch` verdict in spec 014 terms.
-An implementation-mode failure is a regression signal: real behavior moved
-away from the recorded reality.
+A contract-mode failure is a fresh `validation_mismatch` verdict in spec 014
+terms: a divergence no ledger entry explains. Candidate findings never pass
+silently — they fail the dedicated todo test until fixed or designated. An
+implementation-mode failure is a regression signal: real behavior moved away
+from the recorded reality.
 
 ## Findings ledger
 
@@ -54,28 +59,37 @@ Designated drift (already recorded in spec 002 v1.1.2 and the modeling brief):
    `applyPrStatusToHandoff`).
 2. `btrain locks release-lane` drops registry entries with no audited
    override and leaves the handoff locked-file record behind.
-2b. `handoff resolve --final` from `needs-review` or a PR-flow status
-    terminally resolves. Spec 002 requires plain resolve into `ready-for-pr`.
+3. `handoff resolve --final` from `needs-review` or a PR-flow status
+   terminally resolves. Spec 002 requires plain resolve into `ready-for-pr`.
 
 Candidate findings surfaced by harness runs (need designation decisions in
-spec 002/005/006 before the model treats them as normative):
+spec 002/005/006 before the model treats them as normative). Each is tallied
+by contract mode and keeps the candidate todo test red:
 
-3. `resolveHandoff` never checks the acting agent against the lane. Any
-   configured agent can approve `needs-review` into `ready-for-pr` or resolve
-   any lane. The designated contract assigns `ready-for-pr` entry to the
-   reviewer.
-4. `resolveHandoff` resolves an idle, never-claimed lane.
-5. When the reviewer (not the owner) moves a lane to `needs-review`,
+4. `resolveHandoff` never checks the acting agent against the lane, and a
+   plain resolve from a PR-flow status terminally releases retained locks.
+   The designated contract assigns `ready-for-pr` entry to the reviewer and
+   terminates PR-flow lanes through merge or closure.
+5. `resolveHandoff` resolves an idle, never-claimed lane.
+6. When the reviewer (not the owner) moves a lane to `needs-review`,
    `inferPeerReviewer` reassigns the reviewer to the owner. The lane then
    waits for review with reviewer == owner, which breaks owner/reviewer
    separation.
-6. `patchHandoff` validates the target status name but not the source
+7. `patchHandoff` validates the target status name but not the source
    status: `needs-review` from `resolved`, `pr-review` from `in-progress`,
    and direct `ready-to-merge` updates are all accepted.
-7. `patchHandoff` crashes with a raw `ENOENT` (not a `BtrainError`) when the
+8. `patchHandoff` crashes with a raw `ENOENT` (not a `BtrainError`) when the
    lane has never been claimed.
-8. `applyPrStatusToHandoff` with an explicit `--pr` applies outcomes from any
+9. `applyPrStatusToHandoff` with an explicit `--pr` applies outcomes from any
    lane status, so a merged PR can terminally resolve an `in-progress` lane.
+10. `patchHandoff --files` (the designated rescope path) enforces no actor
+    or source-status restrictions: any agent can rescope any active lane,
+    including during `needs-review` and PR-flow retention, against the
+    spec 014 rescope designation.
+
+Verified working (positive witnesses): spec 006 FR-18 same-reason repair
+re-entry escalates to a human (`repairEscalation: "human"`, attempts
+counted).
 
 Observed during this lane's own workflow (not harness-derived): the pre-push
 guard blocks all pushes while any lane is `in-progress`, including pushes
@@ -83,13 +97,11 @@ that only carry another lane's reviewed work.
 
 ## Known gaps
 
-- Rescoping (`handoff update --files`) is not a generated command yet. The
-  designated rescope contract (spec 014 v0.1.9) needs a model transition and
-  a generator entry.
 - Crash-window injection (partial failure between the lock-registry write
   and the handoff write) is not exercised yet.
 - Concurrent interleavings are not exercised; runs are sequential.
-- Repair-attempt counting and the spec 006 FR-18 escalation bound are not
+- The FR-18 comparison checks escalation presence on same-reason re-entry;
+  the implementation's attempt-counting internals are not designated and not
   compared.
 - Traces are harness-internal JSON; export to TLC trace-validation format is
   future work once `specs/tla/` exists.
