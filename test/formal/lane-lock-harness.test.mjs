@@ -309,15 +309,33 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],
 ])
 
-function classifyDivergence(cmd, modelReason, kind) {
+// Designated classifications are non-failing, so each verifies that the
+// observed real state matches the KNOWN drift shape before ledgering — a
+// different wrong state on the same command is an unknown divergence and
+// fails. Candidate classifications feed a failing gate, so shape precision
+// there cannot hide a new mismatch.
+function classifyDivergence(cmd, modelReason, kind, realLane) {
+  const sameSet = (a, b) => JSON.stringify(a) === JSON.stringify(b)
   if (kind === "state" && cmd.t === "prOutcome" && cmd.outcome === "closed") {
-    return { designated: true, label: "close-without-merge" }
+    // Drift shape: routed to repair-needed with the lane's locks retained.
+    const shapeOk =
+      realLane.status === "repair-needed" &&
+      realLane.lockedFiles.length > 0 &&
+      sameSet(realLane.registry, realLane.lockedFiles)
+    return shapeOk ? { designated: true, label: "close-without-merge" } : null
   }
   if (kind === "allow" && cmd.t === "releaseLane" && modelReason === "unaudited-release-forbidden") {
-    return { designated: true, label: "unaudited-release" }
+    // Drift shape: registry emptied while the handoff record keeps its paths.
+    const shapeOk = realLane.registry.length === 0 && realLane.lockedFiles.length > 0
+    return shapeOk ? { designated: true, label: "unaudited-release" } : null
   }
   if (kind === "allow" && cmd.t === "resolve" && modelReason === KNOWN_DRIFTS.finalFromPrFlow) {
-    return { designated: true, label: "final-resolve-bypass" }
+    // Drift shape: terminal resolved with everything released.
+    const shapeOk =
+      realLane.status === "resolved" &&
+      realLane.registry.length === 0 &&
+      realLane.lockedFiles.length === 0
+    return shapeOk ? { designated: true, label: "final-resolve-bypass" } : null
   }
   if (kind === "allow" && CANDIDATE_REASON_LABELS.has(modelReason)) {
     return { designated: false, label: CANDIDATE_REASON_LABELS.get(modelReason) }
@@ -411,7 +429,7 @@ async function executeSequence(mode, cmds) {
       if (expected.ok !== realOk) {
         const cls =
           mode === "contract" && !expected.ok && realOk
-            ? classifyDivergence(cmd, expected.reason, "allow")
+            ? classifyDivergence(cmd, expected.reason, "allow", real[cmd.lane])
             : null
         if (cls) {
           ledger(cls, cmd)
@@ -430,7 +448,7 @@ async function executeSequence(mode, cmds) {
       if (diffLanes.length > 0) {
         const cls =
           mode === "contract" && diffLanes.length === 1 && diffLanes[0] === cmd.lane
-            ? classifyDivergence(cmd, expected.reason || "", "state")
+            ? classifyDivergence(cmd, expected.reason || "", "state", real[cmd.lane])
             : null
         if (cls) {
           ledger(cls, cmd)
@@ -500,6 +518,11 @@ async function runConformance(mode) {
   const fold = (into, from) => {
     for (const [label, n] of from) into.set(label, (into.get(label) || 0) + n)
   }
+  // FR-6: every run — pass or fail — is reproducible from a recorded seed,
+  // so a chosen seed is supplied up front instead of letting fast-check pick
+  // an internal one it only reveals on failure.
+  const runSeed =
+    SEED !== undefined ? SEED : (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) | 0
   try {
     await fc.assert(
       fc.asyncProperty(fc.array(commandArb(), { minLength: 3, maxLength: 12 }), async (cmds) => {
@@ -514,15 +537,18 @@ async function runConformance(mode) {
           throw error
         }
       }),
-      { numRuns: NUM_RUNS, ...(SEED !== undefined ? { seed: SEED } : {}) },
+      { numRuns: NUM_RUNS, seed: runSeed },
     )
     const show = (map) => [...map].map(([label, n]) => `${label}=${n}`).join(", ") || "(none)"
+    console.log(
+      `[formal:${mode}] seed: ${runSeed} runs: ${NUM_RUNS} (reproduce with BTRAIN_FORMAL_SEED=${runSeed} BTRAIN_FORMAL_RUNS=${NUM_RUNS})`,
+    )
     console.log(`[formal:${mode}] designated drift ledgered: ${show(designated)}`)
     console.log(`[formal:${mode}] candidate findings tallied: ${show(candidates)}`)
-    return { designated, candidates }
+    return { designated, candidates, seed: runSeed }
   } catch (error) {
     const details = {
-      seed: /seed:\s*(-?\d+)/.exec(error.message)?.[1] ?? String(SEED ?? ""),
+      seed: String(runSeed),
       counterexamplePath: /Counterexample:[\s\S]*?(\[[\s\S]*?\])/.exec(error.message)?.[1] ?? "",
     }
     const divergence = lastDivergence || error
@@ -530,7 +556,7 @@ async function runConformance(mode) {
     assert.fail(
       `${mode} conformance failed (validation_mismatch — divergence outside the documented ledger).\n` +
         `${divergence.message}\n` +
-        `Reproduce with BTRAIN_FORMAL_SEED=${details.seed}.\n` +
+        `Reproduce with BTRAIN_FORMAL_SEED=${runSeed} BTRAIN_FORMAL_RUNS=${NUM_RUNS}.\n` +
         `Trace written to ${traceFile}\n\n${error.message}`,
     )
   }
