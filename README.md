@@ -349,9 +349,11 @@ approved intended behavior in prose   (specs 002/005/006, designated by spec 014
      as `validation_mismatch`. A divergent lane adopts the real state and is
      excluded for the rest of that sequence, so the remaining lanes stay
      fully checked.
-   - the **candidate findings** test stays `todo`-red while any ledger
-     candidate exists in the implementation; it flips green as candidates
-     are fixed or designated.
+   - the **candidate findings** test fails — and the formal gate exits
+     non-zero — while any ledger candidate exists in the implementation:
+     that is the `validation_mismatch` verdict, which spec 014 blocks on.
+     It goes green as candidates are fixed or designated. The default
+     `npm test` is unaffected.
    - **implementation mode** must pass. It checks real behavior against
      recorded reality and catches new drift.
    - The **drift witnesses** (close-without-merge, `--final` from

@@ -394,7 +394,7 @@ btrain-chat status</code></pre>
             </thead>
             <tbody>
               <tr><td><code>npm run test:formal</code></td><td>Conformance check, ~0.5s for 60 runs</td></tr>
-              <tr><td>contract mode</td><td>Must pass &mdash; designated drift is ledgered and candidate findings tallied; an unledgered divergence fails as <code>validation_mismatch</code>. Divergent lanes adopt real state so the rest of each sequence stays checked; candidates surface via a todo test</td></tr>
+              <tr><td>contract mode</td><td>Must pass &mdash; designated drift is ledgered and candidate findings tallied; an unledgered divergence fails as <code>validation_mismatch</code>. Divergent lanes adopt real state so the rest of each sequence stays checked; a dedicated gate test fails while any candidate exists</td></tr>
               <tr><td>implementation mode</td><td>Must pass &mdash; catches new drift against recorded reality</td></tr>
               <tr><td>drift witnesses</td><td>Deterministic, todo-red until the designated drift is repaired</td></tr>
             </tbody>
