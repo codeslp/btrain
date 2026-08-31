@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.7
+**Version**: 0.1.8
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-31
@@ -110,6 +110,23 @@ prose:
   decides the lane will not continue. Terminal lock release applies.
 - No other exit is legal in the first model. Repair must not move directly
   to `needs-review` or to a PR-flow status.
+
+Spec 002 mentions rescoping without defining it, and spec 006 FR-20 covers
+only guardian or human rescoping during repair. Spec 014 designates the
+normal rescope contract for the first model, provisionally until spec 002
+adopts its own:
+
+- A rescope is `btrain handoff update --lane <id> --files "<paths>"` on an
+  active lane.
+- The supplied paths replace the lock set. They do not extend it.
+- The new set must be non-empty and must not conflict with another lane's
+  locks. The handoff locked-file record and the lock registry must both
+  reflect the new set.
+- The lane owner rescopes during `in-progress` and `changes-requested`.
+  During `repair-needed`, spec 006 FR-20 governs: guardian or human only.
+- Rescoping during `needs-review` or a PR-flow status is invalid. Review and
+  PR retention (spec 002 v1.1.2) hold a fixed, approved scope until return,
+  merge, or closure.
 
 ## Goals
 
