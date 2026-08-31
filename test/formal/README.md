@@ -103,8 +103,9 @@ that only carry another lane's reviewed work.
 - Crash-window injection (partial failure between the lock-registry write
   and the handoff write) is not exercised yet.
 - Concurrent interleavings are not exercised; runs are sequential.
-- The FR-18 comparison checks escalation presence on same-reason re-entry;
-  the implementation's attempt-counting internals are not designated and not
-  compared.
+- The FR-18 comparison checks escalation presence on same-reason re-entry,
+  and the FR-7 comparison checks the assigned repair owner (most recent
+  canonical actor before the repair). The implementation's attempt-counting
+  internals are not designated and not compared.
 - Traces are harness-internal JSON; export to TLC trace-validation format is
   future work once `specs/tla/` exists.

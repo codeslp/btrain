@@ -64,6 +64,12 @@ function emptyLane() {
     // contract now expects human escalation (same-reason re-entry).
     repairReason: "",
     escalationExpected: false,
+    // Canonical reason code carried by the lane (spec 005/006 taxonomies).
+    reasonCode: "",
+    // spec 006 FR-7: repair responsibility goes to the most recent canonical
+    // workflow actor recorded BEFORE the repair transition.
+    repairOwner: "",
+    lastActor: "",
   }
 }
 
@@ -127,6 +133,22 @@ export class LaneLockModel {
     return true
   }
 
+  // Shared effects of an accepted status update: reason-code taxonomy
+  // (cleared on non-reason statuses), FR-7 repair-owner assignment (the most
+  // recent canonical actor BEFORE the repair transition), and the canonical
+  // actor record itself.
+  #applyUpdateEffects(s, status, actor, reason) {
+    if (status === "repair-needed") {
+      s.reasonCode = reason || "invalid-handoff"
+      s.repairOwner = s.lastActor || s.owner || actor
+    } else {
+      s.reasonCode = ""
+      s.repairOwner = ""
+      if (status === "in-progress") s.escalationExpected = false
+    }
+    s.lastActor = actor
+  }
+
   // Mirrors inferPeerReviewer's candidate order when the acting agent would
   // otherwise be its own reviewer: explicit > current (≠ actor) > owner >
   // first configured agent ≠ actor.
@@ -158,6 +180,9 @@ export class LaneLockModel {
       fileExists: true,
       repairReason: "",
       escalationExpected: false,
+      reasonCode: "",
+      repairOwner: "",
+      lastActor: owner,
     })
     this.#setRegistry(lane, normalized)
     return this.#accept()
@@ -185,7 +210,7 @@ export class LaneLockModel {
       this.#setRegistry(lane, s.lockedFiles)
       s.status = status
       if (status === "needs-review") this.#reassignReviewer(s, actor)
-      if (status === "in-progress") s.escalationExpected = false
+      this.#applyUpdateEffects(s, status, actor, reason)
       if (pr) s.prNumber = String(pr)
       return this.#accept()
     }
@@ -198,6 +223,7 @@ export class LaneLockModel {
       }
       if (actor !== s.owner) return this.#reject("needs-review-requires-owner")
       s.status = "needs-review"
+      this.#applyUpdateEffects(s, status, actor, reason)
       return this.#accept()
     }
 
@@ -206,6 +232,7 @@ export class LaneLockModel {
       if (s.status !== "ready-for-pr") return this.#reject("pr-review-from-invalid-status")
       if (actor !== s.owner) return this.#reject("pr-review-requires-owner")
       s.status = "pr-review"
+      this.#applyUpdateEffects(s, status, actor, reason)
       if (pr) s.prNumber = String(pr)
       return this.#accept()
     }
@@ -228,6 +255,7 @@ export class LaneLockModel {
         s.repairReason = reason
       }
       s.status = "repair-needed"
+      this.#applyUpdateEffects(s, status, actor, reason)
       return this.#accept()
     }
 
@@ -236,11 +264,17 @@ export class LaneLockModel {
       if (!["repair-needed", "in-progress", "changes-requested"].includes(s.status)) {
         return this.#reject("in-progress-from-invalid-status")
       }
-      if (actor !== s.owner) return this.#reject("in-progress-requires-owner")
+      if (s.status === "repair-needed") {
+        // spec 006 FR-15: the responsible repair actor clears the repair.
+        const responsible = s.repairOwner || s.owner
+        if (actor !== responsible) return this.#reject("repair-clear-requires-repair-owner")
+      } else if (actor !== s.owner) {
+        return this.#reject("in-progress-requires-owner")
+      }
       s.status = "in-progress"
       // The FR-18 expectation is checked at the escalating re-entry itself;
       // clearing the repair resets it (the reason memory persists).
-      s.escalationExpected = false
+      this.#applyUpdateEffects(s, status, actor, reason)
       return this.#accept()
     }
 
@@ -257,6 +291,10 @@ export class LaneLockModel {
       if (!this.#reacquireFromHandoff(lane)) return this.#reject("reacquire-conflict")
     }
     s.status = "changes-requested"
+    // spec 005 FR-4/FR-15: the reviewer's findings and reason code persist
+    // in the canonical record. The harness submits a fixed reason.
+    s.reasonCode = "spec-mismatch"
+    s.lastActor = actor
     return this.#accept()
   }
 
@@ -294,6 +332,8 @@ export class LaneLockModel {
       }
       s.status = "ready-for-pr"
       s.fileExists = true
+      s.reasonCode = ""
+      s.lastActor = actor
       return this.#accept()
     }
 
@@ -311,6 +351,9 @@ export class LaneLockModel {
     s.fileExists = true
     s.repairReason = ""
     s.escalationExpected = false
+    s.reasonCode = ""
+    s.repairOwner = ""
+    s.lastActor = actor
     this.#releaseRegistry(lane)
     return this.#accept()
   }
@@ -335,6 +378,9 @@ export class LaneLockModel {
       s.status = "resolved"
       s.lockedFiles = []
       s.fileExists = true
+      s.reasonCode = ""
+      s.repairOwner = ""
+      s.lastActor = s.owner || s.lastActor
       this.#releaseRegistry(lane)
       return this.#accept()
     }
@@ -355,24 +401,36 @@ export class LaneLockModel {
       if (this.mode === "implementation") {
         // KNOWN_DRIFTS.closeWithoutMerge: routed to repair-needed, locks kept.
         s.status = "repair-needed"
+        s.reasonCode = "invalid-handoff"
+        s.repairOwner = s.lastActor || s.owner
+        s.lastActor = s.owner || s.lastActor
         return this.#accept()
       }
       // Contract: close without merge is terminal resolved plus lock release.
       s.status = "resolved"
       s.lockedFiles = []
+      s.reasonCode = ""
+      s.repairOwner = ""
+      s.lastActor = s.owner || s.lastActor
       this.#releaseRegistry(lane)
       return this.#accept()
     }
     if (outcome === "feedback") {
       s.status = "changes-requested"
+      s.reasonCode = "pr-review-feedback"
+      s.lastActor = s.owner || s.lastActor
       return this.#accept()
     }
     if (outcome === "clear") {
       s.status = "ready-to-merge"
+      s.reasonCode = ""
+      s.lastActor = s.owner || s.lastActor
       return this.#accept()
     }
     // waiting
     s.status = "pr-review"
+    s.reasonCode = ""
+    s.lastActor = s.owner || s.lastActor
     return this.#accept()
   }
 
@@ -413,6 +471,7 @@ export class LaneLockModel {
     if (normalized.length === 0) return this.#reject("files-required")
     if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
     s.lockedFiles = [...normalized].sort()
+    s.lastActor = actor
     this.#setRegistry(lane, normalized)
     return this.#accept()
   }
@@ -485,6 +544,7 @@ export class LaneLockModel {
         status: s.status,
         owner: s.owner,
         reviewer: s.reviewer,
+        reasonCode: s.reasonCode,
         lockedFiles: [...s.lockedFiles].sort(),
         registry: this.registryPaths(id),
       }

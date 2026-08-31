@@ -49,7 +49,9 @@ const TRACE_DIR =
 
 const LANES = ["x", "y"]
 const AGENTS = ["alpha", "beta", "gamma"]
-const FILE_POOL = ["src/a/", "src/b/", "docs/"]
+// "src/" is an ancestor of "src/a/" and "src/b/", so generated claims and
+// rescopes exercise prefix-overlap exclusivity, not only identical paths.
+const FILE_POOL = ["src/", "src/a/", "src/b/", "docs/"]
 const PR_NUMBER = "101"
 const NEEDS_REVIEW_CONTEXT = {
   base: "main",
@@ -138,17 +140,19 @@ async function realSnapshot(repo, config) {
       status: s.status || "idle",
       owner: s.owner || "",
       reviewer: s.reviewer || "",
+      reasonCode: String(s.reasonCode || ""),
       lockedFiles: sortedPaths(s.lockedFiles),
       registry: registry.locks
         .filter((l) => l.lane === id)
         .map((l) => l.path)
         .sort(),
     }
-    // Compared through the FR-18 escalation expectation, not raw equality:
+    // Compared through explicit contract expectations, not raw equality:
     // the implementation's attempt-counting internals are not designated.
     repair[id] = {
       attempts: Number(s.repairAttempts) || 0,
       escalation: String(s.repairEscalation || ""),
+      owner: String(s.repairOwner || ""),
     }
   }
   return { lanes, repair }
@@ -307,6 +311,7 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["rescope-from-invalid-status", "rescope-authorization"],
   ["repair-rescope-requires-guardian", "rescope-authorization"],
   ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],
+  ["repair-clear-requires-repair-owner", "update-actor-unchecked"],
 ])
 
 // Designated classifications are non-failing, so each verifies that the
@@ -463,7 +468,8 @@ async function executeSequence(mode, cmds) {
 
       // spec 006 FR-18 (spec 014 designation): a same-reason repair re-entry
       // exhausts the one-attempt budget, so the contract expects a recorded
-      // human escalation on the real lane.
+      // human escalation on the real lane. spec 006 FR-7: the assigned
+      // repair owner is the most recent canonical actor before the repair.
       if (mode === "contract" && !tainted.has(cmd.lane)) {
         const m = model.lane(cmd.lane)
         if (m.escalationExpected && !snap.repair[cmd.lane].escalation) {
@@ -471,6 +477,16 @@ async function executeSequence(mode, cmds) {
           tainted.add(cmd.lane)
           model.adoptReal(cmd.lane, real[cmd.lane])
           continue
+        }
+        if (
+          m.status === "repair-needed" &&
+          m.repairOwner &&
+          snap.repair[cmd.lane].owner !== m.repairOwner
+        ) {
+          throw new Divergence(
+            `step ${i} ${cmd.t}: repair owner diverged — contract expects "${m.repairOwner}" (FR-7 most recent canonical actor), implementation assigned "${snap.repair[cmd.lane].owner}"`,
+            trace,
+          )
         }
       }
 
@@ -666,6 +682,47 @@ test(
       const { lanes } = await realSnapshot(repo, config)
       assert.equal(lanes.x.status, "resolved", "contract: close without merge is terminal resolved")
       assert.deepEqual(lanes.x.registry, [], "contract: terminal resolved releases the lane's locks")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
+// Positive FR-4 witness (spec 005): reviewer findings persist canonically —
+// the summary lands in the handoff record and the reason code in lane state.
+test(
+  "canonical findings: request-changes persists the summary and reason code",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  async () => {
+    const { root, repo } = await makeRepo()
+    try {
+      const config = await readProjectConfig(repo)
+      await asAgent("alpha", () =>
+        claimHandoff(repo, { lane: "x", task: "findings witness", owner: "alpha", reviewer: "beta", files: "src/a/" }),
+      )
+      await asAgent("alpha", () =>
+        patchHandoff(repo, {
+          lane: "x",
+          actor: "alpha",
+          status: "needs-review",
+          "no-dispatch": true,
+          ...NEEDS_REVIEW_CONTEXT,
+        }),
+      )
+      const summary = "canonical findings witness body 7f3a"
+      await asAgent("beta", () =>
+        requestChangesHandoff(repo, {
+          lane: "x",
+          actor: "beta",
+          summary,
+          "reason-code": "spec-mismatch",
+        }),
+      )
+      const { lanes } = await realSnapshot(repo, config)
+      assert.equal(lanes.x.status, "changes-requested")
+      assert.equal(lanes.x.reasonCode, "spec-mismatch", "FR-15/spec 005: reason code persists in lane state")
+      const record = await fs.readFile(path.join(repo, ".claude/collab/HANDOFF_X.md"), "utf8")
+      assert.ok(record.includes(summary), "FR-4: the reviewer's findings persist in the canonical record")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }
