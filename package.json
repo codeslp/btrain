@@ -10,10 +10,14 @@
   "scripts": {
     "test": "env -u BTRAIN_AGENT -u BRAIN_TRAIN_AGENT -u BTRAIN_LANE -u BTRAIN_LANE_LOCKED -u BTRAIN_REPO node --test 'test/**/*.test.mjs'",
     "test:e2e": "env -u BTRAIN_AGENT -u BRAIN_TRAIN_AGENT -u BTRAIN_LANE -u BTRAIN_LANE_LOCKED -u BTRAIN_REPO node --test test/e2e.test.mjs",
+    "test:formal": "env -u BTRAIN_AGENT -u BRAIN_TRAIN_AGENT -u BTRAIN_LANE -u BTRAIN_LANE_LOCKED -u BTRAIN_REPO BTRAIN_FORMAL=1 node --test test/formal/lane-lock-harness.test.mjs",
     "btrain": "node src/brain_train/cli.mjs",
     "collab:append-handoff-history": "node scripts/handoff-history-watcher.mjs --once",
     "collab:register-handoff-watch": "bash scripts/register-handoff-watch-path.sh",
     "collab:watch-handoff-history": "node scripts/handoff-history-watcher.mjs",
     "collab:install-handoff-history-agent": "bash scripts/install-handoff-history-launch-agent.sh"
+  },
+  "devDependencies": {
+    "fast-check": "^4.9.0"
   }
 }
