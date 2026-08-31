@@ -405,7 +405,9 @@ code moves through these steps:
    `ready-for-pr` and locks stay held. Run `btrain pr create --lane <id>
    --bots all`, then `btrain pr poll --lane <id> --apply` and
    `btrain pr request-review --lane <id> --bots all` until bots are clear.
-   Merge releases the locks and resolves the lane.
+   Merge the PR, then run `btrain pr poll --lane <id> --apply` once more:
+   the poll observes the merge, releases the locks, and resolves the lane.
+   Merging alone does not update the local handoff.
 8. **CI (phase 2).** Once the pilot gate is enabled, CI reruns the
    deterministic checks on the exact PR head before merge.
 
@@ -419,6 +421,7 @@ code moves through these steps:
 | `validation_mismatch` | A real trace does not conform to the approved model | Block |
 | `state_space_exhausted` | TLC hit its resource bounds | Warn; reviewer decides |
 | `tool_unavailable` | Binary, credential, or provider missing | Infrastructure failure — never reported as pass or as a correctness failure |
+| `policy_blocked` | A provider refused or could not perform a phase | Reported separately from verification evidence; route to an approved alternative or a human |
 
 The harness has already earned its keep. The property runs surfaced six
 candidate findings and classify all three designated drifts. Deterministic
