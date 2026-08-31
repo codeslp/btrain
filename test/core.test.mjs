@@ -1513,8 +1513,10 @@ console.log("ready-for-pr owner ran")
     assert.match(stdout, /Bash\(rtk gh pr merge \*\)/)
   })
 
-  it("final resolve releases locks after the PR phase completes", async () => {
-    const resolved = await runBtrain(
+  it("rejects a direct --final during the PR phase; plain resolve releases", async () => {
+    // spec 002 v1.1.2: --final is the merge path (pr poll --apply), not a
+    // review bypass. A direct --final from a PR-flow status is rejected.
+    const rejected = await runBtrain(
       [
         "handoff",
         "resolve",
@@ -1530,7 +1532,13 @@ console.log("ready-for-pr owner ran")
       ],
       tmpDir,
     )
+    assert.notEqual(rejected.code, 0, rejected.stdout)
+    assert.ok(rejected.stderr.includes("merge path"), rejected.stderr)
 
+    const resolved = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Superseded.", "--actor", "TestBot"],
+      tmpDir,
+    )
     assert.equal(resolved.code, 0, resolved.stderr)
     assert.ok(resolved.stdout.includes("status: resolved"), resolved.stdout)
 
@@ -3781,6 +3789,29 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.notEqual(crossLaneRelease.code, 0)
       assert.match(crossLaneRelease.stderr, /scoped to lane b; refusing to release a lock outside that lane/)
 
+      // Releasing an active lane's own lock now requires the audited
+      // force-release override (spec 002 v1.1.2 / spec 006 FR-2c/FR-2d).
+      const unauditedOwnRelease = await runBtrain(
+        ["locks", "release", "--repo", repoDir, "--path", "src/lane-b.ts"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(unauditedOwnRelease.code, 0)
+      assert.match(unauditedOwnRelease.stderr, /force-release/)
+
+      // The grant comes from an unscoped session: lane-locked runners cannot
+      // self-grant overrides.
+      const grantOwnRelease = await runBtrain(
+        [
+          "override", "grant", "--repo", repoDir,
+          "--action", "force-release", "--lane", "b",
+          "--requested-by", "OwnerB", "--confirmed-by", "human",
+          "--reason", "test: audited own-lane lock release",
+        ],
+        repoDir,
+      )
+      assert.equal(grantOwnRelease.code, 0, grantOwnRelease.stderr)
+
       const ownLaneRelease = await runBtrain(
         ["locks", "release", "--repo", repoDir, "--path", "src/lane-b.ts"],
         repoDir,
@@ -4963,7 +4994,30 @@ describe("multi-lane handoff lifecycle", () => {
     assert.ok(laneBLocks.length > 0, "Lane B should still have locks")
   })
 
-  it("locks release-lane clears all locks for a lane", async () => {
+  it("locks release-lane requires an audited override for an active lane", async () => {
+    // spec 002 v1.1.2 + spec 006 FR-2c/FR-2d: suspending an active lane's
+    // lock coverage requires a granted, human-confirmed force-release
+    // override.
+    const rejected = await runBtrain(
+      ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
+      tmpDir,
+    )
+    assert.notEqual(rejected.code, 0, rejected.stdout)
+    assert.ok(rejected.stderr.includes("force-release"), rejected.stderr)
+
+    const granted = await runBtrain(
+      [
+        "override", "grant", "--repo", tmpDir,
+        "--action", "force-release",
+        "--lane", "b",
+        "--requested-by", "Gemini",
+        "--confirmed-by", "human",
+        "--reason", "test: audited release of lane b",
+      ],
+      tmpDir,
+    )
+    assert.equal(granted.code, 0, granted.stderr)
+
     const { stdout } = await runBtrain(
       ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
       tmpDir,

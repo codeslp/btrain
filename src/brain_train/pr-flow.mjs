@@ -616,20 +616,25 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       lane: laneId,
       actor,
       final: true,
+      viaPrOutcome: true,
       summary: `PR #${prNumber} merged${status.pr.mergedAt ? ` at ${status.pr.mergedAt}` : ""}.`,
     })
     return "resolved"
   }
 
   if (status.overall === "closed") {
-    await patchHandoff(repoRoot, {
+    // spec 002 v1.1.2: close without merge is terminal `resolved` plus lock
+    // release — the same terminal outcome as a merge, not `repair-needed`
+    // (spec 006 retention covers workflow-integrity repair, not GitHub
+    // close).
+    await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
-      status: "repair-needed",
-      "reason-code": "invalid-handoff",
-      next: `PR #${prNumber} is closed without a merge. Decide whether to reopen, replace, or intentionally resolve the lane.`,
+      final: true,
+      viaPrOutcome: true,
+      summary: `PR #${prNumber} closed without a merge; lane resolved and locks released per spec 002 v1.1.2. Reopen with a fresh claim if the work should continue.`,
     })
-    return "repair-needed"
+    return "resolved"
   }
 
   if (status.overall === "feedback") {

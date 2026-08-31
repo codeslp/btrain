@@ -215,7 +215,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -1197,6 +1197,56 @@ async function releaseLocks(repoRoot, laneId) {
     await writeLockRegistry(repoRoot, registry)
     return released
   })
+}
+
+// spec 002 v1.1.2 Force-release override + spec 006 FR-2c/FR-2d: suspending
+// an ACTIVE lane's lock coverage requires a verified, human-confirmed
+// override (grant then consume). Releasing locks of inactive lanes (stale
+// cleanup) needs no override. Terminal resolution releases through
+// releaseLocks directly — that is the contract's own release path, not a
+// suspension.
+async function consumeForceReleaseOverride(repoRoot, laneId, actorLabel) {
+  try {
+    return await consumeOverride(repoRoot, { action: "force-release", lane: laneId, actorLabel })
+  } catch (laneScopedError) {
+    try {
+      return await consumeOverride(repoRoot, { action: "force-release", actorLabel })
+    } catch {
+      throw new BtrainError({
+        message: `Releasing active lane ${laneId}'s locks requires an audited force-release override.`,
+        reason:
+          "Spec 002 v1.1.2 and spec 006 FR-2c/FR-2d: lock coverage of an active lane may be suspended only after a human-confirmed override is granted and consumed.",
+        fix: `btrain override grant --action force-release --lane ${laneId} --requested-by <agent> --confirmed-by <human> --reason "..." — then re-run this command.`,
+        context: laneScopedError instanceof BtrainError ? laneScopedError.message : String(laneScopedError),
+      })
+    }
+  }
+}
+
+async function releaseLaneLocksAudited(repoRoot, laneId, options = {}) {
+  const config = options.config || (await readProjectConfig(repoRoot))
+  const lane = await readLaneState(repoRoot, config, laneId)
+  if (isLaneActiveStatus(lane.status)) {
+    await consumeForceReleaseOverride(repoRoot, laneId, options.actorLabel || "btrain")
+  }
+  return releaseLocks(repoRoot, laneId)
+}
+
+async function forceReleaseLockAudited(repoRoot, lockPath, options = {}) {
+  const config = options.config || (await readProjectConfig(repoRoot))
+  const registry = await readLockRegistry(repoRoot)
+  const owningLanes = [...new Set(
+    registry.locks
+      .filter((lock) => lock.path === lockPath && (!options.lane || lock.lane === options.lane))
+      .map((lock) => lock.lane),
+  )]
+  for (const owningLane of owningLanes) {
+    const lane = await readLaneState(repoRoot, config, owningLane)
+    if (isLaneActiveStatus(lane.status)) {
+      await consumeForceReleaseOverride(repoRoot, owningLane, options.actorLabel || "btrain")
+    }
+  }
+  return forceReleaseLock(repoRoot, lockPath, options)
 }
 
 async function listLocks(repoRoot) {
@@ -5590,6 +5640,25 @@ async function resolveHandoff(repoRoot, options) {
       : null
 
   const finalResolve = !!options.final || !!options["final"]
+  // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
+  // bypass. From needs-review the reviewer's plain resolve enters
+  // ready-for-pr, and PR-flow lanes terminate through PR outcomes
+  // (applyPrStatusToHandoff passes viaPrOutcome).
+  const reviewFlowStatuses = new Set(["needs-review", "ready-for-pr", "pr-review", "ready-to-merge"])
+  if (
+    prFlow.enabled &&
+    finalResolve &&
+    options.viaPrOutcome !== true &&
+    reviewFlowStatuses.has(existingCurrent.status)
+  ) {
+    throw new BtrainError({
+      message: "`--final` is the merge path, not a review bypass.",
+      reason: `Lane ${laneId || "(single)"} is \`${existingCurrent.status}\`. Spec 002 v1.1.2: peer resolve at needs-review enters ready-for-pr with locks retained, and PR-flow lanes terminate through merge or closure.`,
+      fix: existingCurrent.status === "needs-review"
+        ? `Peer approval: btrain handoff resolve --lane ${laneId || "<id>"} --summary "..." --actor "<reviewer>" (without --final).`
+        : `Let the PR outcome terminate the lane: btrain pr poll --lane ${laneId || "<id>"} --apply.`,
+    })
+  }
   if (prFlow.enabled && existingCurrent.status === "needs-review" && !finalResolve) {
     const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
     if (laneId && retainedFiles.length > 0) {
@@ -9565,6 +9634,8 @@ export {
   findAvailableLane,
   findRepoRoot,
   forceReleaseLock,
+  forceReleaseLockAudited,
+  releaseLaneLocksAudited,
   getBrainTrainHome,
   getLaneConfigs,
   getRepoPaths,

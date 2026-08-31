@@ -11,7 +11,7 @@ import {
   consumeOverride,
   doctor,
   extractSpillPathFromNextAction,
-  forceReleaseLock,
+  forceReleaseLockAudited,
   getBrainTrainHome,
   getLaneConfigs,
   getReviewStatus,
@@ -29,7 +29,7 @@ import {
   readSpilledNextActionBody,
   registerRepo,
   removeRepo,
-  releaseLocks,
+  releaseLaneLocksAudited,
   requestChangesHandoff,
   resolveHandoff,
   resolveRepoRoot,
@@ -2329,7 +2329,10 @@ async function run() {
           })
         }
       }
-      const removed = await forceReleaseLock(repoRoot, options.path, { lane: scopedLane })
+      const removed = await forceReleaseLockAudited(repoRoot, options.path, {
+        lane: scopedLane,
+        actorLabel: options.actor,
+      })
       console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
       return
     }
@@ -2343,7 +2346,9 @@ async function run() {
           context: "Run `btrain locks` to see which lanes have active locks.",
         })
       }
-      const released = await releaseLocks(repoRoot, options.lane)
+      const released = await releaseLaneLocksAudited(repoRoot, options.lane, {
+        actorLabel: options.actor,
+      })
       console.log(`Released ${released.length} lock(s) for lane ${options.lane}`)
       for (const lock of released) {
         console.log(`  ${lock.path} (${lock.owner})`)

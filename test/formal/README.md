@@ -37,12 +37,12 @@ agent or provider credentials.
 
 | Test | Meaning | Expected today |
 | --- | --- | --- |
-| contract mode (ledger gated) | Real behavior vs the designated contract; designated drift is ledgered, candidate findings are tallied, each divergent lane is adopted so the rest of the sequence stays checked | Must pass; a divergence outside the ledger fails as `validation_mismatch` |
+| contract mode (ledger gated) | Real behavior vs the designated contract; candidate findings are tallied, each divergent lane is adopted so the rest of the sequence stays checked | Must pass; a divergence outside the candidate ledger fails as `validation_mismatch`. No designated drift remains — a reappearance fails |
 | candidate findings absent | Asserts the candidate tally is empty | FAILS while ledger candidates 4–11 exist: the formal verdict is `validation_mismatch` and the suite exits non-zero (spec 014 blocks on it); flips green as candidates are fixed or designated |
-| implementation mode | Real behavior vs a model that mirrors known drift | Must pass; a failure means a new, unknown divergence |
-| classifier check | Deterministic close-without-merge chain | Must pass: ledgers as designated drift, never as unknown |
+| implementation mode | Real behavior vs the implementation mirror | Must pass; a failure means a new, unknown divergence |
+| closed-chain check | Deterministic close-without-merge chain | Must pass with zero tallies: the chain conforms end to end |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
-| drift witnesses (todo) | Deterministic close-without-merge and `--final` sequences, contract asserted | Stay red until the JS is repaired |
+| repaired-drift witnesses | Close-without-merge, `--final` rejection, unaudited-release rejection | Must pass: normal regression tests since the drift-repair lane |
 
 A contract-mode failure is a fresh `validation_mismatch` verdict in spec 014
 terms: a divergence no ledger entry explains. Candidate findings never pass
@@ -52,7 +52,9 @@ signal: real behavior moved away from the recorded reality.
 
 ## Findings ledger
 
-Designated drift (already recorded in spec 002 v1.1.2 and the modeling brief):
+Repaired designated drift (fixed in the drift-repair lane; each is guarded
+by a passing regression witness, and a reappearance fails contract mode as
+an unknown divergence):
 
 1. Close-without-merge routes to `repair-needed` instead of terminal
    `resolved` plus lock release (`src/brain_train/pr-flow.mjs`,

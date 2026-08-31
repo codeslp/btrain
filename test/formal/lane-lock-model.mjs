@@ -13,19 +13,13 @@
 // drifted behavior instead, so the harness can hunt for undesignated
 // divergences without tripping on the known ones.
 
-export const KNOWN_DRIFTS = Object.freeze({
-  // spec 002 v1.1.2: close-without-merge is terminal resolved + lock release.
-  // pr-flow.mjs applyPrStatusToHandoff routes it to repair-needed instead.
-  closeWithoutMerge: "close-without-merge-routes-to-repair-needed",
-  // spec 002 Force-release override + spec 006 FR-2c/FR-2d: coverage may be
-  // suspended only after a verified audited override. `releaseLocks` (the
-  // `btrain locks release-lane` path) drops registry entries unaudited.
-  unauditedRelease: "unaudited-release-lane-suspends-coverage",
-  // spec 002 `handoff resolve --final`: not a reviewer bypass of ready-for-pr.
-  // `--final` from needs-review or a PR-flow status is drift. Current
-  // resolveHandoff honors it as terminal resolved.
-  finalFromPrFlow: "final-from-pr-flow-is-drift",
-})
+// The three formerly designated drifts (close-without-merge to
+// repair-needed, unaudited release-lane, --final review bypass) were
+// repaired in the drift-repair lane: the implementation now matches the
+// contract on all three, witnessed by the passing regression tests in the
+// harness. No designated drift remains; a reappearance fails as an unknown
+// divergence.
+export const KNOWN_DRIFTS = Object.freeze({})
 
 const PR_FLOW_STATUSES = new Set(["ready-for-pr", "pr-review", "ready-to-merge"])
 const ACTIVE_STATUSES = new Set([
@@ -313,11 +307,11 @@ export class LaneLockModel {
       return this.#reject("resolve-from-idle")
     }
 
-    // spec 002: `--final` from needs-review or PR-flow statuses is drift.
-    // Contract rejects it. Implementation still honors it as terminal resolve.
+    // spec 002 v1.1.2: `--final` is the merge path, not a review bypass —
+    // and the implementation now enforces this (drift repaired).
     const prFlowHeld = s.status === "needs-review" || PR_FLOW_STATUSES.has(s.status)
-    if (this.mode === "contract" && this.prFlowEnabled && final && prFlowHeld) {
-      return this.#reject(KNOWN_DRIFTS.finalFromPrFlow)
+    if (this.prFlowEnabled && final && prFlowHeld) {
+      return this.#reject("final-from-review-flow")
     }
 
     // spec 002 v1.1.2 PR-flow retention: a PR-flow lane terminates through
@@ -377,7 +371,10 @@ export class LaneLockModel {
       }
     }
 
-    if (outcome === "merged") {
+    // Terminal outcomes route through resolveHandoff (final, viaPrOutcome):
+    // merge and close-without-merge are both terminal resolved plus lock
+    // release (spec 002 v1.1.2; the close drift is repaired).
+    if (outcome === "merged" || outcome === "closed") {
       s.status = "resolved"
       s.lockedFiles = []
       s.fileExists = true
@@ -389,7 +386,7 @@ export class LaneLockModel {
     }
 
     if (this.mode === "implementation") {
-      // Non-merged outcomes route through patchHandoff and inherit its
+      // Non-terminal outcomes route through patchHandoff and inherit its
       // guards: crash on a missing handoff file, rejection while the handoff
       // record and registry disagree, locked files required for every active
       // target, and re-acquisition of the lane's locks.
@@ -400,24 +397,6 @@ export class LaneLockModel {
       this.#setRegistry(lane, s.lockedFiles)
     }
 
-    if (outcome === "closed") {
-      if (this.mode === "implementation") {
-        // KNOWN_DRIFTS.closeWithoutMerge: routed to repair-needed, locks kept.
-        s.status = "repair-needed"
-        s.reasonCode = "invalid-handoff"
-        s.repairOwner = s.lastActor || s.owner
-        s.lastActor = s.owner || s.lastActor
-        return this.#accept()
-      }
-      // Contract: close without merge is terminal resolved plus lock release.
-      s.status = "resolved"
-      s.lockedFiles = []
-      s.reasonCode = ""
-      s.repairOwner = ""
-      s.lastActor = s.owner || s.lastActor
-      this.#releaseRegistry(lane)
-      return this.#accept()
-    }
     if (outcome === "feedback") {
       s.status = "changes-requested"
       s.reasonCode = "pr-review-feedback"
@@ -487,11 +466,10 @@ export class LaneLockModel {
   // spec 006 FR-2c/FR-2d). Implementation: succeeds and leaves the handoff
   // locked-file record behind (KNOWN_DRIFTS.unauditedRelease).
   releaseLane({ lane }) {
+    // Drift repaired: releaseLaneLocksAudited rejects unaudited releases of
+    // ACTIVE lanes in the implementation, matching the contract in both
+    // modes. Inactive (stale) cleanup stays free.
     const s = this.lane(lane)
-    if (this.mode === "implementation") {
-      this.#releaseRegistry(lane)
-      return this.#accept()
-    }
     if (ACTIVE_STATUSES.has(s.status)) return this.#reject("unaudited-release-forbidden")
     this.#releaseRegistry(lane)
     return this.#accept()
