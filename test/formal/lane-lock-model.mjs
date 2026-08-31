@@ -21,6 +21,10 @@ export const KNOWN_DRIFTS = Object.freeze({
   // suspended only after a verified audited override. `releaseLocks` (the
   // `btrain locks release-lane` path) drops registry entries unaudited.
   unauditedRelease: "unaudited-release-lane-suspends-coverage",
+  // spec 002 `handoff resolve --final`: not a reviewer bypass of ready-for-pr.
+  // `--final` from needs-review or a PR-flow status is drift. Current
+  // resolveHandoff honors it as terminal resolved.
+  finalFromPrFlow: "final-from-pr-flow-is-drift",
 })
 
 const PR_FLOW_STATUSES = new Set(["ready-for-pr", "pr-review", "ready-to-merge"])
@@ -248,6 +252,13 @@ export class LaneLockModel {
     // against the lane and resolves from any status, including idle.
     if (this.mode === "contract" && s.status === "idle") {
       return this.#reject("resolve-from-idle")
+    }
+
+    // spec 002: `--final` from needs-review or PR-flow statuses is drift.
+    // Contract rejects it. Implementation still honors it as terminal resolve.
+    const prFlowHeld = s.status === "needs-review" || PR_FLOW_STATUSES.has(s.status)
+    if (this.mode === "contract" && this.prFlowEnabled && final && prFlowHeld) {
+      return this.#reject(KNOWN_DRIFTS.finalFromPrFlow)
     }
 
     if (this.prFlowEnabled && s.status === "needs-review" && !final) {

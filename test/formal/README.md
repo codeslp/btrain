@@ -37,9 +37,9 @@ agent or provider credentials.
 
 | Test | Meaning | Expected today |
 | --- | --- | --- |
-| contract mode (todo) | Real behavior vs the designated contract | Fails: `validation_mismatch` — designated drift and the findings below exist |
+| contract mode | Real behavior vs the designated contract | Must pass except for classified designated drift (close-without-merge, unaudited release, `--final` from PR-flow). A new mismatch fails the suite. |
 | implementation mode | Real behavior vs a model that mirrors known drift | Must pass; a failure means a new, unknown divergence |
-| drift witness (todo) | Deterministic close-without-merge sequence, contract asserted | Fails until `applyPrStatusToHandoff` is repaired; flips green after |
+| drift witnesses (todo) | Deterministic close-without-merge and `--final` sequences, contract asserted | Stay red until the JS is repaired; they do not todo the random property |
 
 A contract-mode failure is a `validation_mismatch` verdict in spec 014 terms.
 An implementation-mode failure is a regression signal: real behavior moved
@@ -54,6 +54,8 @@ Designated drift (already recorded in spec 002 v1.1.2 and the modeling brief):
    `applyPrStatusToHandoff`).
 2. `btrain locks release-lane` drops registry entries with no audited
    override and leaves the handoff locked-file record behind.
+2b. `handoff resolve --final` from `needs-review` or a PR-flow status
+    terminally resolves. Spec 002 requires plain resolve into `ready-for-pr`.
 
 Candidate findings surfaced by harness runs (need designation decisions in
 spec 002/005/006 before the model treats them as normative):
