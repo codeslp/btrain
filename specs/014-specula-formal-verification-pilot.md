@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.6
+**Version**: 0.1.7
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-31
@@ -97,6 +97,20 @@ Exact normative ranges for the first model:
   human-escalation bound, lock retention, and the audited override
   (not GitHub close)
 
+Spec 006 establishes that `repair-needed` exists and who clears it, but it
+does not fix legal source or destination statuses. Spec 014 designates them
+for the first model, provisionally until spec 006 adopts its own transition
+prose:
+
+- Entry: only from an active lane status, for a workflow-integrity failure.
+  Entry from `idle` or `resolved` is invalid.
+- Exit to `in-progress`: the responsible repair actor clears the repair and
+  same-lane work continues.
+- Exit to `resolved`: a terminal disposition after the FR-18 escalation
+  decides the lane will not continue. Terminal lock release applies.
+- No other exit is legal in the first model. Repair must not move directly
+  to `needs-review` or to a PR-flow status.
+
 ## Goals
 
 - Establish an owned, reviewable formal-verification lifecycle for btrain.
@@ -191,13 +205,16 @@ The author records a short rationale, keeps the approved model stable, and runs
 the prose-to-model pin check. The remaining evidence depends on what the change
 touches:
 
-- Code-free edits require the pin check only. Examples include prose
-  formatting, comment changes, documentation edits, and test-only changes that
-  do not alter observed modeled behavior.
+- Non-executable edits require the pin check only. Examples include prose
+  formatting, comment changes, and documentation edits.
 - Changes that touch a modeled implementation entry point, such as equivalent
   refactors, must also run focused implementation validation before review.
   The pin check never exercises code. Validation is what detects a mistakenly
   non-equivalent refactor.
+- Changes that edit the validation harness, its model transcription, or other
+  executable tests in the modeled area must also run the focused harness
+  before review. A removed assertion or a broken generator weakens validation
+  silently, and only an executed run shows it.
 
 ### Semantic impact
 
@@ -381,7 +398,9 @@ implementation entry points with generated command sequences. It must check
 each step against an executable transcription of the approved model. It must
 record the seed that reproduces each run. Harness runs must not require agent
 or provider credentials. Specula may generate and edit harness code, but replacing
-the engine is a spec 014 policy change, not an implementation detail.
+the engine is a spec 014 policy change, not an implementation detail. The
+engine evaluation and its revisit conditions are recorded in
+`research/fastcheck-engine-choice.md`.
 
 ### FR-7: Focused pre-review verification
 
