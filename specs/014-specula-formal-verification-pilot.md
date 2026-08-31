@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.8
+**Version**: 0.1.9
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-31
@@ -330,17 +330,31 @@ decision must not be hidden in shell exit-code handling.
 
 ## Pre-Review and CI Evidence
 
-The review packet for a formal-impact change must include:
+The review packet depends on the declared formal impact. Do not record
+placeholder TLC, Specula, model, or harness artifacts for a packet that does
+not require them.
+
+Every packet includes:
 
 - formal-impact classification and rationale
 - authoritative prose range or decision record
-- changed model and harness files
-- Specula version and isolated-run identifier
-- TLC configuration, bounds, states explored, depth, and verdict
-- trace-validation command and verdict
-- conventional test command and verdict
+- pin-check command and verdict
 - unverified paths and tool/provider failures
-- specific questions for the independent reviewer
+
+Additional evidence by class:
+
+- **Code-free no-semantic-impact** (prose formatting, comments, documentation):
+  the items above only. No model or harness diffs, Specula run, TLC, trace
+  validation, or conventional-test evidence.
+- **No-semantic-impact that touches a modeled implementation entry point or
+  the executable harness/tests**: plus the focused validation or harness
+  command and verdict. Model, TLC, and Specula artifacts are required only
+  if those files actually changed.
+- **Semantic impact**: plus changed model and harness files; Specula version
+  and isolated-run identifier when Specula ran; TLC configuration, bounds,
+  states explored, depth, and verdict; trace-validation command and verdict;
+  conventional test command and verdict; specific questions for the
+  independent reviewer.
 
 CI must verify evidence against the exact PR head. Cached results are reusable
 only when keyed by all semantic inputs: source commit, prose range/hash, TLA+

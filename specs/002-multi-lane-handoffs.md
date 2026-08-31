@@ -80,6 +80,16 @@ Close without merge is a **terminal lock-release** event. It is not `repair-need
 
 Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-needed` (`src/brain_train/pr-flow.mjs`) is implementation drift and a candidate counterexample. The model must pin this designated contract, not the current branch.
 
+### `handoff resolve --final`
+
+`--final` marks a resolve as terminal: the lane becomes `resolved` and locks release. It does not enter `ready-for-pr`.
+
+In a PR-flow-enabled repository this is not a reviewer bypass of local approval. From `needs-review`, the assigned reviewer uses plain `handoff resolve` (no `--final`) to enter `ready-for-pr` with locks retained. `--final` from `needs-review` or from any PR-flow status (`ready-for-pr`, `pr-review`, `ready-to-merge`) is implementation drift and a candidate counterexample.
+
+`--final` is valid only when terminal `resolved` is already the designated next status: in repositories without PR-flow, where resolve is terminal, or as the explicit terminal disposition after merge or close handling. The actor is the same as for that terminal resolve.
+
+Current `resolveHandoff` honoring `--final` from `needs-review` in this PR-flow repository (`src/brain_train/core.mjs`) is drift, not the contract.
+
 ### Force-release override
 
 `btrain locks release --path` and `btrain locks release-lane` may drop lock-registry coverage without resolving the lane, but only as a spec 006 FR-2c/FR-2d audited override:
@@ -104,7 +114,7 @@ All `handoff` subcommands accept `--lane <id>`:
 | `btrain handoff` | Shows all lanes' status and guidance |
 | `btrain handoff claim --lane a` | Claims a task on lane A |
 | `btrain handoff update --lane a` | Updates lane A's state |
-| `btrain handoff resolve --lane a` | Local approval or terminal resolve. Releases locks only when the lane becomes `resolved`; in PR-flow, local approval keeps locks through merge or close. |
+| `btrain handoff resolve --lane a` | Local approval or terminal resolve. Releases locks only when the lane becomes `resolved`; in PR-flow, local approval keeps locks through merge or close. `--final` is not a reviewer bypass; see `handoff resolve --final`. |
 | `btrain locks` | Lists all active file locks |
 | `btrain locks release --path <p>` | Force-releases a specific lock after a spec 006 audited override |
 | `btrain locks release-lane --lane <id>` | Releases all locks for a lane after a spec 006 audited override |
