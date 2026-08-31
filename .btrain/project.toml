@@ -39,7 +39,7 @@ handoff_path = ".claude/collab/HANDOFF_F.md"
 [pr_flow]
 enabled = true
 base = "main"
-required_bots = ["codex", "unblocked"]
+required_bots = ["codex"]
 
 [pr_flow.bots.codex]
 aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
