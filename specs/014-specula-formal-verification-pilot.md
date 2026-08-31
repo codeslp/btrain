@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.5
+**Version**: 0.1.6
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-31
@@ -84,10 +84,13 @@ Exact normative ranges for the first model:
   PR-flow retention, terminal release, PR-feedback return to
   `changes-requested`, `ready-for-pr` / `pr-review` / `ready-to-merge` /
   merge / close actors, and force-release
-- spec 005 v0.1.0, section Proposed Status Model and FR-1 through FR-11: the
-  `changes-requested` local review-return contract, covering status semantics,
-  active lane and lock treatment, canonical findings, reviewer identity,
-  next-actor routing, and the same-lane rework loop
+- spec 005 v0.1.0, section Proposed Status Model, FR-1 through FR-8, FR-10,
+  and FR-11: the `changes-requested` local review-return contract, covering
+  status semantics, active lane and lock treatment, canonical findings,
+  reviewer identity, next-actor routing, and the same-lane rework loop. FR-9
+  is excluded as conflicting prose: spec 002 v1.1.2 supersedes it in PR-flow
+  repositories, where peer `handoff resolve` advances `needs-review` to
+  nonterminal `ready-for-pr` and retains locks
 - spec 006 v0.1.0, FR-2c, FR-2d, FR-4, FR-5, FR-7, FR-15, FR-18, and FR-20:
   the `repair-needed` workflow-integrity contract, covering state entry,
   lane-local freeze, repair ownership, clearing, the one-retry
