@@ -179,7 +179,10 @@ export class LaneLockModel {
       lockedFiles: [...normalized].sort(),
       prNumber: "",
       fileExists: true,
-      repairReasonsSeen: [],
+      // repairReasonsSeen deliberately NOT reset: the implementation counts
+      // repair history from the lane's event log, which spans re-claims.
+      // Whether the FR-18 budget should span tasks is a designation question
+      // recorded in the README ledger.
       escalationExpected: false,
       reasonCode: "",
       repairOwner: "",
@@ -350,7 +353,6 @@ export class LaneLockModel {
     s.status = "resolved"
     s.lockedFiles = []
     s.fileExists = true
-    s.repairReasonsSeen = []
     s.escalationExpected = false
     s.reasonCode = ""
     s.repairOwner = ""
@@ -362,14 +364,14 @@ export class LaneLockModel {
   // spec 002 PR-flow states and actors: outcomes applied from GitHub state.
   prOutcome({ lane, outcome, pr }) {
     const s = this.lane(lane)
-    // An explicitly supplied PR (`--pr`) satisfies the linked precondition
-    // in both modes — the real entry point accepts it, and the contract's
-    // concern is the source status, not how the PR number arrived.
-    if (pr && !s.prNumber) {
-      s.prNumber = String(pr)
-    }
+    // An explicitly supplied PR (`--pr`) satisfies the linked precondition —
+    // the real entry point accepts it. Only the outcomes that route through
+    // patchHandoff carrying the PR (feedback, clear, waiting) persist the
+    // supplied number on the lane; merged and closed leave the stored link
+    // unchanged.
+    const suppliedPr = pr ? String(pr) : ""
     if (this.mode === "contract") {
-      if (!s.prNumber) return this.#reject("no-linked-pr")
+      if (!s.prNumber && !suppliedPr) return this.#reject("no-linked-pr")
       if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
         return this.#reject("pr-outcome-from-invalid-status")
       }
@@ -420,18 +422,21 @@ export class LaneLockModel {
       s.status = "changes-requested"
       s.reasonCode = "pr-review-feedback"
       s.lastActor = s.owner || s.lastActor
+      if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
       return this.#accept()
     }
     if (outcome === "clear") {
       s.status = "ready-to-merge"
       s.reasonCode = ""
       s.lastActor = s.owner || s.lastActor
+      if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
       return this.#accept()
     }
     // waiting
     s.status = "pr-review"
     s.reasonCode = ""
     s.lastActor = s.owner || s.lastActor
+    if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
     return this.#accept()
   }
 
@@ -546,6 +551,7 @@ export class LaneLockModel {
         owner: s.owner,
         reviewer: s.reviewer,
         reasonCode: s.reasonCode,
+        prLinked: Boolean(s.prNumber),
         lockedFiles: [...s.lockedFiles].sort(),
         registry: this.registryPaths(id),
       }

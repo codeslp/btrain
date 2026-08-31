@@ -100,6 +100,12 @@ that only carry another lane's reviewed work.
 
 ## Known gaps
 
+- Designation question: the implementation's FR-18 budget counts repair
+  history from the lane's event log, which spans re-claims of the same lane.
+  The model mirrors this. Whether a new task inherits the previous task's
+  repair budget needs a spec 006 designation; edge cases surface as
+  `repair-escalation-missing` tallies.
+
 - Crash-window injection (partial failure between the lock-registry write
   and the handoff write) is not exercised yet.
 - Concurrent interleavings are not exercised; runs are sequential.

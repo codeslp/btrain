@@ -141,6 +141,7 @@ async function realSnapshot(repo, config) {
       owner: s.owner || "",
       reviewer: s.reviewer || "",
       reasonCode: String(s.reasonCode || ""),
+      prLinked: Boolean(s.prNumber),
       lockedFiles: sortedPaths(s.lockedFiles),
       registry: registry.locks
         .filter((l) => l.lane === id)
@@ -507,6 +508,16 @@ async function executeSequence(mode, cmds) {
           tainted.add(cmd.lane)
           model.adoptReal(cmd.lane, real[cmd.lane])
           continue
+        }
+        if (
+          m.status === "repair-needed" &&
+          !m.escalationExpected &&
+          snap.repair[cmd.lane].escalation
+        ) {
+          throw new Divergence(
+            `step ${i} ${cmd.t}: unexpected escalation — the implementation reports "${snap.repair[cmd.lane].escalation}" on a repair entry the contract does not consider budget-exhausted`,
+            trace,
+          )
         }
         if (
           m.status === "repair-needed" &&
