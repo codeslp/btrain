@@ -73,12 +73,15 @@ testing field.
 
 ## Baseline evidence
 
-The first harness build on fast-check (test/formal/, 2026-08-31) reproduced
-the designated close-without-merge drift as a shrunk 5-step counterexample,
-surfaced six previously unrecorded candidate findings (actor-authorization
-and source-status gaps; see test/formal/README.md), and runs 60 property
-executions in ~0.5s with full seed reproduction. That is the empirical basis
-for making the engine choice policy rather than preference.
+A prototype harness built on fast-check (2026-08-31, developed in lane d and
+landing as a separate change — not part of the spec revision this document
+accompanies) reproduced the designated close-without-merge drift as a shrunk
+5-step counterexample, surfaced six previously unrecorded candidate findings
+(actor-authorization and source-status gaps), and ran 60 property executions
+in ~0.5s with full seed reproduction. The lane d change adds `test/formal/`
+with the harness, its contract model, and the findings ledger; until it
+merges, the numbers here are working-tree measurements. They are the
+empirical basis for making the engine choice policy rather than preference.
 
 ## Revisit conditions
 
