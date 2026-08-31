@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.1
+**Version**: 0.1.2
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-30
@@ -59,7 +59,7 @@ semantics.
 No TLA+ model may be treated as authoritative until conflicting prose is
 reconciled and exact normative ranges are designated.
 
-Lock release is designated in spec 002 v1.1.1 (2026-08-30):
+Lock release is designated in spec 002 v1.1.2 (2026-08-30):
 
 - Terminal `resolved` releases the lane's locks.
 - When `[pr_flow].enabled` is true, peer `handoff resolve` is local approval
@@ -70,10 +70,10 @@ Lock release is designated in spec 002 v1.1.1 (2026-08-30):
   `repair-needed`. Spec 006 retention applies to workflow-integrity repair, not
   GitHub close. Current JS that routes close to `repair-needed` is drift, not
   the contract.
-- `btrain locks release` / `release-lane` are audited overrides that drop
-  registry coverage without requiring matching handoff lock records. The
-  matching-coverage invariant is suspended on those traces (spec 002
-  Force-release override).
+- `btrain locks release` / `release-lane` suspend matching coverage only
+  after a verified spec 006 FR-2c/FR-2d override (request, reason, human
+  confirm, consume). An unaudited CLI release is drift, not a valid
+  uncovered trace (spec 002 Force-release override).
 - Specula must pin this designated contract. It must not choose whichever
   behavior the implementation currently exhibits if that later drifts.
 
@@ -409,7 +409,7 @@ Broader models require separate scope decisions based on pilot evidence.
 ### Phase 0: Reconcile and bootstrap
 
 - approve spec 014 (still Draft; this lane produces the reviewable draft)
-- lock-release designated in spec 002 v1.1.1: PR-flow retains through merge/close; close-without-merge is terminal resolved (not repair-needed); terminal resolved releases; force-release is an audited override
+- lock-release designated in spec 002 v1.1.2: PR-flow retains through merge/close; close-without-merge is terminal resolved (not repair-needed); terminal resolved releases; force-release is an audited override
 - fix formal-skill references to point at their real owning specification (out of this lane lock; follow-up)
 - modeling brief: `specs/014-specula-modeling-guidance.md`
 

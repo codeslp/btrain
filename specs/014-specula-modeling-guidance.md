@@ -20,14 +20,14 @@
 
 1. When two lanes claim overlapping paths or claim/update operations interleave,
    can both lanes become active with overlapping locks?
-   Expected behavior: active lanes have exclusive, matching lock coverage, except on an audited force-release trace (`btrain locks release` / `release-lane`), which must set an uncovered/override flag instead of requiring matching coverage.
+   Expected behavior: active lanes have exclusive, matching lock coverage, except after a verified spec 006 audited override consumed by `btrain locks release` / `release-lane`. That trace must set an uncovered/override flag. An unaudited CLI release (no grant/consume, no human confirm) is drift, not a valid uncovered trace.
 2. When a lane changes status, can an actor other than the contractually assigned
    owner, reviewer, repair owner, or PR-flow actor advance it?
    Expected behavior: every transition is authorized and routes the correct next actor.
 3. When local review, PR feedback, merge, closure, or repair occurs, can locks be
    released too early, retained after terminal completion, or diverge from the
    handoff record?
-   Expected behavior: lock retention and release follow spec 002 v1.1.1: retain through PR-flow states; release on merge, close-without-merge (terminal resolved, not repair-needed), terminal resolved, or audited force-release.
+   Expected behavior: lock retention and release follow spec 002 v1.1.2: retain through PR-flow states; release on merge, close-without-merge (terminal resolved, not repair-needed), terminal resolved, or audited force-release.
 4. When review requests changes or PR bots return feedback, can the lane lose its
    reviewer, owner, findings, or same-lane rework path?
    Expected behavior: rework remains active, canonical, and routed to the writer.
@@ -54,9 +54,10 @@
   `applyPrStatusToHandoff` sends GitHub close-without-merge to `repair-needed`
   while the contract is terminal `resolved` plus lock release. Model the
   contract; treat the JS path as a candidate counterexample.
-- `btrain locks release-lane` currently drops registry entries without updating
-  the handoff locked-file record. That is allowed as an audited override; do
-  not encode matching coverage as an unconditional invariant.
+- `btrain locks release-lane` currently drops registry entries without a spec
+  006 override grant/consume and without updating the handoff locked-file
+  record. Treat that unaudited path as drift. Suspend matching coverage only
+  after a verified override event.
 - The bundled formal skills currently cite nonexistent spec 002 sections and the
   pin workflow no-ops because no formal artifacts exist.
 

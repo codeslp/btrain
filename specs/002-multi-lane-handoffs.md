@@ -1,7 +1,7 @@
 # Spec: Multi-Lane Handoffs with File Locking
 
 **Status**: Implemented
-**Version**: 1.1.1
+**Version**: 1.1.2
 **Author**: btrain
 **Date**: 2026-03-15
 **Updated**: 2026-08-30
@@ -57,7 +57,7 @@ Each lane has its own independent handoff file with the standard `## Current` se
 2. **On terminal resolve**: `btrain handoff resolve --lane` auto-releases that lane's locks only when the lane actually becomes `resolved`
 3. **Pre-commit hook**: Blocks commits touching files locked by another lane
 
-When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`. It does **not** release locks. Locks stay held through `ready-for-pr`, `pr-review`, and `ready-to-merge`, and are released when the PR merges or closes (or via `btrain locks release-lane`).
+When `[pr_flow].enabled` is true, peer `handoff resolve` means local review approval and advances the lane to `ready-for-pr`. It does **not** release locks. Locks stay held through `ready-for-pr`, `pr-review`, and `ready-to-merge`, and are released when the PR merges or closes (or via `btrain locks release-lane` after a spec 006 audited override). Close without merge is terminal `resolved` plus lock release; it is not `repair-needed`.
 
 This PR-flow retention contract is the intended behavior for PR-flow-enabled repositories, including this one. Spec 002's original resolve-releases rule still applies only to terminal `resolved` (no PR-flow, or after the PR has merged or closed).
 
@@ -67,7 +67,7 @@ These statuses and actors are the designated contract for the spec 014 first mod
 
 | Status | Meaning | Who may enter it | Locks |
 |---|---|---|---|
-| `ready-for-pr` | Local peer approved; a PR may be opened or relinked | Owner, after the reviewer runs `handoff resolve` | retained |
+| `ready-for-pr` | Local peer approved; a PR may be opened or relinked | Assigned reviewer via `handoff resolve`. The owner acts next (opens or relinks the PR) after the lane is already in this status. | retained |
 | `pr-review` | A GitHub PR is linked and waiting on GitHub review/CI | Owner via `btrain pr create`, or owner via `handoff update --status pr-review --pr` to relink | retained |
 | `ready-to-merge` | GitHub review/CI disposition is mergeable | `btrain pr poll --apply` (PR-flow), not a peer `handoff resolve` | retained |
 | `changes-requested` (PR-flow) | GitHub review returned findings | `btrain pr poll --apply` when overall status is feedback; then the writer acts (spec 005) | retained |
@@ -80,16 +80,18 @@ Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-neede
 
 ### Force-release override
 
-`btrain locks release --path` and `btrain locks release-lane` are audited overrides (spec 006 override path). They drop lock-registry coverage without requiring the lane to be `resolved`, and they are not required to rewrite the handoff's locked-file record in the same operation.
+`btrain locks release --path` and `btrain locks release-lane` may drop lock-registry coverage without resolving the lane, but only as a spec 006 FR-2c/FR-2d audited override:
 
-After an audited force-release:
+- an agent or guardian requests the override
+- a reason is recorded
+- a human confirms before execution
+- the override is granted and consumed in canonical workflow history
 
-- the lane may remain active
-- matching lock coverage is **not** required on that trace
-- the model must record an uncovered/override flag
-- the handoff locked-file list is stale until the next claim or rescope
+Matching lock coverage is suspended **only after** that verified override event. The model must record an uncovered/override flag; the handoff locked-file list is stale until the next claim or rescope.
 
-The default invariant "every active lane has exclusive, matching lock coverage" holds only on traces with no audited force-release.
+A CLI call that releases locks from `--path` or `--lane` alone, without grant/consume and human confirmation, is implementation drift and a candidate counterexample. The conformance harness must not treat that unaudited path as a valid uncovered trace.
+
+The default invariant "every active lane has exclusive, matching lock coverage" holds on every trace that has not completed a verified spec 006 override.
 
 ## CLI Commands
 
@@ -102,8 +104,8 @@ All `handoff` subcommands accept `--lane <id>`:
 | `btrain handoff update --lane a` | Updates lane A's state |
 | `btrain handoff resolve --lane a` | Local approval or terminal resolve. Releases locks only when the lane becomes `resolved`; in PR-flow, local approval keeps locks through merge or close. |
 | `btrain locks` | Lists all active file locks |
-| `btrain locks release --path <p>` | Force-releases a specific lock |
-| `btrain locks release-lane --lane <id>` | Releases all locks for a lane |
+| `btrain locks release --path <p>` | Force-releases a specific lock after a spec 006 audited override |
+| `btrain locks release-lane --lane <id>` | Releases all locks for a lane after a spec 006 audited override |
 | `btrain status` | Shows per-lane breakdown when lanes enabled |
 | `btrain doctor` | Checks lane files, locks.json validity, stale locks, lock overlaps |
 
