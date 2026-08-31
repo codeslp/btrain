@@ -1,10 +1,12 @@
 # Spec: Multi-Lane Handoffs with File Locking
 
-**Status**: Implemented
+**Status**: Partially implemented
 **Version**: 1.1.2
 **Author**: btrain
 **Date**: 2026-03-15
-**Updated**: 2026-08-30
+**Updated**: 2026-08-31
+
+The multi-lane lock baseline through v1.1.1 is implemented. Version 1.1.2 is the designated contract, including close-without-merge as terminal `resolved` and audited force-release. Those two paths remain CLI drift and are not yet delivered.
 
 ## Summary
 

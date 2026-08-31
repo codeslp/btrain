@@ -50,7 +50,7 @@
 
 ## Known Incidents and References
 
-- Spec 002 v1.1.1 designates lock release. Remaining mismatch: current
+- Spec 002 v1.1.2 designates lock release. Remaining mismatch: current
   `applyPrStatusToHandoff` sends GitHub close-without-merge to `repair-needed`
   while the contract is terminal `resolved` plus lock release. Model the
   contract; treat the JS path as a candidate counterexample.
