@@ -319,19 +319,38 @@ const CANDIDATE_REASON_LABELS = new Map([
 // different wrong state on the same command is an unknown divergence and
 // fails. Candidate classifications feed a failing gate, so shape precision
 // there cannot hide a new mismatch.
-function classifyDivergence(cmd, modelReason, kind, realLane) {
+function classifyDivergence(cmd, modelReason, kind, realLane, ctx = {}) {
   const sameSet = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const pre = ctx.pre || null
   if (kind === "state" && cmd.t === "prOutcome" && cmd.outcome === "closed") {
-    // Drift shape: routed to repair-needed with the lane's locks retained.
+    // Drift shape, complete: routed to repair-needed with locks retained and
+    // EVERY non-designated field unchanged from the pre-command contract
+    // state (owner, reviewer, locked set), the drift's canonical reason
+    // code, and the FR-7 repair owner. Any additional corruption riding the
+    // closed outcome is an unknown divergence.
     const shapeOk =
+      pre !== null &&
       realLane.status === "repair-needed" &&
+      realLane.owner === pre.owner &&
+      realLane.reviewer === pre.reviewer &&
+      realLane.reasonCode === "invalid-handoff" &&
+      sameSet(realLane.lockedFiles, [...pre.lockedFiles].sort()) &&
+      sameSet(realLane.registry, realLane.lockedFiles) &&
       realLane.lockedFiles.length > 0 &&
-      sameSet(realLane.registry, realLane.lockedFiles)
+      (!ctx.realRepair || ctx.realRepair.owner === (pre.lastActor || pre.owner))
     return shapeOk ? { designated: true, label: "close-without-merge" } : null
   }
   if (kind === "allow" && cmd.t === "releaseLane" && modelReason === "unaudited-release-forbidden") {
-    // Drift shape: registry emptied while the handoff record keeps its paths.
-    const shapeOk = realLane.registry.length === 0 && realLane.lockedFiles.length > 0
+    // Drift shape, complete: registry emptied while the handoff record and
+    // every other field keep their pre-command values.
+    const shapeOk =
+      pre !== null &&
+      realLane.registry.length === 0 &&
+      realLane.status === pre.status &&
+      realLane.owner === pre.owner &&
+      realLane.reviewer === pre.reviewer &&
+      sameSet(realLane.lockedFiles, [...pre.lockedFiles].sort()) &&
+      realLane.lockedFiles.length > 0
     return shapeOk ? { designated: true, label: "unaudited-release" } : null
   }
   if (kind === "allow" && cmd.t === "resolve" && modelReason === KNOWN_DRIFTS.finalFromPrFlow) {
@@ -389,6 +408,11 @@ async function executeSequence(mode, cmds) {
         continue
       }
 
+      // Pre-command contract state of the target lane, for verifying that a
+      // ledgered designated drift changed ONLY its designated fields.
+      const preLane =
+        mode === "contract" ? JSON.parse(JSON.stringify(model.lane(cmd.lane))) : null
+
       const expected = applyModel(model, cmd, actor)
 
       let realOk = true
@@ -434,7 +458,10 @@ async function executeSequence(mode, cmds) {
       if (expected.ok !== realOk) {
         const cls =
           mode === "contract" && !expected.ok && realOk
-            ? classifyDivergence(cmd, expected.reason, "allow", real[cmd.lane])
+            ? classifyDivergence(cmd, expected.reason, "allow", real[cmd.lane], {
+                pre: preLane,
+                realRepair: snap.repair[cmd.lane],
+              })
             : null
         if (cls) {
           ledger(cls, cmd)
@@ -453,7 +480,10 @@ async function executeSequence(mode, cmds) {
       if (diffLanes.length > 0) {
         const cls =
           mode === "contract" && diffLanes.length === 1 && diffLanes[0] === cmd.lane
-            ? classifyDivergence(cmd, expected.reason || "", "state", real[cmd.lane])
+            ? classifyDivergence(cmd, expected.reason || "", "state", real[cmd.lane], {
+                pre: preLane,
+                realRepair: snap.repair[cmd.lane],
+              })
             : null
         if (cls) {
           ledger(cls, cmd)

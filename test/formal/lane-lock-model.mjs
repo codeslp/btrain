@@ -60,9 +60,10 @@ function emptyLane() {
     // Whether a handoff file exists for the lane. patchHandoff crashes on a
     // never-claimed lane, so the implementation mirror needs this.
     fileExists: false,
-    // FR-18 tracking: the last workflow-integrity reason and whether the
-    // contract now expects human escalation (same-reason re-entry).
-    repairReason: "",
+    // FR-18 tracking: every workflow-integrity reason seen (the
+    // implementation counts history per reason) and whether the contract
+    // now expects human escalation (same-reason re-entry).
+    repairReasonsSeen: [],
     escalationExpected: false,
     // Canonical reason code carried by the lane (spec 005/006 taxonomies).
     reasonCode: "",
@@ -178,7 +179,7 @@ export class LaneLockModel {
       lockedFiles: [...normalized].sort(),
       prNumber: "",
       fileExists: true,
-      repairReason: "",
+      repairReasonsSeen: [],
       escalationExpected: false,
       reasonCode: "",
       repairOwner: "",
@@ -249,10 +250,10 @@ export class LaneLockModel {
       // designation: re-entering for the same unresolved reason exhausts the
       // one-attempt budget, so the contract expects human escalation.
       if (!ACTIVE_STATUSES.has(s.status)) return this.#reject("repair-from-inactive")
-      if (reason && reason === s.repairReason) {
+      if (reason && s.repairReasonsSeen.includes(reason)) {
         s.escalationExpected = true
       } else if (reason) {
-        s.repairReason = reason
+        s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
       }
       s.status = "repair-needed"
       this.#applyUpdateEffects(s, status, actor, reason)
@@ -349,7 +350,7 @@ export class LaneLockModel {
     s.status = "resolved"
     s.lockedFiles = []
     s.fileExists = true
-    s.repairReason = ""
+    s.repairReasonsSeen = []
     s.escalationExpected = false
     s.reasonCode = ""
     s.repairOwner = ""
