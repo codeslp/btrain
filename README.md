@@ -357,8 +357,10 @@ approved intended behavior in prose   (specs 002/005/006, designated by spec 014
    - **implementation mode** must pass. It checks real behavior against
      recorded reality and catches new drift.
    - The **drift witnesses** (close-without-merge, `--final` from
-     needs-review) report as `todo` failures. They assert the contract and
-     flip green when the designated drift is repaired.
+     needs-review) report as `todo` failures. They assert the contract, so
+     the change that repairs a designated drift must also remove that
+     witness's `todo` marker — turning it into a normal passing regression
+     test (Node reports a passing `todo` as `todo`, not `pass`).
 4. Tune runs when needed:
    - `BTRAIN_FORMAL_RUNS=<n>` — property runs per mode (default 15)
    - `BTRAIN_FORMAL_SEED=<n>` — reproduce a recorded failure exactly
@@ -367,8 +369,9 @@ approved intended behavior in prose   (specs 002/005/006, designated by spec 014
    credentials, network, or provider.
 
 TLA+/TLC model checking (`specs/tla/`, pin sync, exact-head CI) is pilot
-phase 1–2 and does not exist yet. The bundled `tla-*` skills no-op until
-those artifacts land.
+phase 1–2. While `specs/tla/` is empty, `tla-pin-sync` and `speckit-formal`
+no-op cleanly; `tla-author` is the skill that bootstraps the first `.tla`
+and `.cfg` pair under TLC feedback.
 
 ### A Change in Practice
 
@@ -401,8 +404,8 @@ code moves through these steps:
 7. **PR flow.** With `[pr_flow].enabled`, local approval advances to
    `ready-for-pr` and locks stay held. Run `btrain pr create --lane <id>
    --bots all`, then `btrain pr poll --lane <id> --apply` and
-   `btrain pr request-review` until bots are clear. Merge releases the
-   locks and resolves the lane.
+   `btrain pr request-review --lane <id> --bots all` until bots are clear.
+   Merge releases the locks and resolves the lane.
 8. **CI (phase 2).** Once the pilot gate is enabled, CI reruns the
    deterministic checks on the exact PR head before merge.
 
