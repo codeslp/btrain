@@ -20,14 +20,14 @@
 
 1. When two lanes claim overlapping paths or claim/update operations interleave,
    can both lanes become active with overlapping locks?
-   Expected behavior: active lanes have exclusive, matching lock coverage.
+   Expected behavior: active lanes have exclusive, matching lock coverage, except on an audited force-release trace (`btrain locks release` / `release-lane`), which must set an uncovered/override flag instead of requiring matching coverage.
 2. When a lane changes status, can an actor other than the contractually assigned
    owner, reviewer, repair owner, or PR-flow actor advance it?
    Expected behavior: every transition is authorized and routes the correct next actor.
 3. When local review, PR feedback, merge, closure, or repair occurs, can locks be
    released too early, retained after terminal completion, or diverge from the
    handoff record?
-   Expected behavior: lock retention and release follow one reconciled contract.
+   Expected behavior: lock retention and release follow spec 002 v1.1.1: retain through PR-flow states; release on merge, close-without-merge (terminal resolved, not repair-needed), terminal resolved, or audited force-release.
 4. When review requests changes or PR bots return feedback, can the lane lose its
    reviewer, owner, findings, or same-lane rework path?
    Expected behavior: rework remains active, canonical, and routed to the writer.
@@ -50,8 +50,13 @@
 
 ## Known Incidents and References
 
-- Spec 002 and current PR-flow guidance disagree about when `resolve` releases
-  locks; treat this as an authority conflict to resolve, not as an implementation fact.
+- Spec 002 v1.1.1 designates lock release. Remaining mismatch: current
+  `applyPrStatusToHandoff` sends GitHub close-without-merge to `repair-needed`
+  while the contract is terminal `resolved` plus lock release. Model the
+  contract; treat the JS path as a candidate counterexample.
+- `btrain locks release-lane` currently drops registry entries without updating
+  the handoff locked-file record. That is allowed as an audited override; do
+  not encode matching coverage as an unconditional invariant.
 - The bundled formal skills currently cite nonexistent spec 002 sections and the
   pin workflow no-ops because no formal artifacts exist.
 

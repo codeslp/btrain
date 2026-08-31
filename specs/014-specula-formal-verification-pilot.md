@@ -1,9 +1,10 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.1.1
 **Author**: btrain
 **Date**: 2026-08-29
+**Updated**: 2026-08-30
 
 ## Decision
 
@@ -58,19 +59,32 @@ semantics.
 No TLA+ model may be treated as authoritative until conflicting prose is
 reconciled and exact normative ranges are designated.
 
-Lock release is designated in spec 002 v1.1.0 (2026-08-29):
+Lock release is designated in spec 002 v1.1.1 (2026-08-30):
 
 - Terminal `resolved` releases the lane's locks.
 - When `[pr_flow].enabled` is true, peer `handoff resolve` is local approval
   and advances to `ready-for-pr`. Locks are retained through `ready-for-pr`,
   `pr-review`, and `ready-to-merge`, and released when the PR merges or closes
   (or via `btrain locks release-lane`).
+- Close without merge is terminal `resolved` plus lock release. It is not
+  `repair-needed`. Spec 006 retention applies to workflow-integrity repair, not
+  GitHub close. Current JS that routes close to `repair-needed` is drift, not
+  the contract.
+- `btrain locks release` / `release-lane` are audited overrides that drop
+  registry coverage without requiring matching handoff lock records. The
+  matching-coverage invariant is suspended on those traces (spec 002
+  Force-release override).
 - Specula must pin this designated contract. It must not choose whichever
   behavior the implementation currently exhibits if that later drifts.
 
-Exact normative ranges for the first model: spec 002 Lock Enforcement and CLI
-Commands (lock acquisition, exclusivity, PR-flow retention, terminal release);
-spec 005 for `changes-requested`; spec 006 for `repair-needed`.
+Exact normative ranges for the first model:
+
+- spec 002 Lock Enforcement, PR-flow states and actors, Force-release override,
+  and CLI Commands: lock acquisition, exclusivity, PR-flow retention, terminal
+  release, `ready-for-pr` / `pr-review` / `ready-to-merge` / merge / close
+  actors, and force-release
+- spec 005: `changes-requested` (local review return and PR-flow feedback)
+- spec 006: `repair-needed` (workflow integrity only; not GitHub close)
 
 ## Goals
 
@@ -395,7 +409,7 @@ Broader models require separate scope decisions based on pilot evidence.
 ### Phase 0: Reconcile and bootstrap
 
 - approve spec 014 (still Draft; this lane produces the reviewable draft)
-- lock-release designated in spec 002 v1.1.0: PR-flow retains through merge/close; terminal resolved releases
+- lock-release designated in spec 002 v1.1.1: PR-flow retains through merge/close; close-without-merge is terminal resolved (not repair-needed); terminal resolved releases; force-release is an audited override
 - fix formal-skill references to point at their real owning specification (out of this lane lock; follow-up)
 - modeling brief: `specs/014-specula-modeling-guidance.md`
 
