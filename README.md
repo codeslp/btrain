@@ -288,7 +288,10 @@ Every active lane may carry a structured `Delegation Packet` describing the cont
 | `resolved` | Anyone | Review approved — lane recyclable |
 
 Locks are retained through `ready-for-pr`, `pr-review`, and `ready-to-merge`,
-and release when the PR merges or closes (spec 002 v1.1.2).
+and release when the PR merges. Spec 002 v1.1.2 designates close-without-merge
+to release too, but the current implementation routes closure to
+`repair-needed` and keeps the locks — a designated drift the formal harness
+witnesses (see Formal Verification below).
 
 ### Review Context Fields
 
@@ -343,7 +346,10 @@ approved intended behavior in prose   (specs 002/005/006, designated by spec 014
 3. Read the result:
    - **contract mode** must pass. Divergences that match the documented
      ledger (designated drift and recorded candidate findings) are allowed;
-     any new divergence is a `validation_mismatch` and fails the suite.
+     a divergence outside the ledger fails the run as `validation_mismatch`.
+     Each generated sequence stops at its first divergence, so a sequence
+     that hits ledgered drift first is not checked further — detection of
+     new mismatches comes from the many independent sequences per run.
    - **implementation mode** must pass. It checks real behavior against
      recorded reality and catches new drift.
    - The **drift witnesses** (close-without-merge, `--final` from
