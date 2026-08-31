@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.4
+**Version**: 0.1.5
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-08-31
@@ -79,12 +79,20 @@ Lock release is designated in spec 002 v1.1.2 (2026-08-30):
 
 Exact normative ranges for the first model:
 
-- spec 002 Lock Enforcement, PR-flow states and actors, Force-release override,
-  and CLI Commands: lock acquisition, exclusivity, PR-flow retention, terminal
-  release, `ready-for-pr` / `pr-review` / `ready-to-merge` / merge / close
-  actors, and force-release
-- spec 005: `changes-requested` (local review return and PR-flow feedback)
-- spec 006: `repair-needed` (workflow integrity only; not GitHub close)
+- spec 002 v1.1.2, sections Lock Enforcement, PR-flow states and actors,
+  Force-release override, and CLI Commands: lock acquisition, exclusivity,
+  PR-flow retention, terminal release, PR-feedback return to
+  `changes-requested`, `ready-for-pr` / `pr-review` / `ready-to-merge` /
+  merge / close actors, and force-release
+- spec 005 v0.1.0, section Proposed Status Model and FR-1 through FR-11: the
+  `changes-requested` local review-return contract, covering status semantics,
+  active lane and lock treatment, canonical findings, reviewer identity,
+  next-actor routing, and the same-lane rework loop
+- spec 006 v0.1.0, FR-2c, FR-2d, FR-4, FR-5, FR-7, FR-15, FR-18, and FR-20:
+  the `repair-needed` workflow-integrity contract, covering state entry,
+  lane-local freeze, repair ownership, clearing, the one-retry
+  human-escalation bound, lock retention, and the audited override
+  (not GitHub close)
 
 ## Goals
 
@@ -374,8 +382,12 @@ the engine is a spec 014 policy change, not an implementation detail.
 
 ### FR-7: Focused pre-review verification
 
-Formal-impact changes must run affected-model TLC and focused implementation
-validation before entering `needs-review`.
+Pre-review verification must match the declared formal impact. Semantic-impact
+changes must run affected-model TLC and focused implementation validation
+before entering `needs-review`. No-semantic-impact changes that touch a
+modeled implementation entry point must run focused implementation validation
+before entering `needs-review`. Code-free no-semantic-impact edits require
+the pin check only.
 
 ### FR-8: Exact-head CI verification
 
