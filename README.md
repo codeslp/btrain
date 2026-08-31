@@ -403,9 +403,13 @@ code moves through these steps:
    writer).
 7. **PR flow.** With `[pr_flow].enabled`, local approval advances to
    `ready-for-pr` and locks stay held. Run `btrain pr create --lane <id>
-   --bots all`, then `btrain pr poll --lane <id> --apply` and
-   `btrain pr request-review --lane <id> --bots all` until bots are clear.
-   Merge the PR, then run `btrain pr poll --lane <id> --apply` once more:
+   --bots all`, then loop until bots are clear: `btrain pr poll --lane <id>
+   --apply` (bot findings move the lane to `changes-requested`), fix and
+   push, `btrain pr request-review --lane <id> --bots all`, then re-enter
+   the loop with `btrain handoff update --lane <id> --status pr-review
+   --actor <you>` (request-review posts comments but does not change the
+   status). Merge the PR, then run `btrain pr poll --lane <id> --apply`
+   once more:
    the poll observes the merge, releases the locks, and resolves the lane.
    Merging alone does not update the local handoff.
 8. **CI (phase 2).** Once the pilot gate is enabled, CI reruns the
@@ -423,7 +427,7 @@ code moves through these steps:
 | `tool_unavailable` | Binary, credential, or provider missing | Infrastructure failure — never reported as pass or as a correctness failure |
 | `policy_blocked` | A provider refused or could not perform a phase | Reported separately from verification evidence; route to an approved alternative or a human |
 
-The harness has already earned its keep. The property runs surfaced six
+The harness has already earned its keep. The property runs surfaced eight
 candidate findings and classify all three designated drifts. Deterministic
 todo witnesses cover two of them — close-without-merge routing and the
 `--final` review bypass — while unaudited lock release is exercised and
