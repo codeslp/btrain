@@ -378,32 +378,29 @@ btrain-chat status</code></pre>
   <!-- Formal Verification -->
   <section id="formal" class="section">
     <div class="container">
-      <div class="section-label">Formal Verification &middot; Pilot</div>
-      <h2>The workflow is the spec.<br>The spec is checked.</h2>
+      <div class="section-label">Verified Rules</div>
+      <h2>The rules are written down.<br>Machines check them.</h2>
       <div class="security-grid">
         <div class="security-item">
-          <h3>&#128220; Designated contract</h3>
-          <p>Intended behavior lives in reviewed prose with exact normative ranges (spec 014 pins specs 002/005/006). The implementation conforms to the spec &mdash; never the reverse. Prose changes first, code follows.</p>
+          <h3>&#128220; A precise contract</h3>
+          <p>Who may move a lane, when files stay locked, and when locks release are written down as a precise contract in the repository. Code follows the contract &mdash; never the reverse. Behavior changes update the written rules first, then the code.</p>
         </div>
         <div class="security-item">
-          <h3>&#9878;&#65039; Property harness</h3>
-          <p>A fast-check harness drives the core workflow APIs behind the CLI (<code>claimHandoff</code>, <code>patchHandoff</code>, <code>resolveHandoff</code>, PR outcomes) with generated command sequences and diffs every step against an executable contract model. Deterministic from a seed, credential-free, CI-ready.</p>
+          <h3>&#9878;&#65039; Checked two ways</h3>
+          <p>A model checker (TLA+) explores every reachable state of the workflow design &mdash; millions of states in seconds &mdash; and proves the safety rules always hold. A test harness then generates thousands of random workflow sequences, runs them against the real code, and compares every step with the contract.</p>
           <table class="security-table">
             <thead>
-              <tr><th>Run</th><th>Meaning</th></tr>
+              <tr><th>Check</th><th>Proves</th></tr>
             </thead>
             <tbody>
-              <tr><td><code>npm run test:formal</code></td><td>Conformance check, ~0.5s for 60 runs</td></tr>
-              <tr><td>contract mode</td><td>Must pass &mdash; designated drift is ledgered and candidate findings tallied; an unledgered divergence fails as <code>validation_mismatch</code>. Divergent lanes adopt real state so the rest of each sequence stays checked; a dedicated gate test fails while any candidate exists</td></tr>
-              <tr><td>implementation mode</td><td>Must pass &mdash; catches new drift against recorded reality</td></tr>
-              <tr><td>drift witnesses</td><td>Deterministic, todo-red until the designated drift is repaired</td></tr>
+              <tr><td>Model checking</td><td>The design keeps its promises: exclusive locks, no orphaned locks, review always involves a second agent</td></tr>
+              <tr><td><code>npm run test:formal</code></td><td>The running code matches the written rules</td></tr>
             </tbody>
           </table>
         </div>
         <div class="security-item">
-          <h3>&#128300; Drift becomes a counterexample</h3>
-          <p>Divergence shrinks to a minimal command sequence with a seed and a JSON trace. The property harness surfaced eight undesignated divergences and classifies all three designated drifts &mdash; deterministic todo witnesses cover close-without-merge routing and the <code>--final</code> review bypass, while unaudited lock release is exercised by the property runs &mdash; all before any TLA+ was written.</p>
-          <p style="font-size:0.85rem; color: var(--text-muted);">Phase 1 adds a pinned TLA+ model checked by TLC; phase 2 reruns deterministic checks on the exact PR head in CI. Verdicts: <code>pass</code>, <code>stale_model</code>, <code>counterexample</code>, <code>validation_mismatch</code>, <code>state_space_exhausted</code>, <code>tool_unavailable</code>, <code>policy_blocked</code>.</p>
+          <h3>&#128300; Differences can't hide</h3>
+          <p>When the code and the rules disagree, the harness shrinks the difference to a minimal sequence of commands with a seed that replays it exactly. Known gaps are documented in the repository and tracked by a failing check until the code is fixed or the rule is deliberately changed.</p>
         </div>
       </div>
     </div>
