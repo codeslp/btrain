@@ -1,10 +1,10 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.2
+**Version**: 0.1.3
 **Author**: btrain
 **Date**: 2026-08-29
-**Updated**: 2026-08-30
+**Updated**: 2026-08-31
 
 ## Decision
 
@@ -352,6 +352,14 @@ check.
 
 The pilot must include an executable harness that emits traces suitable for
 validation against the approved model.
+
+The pilot harness engine is the fast-check property-based testing library, run
+in model-based mode under `node --test`. The harness must drive the
+implementation entry points with generated command sequences. It must check
+each step against an executable transcription of the approved model. It must
+record the seed that reproduces each run. Harness runs must not require agent
+or provider credentials. Specula may generate and edit harness code, but replacing
+the engine is a spec 014 policy change, not an implementation detail.
 
 ### FR-7: Focused pre-review verification
 
