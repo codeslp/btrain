@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Deterministic prose-to-TLA+ pin check (spec 014 FR-5).
+
+Every specs/tla/*.tla file carries a header block:
+
+    \\* Pinned to: <spec.md path> § <heading title>
+    \\* Pinned to: ...            (one line per pinned section, in order)
+    \\* Pinned-hash: <sha256>
+
+A pinned section is the prose from its heading line up to (not including)
+the next heading of the same or higher level. The hash is sha256 over the
+UTF-8 concatenation of every pinned section in listed order, each line
+right-stripped, lines joined with newlines, one newline between sections.
+
+Commands:
+    tla_pin.py --check [file.tla ...]   exit 0 clean, 1 stale, 2 usage/error
+    tla_pin.py --show-range file.tla    print pinned sections and content
+    tla_pin.py --repin file.tla         rewrite the Pinned-hash line
+
+Stdlib only. No TLC required.
+"""
+
+import argparse
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TLA_DIR = REPO_ROOT / "specs" / "tla"
+PIN_LINE = re.compile(r"^\\\*\s*Pinned to:\s*(?P<path>\S+)\s+§\s+(?P<heading>.+?)\s*$")
+HASH_LINE = re.compile(r"^(?P<prefix>\\\*\s*Pinned-hash:\s*)(?P<hash>[0-9a-f]{64}|UNPINNED)\s*$")
+HEADING = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$")
+
+
+def parse_pins(tla_path: Path):
+    """Return (pins, hash_line_index, recorded_hash, lines)."""
+    lines = tla_path.read_text(encoding="utf-8").splitlines()
+    pins = []
+    hash_index = None
+    recorded = None
+    for i, line in enumerate(lines):
+        pin = PIN_LINE.match(line)
+        if pin:
+            pins.append((pin.group("path"), pin.group("heading")))
+            continue
+        h = HASH_LINE.match(line)
+        if h:
+            hash_index = i
+            recorded = h.group("hash")
+    return pins, hash_index, recorded, lines
+
+
+def extract_section(md_path: Path, heading_title: str) -> str:
+    """Prose from the heading line to the next same-or-higher heading."""
+    text = md_path.read_text(encoding="utf-8").splitlines()
+    start = None
+    level = None
+    for i, line in enumerate(text):
+        m = HEADING.match(line)
+        if m and m.group("title") == heading_title:
+            start = i
+            level = len(m.group("hashes"))
+            break
+    if start is None:
+        raise KeyError(f"heading not found: {md_path}:{heading_title!r}")
+    end = len(text)
+    for i in range(start + 1, len(text)):
+        m = HEADING.match(text[i])
+        if m and len(m.group("hashes")) <= level:
+            end = i
+            break
+    return "\n".join(line.rstrip() for line in text[start:end]).rstrip() + "\n"
+
+
+def compute_hash(pins) -> str:
+    parts = []
+    for rel_path, heading in pins:
+        md_path = REPO_ROOT / rel_path
+        parts.append(extract_section(md_path, heading))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def target_files(paths):
+    if paths:
+        return [Path(p).resolve() for p in paths]
+    if not TLA_DIR.is_dir():
+        return []
+    return sorted(TLA_DIR.glob("*.tla"))
+
+
+def cmd_check(paths) -> int:
+    files = target_files(paths)
+    if not files:
+        print("no TLA artifacts — nothing to check")
+        return 0
+    stale = []
+    for tla in files:
+        pins, hash_index, recorded, _ = parse_pins(tla)
+        if not pins or hash_index is None:
+            stale.append((tla, "missing Pinned to / Pinned-hash header"))
+            continue
+        try:
+            current = compute_hash(pins)
+        except (KeyError, FileNotFoundError) as error:
+            stale.append((tla, f"pinned prose unavailable: {error}"))
+            continue
+        if recorded != current:
+            stale.append((tla, f"recorded {recorded[:12]}… != current {current[:12]}…"))
+    for tla, reason in stale:
+        print(f"STALE {tla.relative_to(REPO_ROOT)}: {reason}")
+    if stale:
+        print(f"{len(stale)} stale pin(s). Re-pin with: scripts/tla_pin.py --repin <file.tla>")
+        return 1
+    print(f"{len(files)} pin(s) clean")
+    return 0
+
+
+def cmd_show_range(path: str) -> int:
+    tla = Path(path).resolve()
+    pins, _, recorded, _ = parse_pins(tla)
+    if not pins:
+        print(f"{tla}: no Pinned to header")
+        return 2
+    print(f"recorded hash: {recorded}")
+    for rel_path, heading in pins:
+        print(f"--- {rel_path} § {heading} ---")
+        print(extract_section(REPO_ROOT / rel_path, heading))
+    return 0
+
+
+def cmd_repin(path: str) -> int:
+    tla = Path(path).resolve()
+    pins, hash_index, recorded, lines = parse_pins(tla)
+    if not pins or hash_index is None:
+        print(f"{tla}: missing Pinned to / Pinned-hash header; add them first")
+        return 2
+    current = compute_hash(pins)
+    if recorded == current:
+        print(f"{tla.relative_to(REPO_ROOT)}: already pinned to {current[:12]}…")
+        return 0
+    prefix = HASH_LINE.match(lines[hash_index]).group("prefix")
+    lines[hash_index] = f"{prefix}{current}"
+    tla.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"{tla.relative_to(REPO_ROOT)}: re-pinned {str(recorded)[:12]}… -> {current[:12]}…")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--check", action="store_true")
+    group.add_argument("--show-range", metavar="FILE")
+    group.add_argument("--repin", metavar="FILE")
+    parser.add_argument("files", nargs="*", help="explicit .tla targets for --check")
+    args = parser.parse_args()
+    if args.check:
+        return cmd_check(args.files)
+    if args.show_range:
+        return cmd_show_range(args.show_range)
+    return cmd_repin(args.repin)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
