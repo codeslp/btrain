@@ -300,9 +300,17 @@ export class LaneLockModel {
     if (this.mode === "contract" && actor !== s.owner && actor !== s.reviewer) {
       return this.#reject("resolve-requires-lane-actor")
     }
+    // spec 014 designation: repair-needed exits to resolved only as a
+    // terminal disposition after the FR-18 escalation decides the lane will
+    // not continue. A premature resolve releases contained locks early.
+    if (this.mode === "contract" && s.status === "repair-needed" && !s.escalationExpected) {
+      return this.#reject("repair-resolve-before-escalation")
+    }
     s.status = "resolved"
     s.lockedFiles = []
     s.fileExists = true
+    s.repairReason = ""
+    s.escalationExpected = false
     this.#releaseRegistry(lane)
     return this.#accept()
   }
@@ -310,15 +318,17 @@ export class LaneLockModel {
   // spec 002 PR-flow states and actors: outcomes applied from GitHub state.
   prOutcome({ lane, outcome, pr }) {
     const s = this.lane(lane)
-    // Implementation mirror: applyPrStatusToHandoff takes the PR from its
-    // options and never validates the source status.
+    // An explicitly supplied PR (`--pr`) satisfies the linked precondition
+    // in both modes — the real entry point accepts it, and the contract's
+    // concern is the source status, not how the PR number arrived.
+    if (pr && !s.prNumber) {
+      s.prNumber = String(pr)
+    }
     if (this.mode === "contract") {
       if (!s.prNumber) return this.#reject("no-linked-pr")
       if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
         return this.#reject("pr-outcome-from-invalid-status")
       }
-    } else if (pr && !s.prNumber) {
-      s.prNumber = String(pr)
     }
 
     if (outcome === "merged") {

@@ -260,7 +260,13 @@ function applyModel(model, cmd, actor) {
     case "claim":
       return model.claim(cmd)
     case "update":
-      return model.update({ lane: cmd.lane, actor, status: cmd.status, pr: cmd.status === "pr-review" ? PR_NUMBER : undefined })
+      return model.update({
+        lane: cmd.lane,
+        actor,
+        status: cmd.status,
+        pr: cmd.status === "pr-review" ? PR_NUMBER : undefined,
+        reason: cmd.status === "repair-needed" ? cmd.reason || "invalid-handoff" : undefined,
+      })
     case "requestChanges":
       return model.requestChanges({ lane: cmd.lane, actor })
     case "resolve":
@@ -300,6 +306,7 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["rescope-requires-owner", "rescope-authorization"],
   ["rescope-from-invalid-status", "rescope-authorization"],
   ["repair-rescope-requires-guardian", "rescope-authorization"],
+  ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],
 ])
 
 function classifyDivergence(cmd, modelReason, kind) {
@@ -542,18 +549,22 @@ test(
 )
 
 // Candidate findings are violations of the approved model that are not yet
-// designated drift. This test stays todo-red while the implementation
-// exhibits any of them; it flips green as they are fixed or designated.
+// designated drift — validation_mismatch verdicts under spec 014, so this
+// test FAILS (and the formal gate exits non-zero) while the implementation
+// exhibits any of them. It goes green as candidates are fixed or designated.
+// The default `npm test` is unaffected (the formal suite is opt-in).
 test(
-  "candidate findings absent (contract mode)",
-  {
-    skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness",
-    todo: "README ledger candidates 4-10 still present in the implementation",
-  },
+  "candidate findings absent (contract mode — failing means validation_mismatch)",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
   async () => {
     const { candidates } = await runConformance("contract")
     const summary = [...candidates].map(([label, n]) => `${label}=${n}`).join(", ")
-    assert.equal(candidates.size, 0, `candidate findings observed: ${summary}`)
+    assert.equal(
+      candidates.size,
+      0,
+      `validation_mismatch: candidate contract violations observed (${summary}). ` +
+        "Fix the implementation or designate the behavior in specs 002/005/006; see test/formal/README.md ledger.",
+    )
   },
 )
 

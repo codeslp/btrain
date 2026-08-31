@@ -38,7 +38,7 @@ agent or provider credentials.
 | Test | Meaning | Expected today |
 | --- | --- | --- |
 | contract mode (ledger gated) | Real behavior vs the designated contract; designated drift is ledgered, candidate findings are tallied, each divergent lane is adopted so the rest of the sequence stays checked | Must pass; a divergence outside the ledger fails as `validation_mismatch` |
-| candidate findings absent (todo) | Asserts the candidate tally is empty | Red while ledger candidates 4–10 exist; flips green as they are fixed or designated |
+| candidate findings absent | Asserts the candidate tally is empty | FAILS while ledger candidates 4–11 exist: the formal verdict is `validation_mismatch` and the suite exits non-zero (spec 014 blocks on it); flips green as candidates are fixed or designated |
 | implementation mode | Real behavior vs a model that mirrors known drift | Must pass; a failure means a new, unknown divergence |
 | classifier check | Deterministic close-without-merge chain | Must pass: ledgers as designated drift, never as unknown |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
@@ -46,9 +46,9 @@ agent or provider credentials.
 
 A contract-mode failure is a fresh `validation_mismatch` verdict in spec 014
 terms: a divergence no ledger entry explains. Candidate findings never pass
-silently — they fail the dedicated todo test until fixed or designated. An
-implementation-mode failure is a regression signal: real behavior moved away
-from the recorded reality.
+silently — they fail the dedicated gate test, so `npm run test:formal` exits
+non-zero while any exist. An implementation-mode failure is a regression
+signal: real behavior moved away from the recorded reality.
 
 ## Findings ledger
 
@@ -86,6 +86,9 @@ by contract mode and keeps the candidate todo test red:
     or source-status restrictions: any agent can rescope any active lane,
     including during `needs-review` and PR-flow retention, against the
     spec 014 rescope designation.
+11. `resolveHandoff` resolves a `repair-needed` lane before the FR-18
+    escalation, releasing contained locks early. Spec 014 designates repair
+    exit-to-resolved only as a terminal disposition after escalation.
 
 Verified working (positive witnesses): spec 006 FR-18 same-reason repair
 re-entry escalates to a human (`repairEscalation: "human"`, attempts
