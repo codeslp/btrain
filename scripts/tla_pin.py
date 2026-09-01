@@ -193,14 +193,28 @@ def cmd_verify_verdict(path: str) -> int:
         print("STALE validation: no seed/runs recorded; the verdict is not keyed by a trace set")
         stale.append("validation")
     status = data.get("status")
-    print(f"status: {status}")
+    tlc_status = (data.get("tlc") or {}).get("status")
+    # A chain `pass` (spec 014) needs TLC to pass AND every recorded validation
+    # outcome to pass: contract mode, the candidate gate, implementation mode,
+    # and trace validation. Seed/run metadata alone proves nothing.
+    validation_outcomes = {
+        "contract_mode": str(validation.get("contract_mode", "")),
+        "candidate_gate": str(validation.get("candidate_gate", "")),
+        "implementation_mode": str(validation.get("implementation_mode", "")),
+        "trace_validation": str(validation.get("trace_validation", "")),
+    }
+    failed_outcomes = [k for k, v in validation_outcomes.items() if not v.lower().startswith("pass")]
+    print(f"status: {status} (tlc: {tlc_status}; validation outcomes not passing: {failed_outcomes or 'none'})")
+    if status == "pass" and (tlc_status != "pass" or failed_outcomes):
+        print("INVALID: status is `pass` but TLC or a recorded validation outcome is not a pass; the artifact overclaims")
+        stale.append("status")
     if stale:
-        print(f"{len(stale)} stale key(s); do not reuse this verdict. Re-run TLC and the harness.")
+        print(f"{len(stale)} stale or invalid key(s); do not reuse this verdict. Re-run TLC and the harness.")
         return 1
     if status != "pass":
         print("keys are fresh but the recorded verdict is not `pass`; nothing to reuse as a pass.")
         return 3
-    print("verdict is fresh and reusable")
+    print("verdict is fresh, every validation outcome passed, and it is reusable")
     return 0
 
 
