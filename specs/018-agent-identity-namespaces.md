@@ -162,9 +162,10 @@ when the lane merges.
   id, so this is the pre-migration state). It passes on `codex` plus
   `gh-codex`, the intended end state: the prefix is the discriminator and
   FR-4 labels do the rest.
-- The FR-3 same-word check fires only when both the unprefixed and the
-  prefixed form of one name appear inside the bot set, or when a local agent
-  is named with a `gh-` prefix.
+- A bot set containing both `codex` and `gh-codex` fails FR-1 (`codex` is an
+  unprefixed bot id), not FR-3. A local agent named `gh-anything` fails FR-2.
+  FR-3 fires only on an exact string collision between a local id and a bot
+  id.
 
 ## Open questions
 
