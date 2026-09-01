@@ -325,12 +325,13 @@ by machines in two ways.
 
 **Design checking** (pilot, not yet on `main`). A model checker
 (TLA+/TLC) explores every reachable state of the intended workflow and
-checks nine rules that must always hold, among them: no two lanes ever lock
-the same files, locks never outlive their lane, review always involves a
-second agent, and no lane reaches the pull-request stage without a peer
-approval. The model passes against a deliberately small configuration —
-3.8 million distinct states. It merges into `specs/tla/` with the phase 1
-work.
+checks rules that must always hold: no two lanes ever lock the same files,
+locks never outlive their lane, review always involves a second agent, and
+no lane reaches the pull-request stage without a peer approval. The model
+passes against a deliberately small configuration. The full rule list lives
+in `specs/tla/LaneLock.cfg` and the latest verified run is cached beside the
+model, so no counts are restated here to drift. It merges into `specs/tla/`
+with the phase 1 work.
 
 **Code checking** (available now). A test harness generates random workflow
 sequences (claims, reviews, PR outcomes, repairs), runs them against the
