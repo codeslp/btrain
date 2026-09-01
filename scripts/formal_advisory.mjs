@@ -105,7 +105,9 @@ export function classifyPaths(files) {
   const modeledProse = files.some((file) => /^specs\/(002|005|006|014)[^/]*\.md$/.test(file))
   const tlaArtifacts = files.some((file) => file.startsWith("specs/tla/"))
   const pinTool = files.includes("scripts/tla_pin.py")
-  const harness = modeledProse || tlaArtifacts || files.some((file) =>
+  const cli = files.includes("src/brain_train/cli.mjs")
+  const advisoryWorkflow = files.includes(".github/workflows/formal-advisory.yml")
+  const harness = advisoryWorkflow || modeledProse || tlaArtifacts || files.some((file) =>
     file.startsWith("test/formal/")
     || file === "package.json"
     || file === "package-lock.json"
@@ -120,6 +122,7 @@ export function classifyPaths(files) {
     pin,
     tlc,
     harness,
+    cli,
     formalSurface: pin || tlc || harness,
   }
 }
@@ -213,11 +216,19 @@ function runHarness(root) {
     }
   }
   const run = command("npm", ["run", "test:formal"], { cwd: root })
-  const output = `${run.stdout}\n${run.stderr}`
-  let verdict = "infrastructure_failure"
-  if (run.status === 0) verdict = "pass"
-  else if (/validation_mismatch/.test(output)) verdict = "validation_mismatch"
+  const verdict = classifyHarnessResult(run)
   return { name: "fast-check", verdict, ...run }
+}
+
+export function classifyHarnessResult(run) {
+  if (run.status === 0) return "pass"
+  if (run.status === 1) return "validation_mismatch"
+  return "infrastructure_failure"
+}
+
+function runCliContractTests(root) {
+  const run = command("node", ["--test", "test/core.test.mjs"], { cwd: root })
+  return { name: "cli-contract", verdict: classifyHarnessResult(run), ...run }
 }
 
 function exitCodeFor(checks) {
@@ -278,16 +289,19 @@ function runExecutionTreeSelfTest() {
 
 function runSelfTest() {
   assert.deepEqual(classifyPaths(["README.md"]), {
-    impact: "none", pin: false, tlc: false, harness: false, formalSurface: false,
+    impact: "none", pin: false, tlc: false, harness: false, cli: false, formalSurface: false,
   })
   const semanticSelection = classifyPaths(["specs/014-specula-formal-verification-pilot.md"])
   assert.equal(semanticSelection.impact, "semantic")
   assert.equal(semanticSelection.harness, true)
   assert.equal(classifyPaths(["src/brain_train/core.mjs"]).harness, true)
+  assert.equal(classifyPaths(["src/brain_train/cli.mjs"]).cli, true)
+  assert.equal(classifyPaths([".github/workflows/formal-advisory.yml"]).impact, "validation")
   assert.equal(classifyPaths(["test/formal/lane-lock-harness.test.mjs"]).impact, "validation")
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
+  assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }), "validation_mismatch")
   runExecutionTreeSelfTest()
   process.stdout.write("formal_advisory self-test passed\n")
 }
@@ -321,6 +335,7 @@ async function main() {
     const pinBlocked = result.checks.some((check) => check.verdict === "stale_pin")
     if (selection.tlc && !pinBlocked) result.checks.push(...runTlc(root, tlaFiles))
     if (selection.harness) result.checks.push(runHarness(root))
+    if (selection.cli) result.checks.push(runCliContractTests(root))
   }
 
   result.durationMs = Date.now() - startedAt
