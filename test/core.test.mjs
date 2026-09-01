@@ -6180,6 +6180,46 @@ describe("an explicit core.hooksPath equal to the repository root is a valid hoo
   })
 })
 
+describe("core.hooksPath pathname expansion is honored", () => {
+  it("tests the path git expands, so ~/dir installs there and ~/file disables", async () => {
+    // Git expands `~` in core.hooksPath. Resolving the literal `~` under the
+    // repository root misclassifies both cases: a real ~/shared-hooks directory
+    // looks missing, and a ~/file target looks like a fresh directory to
+    // create, so doctor stays silent and `btrain hooks` later hits a raw
+    // filesystem error. HOME is redirected to the temp dir for the subprocess.
+    const tmpDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      const home = path.join(tmpDir, "home")
+      await fs.mkdir(path.join(home, "shared-hooks"), { recursive: true })
+      await fs.writeFile(path.join(home, "notdir"), "a file, not a hooks dir\n")
+      const repo = path.join(tmpDir, "repo")
+      await fs.mkdir(repo)
+      await exec("git", ["init", repo])
+      const env = { HOME: home }
+
+      await exec("git", ["-C", repo, "config", "core.hooksPath", "~/shared-hooks"])
+      const okInit = await runBtrain(["init", repo, "--hooks"], repo, env)
+      assert.equal(okInit.code, 0, okInit.stderr)
+      const installed = await fs.readFile(path.join(home, "shared-hooks", "pre-commit"), "utf8")
+      assert.ok(installed.includes("# btrain:pre-commit-hook"), "hook must land in the expanded ~/shared-hooks")
+      const okDoctor = await runBtrain(["doctor", "--repo", repo], repo, env)
+      assert.ok(!/disables git hooks/i.test(okDoctor.stdout), okDoctor.stdout)
+
+      await exec("git", ["-C", repo, "config", "core.hooksPath", "~/notdir"])
+      const badDoctor = await runBtrain(["doctor", "--repo", repo], repo, env)
+      assert.match(badDoctor.stdout, /core\.hooksPath.*disables git hooks/i, badDoctor.stdout)
+      const badHooks = await runBtrain(["hooks", "--repo", repo], repo, env)
+      assert.match(badHooks.stdout, /not installed.*core\.hooksPath/i, "btrain hooks must say the gate was not installed")
+      assert.equal(await fs.stat(path.join(home, "notdir")).then((s) => s.isFile()), true, "the file target is untouched")
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
 describe("managed hooks treat a disabling core.hooksPath as unavailable", () => {
   const cases = [
     { label: "empty value", value: "" },
@@ -6212,6 +6252,11 @@ describe("managed hooks treat a disabling core.hooksPath as unavailable", () => 
 
         const doctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
         assert.match(doctor.stdout, /core\.hooksPath.*disables git hooks/i, doctor.stdout)
+
+        // `btrain hooks` must not report success while installing nothing.
+        const hooks = await runBtrain(["hooks", "--repo", tmpDir], tmpDir)
+        assert.match(hooks.stdout, /not installed.*core\.hooksPath disables git hooks/i, hooks.stdout)
+        assert.notEqual(hooks.code, 0, "btrain hooks should exit non-zero when no gate was installed")
       } finally {
         await rmDir(tmpDir)
       }

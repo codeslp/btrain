@@ -1333,6 +1333,12 @@ function printHookInstallResult(label, result) {
   }
   if (result.reason === "not-a-git-repo") {
     console.log(`${label}: skipped (not a git repo)`)
+    return
+  }
+  if (result.reason === "hooks-disabled") {
+    console.log(
+      `${label}: not installed — core.hooksPath disables git hooks here (empty or not a directory), so this gate would never run. Unset it or point it at a directory, then re-run.`,
+    )
   }
 }
 
@@ -2203,6 +2209,11 @@ async function run() {
     }
     printHookInstallResult(`pre-commit hook (${repoRoot})`, result.preCommit)
     printHookInstallResult(`pre-push hook (${repoRoot})`, result.prePush)
+    if (Object.values(result).every((hook) => hook.reason === "hooks-disabled")) {
+      // Nothing was installed and the gates cannot run; a zero exit would
+      // read as a successful remediation.
+      process.exitCode = 1
+    }
     return
   }
 

@@ -471,11 +471,22 @@ async function gitHooksDisabledByConfig(repoRoot) {
   if (configured.trim() === "") {
     return true
   }
-  const resolved = path.resolve(repoRoot, configured.trim())
+  // Git applies its own pathname expansion to core.hooksPath (`~/shared-hooks`
+  // means $HOME/shared-hooks). Test the EFFECTIVE path Git reports, never the
+  // raw config value resolved under the repo root.
+  let effective
   try {
-    const stats = await fs.stat(resolved)
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "--git-path", "hooks"], {
+      cwd: repoRoot,
+    })
+    effective = path.resolve(repoRoot, stdout.trim())
+  } catch {
+    effective = path.resolve(repoRoot, configured.trim())
+  }
+  try {
+    const stats = await fs.stat(effective)
     if (!stats.isDirectory()) {
-      return true // /dev/null or any non-directory target
+      return true // /dev/null, a regular file, or any non-directory target
     }
   } catch {
     // does not exist yet: Git will look there once created; installable
