@@ -71,11 +71,41 @@ function changedFiles(root, base, head) {
   return result.stdout.split("\n").map((entry) => entry.trim()).filter(Boolean)
 }
 
+export function verifyExecutionTree(root, requestedHead) {
+  const currentResult = command("git", ["rev-parse", "HEAD"], { cwd: root, echo: false })
+  if (currentResult.status !== 0) {
+    throw new Error("Could not resolve the checked-out HEAD for formal verification.")
+  }
+  const head = currentResult.stdout.trim()
+  if (requestedHead) {
+    const requestedResult = command("git", ["rev-parse", requestedHead], { cwd: root, echo: false })
+    if (requestedResult.status !== 0) {
+      throw new Error(`Could not resolve the requested formal-verification head: ${requestedHead}.`)
+    }
+    if (requestedResult.stdout.trim() !== head) {
+      throw new Error(`Requested head ${requestedHead} does not match the checked-out HEAD ${head}.`)
+    }
+  }
+
+  const statusResult = command(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd: root, echo: false },
+  )
+  if (statusResult.status !== 0) {
+    throw new Error("Could not verify that the formal-verification worktree is clean.")
+  }
+  if (statusResult.stdout.trim()) {
+    throw new Error("Formal verification requires a clean Git worktree so the evidence matches the reported head.")
+  }
+  return { head }
+}
+
 export function classifyPaths(files) {
   const modeledProse = files.some((file) => /^specs\/(002|005|006|014)[^/]*\.md$/.test(file))
   const tlaArtifacts = files.some((file) => file.startsWith("specs/tla/"))
   const pinTool = files.includes("scripts/tla_pin.py")
-  const harness = files.some((file) =>
+  const harness = modeledProse || tlaArtifacts || files.some((file) =>
     file.startsWith("test/formal/")
     || file === "package.json"
     || file === "package-lock.json"
@@ -217,16 +247,48 @@ function writeResult(outputPath, result) {
   process.stdout.write(`Formal advisory result: ${outputPath}\n`)
 }
 
+function runExecutionTreeSelfTest() {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-self-test-"))
+  try {
+    assert.equal(command("git", ["init", "-q"], { cwd: root, echo: false }).status, 0)
+    fs.writeFileSync(path.join(root, "fixture.txt"), "first\n")
+    assert.equal(command("git", ["add", "fixture.txt"], { cwd: root, echo: false }).status, 0)
+    assert.equal(command(
+      "git",
+      ["-c", "user.name=Formal Test", "-c", "user.email=formal@example.invalid", "commit", "-qm", "first"],
+      { cwd: root, echo: false },
+    ).status, 0)
+    const firstHead = command("git", ["rev-parse", "HEAD"], { cwd: root, echo: false }).stdout.trim()
+
+    assert.equal(verifyExecutionTree(root, "").head, firstHead)
+    fs.writeFileSync(path.join(root, "fixture.txt"), "dirty\n")
+    assert.throws(() => verifyExecutionTree(root, ""), /clean Git worktree/)
+
+    assert.equal(command("git", ["add", "fixture.txt"], { cwd: root, echo: false }).status, 0)
+    assert.equal(command(
+      "git",
+      ["-c", "user.name=Formal Test", "-c", "user.email=formal@example.invalid", "commit", "-qm", "second"],
+      { cwd: root, echo: false },
+    ).status, 0)
+    assert.throws(() => verifyExecutionTree(root, firstHead), /does not match the checked-out HEAD/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
 function runSelfTest() {
   assert.deepEqual(classifyPaths(["README.md"]), {
     impact: "none", pin: false, tlc: false, harness: false, formalSurface: false,
   })
-  assert.equal(classifyPaths(["specs/014-specula-formal-verification-pilot.md"]).impact, "semantic")
+  const semanticSelection = classifyPaths(["specs/014-specula-formal-verification-pilot.md"])
+  assert.equal(semanticSelection.impact, "semantic")
+  assert.equal(semanticSelection.harness, true)
   assert.equal(classifyPaths(["src/brain_train/core.mjs"]).harness, true)
   assert.equal(classifyPaths(["test/formal/lane-lock-harness.test.mjs"]).impact, "validation")
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
+  runExecutionTreeSelfTest()
   process.stdout.write("formal_advisory self-test passed\n")
 }
 
@@ -238,14 +300,14 @@ async function main() {
   }
   const root = repoRoot()
   const startedAt = Date.now()
+  const executionTree = verifyExecutionTree(root, options.head)
   const files = changedFiles(root, options.base, options.head)
   const selection = classifyPaths(files)
-  const headResult = command("git", ["rev-parse", options.head || "HEAD"], { cwd: root, echo: false })
   const result = {
     schemaVersion: 1,
     advisory: true,
     base: options.base,
-    head: headResult.status === 0 ? headResult.stdout.trim() : options.head || "HEAD",
+    head: executionTree.head,
     changedFiles: files,
     selection,
     checks: [],
