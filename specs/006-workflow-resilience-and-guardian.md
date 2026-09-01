@@ -403,10 +403,12 @@ Entry: a lane enters `repair-needed` only from an active lane status (`in-progre
 
 Exit to `in-progress`: the responsible repair actor (FR-7, FR-15) clears the repair and same-lane work continues. The lane's locks are retained (FR-20).
 
-Exit to `resolved`: a terminal disposition, legal only when one of two conditions holds:
+Exit to `resolved`: a terminal disposition, legal only with a recorded human decision. One of two records must exist in canonical workflow history for this lane:
 
-- the FR-18 escalation has already fired for this lane, so a human has decided the lane will not continue, or
-- the resolve is carried out through the FR-2c/FR-2d audited override, with the human confirmation recorded in canonical workflow history.
+- a human disposition event, recorded after the FR-18 escalation fired, naming the lane, the reason, and the confirming human, and stating that the lane will not continue; or
+- the FR-2c/FR-2d audited override, whose grant already carries the human confirmation.
+
+The FR-18 escalation flag (`repairEscalation: "human"`) is a request for a human decision. It is not itself the decision and does not authorize the terminal exit.
 
 Terminal `resolved` releases the lane's locks, as spec 002 specifies. A plain `btrain handoff resolve` on a `repair-needed` lane that meets neither condition must be rejected with guidance to clear the repair first or to request an override.
 

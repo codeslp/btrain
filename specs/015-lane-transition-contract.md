@@ -146,7 +146,7 @@ Statuses: `idle`, `in-progress`, `needs-review`, `changes-requested`,
 | 1 | Claim | `handoff claim` | `idle`, `resolved` | `in-progress` | any-agent | files non-empty; no cross-lane conflict; reviewer distinct from owner | acquire | 002 Lock Enforcement item 1, CLI Commands | designated |
 | 2 | ToNeedsReview | `handoff update --status needs-review` | `in-progress`, `changes-requested` | `needs-review` | owner | reviewer context complete; reviewable diff or consumed override | retain | 005 Proposed Status Model, FR-7 | provisional (actor) |
 | 3 | RequestChanges | `handoff request-changes` | `needs-review` | `changes-requested` | reviewer | reason code present | retain | 005 FR-8, FR-15 | designated |
-| 4 | PeerResolve | `handoff resolve` (PR flow on) | `needs-review` | `ready-for-pr` | reviewer, distinct from owner | none | retain, re-acquire if uncovered | 002 Lock Enforcement, PR-flow states row 1 | designated |
+| 4 | PeerResolve | `handoff resolve` (PR flow on) | `needs-review` | `ready-for-pr` | reviewer, distinct from owner | none | retain; a lane uncovered by an audited force-release stays uncovered until claim or rescope (002 Force-release override) | 002 Lock Enforcement, PR-flow states row 1 | designated |
 | 5 | TerminalResolve | `handoff resolve` (PR flow off) | `needs-review` | `resolved` | reviewer | none | release | 002 Lock Enforcement item 2; 005 FR-9 | designated |
 | 6 | AbandonResolve | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | lane-agent | none | release | none; `LaneLock.tla` only | undesignated |
 | 7 | LinkPr | `pr create`; `handoff update --status pr-review --pr` | `ready-for-pr` | `pr-review` | owner | PR number present | retain | 002 PR-flow states row 2 | designated |
@@ -157,7 +157,7 @@ Statuses: `idle`, `in-progress`, `needs-review`, `changes-requested`,
 | 12 | ReturnToPr | `handoff update --status pr-review` | `changes-requested` with linked PR | `pr-review` | owner | linked PR; feedback reason code | retain | none; CLI guidance and live use only | undesignated |
 | 13 | RepairEnter | `handoff update --status repair-needed`; `watchdog-repair` | Active minus `repair-needed` | `repair-needed` | any-agent, system (who may declare a repair manually is open question 7) | reason code; FR-18 count and escalation computed | retain | 006 FR-4, FR-20; 014 designation | provisional |
 | 14 | RepairClear | `handoff update --status in-progress` | `repair-needed` | `in-progress` | repair-owner, system, or override | none | retain | 006 FR-15; 014 designation | provisional |
-| 15 | RepairResolve | `handoff resolve` | `repair-needed` | `resolved` | lane-agent, or override | FR-18 escalation reached (lane-agent) or override consumed | release | 014 designation; proposed 006 FR-29 | provisional, product call |
+| 15 | RepairResolve | `handoff resolve` | `repair-needed` | `resolved` | lane-agent with a recorded human disposition, or override | a recorded human disposition event for this lane after FR-18 escalation, or a consumed FR-2c/2d override; the escalation flag alone is not a decision | release | 014 designation; proposed 006 FR-29 | provisional, product call |
 | 16 | Rescope | `handoff update --files` (set differs) | `in-progress`, `changes-requested`, `repair-needed` | same | owner in `in-progress` or `changes-requested`; system or override in `repair-needed` | non-empty; no cross-lane conflict | replace | 014 rescope designation; 006 FR-20 | provisional, product call |
 | 17 | Resync | `handoff update --files` (set equals handoff record); doctor repair | Active | same | owner, or system | no cross-lane conflict; equality after `normalizePathList` (trim, dedupe, sort; no slash rewriting) | restore coverage | 006 FR-2 "lock/status resync" (concept only) | undesignated |
 | 18 | ForceRelease | `locks release`, `locks release-lane` | Active | same | override | none beyond the override | suspend | 002 Force-release override | designated |
@@ -170,10 +170,15 @@ Statuses: `idle`, `in-progress`, `needs-review`, `changes-requested`,
 | L5 | legacy | `pr-poll` waiting, feedback, clear with explicit `--pr` | any Active | per outcome | system | none | retain | forbidden by 002 PR-flow states | legacy (#9 residual) |
 | L6 | legacy | `handoff update --files` | any Active | same | any | non-empty | replace | forbidden by 014 rescope designation | legacy (#10) |
 | L7 | legacy | `handoff resolve` | `repair-needed` before escalation | `resolved` | any | none | release | forbidden by 014 repair designation | legacy (#11) |
+| L8 | legacy | `handoff resolve` | `needs-review` | `ready-for-pr` (PR flow on) or `resolved` (off) | any, actor unchecked | none | as rows 4 and 5 | forbidden by 002 PR-flow states row 1 (reviewer enters ready-for-pr) | legacy (#4, actor half) |
+| L9 | legacy | `handoff resolve` (PR flow on) | `needs-review`, lane uncovered by force-release | `ready-for-pr` | any | none | re-acquires the handoff paths (`core.mjs:5711`), which can fail if another lane took them | forbidden by 002 Force-release override (coverage stays suspended until claim or rescope) | legacy (new observation, not yet in the ledger) |
+| L10 | legacy | `handoff update --owner` or `--reviewer` | any | same | any | none | registry owner label follows the new owner | undesignated (open question 8) | legacy (row 20 fallback) |
 
-Rows 1 through 20 are the intended contract. Rows L1 through L7 exist only so
-the structural half is behavior-preserving; each is retired by the semantic
-half once its owning prose lands.
+Rows 1 through 20 are the intended contract. Rows L1 through L10 exist only so
+the structural half is behavior-preserving: every request the current CLI
+accepts must match some row in Phase A. Each legacy row is retired by the
+semantic half once its owning prose lands. L9 records a divergence found while
+drafting this spec; it is added to the ledger by the structural half.
 
 ## Functional Requirements
 
@@ -371,8 +376,12 @@ actor; the mismatch error text must name the resync form.
 **#11 resolve from `repair-needed` before escalation.** Code-wrong under the
 spec 014 designation, and the designation is explicitly provisional (lines
 100-103). Recommendation: ratify it in spec 006 with one addition. Resolve from
-`repair-needed` is legal after FR-18 escalation, or through the FR-2c/2d
-audited, human-confirmed override. That matches FR-15 and FR-20, which already
+`repair-needed` is legal only with a human record: either the FR-2c/2d
+audited, human-confirmed override, or a recorded human disposition event
+after FR-18 escalation that names the lane, the reason, and the confirmer.
+The escalation flag by itself is a request for a decision, not the decision;
+treating it as one would let any lane agent release containment locks the
+moment a same-reason re-entry set `repairEscalation: "human"`. That matches FR-15 and FR-20, which already
 give a human override authority over clearing and locks, and gives a broken
 lane an exit that does not require a second failure. Owner: spec 006, as a new
 unpinned FR-29 "repair-needed transitions" (FR-4, FR-15, FR-18, FR-20 are
