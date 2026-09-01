@@ -15,6 +15,8 @@ const MODELED_RUNTIME_FILES = new Set([
 ])
 const TLC_MAX_HEAP_MB = 1024
 const TLC_WORKERS = 2
+const FORMAL_HARNESS_TIMEOUT_MS = 300_000
+const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000
 
 function parseArgs(argv) {
   const options = {
@@ -154,6 +156,7 @@ export function classifyPaths(files, declaredImpact = "auto") {
   const cli = files.includes("src/brain_train/cli.mjs")
   const advisoryWorkflow = files.includes(".github/workflows/formal-advisory.yml")
   const selfTest = advisoryWorkflow || files.includes("scripts/formal_advisory.mjs")
+  const pinToolTest = pinTool
   const harnessSurface = advisoryWorkflow || tlaArtifacts || files.some((file) =>
     file.startsWith("test/formal/")
     || file === "package.json"
@@ -179,6 +182,7 @@ export function classifyPaths(files, declaredImpact = "auto") {
     harness,
     cli,
     selfTest,
+    pinToolTest,
     formalSurface: pin || tlc || harness,
   }
 }
@@ -250,6 +254,49 @@ function runPinCheck(root, tlaFiles) {
   return { name: "pin", verdict, ...run }
 }
 
+function runPinToolSelfTest(root) {
+  const script = path.join(root, "scripts", "tla_pin.py")
+  const commandText = "python3 scripts/tla_pin.py --check <stale-fixture> <malformed-fixture>"
+  if (!fs.existsSync(script)) {
+    return {
+      name: "pin-tool-self-test",
+      verdict: "infrastructure_failure",
+      durationMs: 0,
+      command: commandText,
+      detail: "scripts/tla_pin.py is missing.",
+    }
+  }
+
+  const fixtureParent = path.join(root, ".btrain")
+  fs.mkdirSync(fixtureParent, { recursive: true })
+  const fixtureDirectory = fs.mkdtempSync(path.join(fixtureParent, "formal-pin-self-test-"))
+  const staleFixture = path.join(fixtureDirectory, "stale.tla")
+  const malformedFixture = path.join(fixtureDirectory, "malformed.tla")
+  try {
+    fs.writeFileSync(
+      staleFixture,
+      `\\* Pinned to: specs/014-specula-formal-verification-pilot.md § Decision\n\\* Pinned-hash: ${"0".repeat(64)}\n`,
+    )
+    fs.writeFileSync(
+      malformedFixture,
+      `\\* Pinned-hash: ${"0".repeat(64)}\n`,
+    )
+    const run = command(
+      "python3",
+      [script, "--check", staleFixture, malformedFixture],
+      { cwd: root, timeoutMs: PIN_TOOL_SELF_TEST_TIMEOUT_MS, measureMemory: true },
+    )
+    const staleLines = (run.stdout || "").match(/^STALE\s+.*$/gm) || []
+    const expectedFailure = run.status === 1
+      && staleLines.length === 2
+      && /^2 stale pin\(s\)\. Re-pin with:/m.test(run.stdout || "")
+    const verdict = classifyMeasuredVerdict(run, expectedFailure ? "pass" : "infrastructure_failure")
+    return { name: "pin-tool-self-test", verdict, ...run }
+  } finally {
+    fs.rmSync(fixtureDirectory, { recursive: true, force: true })
+  }
+}
+
 export function classifyPinResult(run) {
   if (run.status === 0) return "pass"
   const stdout = run.stdout || ""
@@ -317,7 +364,11 @@ function runHarness(root) {
       detail: "package.json does not define test:formal.",
     }
   }
-  const run = command("npm", ["run", "test:formal"], { cwd: root, measureMemory: true })
+  const run = command(
+    "npm",
+    ["run", "test:formal"],
+    { cwd: root, timeoutMs: FORMAL_HARNESS_TIMEOUT_MS, measureMemory: true },
+  )
   const verdict = classifyMeasuredVerdict(run, classifyHarnessResult(run, { modeledAssertions: true }))
   return { name: "fast-check", verdict, ...run }
 }
@@ -444,14 +495,14 @@ function runMergeBaseSelfTest() {
 
 function runSelfTest() {
   assert.deepEqual(classifyPaths(["README.md"]), {
-    impact: "none", pin: false, tlc: false, harness: false, cli: false, selfTest: false, formalSurface: false,
+    impact: "none", pin: false, tlc: false, harness: false, cli: false, selfTest: false, pinToolTest: false, formalSurface: false,
   })
   const semanticSelection = classifyPaths(["specs/014-specula-formal-verification-pilot.md"])
   assert.equal(semanticSelection.impact, "semantic")
   assert.equal(semanticSelection.harness, true)
   assert.deepEqual(
     classifyPaths(["specs/014-specula-formal-verification-pilot.md"], "no-semantic"),
-    { impact: "no-semantic", pin: true, tlc: false, harness: false, cli: false, selfTest: false, formalSurface: true },
+    { impact: "no-semantic", pin: true, tlc: false, harness: false, cli: false, selfTest: false, pinToolTest: false, formalSurface: true },
   )
   assert.equal(
     classifyPaths(["specs/014-specula-formal-verification-pilot.md", "src/brain_train/core.mjs"], "no-semantic").impact,
@@ -464,6 +515,7 @@ function runSelfTest() {
   assert.equal(classifyPaths(["test/formal/lane-lock-harness.test.mjs"]).impact, "validation")
   assert.equal(classifyPaths(["scripts/formal_advisory.mjs"]).selfTest, true)
   assert.equal(classifyPaths(["src/brain_train/core.mjs"]).selfTest, false)
+  assert.equal(classifyPaths(["scripts/tla_pin.py"]).pinToolTest, true)
   assert.equal(classifyMeasuredVerdict({ memoryMeasurement: "unavailable" }, "pass"), "infrastructure_failure")
   assert.equal(classifyMeasuredVerdict({ memoryMeasurement: "linux-time-max-rss" }, "pass"), "pass")
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
@@ -496,6 +548,7 @@ function runSelfTest() {
   assert.equal(exitCodeFor(exhaustedWithInfrastructure), 2)
   assert.equal(overallVerdict(exhaustedWithInfrastructure), "infrastructure_failure")
   assert.equal(runPinCheck("/tmp/unused", []).verdict, "infrastructure_failure")
+  assert.equal(runPinToolSelfTest("/tmp/unused").verdict, "infrastructure_failure")
   assert.equal(runTlc("/tmp/unused", [])[0].verdict, "infrastructure_failure")
   const missingScriptRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-package-test-"))
   try {
@@ -521,6 +574,9 @@ function runSelfTest() {
   assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
   assert.match(workflow, /FORMAL_IMPACT: \$\{\{ steps\.select\.outputs\.formal_impact \}\}/)
   assert.match(workflow, /jq -r '\.verdict'.*== "no_formal_surface"/)
+  assert.match(workflow, /timeout-minutes: 10/)
+  const source = fs.readFileSync(new URL(import.meta.url), "utf8")
+  assert.match(source, /timeoutMs: FORMAL_HARNESS_TIMEOUT_MS/)
   process.stdout.write("formal_advisory self-test passed\n")
 }
 
@@ -550,6 +606,7 @@ async function main() {
   } else {
     const tlaFiles = findTlaFiles(root)
     if (selection.pin) result.checks.push(runPinCheck(root, tlaFiles))
+    if (selection.pinToolTest) result.checks.push(runPinToolSelfTest(root))
     const pinBlocked = result.checks.some((check) => check.verdict === "stale_pin")
     if (selection.tlc && !pinBlocked) result.checks.push(...runTlc(root, tlaFiles))
     if (selection.selfTest) result.checks.push(runAdvisorySelfTest(root))
