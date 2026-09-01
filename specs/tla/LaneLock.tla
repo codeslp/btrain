@@ -190,9 +190,13 @@ PrTerminal(l) ==
   /\ UNCHANGED <<owner, reviewer, lastActor>>
 
 \* Terminal resolve outside the review/PR flow: the owner or reviewer
-\* abandons or supersedes the lane. Terminal resolved releases locks.
+\* abandons or supersedes the lane. Terminal resolved releases locks. Once a
+\* PR is linked the lane belongs to the PR flow even while GitHub feedback
+\* has it in changes-requested; it then terminates only through PrTerminal
+\* (spec 002 PR-flow states and actors), never by direct abandonment.
 AbandonResolve(l, a) ==
   /\ IsLaneAgent(l, a)
+  /\ ~prLinked[l]
   /\ status[l] \in {"in-progress", "changes-requested"}
   /\ status' = [status EXCEPT ![l] = "resolved"]
   /\ locked' = [locked EXCEPT ![l] = {}]
@@ -379,6 +383,15 @@ RepairOwnerAssigned ==
     IF status[l] = "repair-needed"
       THEN repairOwner[l] \in {owner[l], reviewer[l]}
       ELSE repairOwner[l] = NoAgent
+
+\* spec 002 PR-flow states and actors: once a PR is linked, the lane stays
+\* active until a GitHub outcome (PrTerminal) or a post-escalation repair
+\* disposition (RepairResolve) terminates it and clears the link. No plain
+\* agent resolve may abandon a linked lane, so a linked lane is never found in
+\* a terminal status. (A linked lane may pass through repair-needed and back:
+\* workflow-integrity repair does not unlink the PR.)
+LinkedLaneStaysActive ==
+  \A l \in Lanes : prLinked[l] => status[l] \in ActiveStatuses
 
 \* Every active lane records a canonical actor, and it is a lane agent.
 LastActorIsLaneAgent ==

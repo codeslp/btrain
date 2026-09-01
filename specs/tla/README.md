@@ -41,17 +41,22 @@ python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/LaneLock.json
 ```
 
 Every key is recomputed and reported FRESH or STALE, including the tool hash
-(`TLC_JAR` or `--tool-jar`; unverifiable means STALE, never SKIP) and the
-source commit (it must be an ancestor of HEAD with no change to any semantic
-input since, so the verdict describes the exact head being reviewed). Any
+(`TLC_JAR` or `--tool-jar`; unverifiable means STALE, never SKIP) and
+`inputs_sha256`, a content hash over every semantic input: the `.tla`, the
+`.cfg`, the pinned prose files, the harness files, and every file under
+`src/brain_train/` (the implementation the harness drives). Keying by content
+rather than by commit id means a squash merge or rebase does not orphan valid
+evidence, and a change to the driven implementation invalidates a recorded
+validation even when the model did not change. `source_commit` is recorded for
+provenance and is not a reuse key. Any
 STALE key, a missing seed/runs pair, a status other than `pass`, or a `pass`
 whose recorded TLC or validation outcomes (contract mode, candidate gate,
 implementation mode, trace validation) are not all passes means the file must
 not be reused; re-run TLC and `npm run test:formal`. The verifier is the only sanctioned way to consume
 this file. Consumer wiring lands in its own lanes because those files are
 outside this lane's locks: `tla-run-tlc` (PR #40), `tla-trace-explain`, the
-`formal-advisory` CI workflow, and `pre-handoff`. TLC baseline: 95,390,161 states generated, 8,236,969 distinct, depth
-26, 2 min 25 s with 10 workers.
+`formal-advisory` CI workflow, and `pre-handoff`. TLC baseline: 88,436,305 states generated, 8,236,969 distinct, depth
+25, 4 min 3 s with 10 workers.
 
 ## Pin check
 
@@ -92,6 +97,7 @@ design; widen only after the small model passes.
 | `PrFlowNeedsPeerApproval` | spec 002 v1.1.2 review routing: no lane sits in the PR flow without a peer approval by a reviewer distinct from the owner |
 | `RepairOwnerAssigned` | spec 006 FR-7: a `repair-needed` lane always carries a responsible actor, and it is the lane's owner or reviewer (the most recent canonical workflow actor); outside repair none is assigned |
 | `LastActorIsLaneAgent` | spec 006 FR-7 support: the recorded canonical actor of an active lane is always a lane agent, never GitHub, the watchdog, or an override requester |
+| `LinkedLaneStaysActive` | spec 002 PR-flow states and actors: a lane with a linked PR never reaches a terminal status except through `PrTerminal` or a post-escalation `RepairResolve`; `AbandonResolve` is guarded on `~prLinked` |
 | `TypeOK` | state-space sanity, no prose claim |
 
 ### Verification hygiene

@@ -154,6 +154,40 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# Every input whose content can change the meaning of a cached verdict: the
+# model and its configuration, the pinned prose, the FR-6 harness, and the
+# implementation the harness drives. Hashing their contents (not a commit id)
+# survives squash merges and rebases: the verdict applies to any head whose
+# semantic inputs are byte-identical.
+IMPLEMENTATION_INPUT_DIRS = ("src/brain_train",)
+
+
+def semantic_inputs(tla: Path, cfg: Path, pins, harness_files) -> list[Path]:
+    paths = [tla, cfg]
+    paths += [REPO_ROOT / rel for rel, _ in pins]
+    paths += [REPO_ROOT / rel for rel in harness_files]
+    for rel_dir in IMPLEMENTATION_INPUT_DIRS:
+        base = REPO_ROOT / rel_dir
+        if base.is_dir():
+            paths += sorted(p for p in base.rglob("*") if p.is_file())
+    seen, ordered = set(), []
+    for p in paths:
+        rp = p.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            ordered.append(p)
+    return ordered
+
+
+def inputs_sha256(paths) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(paths, key=lambda q: str(q.relative_to(REPO_ROOT))):
+        h.update(str(p.relative_to(REPO_ROOT)).encode("utf-8") + b"\0")
+        h.update(_sha256_file(p).encode("ascii") + b"\n")
+    return h.hexdigest()
+
+
 def cmd_verify_verdict(path: str, tool_jar: str | None = None) -> int:
     """Recompute every semantic-input key of a cached TLC verdict (spec 014:
     cached results are reusable only when keyed by all semantic inputs) and
@@ -193,28 +227,14 @@ def cmd_verify_verdict(path: str, tool_jar: str | None = None) -> int:
         # is never reported as a pass).
         print("STALE tla2tools_sha256: tool hash unverified (set TLC_JAR or pass --tool-jar)")
         stale.append("tla2tools_sha256")
-    # Exact-head rule (spec 014 FR-8): the recorded source commit must be an
-    # ancestor of HEAD and none of the semantic inputs may differ between it
-    # and HEAD. Content hashes above cover the working tree; this covers the
-    # commit identity the verdict claims to describe.
+    # Exact-head rule (spec 014 FR-8), keyed by content rather than commit id so
+    # a squash merge or rebase does not orphan valid evidence: the verdict is
+    # reusable on this head only if every semantic input, including the
+    # implementation files the harness drives, is byte-identical to the run.
+    inputs = semantic_inputs(tla, cfg, pins, keys.get("harness_files") or [])
+    check("inputs_sha256 (tla, cfg, pinned prose, harness, src/brain_train)", keys.get("inputs_sha256"), inputs_sha256(inputs))
     src = keys.get("source_commit")
-    inputs = [tla, cfg] + [REPO_ROOT / rel for rel, _ in pins] + [REPO_ROOT / rel for rel in (keys.get("harness_files") or [])]
-    if not src:
-        print("STALE source_commit: none recorded")
-        stale.append("source_commit")
-    else:
-        def git(*args):
-            return subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True).returncode
-        exists = git("cat-file", "-e", f"{src}^{{commit}}") == 0
-        ancestor = exists and git("merge-base", "--is-ancestor", src, "HEAD") == 0
-        rel_inputs = [str(p.relative_to(REPO_ROOT)) for p in inputs]
-        unchanged = ancestor and git("diff", "--quiet", src, "HEAD", "--", *rel_inputs) == 0
-        if unchanged:
-            print(f"FRESH source_commit: {src[:12]} is an ancestor of HEAD with identical semantic inputs")
-        else:
-            reason = "unknown commit" if not exists else ("not an ancestor of HEAD" if not ancestor else "semantic inputs changed since")
-            print(f"STALE source_commit: {str(src)[:12]} ({reason})")
-            stale.append("source_commit")
+    print(f"info  source_commit: {str(src)[:12] if src else 'none'} (provenance only; the content keys above decide reuse)")
     validation = data.get("validation") or {}
     if not validation.get("seed") or not validation.get("runs"):
         print("STALE validation: no seed/runs recorded; the verdict is not keyed by a trace set")

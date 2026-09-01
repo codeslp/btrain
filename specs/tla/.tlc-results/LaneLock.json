@@ -2,26 +2,28 @@
   "status": "validation_mismatch",
   "status_note": "spec 014 verdict for the whole chain: TLC passed, but FR-6 validation on the same tree tallies ledgered candidate findings (test/formal/README.md), and implementation mode fails on a stale mirror fixed in PR #34. A `pass` requires validation to match; it does not yet.",
   "keys": {
-    "tla_content_sha256": "0ba6c7bd3de1d6b00b01c530d37a9a9c029d3b7eccfd555f26798ed06296ad3a",
-    "cfg_sha256": "eb6efaa5cf0b665a747913ea389c841ba5edea9d8c0ab1ed3a70b07de0909663",
+    "tla_content_sha256": "a83386fddff4217b1c51c04c5bc39b9d48df77d8dd39755e4de010528f5bd2dc",
+    "cfg_sha256": "330a7bc60b938a17ae159560e1b5e79d1986fe1651c364c9cf6adfa9e3c0575d",
     "pinned_prose_sha256": "90cb75546bfdf3d0874a2bbc616fdca16624a48fb356e30daf66f6c63fd613ed",
     "harness_sha256": "99d0274ff64e1687904aeb4159b7fc7286be7b7e6f9bc4e836aa1e808cdb1524",
     "harness_files": [
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "b26c16087706fb7466c767f3e102179e477b9bd8",
-    "source_commit_note": "HEAD when TLC and the harness ran; this file is committed on top of it, so verifiers recompute the hashes (scripts/tla_pin.py --verify-verdict) rather than trusting the commit id",
-    "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+    "source_commit": "7a14c2db51a26eb9f89d7cee7154ef6b951a256c",
+    "source_commit_note": "provenance only; not a reuse key (a squash merge changes it without changing any semantic input)",
+    "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+    "inputs_sha256": "bba80c8b4bdc849016bb4c8906f88198da9c1f79f2bb9225b3f6fdc9f038d84d",
+    "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, and every file under src/brain_train/; the reuse key, valid across squash merges"
   },
   "tlc": {
     "status": "pass",
     "tlc_version": "2.19 (tla2tools v1.7.4)",
     "config": "LaneLock.cfg",
-    "states_generated": 95390161,
+    "states_generated": 88436305,
     "distinct_states": 8236969,
-    "depth": 26,
-    "wall_clock_seconds": 145,
+    "depth": 25,
+    "wall_clock_seconds": 243,
     "workers": 10,
     "invariants": [
       "TypeOK",
@@ -34,14 +36,16 @@
       "RepairBudgetBounded",
       "PrFlowNeedsPeerApproval",
       "RepairOwnerAssigned",
-      "LastActorIsLaneAgent"
+      "LastActorIsLaneAgent",
+      "LinkedLaneStaysActive"
     ],
     "mutation_checks": [
       "Claim without NoConflictWithOthers violates Exclusivity",
       "PeerResolve recording peerApproved=FALSE violates PrFlowNeedsPeerApproval",
-      "RepairEnter assigning NoAgent as repairOwner violates RepairOwnerAssigned"
+      "RepairEnter assigning NoAgent as repairOwner violates RepairOwnerAssigned",
+      "LinkedStaysInPrFlow (stronger draft) is violated by RepairEnter on a linked lane; the adopted invariant LinkedLaneStaysActive passes"
     ],
-    "run_at": "2026-09-01T21:36:48Z"
+    "run_at": "2026-09-01T22:44:52Z"
   },
   "validation": {
     "engine": "fast-check model-based (spec 014 FR-6)",
