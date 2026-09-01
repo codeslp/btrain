@@ -344,13 +344,17 @@ against the contract fails a test instead of shipping quietly.
 
 1. `npm install`
 2. `npm run test:formal`
-3. Read the result:
-   - Every conformance check must pass.
-   - One check lists candidate gaps between the code and the rules that are
-     still awaiting a decision. It fails — and the command exits non-zero —
-     while any candidate remains. Each is described in
-     `test/formal/README.md` and stays there until the code is fixed or the
-     rule is deliberately changed.
+3. Read the result. The command exits non-zero today, for two reasons that
+   mean different things:
+   - **A held-open gap, working as designed.** One check keeps the candidate
+     findings visible: differences between the code and the rules that are
+     still waiting on a decision about which side should change. It fails
+     while any candidate remains, so the gaps cannot be forgotten. Each is
+     described in `test/formal/README.md`.
+   - **An unexplained difference, being tracked.** One conformance check is
+     also failing on a difference that no ledger entry accounts for. Until
+     that is resolved, this command cannot go green, and a green run is not
+     the bar for merging today. It is reproducible from a seed.
    - Three earlier gaps have been fixed: a closed-but-unmerged PR left its
      files locked, a shortcut flag let a lane skip peer review, and dropping
      another lane's locks needed no audited sign-off. Each now has a passing
@@ -396,7 +400,10 @@ instructions, and the latest cached result.
 
 For the full policy, history, and current findings: the governing spec in
 `specs/`, the harness and its findings ledger in `test/formal/README.md`,
-and the tooling write-up in `research/`.
+and the tooling write-up in `research/`. One caveat while reading them: the
+specs still describe the three fixed behaviors as outstanding drift. The
+code and the regression tests are ahead of that prose, and correcting it is
+tracked separately.
 
 ---
 
