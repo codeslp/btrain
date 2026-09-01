@@ -361,7 +361,7 @@ the spec 014 designation (lines 114-128) forbids any `--files` during
 repair, and `test/watchdog.test.mjs:122` resyncs a `repair-needed` lane as
 `btrain doctor`. Owner: spec 014 designation (pinned) and eventually spec 002.
 Prose change: distinguish rescope (set changes; owner; `in-progress` and
-`changes-requested`; guardian or human in `repair-needed`) from resync (set
+`changes-requested`; system or override in `repair-needed`) from resync (set
 equals the handoff record; any active status; owner or doctor). Product call:
 whether the doctor counts as the guardian for FR-20 purposes. Prevents
 recurrence: yes (rows 16, 17, L6) once the two events are distinct. Blast
@@ -376,7 +376,7 @@ audited, human-confirmed override. That matches FR-15 and FR-20, which already
 give a human override authority over clearing and locks, and gives a broken
 lane an exit that does not require a second failure. Owner: spec 006, as a new
 unpinned FR-29 "repair-needed transitions" (FR-4, FR-15, FR-18, FR-20 are
-pinned; a new heading after FR-21 leaves them intact). The spec 014 designation
+pinned; a new heading after FR-28 leaves them intact). The spec 014 designation
 text must then be updated to point at FR-29, which is pinned and waits for
 #35. Also designate whether the FR-18 budget spans re-claims: the model resets
 on `Claim`, the implementation counts across the lane's event log (ledger
@@ -417,7 +417,7 @@ designation at a time afterward.
 1. Fix the stale implementation mirror in `lane-lock-model.mjs` so
    `npm run test:formal` fails only on the candidate gate. Reword ledger #9 and
    extend #5.
-2. Add `src/brain_train/transitions.mjs` holding rows 1-19 and L1-L7, with the
+2. Add `src/brain_train/transitions.mjs` holding rows 1-20 and L1-L7, with the
    `owner` and `state` fields as data. Add `applyTransition`.
 3. Route `claimHandoff`, `patchHandoff`, `requestChangesHandoff`,
    `resolveHandoff`, `applyPrStatusToHandoff`, the `pr-create` status write,
