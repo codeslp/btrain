@@ -379,7 +379,7 @@ btrain-chat status</code></pre>
   <section id="formal" class="section">
     <div class="container">
       <div class="section-label">Guarantees</div>
-      <h2>Rules that can't rot.</h2>
+      <h2>The rules are checked, not assumed.</h2>
       <div class="security-grid">
         <div class="security-item">
           <h3>&#128737; Catches rule-breaking before it ships</h3>
@@ -387,22 +387,22 @@ btrain-chat status</code></pre>
         </div>
         <div class="security-item">
           <h3>&#128027; Real gaps it surfaced</h3>
-          <p>The checks compare real behavior against the written rules and hold each difference open until it is fixed or the rule changes deliberately. The three designated drifts (repair in progress):</p>
+          <p>The checks compare real behavior against the written rules and hold each difference open until it is fixed or the rule changes deliberately. Three gaps they found have been repaired, each now guarded by a regression test that fails if the behavior returns:</p>
           <table class="security-table">
             <thead>
               <tr><th>Gap</th><th>Status</th></tr>
             </thead>
             <tbody>
-              <tr><td>Closing a PR without merging leaves its files locked</td><td>Open &mdash; repair in progress</td></tr>
-              <tr><td>A shortcut flag lets a lane skip peer review</td><td>Open &mdash; repair in progress</td></tr>
-              <tr><td>Dropping another lane's file locks needs no audited sign-off</td><td>Open &mdash; repair in progress</td></tr>
+              <tr><td>Closing a PR without merging left its files locked</td><td>Repaired &mdash; regression test in place</td></tr>
+              <tr><td>A shortcut flag let a lane skip peer review</td><td>Repaired &mdash; regression test in place</td></tr>
+              <tr><td>Dropping another lane's file locks needed no audited sign-off</td><td>Repaired &mdash; regression test in place</td></tr>
             </tbody>
           </table>
-          <p style="font-size:0.85rem; color: var(--text-muted);">Eight additional candidate findings are tracked in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger" style="color: var(--accent, #7c3aed);">full findings ledger</a> and await designation decisions.</p>
+          <p style="font-size:0.85rem; color: var(--text-muted);">Eight further candidate findings are still open and await decisions on what the rule should say. They keep <code>npm run test:formal</code> red until they are resolved. All are listed in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger" style="color: var(--accent, #7c3aed);">full findings ledger</a>.</p>
         </div>
         <div class="security-item">
           <h3>&#127922; Every failure comes with a recipe</h3>
-          <p>A failing check prints a seed. Run one command with that seed and you watch the exact same sequence fail again &mdash; no flaky mysteries, no "works on my machine."</p>
+          <p>A failing check prints a seed. Run the command again with that seed and the same sequence replays step for step, so a failure can be reproduced on any machine instead of argued about.</p>
           <p style="font-size:0.85rem; color: var(--text-muted);">Under the hood: generated conformance tests against the real code, with a machine-checked model of the workflow design landing next. Details live in the repo.</p>
         </div>
       </div>

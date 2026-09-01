@@ -288,10 +288,10 @@ Every active lane may carry a structured `Delegation Packet` describing the cont
 | `resolved` | Anyone | Review approved — lane recyclable |
 
 Locks are retained through `ready-for-pr`, `pr-review`, and `ready-to-merge`,
-and release when the PR merges. A PR that is closed without merging should
-release them too, but the code currently routes closure to `repair-needed`
-and keeps the locks. The checks below record this gap and hold it open until
-the code is fixed.
+and release when the PR merges. A PR that is closed without merging also
+resolves the lane and releases its locks. Closure was previously routed to
+`repair-needed` with the locks retained; the checks below caught that, and a
+regression test now holds the corrected behavior in place.
 
 ### Review Context Fields
 
@@ -346,10 +346,15 @@ against the contract fails a test instead of shipping quietly.
 2. `npm run test:formal`
 3. Read the result:
    - Every conformance check must pass.
-   - One check lists known, documented gaps between the code and the rules.
-     It fails — and the command exits non-zero — while any gap remains.
-     Each gap is described in `test/formal/README.md` and tracked until the
-     code is fixed or the rule is deliberately changed.
+   - One check lists candidate gaps between the code and the rules that are
+     still awaiting a decision. It fails — and the command exits non-zero —
+     while any candidate remains. Eight are open today. Each is described in
+     `test/formal/README.md` and stays there until the code is fixed or the
+     rule is deliberately changed.
+   - Three earlier gaps have been fixed: a closed-but-unmerged PR left its
+     files locked, a shortcut flag let a lane skip peer review, and dropping
+     another lane's locks needed no audited sign-off. Each now has a passing
+     regression test, and a return of any of them fails the suite.
    - The regular `npm test` suite is unaffected; these checks are opt-in.
 4. Optional settings:
    - `BTRAIN_FORMAL_RUNS=<n>` — random sequences per check (default 15,
