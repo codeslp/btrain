@@ -126,9 +126,11 @@ a human is reached through `override`. No row grants authority to a bare actor
 string such as "human".
 
 Precedence: contract rows (1-20) are evaluated first. A legacy row applies only
-when no contract row accepts the request, and the `transition-advisory` field
-records the legacy row id that matched. This keeps the advisory data honest
-about which forbidden behavior was exercised.
+when no contract row accepts the request. In Phase A a legacy match is silent:
+nothing new is persisted, so the structural half writes no new fields and its
+rollback claim holds. Only once a row enters advisory mode (FR-5) does a legacy
+match record the `transition-advisory` field with the legacy row id that
+matched, so the advisory data says which forbidden behavior was exercised.
 
 Single-handoff mode (no `[lanes]`): only the `from`, `to`, `actor`, and
 non-lock guards apply. The `locks` column is a no-op and `lockedFiles` is
@@ -172,11 +174,16 @@ Statuses: `idle`, `in-progress`, `needs-review`, `changes-requested`,
 | L7 | legacy | `handoff resolve` | `repair-needed` before escalation | `resolved` | any | none | release | forbidden by 014 repair designation | legacy (#11) |
 | L8 | legacy | `handoff resolve` | `needs-review` | `ready-for-pr` (PR flow on) or `resolved` (off) | any, actor unchecked | none | as rows 4 and 5 | forbidden by 002 PR-flow states row 1 (reviewer enters ready-for-pr) | legacy (#4, actor half) |
 | L9 | legacy | `handoff resolve` (PR flow on) | `needs-review`, lane uncovered by force-release | `ready-for-pr` | any | none | re-acquires the handoff paths (`core.mjs:5711`), which can fail if another lane took them | forbidden by 002 Force-release override (coverage stays suspended until claim or rescope) | legacy (new observation, not yet in the ledger) |
-| L10 | legacy | `handoff update --owner` or `--reviewer` | any | same | any | none | registry owner label follows the new owner | undesignated (open question 8) | legacy (row 20 fallback) |
+| L10 | legacy | `handoff update --owner` or `--reviewer` | any status, including `resolved` and `idle` | same | any, actor unchecked | none | registry owner label follows the new owner | undesignated (open question 8) | legacy (row 20 fallback) |
+| L11 | legacy | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | any, actor unchecked (`resolveHandoff` compares no actor) | none | release | row 6 actor undesignated (open question 5) | legacy (row 6 fallback) |
+| L12 | legacy | `handoff update` with only `--task`, `--next`, `--base`, `--pr`, `--mode`, packet or reviewer-context fields | any | same | any, actor unchecked | none | unchanged | row 19 actor undesignated | legacy (row 19 fallback) |
+| L13 | legacy | `handoff claim` in single-handoff mode (no `[lanes]`) | any, including `in-progress` and `needs-review` | `in-progress` | any-agent | none; the source guard exists only in the lane branch (`core.mjs:4996`) | none (no registry) | undesignated | legacy (single-handoff claim overwrite) |
+| L14 | legacy | `handoff resolve` | `resolved` | `resolved` | any | none | none | undesignated; repeated resolve is accepted today | legacy (repeat resolve) |
 
-Rows 1 through 20 are the intended contract. Rows L1 through L10 exist only so
+Rows 1 through 20 are the intended contract. Rows L1 through L14 exist only so
 the structural half is behavior-preserving: every request the current CLI
-accepts must match some row in Phase A. Each legacy row is retired by the
+accepts must match some row in Phase A, and Phase A's acceptance test is
+exactly that property, checked against the full existing suite. Each legacy row is retired by the
 semantic half once its owning prose lands. L9 records a divergence found while
 drafting this spec; it is added to the ledger by the structural half.
 
@@ -243,7 +250,11 @@ The formal harness gains one deterministic test: for every `(from, event,
 actor-role, guard-fixture)` in the product of statuses, events, roles, and a
 fixed set of guard fixtures, the production list and `lane-lock-model.mjs` in
 contract mode must agree on accept or reject, except where the production row
-is `legacy`. The guard fixtures cover each data guard in both states: PR
+is `legacy`, `provisional`, or `undesignated`: only `designated` rows are
+compared, because provisional and undesignated rows (for example row 12, which
+neither `LaneLock.tla` nor the mirror has) differ from the model by design
+until a decision lands. The test prints the excluded rows so the exclusion
+list visibly shrinks as designations arrive. The guard fixtures cover each data guard in both states: PR
 linked or not, FR-18 escalation reached or not, override consumed or not,
 lock set empty or non-empty, cross-lane conflict present or absent. Guards
 that depend on the working tree (the reviewable-diff gate) are fixed to
@@ -259,6 +270,22 @@ lock effects, file writes, and registry state match the accepted transition.
 (`core.mjs:951`), and `buildLaneGuidance` (`core.mjs:5781`) derive their
 status-to-actor routing from the list rather than from their own `switch`
 statements. Spec 005 FR-11 is satisfied by construction.
+
+Because a status has several outgoing rows with different authorities, each
+status carries exactly one `primary` row that the routers use for "who acts
+next" and default guidance; other rows remain legal transitions but never
+drive routing. The primary rows:
+
+| Status | Primary row | Next actor |
+| --- | --- | --- |
+| `idle`, `resolved` | 1 Claim | any-agent |
+| `in-progress` | 2 ToNeedsReview | owner |
+| `needs-review` | 4 PeerResolve (PR flow on) or 5 TerminalResolve (off); 3 RequestChanges is the alternate reviewer outcome | reviewer |
+| `changes-requested` | 2 ToNeedsReview; row 12 ReturnToPr instead when a PR is linked and row 12 is designated | owner |
+| `ready-for-pr` | 7 LinkPr | owner |
+| `pr-review` | 8 PrRepoll | system (poll) |
+| `ready-to-merge` | 11 PrTerminal | system (merge, then poll) |
+| `repair-needed` | 14 RepairClear | repair-owner |
 
 ### FR-9: Reviewer inference never overrides a valid reviewer
 

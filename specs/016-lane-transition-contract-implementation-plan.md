@@ -179,7 +179,7 @@ rules to encode.
   `npm run test:formal` fails only on the candidate gate
 - reword ledger #9 (terminal half repaired in PR #33) and extend #5 (missing
   file reads repo state and fabricates history)
-- add `src/brain_train/transitions.mjs` with rows 1-20 and L1-L7 from spec 015
+- add `src/brain_train/transitions.mjs` with rows 1-20 and L1-L14 from spec 015, plus the `primary` marker per status
   as data, `owner` and `state` included
 - add `applyTransition` and route `claimHandoff`, `patchHandoff`,
   `requestChangesHandoff`, `resolveHandoff`, `applyPrStatusToHandoff`, the
@@ -214,7 +214,7 @@ rules to encode.
 - cross-check test passes
 - one regression test per fixed defect: `ENOENT`, missing-file resolve,
   reviewer inference
-- `btrain transitions --format json` lists 27 rows
+- `btrain transitions --format json` lists 34 rows (20 contract, 14 legacy)
 
 **Formal impact**: no semantic impact, touches modeled entry points and the
 harness. Pin check plus focused implementation validation plus focused harness
@@ -233,7 +233,7 @@ files or `locks.json` in this phase.
 
 - model: add `RepairResolve` override guard to `LaneLock.tla` and
   `lane-lock-model.mjs` (spec 006 FR-29); repin
-- advisory: row 2 actor guard and row 15 escalation-or-override guard record
+- advisory: row 2 actor guard and row 15 recorded-human-disposition-or-override guard (spec 006 FR-29) record
   `transition-advisory` and warn
 - after the advisory window (spec 015 FR-5): enforce, remove L3 and L7
 - ledger: mark 6, 8, 11 closed; harness candidate labels
