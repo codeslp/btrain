@@ -1,7 +1,7 @@
 # 015 — Lane Transition Contract as a Guarded-Action List
 
 **Status**: Draft
-**Version**: 0.1.1
+**Version**: 0.1.2
 **Author**: btrain
 **Date**: 2026-09-01
 **Updated**: 2026-09-01 (v0.1.2: fixes for checklist `specs/checklists/015-transition-contract.md` CHK001–CHK035 and two independent reviews)
@@ -115,7 +115,7 @@ A transition is one row:
 | `event` | The CLI command or internal event that requests it |
 | `from` | Set of source statuses |
 | `to` | Target status |
-| `actor` | Authority predicate: `owner`, `reviewer`, `lane-agent` (owner or reviewer), `repair-owner` (the lane's recorded repair owner), `any-agent` (any configured agent), `system` (an internal event btrain raised itself), `override` (any agent presenting a consumed spec 006 FR-2c/2d override, which is how a human decision reaches btrain) |
+| `actor` | Authority predicate: `owner`, `reviewer`, `lane-agent` (owner or reviewer), `repair-owner` (the lane's recorded repair owner), `any-agent` (any non-empty actor string in Phase A; configured-agent enforcement arrives with advisory mode, since `claimHandoff` accepts an unconfigured `--owner` today and `analyzeLaneIntegrity` reports it afterwards as `actor-mismatch`), `system` (an internal event btrain raised itself), `override` (any agent presenting a consumed spec 006 FR-2c/2d override, which is how a human decision reaches btrain) |
 | `guard` | Data predicate evaluated against lane state and inputs; returns ok or a reason |
 | `locks` | `acquire`, `retain`, `replace`, `release`, `suspend` |
 | `owner` | The prose that designates the row, by spec and section |
@@ -180,7 +180,7 @@ uses `explicitPr || linkedPr`, `pr-flow.mjs:394-420`).
 | L2 | legacy | `handoff resolve` | `idle` | `resolved` | any | none | none | forbidden by implication of 002 CLI Commands | legacy (#5) |
 | L3 | legacy | `handoff update --status needs-review` | any Active | `needs-review` | any | reviewer reassigned to owner when actor is reviewer | retain | forbidden by 005 FR-5, FR-7 | legacy (#6) |
 | L4 | legacy | `handoff update --status <X>` | any | `<X>` | any | target name valid | per target | forbidden by 002 PR-flow states, 014 repair exits | legacy (#7) |
-| L5 | legacy | `pr-poll` waiting, feedback, clear | any Active with a linked PR (recorded or `--pr`) | per outcome | system | none | retain | forbidden by 002 PR-flow states | legacy (#9 residual) |
+| L5 | legacy | `pr-poll` waiting, feedback, clear | any Active with a linked PR (recorded or `--pr`), or an inactive lane whose registry still holds stale locks (`patchHandoff` falls back to `currentLane.lockPaths`) | per outcome | system | none | retain | forbidden by 002 PR-flow states | legacy (#9 residual) |
 | L6 | legacy | `handoff update --files` | any status | same | any | non-empty when Active | replace when Active; release both records when `idle` (`core.mjs:5292-5295`); in single-handoff mode set `lockedFiles` only | forbidden by 014 rescope designation | legacy (#10) |
 | L7 | legacy | `handoff resolve` | `repair-needed` | `resolved` | any | row 15 guard not met (no recorded human disposition and no consumed override; the escalation flag alone does not satisfy row 15) | release | forbidden by 014 repair designation and 006 FR-29 | legacy (#11) |
 | L8 | legacy | `handoff resolve` | `needs-review` | `ready-for-pr` (PR flow on) or `resolved` (off) | any, actor unchecked | none | as rows 4 and 5 | forbidden by 002 PR-flow states row 1 (reviewer enters ready-for-pr) | legacy (#4, actor half) |
@@ -256,8 +256,10 @@ days and observed events rather than releases.
 When `resolveVerifiedActor` yields an empty actor (`core.mjs:6654`) and the row
 requires `owner`, `reviewer`, `lane-agent`, or `repair-owner`, the gate treats
 the actor as unknown. In Phase A, before any row is in advisory mode, an
-unknown actor satisfies every actor predicate, because that is what the code
-does today. In advisory mode it warns. In enforcement mode it rejects with the
+unknown actor, and equally an actor that does not resolve to a configured
+agent, satisfies every actor predicate, because that is what the code does
+today (`canonicalizeAgentName` returns the raw string for an unconfigured
+name and `claimHandoff` proceeds). In advisory mode it warns. In enforcement mode it rejects with the
 fix `pass --actor or set BTRAIN_AGENT`. Internal `system` events are never
 affected.
 
@@ -503,8 +505,13 @@ Order by what is unpinned and can move now:
 
 1. #6 and #8: prose in spec 005 FR-7 (unpinned); no prose for #8. Flip row 2
    to advisory, then enforce; remove L3.
-2. #11: add spec 006 FR-29 (unpinned). Model: add the disposition-or-override
-   guard to `RepairResolve`. Flip row 15 to advisory, then enforce; remove L7.
+2. #11: add spec 006 FR-29 (unpinned). Implement `btrain repair dispose
+   --lane <id> --confirmed-by <human> --reason "..."` and the
+   `repair-disposition` workflow event it writes, with a harness fixture;
+   `--confirmed-by` is an unverified name, so the audit value rests on the
+   event record, not on authentication. Model: add the
+   disposition-or-override guard to `RepairResolve`. Flip row 15 to advisory,
+   then enforce; remove L7.
 3. After PR #35 merges and the pinned sections reopen: #4 (both halves), #5,
    #7, #9, #10 prose in spec 002 and the spec 014 designations, including the
    row 12 and `ready-to-merge -> pr-review` decisions and the spec 002 line

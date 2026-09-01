@@ -40,7 +40,7 @@ Review this plan for:
 
 Verified on 2026-09-01 against this checkout:
 
-- `npm test`: 546 passing, 9 skipped.
+- `npm test`: 559 passing, 9 skipped (after PR #34).
 - `npm run test:formal`: exits 1. The candidate gate fails as designed
   (`resolve-from-idle`, `update-actor-unchecked`, `update-source-status`
   tallied). The implementation-mode test also fails because the mirror in
@@ -208,7 +208,7 @@ rules to encode.
 
 **Tests**
 
-- full suite unchanged: 546 passing before and after
+- full suite unchanged before and after (559 passing at the time of writing)
 - `npm run test:formal`: implementation mode passes; contract-mode candidate
   tally names the same labels as before the change
 - cross-check test passes
@@ -223,7 +223,7 @@ run before review (spec 014 FR-7).
 **Rollback**: revert the merge commit. No new fields are written to handoff
 files or `locks.json` in this phase.
 
-**Blocked by**: PR #34 (lane `b` locks).
+**Blocked by**: nothing; PR #34 merged on 2026-09-01 and lane `b` released its locks.
 
 ### Workstream 3: Phase B unpinned designations
 
@@ -231,8 +231,12 @@ files or `locks.json` in this phase.
 
 **Primary changes**
 
-- model: add `RepairResolve` override guard to `LaneLock.tla` and
-  `lane-lock-model.mjs` (spec 006 FR-29); repin
+- implement `btrain repair dispose --lane <id> --confirmed-by <human> --reason "..."`
+  and the `repair-disposition` workflow event (spec 006 FR-29), with a
+  harness fixture; without them the row 15 guard is unsatisfiable and every
+  `repair-needed` exit funnels through the override
+- model: add the disposition-or-override guard to `RepairResolve` in
+  `LaneLock.tla` and `lane-lock-model.mjs` (spec 006 FR-29); repin
 - advisory: row 2 actor guard and row 15 recorded-human-disposition-or-override guard (spec 006 FR-29) record
   `transition-advisory` and warn
 - after the advisory window (spec 015 FR-5): enforce, remove L3 and L7
@@ -276,7 +280,10 @@ can be locked (PR #35 merge).
   designated; TLC
 - production rows 6, 12, 17, 20 move from `undesignated` to `designated`
   or are removed
-- advisory then enforce; remove L1, L2, L4, L5, L6
+- advisory then enforce; remove L1, L2, L4, L5, L6, L8, L9
+- spec 015 Phase B step 4 in the same lane: one-line designations for L10
+  (spec 005 FR-5), L11-L15 (spec 002 CLI Commands); then advisory, then
+  enforce; remove them
 - rewrite `test/core.test.mjs:1495-1503`, `test/core.test.mjs:1539`,
   `test/watchdog.test.mjs:122` to the designated paths
 
@@ -317,9 +324,9 @@ pilot model in CI.
 | --- | --- | --- | --- | --- |
 | 1 | WS0 decisions | human | none | open |
 | 2 | WS1 unpinned prose | claude, lane `k` | none | in progress |
-| 3 | PR #34 feedback and merge | codex, lane `b` | codex bot feedback | changes-requested |
+| 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
 | 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | changes-requested |
-| 5 | WS2 structural gate | any agent | step 3 | blocked |
+| 5 | WS2 structural gate | any agent | none | ready |
 | 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | blocked |
 | 7 | WS4 pinned designations | any agent | steps 1, 4, 5 | blocked |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
@@ -337,7 +344,8 @@ touched by this lane. Steps 5 through 8 follow.
 ## Acceptance Criteria
 
 - Every spec 015 row has a `state` other than `legacy` or `undesignated`, or
-  an open question naming the human decision it waits on.
+  an open question naming the human decision it waits on, or a Phase B step
+  that designates it.
 - `npm run test:formal` passes with the candidate gate retired.
 - Spec 014 Phase 3 is on for `LaneLock.tla`.
 - No step edited a pinned section outside the lane that repinned the model.
