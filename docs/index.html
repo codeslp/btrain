@@ -383,11 +383,11 @@ btrain-chat status</code></pre>
       <div class="security-grid">
         <div class="security-item">
           <h3>&#128737; Catches rule-breaking before it ships</h3>
-          <p>Every change to btrain's coordination code gets stress-tested against generated runs of simulated workdays: agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can dream up. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; a test fails before the change lands.</p>
+          <p>An opt-in test harness generates random workflow sequences &mdash; agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can produce. Each step is compared against the written rules. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; the test fails. The harness runs on demand today (<code>npm run test:formal</code>); CI integration is planned but not yet merged.</p>
         </div>
         <div class="security-item">
           <h3>&#128027; Real gaps it surfaced</h3>
-          <p>The checks compare real behavior against the written rules and hold each difference open until it is fixed or the rule changes deliberately. Open gaps today:</p>
+          <p>The checks compare real behavior against the written rules and hold each difference open until it is fixed or the rule changes deliberately. The three designated drifts (repair in progress):</p>
           <table class="security-table">
             <thead>
               <tr><th>Gap</th><th>Status</th></tr>
@@ -398,10 +398,11 @@ btrain-chat status</code></pre>
               <tr><td>Dropping another lane's file locks needs no audited sign-off</td><td>Open &mdash; repair in progress</td></tr>
             </tbody>
           </table>
+          <p style="font-size:0.85rem; color: var(--text-muted);">Eight additional candidate findings are tracked in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger" style="color: var(--accent, #7c3aed);">full findings ledger</a> and await designation decisions.</p>
         </div>
         <div class="security-item">
           <h3>&#127922; Every failure comes with a recipe</h3>
-          <p>A failing check prints a seed. Run one command with that seed and you watch the exact same sequence fail again &mdash; no flaky mysteries, no "works on my machine." The failing scenario is shrunk to the fewest steps that still break, usually two or three commands.</p>
+          <p>A failing check prints a seed. Run one command with that seed and you watch the exact same sequence fail again &mdash; no flaky mysteries, no "works on my machine."</p>
           <p style="font-size:0.85rem; color: var(--text-muted);">Under the hood: generated conformance tests against the real code, with a machine-checked model of the workflow design landing next. Details live in the repo.</p>
         </div>
       </div>

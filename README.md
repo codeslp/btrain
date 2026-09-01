@@ -323,12 +323,14 @@ btrain's coordination rules — who may move a lane, when files stay locked,
 and when locks release — are written down as a precise contract and checked
 by machines in two ways.
 
-**Design checking** (in progress, not yet on `main`). A model checker
+**Design checking** (pilot, not yet on `main`). A model checker
 (TLA+/TLC) explores every reachable state of the intended workflow and
-proves the safety rules always hold: no two lanes ever lock the same files,
-locks never outlive their lane, and review always involves a second agent.
-The model is written and passing against a bounded configuration. It merges
-into `specs/tla/` with the phase 1 work.
+checks nine rules that must always hold, among them: no two lanes ever lock
+the same files, locks never outlive their lane, review always involves a
+second agent, and no lane reaches the pull-request stage without a peer
+approval. The model passes against a deliberately small configuration —
+3.8 million distinct states. It merges into `specs/tla/` with the phase 1
+work.
 
 **Code checking** (available now). A test harness generates random workflow
 sequences (claims, reviews, PR outcomes, repairs), runs them against the
