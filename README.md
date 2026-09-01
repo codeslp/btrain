@@ -378,18 +378,24 @@ instructions, and the latest cached result.
 ### Changing behavior the rules cover
 
 1. Decide what kind of change you are making:
-   - **Documentation or comments only** — run the pin check,
-     `python3 scripts/tla_pin.py --check`. It is required for every prose
-     edit, with or without a behavior change: it no-ops while `specs/tla/`
-     is empty and blocks a stale pin once a model pins the range you edited,
-     so a repin is always a deliberate step.
+   - **Documentation or comments only** (formatting, comments, docs that do
+     not change a workflow rule) — run the pin check,
+     `python3 scripts/tla_pin.py --check`, once that script exists (it lands
+     with the phase 1 model in PR #35; until then there is nothing to pin and
+     the step is skipped). It blocks a stale pin when a model pins the range
+     you edited, so a repin is a deliberate step. A prose edit that changes
+     an authoritative rule in `specs/` is a behavior change and follows the
+     third path below, not this one.
    - **Code changes that keep behavior the same** (a refactor) — run
      `npm run test:formal` to confirm the code still matches the rules.
    - **Behavior changes** — update the written rules first (in `specs/`),
      then the model, then the code. The code follows the rules, never the
      reverse.
 2. Work in your lane as usual, run the checks before handing off, and
-   include the results in your review notes.
+   include in your review notes: which of the three kinds of change this is
+   and why, the prose range it touches, the pin-check verdict, the check
+   results, and anything left unverified. The reviewer uses the first item
+   to decide whether the checks you ran were the right ones.
 3. The reviewer confirms the rules say what was intended and that the
    checks ran against the exact change.
 
