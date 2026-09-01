@@ -22,13 +22,23 @@ that changes, explicitly and only while solo mode is on: btrain's handoff gate t
 migrates that rule to "one context writes, a different context reviews, with a
 different model preferred". While solo mode is on, the same model may fill
 both roles only when no other model family or human is available (FR-9), and
-every such review is labeled so the weaker guarantee is visible. This is a
-declared, time-boxed exception with an audit trail, not a reinterpretation of
-the existing rule.
+every such review is labeled so the weaker guarantee is visible. The
+same-model tier is last and labeled because it gives something up: a
+different model brings decorrelated blind spots (training, tool habits, the
+same misreading of a spec), and a fresh session of the same model removes
+self-approval but does not restore that independence. This is a declared,
+time-boxed exception with an audit trail.
 
 Dependencies: rows and invariants cited below live in spec 015 (PR #37) and
 `specs/tla/LaneLock.tla` (PR #35). Until those merge, the references point
-at the PRs; this spec does not merge before them.
+at the PRs; this spec does not merge before them. One further prerequisite
+for the separation claim below: today `resolveHandoff` compares no actor
+(spec 015 legacy row L8), so owner/reviewer separation is enforced only on
+`handoff request-changes` (`core.mjs:5595-5600`). Solo mode's identity rule
+becomes enforceable at approval time only once spec 015 row 4 (reviewer,
+distinct from owner, enters `ready-for-pr`) is implemented and L8 retired.
+Until then this spec's guarantee is: separation enforced on request-changes,
+labeled but not enforced on approval.
 
 What is not being done: no new statuses, no new lock semantics, no change to
 the transition rules in spec 015, no change to the formal model's invariants.
@@ -44,10 +54,12 @@ trace in the protocol of why the rule was waived, put the same context that
 wrote the change in charge of reviewing it, and required an operator to
 hand-edit lane roles.
 
-The rule the protocol exists to enforce is that **the context that wrote a
-change does not approve it**. Two runtimes are one way to get that. A second,
-fresh context in the same runtime is another. Solo mode makes the second way
-explicit, auditable, and reversible.
+The handoff rule does two jobs: it keeps **the context that wrote a change
+from approving it**, and it brings **a different model's judgment** to the
+review. Two runtimes deliver both. A fresh context in the same runtime
+delivers only the first. Solo mode keeps the first job intact at every tier,
+prefers tiers that also deliver the second, and makes the loss explicit,
+auditable, and reversible when only the last tier is left.
 
 ## How it works
 
@@ -80,7 +92,8 @@ explicit, auditable, and reversible.
    in solo mode.
 
 4. **Dispatch.** `handoff update --status needs-review` dispatches the
-   reviewer runner as it does today (spec 007 reviewer dispatch), but with
+   reviewer runner as it does today (`dispatchNeedsReviewReviewer` in
+   `core.mjs`; routing per spec 005 FR-11), but with
    `BTRAIN_AGENT=<runtime>#review`, a fresh process, no shared conversation
    or scratch state, and the review prompt that the reviewer role receives
    in multi-agent mode. `btrain loop` selects the same identity when the
@@ -117,32 +130,52 @@ Solo mode never turns itself on.
 ### FR-2: Distinct identities, same runtime
 
 The reviewer subagent acts as `<runtime>#review`. Every owner/reviewer
-separation check compares identity strings and therefore holds. Runner
-resolution maps `<runtime>#review` to the same runner as `<runtime>`. A
-`#review` identity assigned to a lane while solo mode was on stays valid for
-that lane after solo mode ends (grandfathering); only new assignments stop.
+separation check compares identity strings and therefore holds wherever such a
+check exists (see the prerequisite in the Decision). The reviewer runner is
+derived from the base runner (FR-3); there is no separate runner entry for the
+`#review` identity, so `btrain agents set` cannot prune it and FR-2 cannot
+drift from the base runner. `#review` identities never enter `[agents].active`
+or the configured-agent roster, so runtime detection (which strips the token
+`review` when tokenizing) is unaffected. A `#review` identity assigned to a
+lane while solo mode was on stays valid for that lane after solo mode ends
+(grandfathering); only new assignments stop.
+
+Verification of a `#review` actor is lane-scoped. `resolveVerifiedActor`
+gains the lane (from `--lane` or `BTRAIN_LANE`) and accepts `<runtime>#review`
+only when solo mode is on, or when that lane records it as reviewer. In every
+other case the identity is rejected with the fix "solo mode is off and lane
+<id> has no #review assignment".
 
 ### FR-3: Fresh context
 
 The reviewer subagent runs in a fresh model session, not merely a new OS
-process. Runners that can reconnect to a persistent session (session ids,
-`--resume`, `--continue`, workspace-scoped session stores) must be invoked in
-a form that cannot resume: btrain passes an explicit fresh-session flag when
-the runner has one, strips known resume flags from the `[agents.runners]`
-value, and sets a per-dispatch working directory for any session store the
-runner keys by path. A repository may define a dedicated
-`[agents.runners]."<runtime>#review"` entry; when present it is validated the
-same way, never used verbatim: `btrain doctor` and dispatch reject an entry
-containing a resume or session option (`--resume`, `--continue`, `-r`, `-c`,
-`--session`, `--session-id`, or a runner-specific equivalent listed in
-btrain's runner table), and the fresh-session flag is added when the runner
-has one. The reviewer's environment is an allowlist, not the writer's
-environment: `PATH`, `HOME`, `TMPDIR`, proxy variables, the runner's
-authentication and configuration variables (any name ending in `_API_KEY`
-or `_API_TOKEN`, plus names in `[solo].env_allow`), and btrain's own
-`BTRAIN_AGENT`, `BTRAIN_LANE`, `BTRAIN_REPO`. Session-identifying variables
-(any name matching `*SESSION*` and names in `[solo].env_deny`) are removed.
-The writer's transcript, scratch files, and conversation are never passed.
+process, inside the repository (it must read the diff and run `btrain`
+commands there). The reviewer runner is the base runner from
+`[agents.runners]` normalized per runner by btrain's runner table; no entry is
+used verbatim and no dedicated `#review` entry exists:
+
+- `claude`: run in print mode with `--no-session-persistence`; reject
+  `--resume`, `-r`, `--continue`, `-c`, `--fork-session`, `--from-pr`.
+- `codex`: run `exec --ephemeral`; reject the `resume` and `fork` subcommands
+  and any `--session*` flag. Note `-c` is codex's `--config` and stays
+  allowed.
+- `gemini`: no persistent-session flag is needed; reject `-r` and
+  `--resume`; btrain supplies a fresh random `--session-id` per dispatch so a
+  workspace-keyed store cannot resume.
+- any other runner: no dispatch until the runner table names its fresh and
+  reject flags; `btrain doctor` reports the gap.
+
+The reviewer's environment is an allowlist, never the writer's environment.
+Always included: everything `buildLoopRunnerEnv` sets today (`BTRAIN_AGENT`,
+`BRAIN_TRAIN_AGENT`, `BTRAIN_LANE`, `BTRAIN_LANE_LOCKED`, `BTRAIN_LOOP_ACTIVE`,
+`BTRAIN_REPO`), `PATH`, `HOME`, `TMPDIR`, `TERM`, `LANG`, `SHELL`, `USER`,
+proxy variables, any name ending in `_API_KEY` or `_API_TOKEN`, and the
+runner configuration names `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GOOGLE_CLOUD_PROJECT`,
+`GOOGLE_APPLICATION_CREDENTIALS`, plus names listed in `[solo].env_allow`.
+Removed: any name matching `*SESSION*` that is not in the allowlist above, and
+names in `[solo].env_deny`. The writer's transcript, scratch files, and
+conversation are never passed.
 
 ### FR-4: No protocol relaxation
 
@@ -162,10 +195,9 @@ identity.
 `btrain solo adopt --lane <id>` reassigns a lane whose owner or reviewer is an
 unavailable runtime: the owner becomes the available runtime, the reviewer is
 chosen by the same FR-9 preference order a claim uses (a different model
-family first, then a configured human, then `<runtime>#review`), locks
+family first, then an opted-in human, then `<runtime>#review`), locks
 re-register under the new owner, and the event records the previous roles and
-the review tier that applied. This replaces the sequence of
-`handoff update --owner/--reviewer` edits the operator performed by hand.
+the review tier that applied.
 
 ### FR-7: Model compatibility
 
@@ -178,40 +210,57 @@ only.
 
 ### FR-9: Different model first
 
-When solo mode assigns a reviewer, it tries, in order: a configured agent of
-a different model family whose runner is available; a human reviewer through
-the `notify` runner when one is configured; and only then the same-runtime
-`#review` subagent. The tier that applied is recorded on the lane and in the
-workflow event, and rendered as `review tier: other-model | human |
-same-model`. A same-model review is the explicit exception this spec
-declares; it is never silent.
+When solo mode assigns a reviewer, it tries tiers in order and records which
+one applied on the lane and in the workflow event, rendered as `review tier:
+other-model | human | same-model`:
 
-Availability is operational, not installation. Before selecting a tier btrain
-probes the runner with a short timeout (`<runner> --version`, then the
-runner's cheapest authenticated call when the runner table defines one). A
-failed probe, or a dispatch that ends as `tool_unavailable` or
-`policy_blocked` (spec 014 failure classes), marks that tier unavailable for
-the rest of the solo period, records the reason on the lane, and btrain
-immediately retries the next tier. A lane is never left in `needs-review`
-because the first tier failed; an installed CLI whose quota is exhausted is
-therefore skipped, which is the motivating case for this spec.
+1. A configured agent of a different model family (FR-10) whose runner is
+   operationally available.
+2. A human, only when the repository opts in with `[solo].human_reviewer =
+   "<agent with a notify runner>"`. A `notify` runner executes nothing and can
+   never fail a probe, so it is not "available" by default. When opted in, the
+   lane waits `[solo].human_timeout` (default 4h) for a `request-changes` or
+   `resolve` from that identity, then falls to tier 3 with the timeout
+   recorded.
+3. The same-runtime `<runtime>#review` subagent. This is the explicit
+   exception this spec declares; it is never silent.
+
+Operational availability is decided per runner from the runner table, not from
+executable presence. Each runner entry names: a presence probe (`<runner>
+--version`), an optional cheap authenticated probe command, and the exit codes
+and stderr patterns that mean quota or authentication failure. A dispatch that
+ends with one of those signals is classified `tool_unavailable`; a provider
+refusal pattern is `policy_blocked` (the spec 014 failure classes, which this
+spec brings into the dispatch classifier alongside `completed`, `failed`, and
+`timed-out`). Any other non-zero exit is a real review failure and is reported
+as such, not as unavailability.
+
+A tier that fails its probe or ends `tool_unavailable` or `policy_blocked` is
+marked unavailable, the reason is recorded on the lane, and btrain
+immediately tries the next tier. An unavailable tier is retried after
+`[solo].retry_after` (default 6h) or on `btrain solo retry`. When every tier
+is unavailable the lane stays `needs-review` with a `no reviewer available`
+warning in `btrain handoff` and `btrain doctor`, and new claims still succeed
+with the reviewer marked `pending`; nothing is silently approved.
 
 ### FR-10: Model family is configured, not inferred from names
 
 FR-9 compares model families, so btrain needs a trustworthy source for them.
 Each configured agent's family comes from, in order: an explicit
-`[agents.families]` entry (`GPT = "codex"`), else the basename of the
-executable in its `[agents.runners]` value only when that basename is a
-known runtime (`claude`, `codex`, `gemini`). A wrapper or launcher (`npx
-codex`, `env ... codex`, a shell script) yields no family, and `btrain
-doctor` errors until `[agents.families]` names it explicitly; the agent name
-is never used as a family. Two identities with the same family are the same
-model for FR-9 even when their names differ; this repository's `GPT` alias
-resolves to the `codex` runner and therefore to the `codex` family. A
+`[agents.families]` entry, else the basename of the executable in its
+`[agents.runners]` value only when that basename is a known runtime
+(`claude`, `codex`, `gemini`). A wrapper or launcher (`npx codex`,
+`env ... codex`, a shell script) yields no family, and `btrain doctor` errors
+until `[agents.families]` names it explicitly; the agent name is never used as
+a family. Two identities with the same family are the same model for FR-9
+even when their names differ. Example: a repository that configures an agent
+named `GPT` with runner `codex` (the scaffold heuristic
+`inferDefaultAgentRunner` produces exactly that) has `GPT` in the `codex`
+family, so `GPT` and `codex` are never each other's other-model reviewer. A
 `notify` runner has family `human`. `btrain doctor` lists the resolved family
 of every configured agent so an operator can see and correct the mapping.
 
-### FR-8: Rate and budget guard
+### FR-11: Rate and budget guard
 
 The reviewer subagent runs under the same `btrain loop` timeout and round
 budget as a peer reviewer. Solo mode does not add rounds. If the available
@@ -252,21 +301,33 @@ runtime also runs out of budget, the dispatch fails as `tool_unavailable`
 ## Acceptance Criteria
 
 - With solo mode on and one runtime configured, a lane can be claimed, handed
-  off, reviewed by a fresh-process `#review` subagent, returned with
+  off, reviewed by a fresh-session `#review` subagent, returned with
   `request-changes`, re-handed off, approved to `ready-for-pr`, and taken
-  through PR flow, with every existing gate firing as it does for peers.
-- `ReviewerSeparation` and the spec 015 cross-check test pass with `#review`
-  identities in the agent set.
+  through PR flow. The gates that must fire exactly as for peers: reviewer
+  context completeness, reviewable diff, `pre-handoff`, `btrain review code`,
+  the request-changes reviewer check, PR-flow lock retention, and every spec
+  015 row.
+- `canonicalizeAgentName` treats `claude` and `claude#review` as distinct
+  (case-insensitive compare), and `getAgentRunnerValue` resolves the reviewer
+  runner for `claude#review` to the normalized `claude` runner with the fresh
+  flag added and no reject flag present. Both are unit tests.
+- A dispatch whose runner exits with a configured quota or auth signal is
+  recorded `tool_unavailable` and the next tier is tried within the same
+  handoff.
 - A solo-mode review is distinguishable in the event log, `btrain handoff`,
-  and the PR body.
-- Solo mode cannot be on without an expiry, and `btrain doctor` reports it.
+  and the PR body, with its tier.
+- Solo mode cannot be on without an expiry; `btrain doctor` reports it and
+  lists grandfathered lanes after expiry.
 
 ## Open questions
 
-1. Should `#review` subagents be allowed to `request-changes` more than once
-   on the same lane, or should a second return escalate to a human because
-   the same runtime is now arguing with itself?
-2. Should solo mode be per lane rather than per repo, so one unavailable
-   runtime does not switch every lane at once?
-3. Does the GitHub bot requirement need a matching "bot unavailable" policy,
-   or is editing `required_bots` by hand acceptable?
+Decided in this revision: a second `request-changes` under the same-model
+tier escalates to a human (FR-11); solo mode is per repository, with
+`solo adopt` acting per lane, and a per-lane toggle is out of scope for the
+first version.
+
+Still open:
+
+1. Does the GitHub bot requirement need a matching "bot unavailable" policy,
+   or is editing `required_bots` by hand acceptable? (`[pr_flow]` is spec
+   002's; this spec does not decide it.)
