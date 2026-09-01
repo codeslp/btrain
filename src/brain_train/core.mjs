@@ -6383,14 +6383,17 @@ function parseProjectToml(content) {
       continue
     }
 
-    const sectionMatch = /^\[([A-Za-z0-9_.]+)\]$/.exec(trimmed)
+    // TOML bare keys allow A-Za-z0-9_- (hyphen included). Bot ids such as
+    // gh-codex live in table headers, so a header regex without "-" silently
+    // skips the table and the bot falls back to default aliases.
+    const sectionMatch = /^\[([A-Za-z0-9_.-]+)\]$/.exec(trimmed)
     if (sectionMatch) {
       currentSection = sectionMatch[1].split(".").filter(Boolean)
       ensureTomlSection(result, currentSection)
       continue
     }
 
-    const entryMatch = /^("(?:[^"\\]|\\.)+"|[A-Za-z0-9_]+)\s*=\s*(.+)$/.exec(trimmed)
+    const entryMatch = /^("(?:[^"\\]|\\.)+"|[A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(trimmed)
     if (!entryMatch) {
       continue
     }

@@ -7,6 +7,8 @@ import path from "node:path"
 import {
   DEFAULT_LOCK_TTL_MS,
   acquireLocks,
+  getPrFlowConfig,
+  readProjectConfig,
   installGitHooks,
   isLockExpired,
   parseCsvList,
@@ -6071,6 +6073,53 @@ describe("a failed claim publication leaves no locks behind", () => {
 
     await fs.rm(eventsDir, { force: true })
     await fs.mkdir(eventsDir, { recursive: true })
+  })
+})
+
+// ──────────────────────────────────────────────
+// project.toml: hyphenated bare keys and table headers
+// ──────────────────────────────────────────────
+
+describe("project.toml parser accepts hyphens in bare keys and table headers", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await fs.mkdir(path.join(tmpDir, ".btrain"), { recursive: true })
+    await fs.writeFile(
+      path.join(tmpDir, ".btrain", "project.toml"),
+      [
+        "[project]",
+        'name = "hyphen-keys"',
+        "",
+        "[pr_flow]",
+        "enabled = true",
+        'required_bots = ["gh-codex"]',
+        "",
+        "[pr_flow.bots.gh-codex]",
+        'aliases = ["chatgpt-codex-connector[bot]"]',
+        'request_body = "@codex review"',
+        'poll-hint = "hyphenated bare key"',
+        "",
+      ].join("\n"),
+    )
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("reads a [pr_flow.bots.gh-codex] table instead of falling back to defaults", async () => {
+    // TOML permits A-Za-z0-9_- in bare keys. The parser matched only
+    // [A-Za-z0-9_.] in table headers, so a hyphenated bot table was skipped
+    // and the bot silently reverted to default aliases and "@gh-codex review",
+    // which the real GitHub bot never answers (spec 018).
+    const config = await readProjectConfig(tmpDir)
+    const prFlow = getPrFlowConfig(config)
+    assert.deepStrictEqual(prFlow.requiredBots, ["gh-codex"])
+    assert.deepStrictEqual(prFlow.bots["gh-codex"].aliases, ["chatgpt-codex-connector[bot]"])
+    assert.equal(prFlow.bots["gh-codex"].requestBody, "@codex review")
+    assert.equal(config.pr_flow.bots["gh-codex"]["poll-hint"], "hyphenated bare key")
   })
 })
 
