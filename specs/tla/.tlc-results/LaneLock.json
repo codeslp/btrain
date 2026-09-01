@@ -1,13 +1,23 @@
 {
   "status": "pass",
-  "tla_content_sha256": "85e01c8c2dcfe9e04b21ce264fee82c29ce71f814095fd19b2cc4e51a9b1ef09",
+  "tla_content_sha256": "bbb7b94168ba2ffe71389ae2e97bf7355b2f96cae796a7b413e4b855d2c804af",
   "tlc_version": "2.19 (tla2tools v1.7.4)",
   "config": "LaneLock.cfg",
-  "states_generated": 19226065,
-  "distinct_states": 2060833,
-  "depth": 25,
-  "wall_clock_seconds": 16,
-  "invariants": ["TypeOK", "Exclusivity", "CoverageForActive", "TerminalClean", "ReviewerSeparation", "ActiveHasLocks", "PrFlowRetention", "RepairBudgetBounded"],
-  "mutation_check": "Claim without NoConflictWithOthers violates Exclusivity (verified on the pre-repairCount revision)",
-  "run_at": "2026-08-31T20:06:15Z"
+  "states_generated": 50278897,
+  "distinct_states": 3821089,
+  "depth": 24,
+  "wall_clock_seconds": 50,
+  "invariants": [
+    "TypeOK",
+    "Exclusivity",
+    "CoverageForActive",
+    "TerminalClean",
+    "ReviewerSeparation",
+    "ActiveHasLocks",
+    "PrFlowRetention",
+    "RepairBudgetBounded",
+    "PrFlowNeedsPeerApproval"
+  ],
+  "mutation_check": "PeerResolve recording peerApproved=FALSE violates PrFlowNeedsPeerApproval (verified on the actor-aware revision)",
+  "run_at": "2026-09-01T05:44:13Z"
 }

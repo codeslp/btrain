@@ -25,8 +25,8 @@ java -cp "$TLC_JAR" tlc2.TLC -config LaneLock.cfg -workers auto LaneLock.tla
 
 Expected: `Model checking completed. No error has been found.` The structured
 verdict is cached at `.tlc-results/LaneLock.json`, keyed by the `.tla`
-content hash. Baseline: 19,226,065 states generated, 2,060,833 distinct,
-depth 25, ~16 seconds.
+content hash. Baseline: 50,278,897 states generated, 3,821,089 distinct,
+depth 24, ~50 seconds.
 
 ## Pin check
 
