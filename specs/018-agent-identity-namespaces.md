@@ -60,8 +60,8 @@ them and `REASON_TAG_PATTERN` (`core.mjs:259`) allows lowercase letters,
 digits, and hyphens only. `gh_codex` would make every PR-feedback transition
 fail validation.
 
-Hyphens are not an option either until one parser bug is fixed.
-`parseProjectToml` (`core.mjs:6264`, regex at `:6274`) matches table headers
+Hyphens needed one parser fix first, which landed in PR #34.
+`parseProjectToml` (before PR #34) matched table headers
 with `/^\[([A-Za-z0-9_.]+)\]$/` and bare keys with `[A-Za-z0-9_]+`, so the
 `[pr_flow.bots.gh-codex]` header is skipped and the entries beneath it are
 misattributed to the previous table (`[pr_flow]`); the bot then falls back to
@@ -77,8 +77,8 @@ const entryMatch = /^("(?:[^"\\]|\\.)+"|[A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(trimme
 ```
 
 plus a test that a hyphenated bot table round-trips through
-`getPrFlowConfig`. The config rename in this spec's lane must not merge
-before that fix.
+`getPrFlowConfig`. Both are on `main` since PR #34; the config rename in this
+spec's lane is safe to merge.
 
 ## Functional Requirements
 
@@ -141,8 +141,8 @@ are external events (`PrClear`, `PrFeedback`, `PrTerminal`). No change.
 
 ### FR-7: Migration
 
-0. Land the parser fix above (`parseProjectToml` accepts `-` in table headers
-   and bare keys) with its test. Steps 1 through 4 depend on it.
+0. The parser fix (`parseProjectToml` accepts `-` in table headers and bare
+   keys) with its test, landed in PR #34. Steps 1 through 4 depend on it.
 1. Move btrain's own defaults to the new namespace in the same change that
    turns FR-1 on: the `required_bots` default in `getPrFlowConfig`
    (`["codex", "unblocked"]` today), the id special cases in
@@ -160,7 +160,7 @@ are external events (`PrClear`, `PrFeedback`, `PrTerminal`). No change.
 4. Existing `changes-requested` lanes keep their old reason tag until the
    next transition; no history rewrite.
 
-This repository performs step 2 in this spec's lane. Step 0 is in PR #34;
+This repository performs step 2 in this spec's lane. Step 0 is done (PR #34);
 step 1 ships with the FR-1 code; steps 3 and 4 happen when this lane merges.
 
 ## Non-Goals
@@ -198,7 +198,7 @@ contracts as stated here: local actor predicates are the four above, and
   FR-4 labels do the rest.
 - A bot set containing both `codex` and `gh-codex` fails FR-1 (`codex` is an
   unprefixed bot id), not FR-3. A local agent named `gh-anything` fails FR-2.
-  FR-3 fires only on an exact string collision between a local id and a bot
+  FR-3 fires only on a case-insensitive match between a local id and a bot
   id.
 
 ## Open questions
