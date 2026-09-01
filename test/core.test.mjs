@@ -5766,3 +5766,72 @@ describe("lock TTL", () => {
     }
   })
 })
+
+// ──────────────────────────────────────────────
+// Force-release TOCTOU (spec 002 v1.1.2 / spec 006 FR-2c/FR-2d)
+// ──────────────────────────────────────────────
+
+describe("force-release audit is atomic with the registry mutation", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("keeps locks when the lane turns active between the audit check and the release", async () => {
+    const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+
+    // Fixture: lane b is INACTIVE but still carries lock coverage (stale
+    // locks). Stale cleanup is legitimately override-free, so the audit
+    // check inside release-lane passes.
+    await fs.writeFile(
+      locksPath,
+      JSON.stringify(
+        { locks: [{ path: "src/", lane: "b", owner: "Codex", acquired_at: new Date().toISOString() }] },
+        null,
+        2,
+      ),
+    )
+
+    let releasePromise
+    // Hold the registry lockfile so release-lane stalls between its audit
+    // check and its mutation — precisely the TOCTOU window.
+    await withFileLock(locksPath + ".lock", async () => {
+      releasePromise = runBtrain(
+        ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
+        tmpDir,
+      )
+      // Let release-lane read lane b's status (inactive → no override).
+      await new Promise((resolve) => setTimeout(resolve, 800))
+
+      // Another agent brings lane b back to active. Writing the handoff
+      // state never touches the registry lockfile, so it lands while
+      // release-lane is stalled.
+      const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+      const before = await fs.readFile(handoffB, "utf8")
+      await fs.writeFile(handoffB, before.replace(/^Status:.*$/m, "Status: in-progress"))
+      assert.match(await fs.readFile(handoffB, "utf8"), /^Status: in-progress$/m)
+    })
+
+    const released = await releasePromise
+
+    const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+    const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
+
+    assert.ok(
+      laneBLocks.length > 0,
+      "lane b was active before the mutation, so its locks must survive without an audited force-release override",
+    )
+    assert.notEqual(released.code, 0, `release-lane must fail once lane b is active: ${released.stdout}`)
+    assert.ok(/force-release/.test(released.stderr), released.stderr)
+  })
+})
