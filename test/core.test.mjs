@@ -5945,6 +5945,39 @@ describe("btrain doctor detects stale managed hooks", () => {
       "the warning must name `btrain hooks` as the fix",
     )
   })
+
+  it("covers every managed hook, not just pre-commit", async () => {
+    // Install and drift detection read one shared registry of managed hooks.
+    // Testing only pre-commit would let a hook be added to the installer and
+    // missed by drift detection without any test noticing.
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const current = await fs.readFile(hookPath, "utf8")
+    assert.ok(current.includes("# btrain:pre-push-hook"), "expected a managed pre-push marker")
+
+    await fs.writeFile(hookPath, "#!/bin/sh\n# btrain:pre-push-hook\n# stale revision\nexit 0\n")
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-push/i, "doctor must report the stale managed pre-push hook")
+
+    // Restore so the shared fixture stays clean for any later assertion.
+    await fs.writeFile(hookPath, current)
+  })
+
+  it("ignores a hook that does not carry the btrain marker", async () => {
+    // Hooks without our marker belong to the user. Reporting them as stale
+    // would tell people to overwrite their own work.
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const managed = await fs.readFile(hookPath, "utf8")
+    await fs.writeFile(hookPath, "#!/bin/sh\n# hand-written by the user\nexit 0\n")
+
+    const result = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(
+      !/pre-push.*differs/i.test(result.stdout),
+      `an unmarked hook is not btrain's to report: ${result.stdout}`,
+    )
+
+    await fs.writeFile(hookPath, managed)
+  })
 })
 
 // ──────────────────────────────────────────────

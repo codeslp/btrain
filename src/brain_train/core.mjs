@@ -1206,7 +1206,14 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock 
         // rollback a failed publication leaves the lane holding locks that
         // no status authorizes, which an audited release then reads as
         // stale coverage and drops with no override.
-        await writeLockRegistry(repoRoot, { ...registry, locks: priorLocks })
+        try {
+          await writeLockRegistry(repoRoot, { ...registry, locks: priorLocks })
+        } catch (rollbackError) {
+          // Report why publication failed, not why the cleanup failed. The
+          // rollback failure rides along so the registry can still be
+          // diagnosed.
+          publishError.cause = publishError.cause ?? rollbackError
+        }
         throw publishError
       }
     }
@@ -1390,20 +1397,18 @@ function managedHookSpecs() {
   ]
 }
 
+function managedHookSpec(key) {
+  const spec = managedHookSpecs().find((hook) => hook.key === key)
+  if (!spec) throw new Error(`Unknown managed hook: ${key}`)
+  return spec
+}
+
 async function installPreCommitHook(repoRoot) {
-  return installManagedHook(repoRoot, {
-    filename: "pre-commit",
-    marker: PRE_COMMIT_HOOK_MARKER,
-    content: renderPreCommitHook(),
-  })
+  return installManagedHook(repoRoot, managedHookSpec("preCommit"))
 }
 
 async function installPrePushHook(repoRoot) {
-  return installManagedHook(repoRoot, {
-    filename: "pre-push",
-    marker: PRE_PUSH_HOOK_MARKER,
-    content: renderPrePushHook(),
-  })
+  return installManagedHook(repoRoot, managedHookSpec("prePush"))
 }
 
 async function installManagedHook(repoRoot, { filename, marker, content }) {
