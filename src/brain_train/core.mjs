@@ -1189,11 +1189,11 @@ async function acquireLocks(repoRoot, laneId, owner, files) {
   })
 }
 
-async function releaseLocks(repoRoot, laneId, { guard } = {}) {
+async function releaseLocks(repoRoot, laneId, { auditInsideLock } = {}) {
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
-    // The guard runs inside the registry critical section so any audit it
-    // performs cannot be invalidated before the mutation below.
-    if (guard) await guard()
+    // Runs inside the registry critical section so the audit cannot be
+    // invalidated before the mutation below.
+    if (auditInsideLock) await auditInsideLock()
     const registry = await readLockRegistry(repoRoot)
     const released = registry.locks.filter((lock) => lock.lane === laneId)
     registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
@@ -1226,20 +1226,26 @@ async function consumeForceReleaseOverride(repoRoot, laneId, actorLabel) {
   }
 }
 
+// Single home for the active-lane audit. Both audited release paths call
+// this so the trust boundary cannot drift between them.
+async function auditActiveLanesForRelease(repoRoot, config, laneIds, actorLabel) {
+  for (const laneId of laneIds) {
+    const lane = await readLaneState(repoRoot, config, laneId)
+    if (isLaneActiveStatus(lane.status)) {
+      await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
+    }
+  }
+}
+
 async function releaseLaneLocksAudited(repoRoot, laneId, options = {}) {
   const config = options.config || (await readProjectConfig(repoRoot))
   const actorLabel = options.actorLabel || "btrain"
   // Reading lane status before taking the registry lock is a TOCTOU: a lane
   // that turns active in that window loses its coverage with no audited
   // override. Terminal resolution and stale cleanup are unaffected — they
-  // call releaseLocks without a guard, and an inactive lane still needs none.
+  // call releaseLocks with no audit hook, and an inactive lane needs none.
   return releaseLocks(repoRoot, laneId, {
-    guard: async () => {
-      const lane = await readLaneState(repoRoot, config, laneId)
-      if (isLaneActiveStatus(lane.status)) {
-        await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
-      }
-    },
+    auditInsideLock: () => auditActiveLanesForRelease(repoRoot, config, [laneId], actorLabel),
   })
 }
 
@@ -1248,18 +1254,13 @@ async function forceReleaseLockAudited(repoRoot, lockPath, options = {}) {
   const actorLabel = options.actorLabel || "btrain"
   return forceReleaseLock(repoRoot, lockPath, {
     ...options,
-    guard: async (registry) => {
+    auditInsideLock: (registry) => {
       const owningLanes = [...new Set(
         registry.locks
           .filter((lock) => lock.path === lockPath && (!options.lane || lock.lane === options.lane))
           .map((lock) => lock.lane),
       )]
-      for (const owningLane of owningLanes) {
-        const lane = await readLaneState(repoRoot, config, owningLane)
-        if (isLaneActiveStatus(lane.status)) {
-          await consumeForceReleaseOverride(repoRoot, owningLane, actorLabel)
-        }
-      }
+      return auditActiveLanesForRelease(repoRoot, config, owningLanes, actorLabel)
     },
   })
 }
@@ -1271,12 +1272,12 @@ async function listLocks(repoRoot) {
 
 async function forceReleaseLock(repoRoot, lockPath, options = {}) {
   const laneId = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
-  const guard = options.guard
+  const auditInsideLock = options.auditInsideLock
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     const registry = await readLockRegistry(repoRoot)
     // Audit against the registry observed inside the critical section, not
     // one read before the lock was held.
-    if (guard) await guard(registry)
+    if (auditInsideLock) await auditInsideLock(registry)
     const before = registry.locks.length
     registry.locks = registry.locks.filter(
       (lock) => lock.path !== lockPath || (laneId && lock.lane !== laneId),
