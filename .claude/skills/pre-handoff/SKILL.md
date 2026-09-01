@@ -25,7 +25,28 @@ Block bad review handoffs before they reach the reviewer.
      `--why` and record `_skipped`, timeouts, or missing authentication with `--gap`.
    - Block when the tier requires context but there is neither a receipt nor an explicit
      skip/gap. Provider availability itself remains a soft gate.
-5. **Code-review gate** — run `btrain review code` against the active lane diff:
+5. **Formal-impact gate** — classify the lane before you run verification:
+   - `none`: the diff does not change modeled prose, TLA+ artifacts, the formal
+     harness, or a modeled runtime entry point. Record the reason in `--preflight`.
+   - `validation`: the diff changes the formal harness, the pin tool, or a modeled
+     runtime entry point without changing intended behavior. Run:
+     `node scripts/formal_advisory.mjs --base <Base> --output <result.json>`.
+   - `semantic`: the diff changes intended prose, a `.tla`, or a TLC configuration.
+     Update prose first. Then update the model and harness. Run the same advisory
+     command against the complete diff.
+   - Record the impact class, exact command, source commit, verdict, duration, and
+     result path in `--verification`. Record each unavailable tool or provider as a
+     separate `--gap`.
+   - During Phase 2, record a stale pin, TLC counterexample, or
+     `validation_mismatch` as `FAIL` evidence and a specific review ask. The
+     advisory result does not block handoff until the Phase 3 selective gate.
+     State-space exhaustion is a warning. Tool or infrastructure failure is a
+     gap and must not appear as a pass.
+   - The complete Specula assessment remains an explicit or scheduled audit. Do not
+     run it for every handoff.
+   - If `scripts/formal_advisory.mjs` is unavailable because the repository has no
+     formal surface, record `formal impact: none — no formal surface` and continue.
+6. **Code-review gate** — run `btrain review code` against the active lane diff:
    ```
    btrain review code --lane <id> --base <Base>
    ```
@@ -35,11 +56,11 @@ Block bad review handoffs before they reach the reviewer.
    - Exit **0** with `0 hard, 0 warn` — record `btrain review code passed` as a `--verification` bullet.
    - If the subcommand is unavailable (older btrain install), note it as a `--gap` (`btrain review code not available — install latest`) and proceed; do not block on tooling drift.
    - For legitimate exceptions (test fixtures, intentional config), suppress on the violating line with `// btrain-allow: <rule-id>` (or `# btrain-allow: ...` for shells/Python). Document any allow-marker addition in the handoff packet so the reviewer can audit it.
-6. Scan the handoff context you are about to submit. Block the handoff if it still contains placeholders like:
+7. Scan the handoff context you are about to submit. Block the handoff if it still contains placeholders like:
    - `Fill this in before handoff`
    - `None yet`
    - empty changed-files, verification, gaps, or review-ask sections
-7. Confirm the full `btrain` reviewer-context set is present:
+8. Confirm the full `btrain` reviewer-context set is present:
    - `--base` or an explicit `Base`
    - `--preflight`
    - one or more `--changed` bullets
@@ -47,16 +68,16 @@ Block bad review handoffs before they reach the reviewer.
    - `--why`
    - one or more `--review-ask` bullets
    - `--gap` bullets for anything still unverified, or an explicit statement that no known gaps remain
-8. If the change spans multiple files, confirm you ran the repo's `code-simplifier` skill on the modified scope when available. Treat a missing simplification pass as a warning to fix before handoff, not a hard block.
-9. Confirm at least one real verification command was run and record what remains unverified.
-10. If this repo has `[cgraph]` enabled, run `btrain status` once before handoff and account for any fresh cgraph tips. Capture unresolved cgraph warnings in `--gap` or turn them into explicit `--review-ask` items.
-11. Prefer repeatable `btrain` flags over one large prose blob:
+9. If the change spans multiple files, confirm you ran the repo's `code-simplifier` skill on the modified scope when available. Treat a missing simplification pass as a warning to fix before handoff, not a hard block.
+10. Confirm at least one real verification command was run and record what remains unverified.
+11. If this repo has `[cgraph]` enabled, run `btrain status` once before handoff and account for any fresh cgraph tips. Capture unresolved cgraph warnings in `--gap` or turn them into explicit `--review-ask` items.
+12. Prefer repeatable `btrain` flags over one large prose blob:
     - one `--changed` per file or logical file group
     - one `--verification` per command
     - one `--gap` per remaining risk
     - one `--review-ask` per concrete reviewer check
-12. Only then run `btrain handoff update --status needs-review`.
-13. If `[pr_flow].enabled` is true, remember that reviewer approval is not final resolution: `btrain handoff resolve` moves the lane to `ready-for-pr`, then the owner runs `btrain pr create --lane <id> --bots all` and stays in the PR loop until `btrain pr poll --lane <id> --apply` resolves the merged PR.
+13. Only then run `btrain handoff update --status needs-review`.
+14. If `[pr_flow].enabled` is true, remember that reviewer approval is not final resolution: `btrain handoff resolve` moves the lane to `ready-for-pr`, then the owner runs `btrain pr create --lane <id> --bots all` and stays in the PR loop until `btrain pr poll --lane <id> --apply` resolves the merged PR.
 
 ## Constraints
 
@@ -66,6 +87,8 @@ Block bad review handoffs before they reach the reviewer.
 - Do not move a lane to review when `btrain review code --lane <id>` reports hard violations (`hardcoded-secret`, `cors-wildcard`). Fix the violation in the same lane or add a documented `// btrain-allow: <rule-id>` marker first.
 - Do not omit `Base` or `Specific review asks`.
 - Do not omit a required context receipt or an explicit provider/context gap.
+- Do not omit or soften a stale pin, TLC counterexample, or validation mismatch.
+- Do not report state-space exhaustion or infrastructure failure as a pass.
 - Do not hand off superseded work. Resolve it stale and claim a real slice instead.
 - Do not silently skip the simplification pass on a multi-file code change.
 - Do not collapse the whole reviewer context into a single paragraph when repeatable `btrain` flags would make the review sharper.
@@ -77,6 +100,7 @@ Block bad review handoffs before they reach the reviewer.
 - Pre-flight review
 - Context tier, receipt, and provider status
 - Code-review gate result (hard / warn / skipped)
+- Formal impact and advisory verdict
 - Changed files
 - Verification run
 - Remaining gaps
