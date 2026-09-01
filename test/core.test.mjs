@@ -6149,6 +6149,49 @@ describe("project.toml parser accepts hyphens in bare keys and table headers", (
 })
 
 // ──────────────────────────────────────────────
+// core.hooksPath that disables hooks
+// ──────────────────────────────────────────────
+
+describe("managed hooks treat a disabling core.hooksPath as unavailable", () => {
+  const cases = [
+    { label: "empty value", value: "" },
+    { label: "/dev/null", value: "/dev/null" },
+  ]
+
+  for (const { label, value } of cases) {
+    it(`does not install into the worktree root or a device when core.hooksPath is ${label}`, async () => {
+      // An empty core.hooksPath makes `git rev-parse --git-path hooks` print
+      // "./", so joining hook filenames onto it writes executable pre-commit
+      // and pre-push files into the repository root that Git never runs;
+      // /dev/null used to surface as a raw EEXIST from mkdir. Both mean
+      // "hooks are off", and doctor must say so.
+      const tmpDir = await makeTmpDir()
+      try {
+        const { execFile } = await import("node:child_process")
+        const { promisify } = await import("node:util")
+        const exec = promisify(execFile)
+        await exec("git", ["init", tmpDir])
+        await exec("git", ["-C", tmpDir, "config", "core.hooksPath", value])
+
+        const init = await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+        assert.equal(init.code, 0, init.stderr)
+        for (const name of ["pre-commit", "pre-push"]) {
+          const atRoot = await fs.stat(path.join(tmpDir, name)).then(() => true, () => false)
+          assert.equal(atRoot, false, `${name} must not be written into the worktree root`)
+          const atDefault = await fs.readFile(path.join(tmpDir, ".git", "hooks", name), "utf8").catch(() => "")
+          assert.ok(!atDefault.includes("# btrain:"), `${name} must not be written into the ignored default dir`)
+        }
+
+        const doctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+        assert.match(doctor.stdout, /core\.hooksPath.*disables git hooks/i, doctor.stdout)
+      } finally {
+        await rmDir(tmpDir)
+      }
+    })
+  }
+})
+
+// ──────────────────────────────────────────────
 // Managed hooks follow core.hooksPath
 // ──────────────────────────────────────────────
 

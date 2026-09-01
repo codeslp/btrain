@@ -451,9 +451,46 @@ async function appendText(targetPath, content) {
   await fs.appendFile(targetPath, content, "utf8")
 }
 
+// core.hooksPath can also switch hooks OFF: an empty value makes Git resolve
+// the hooks dir to the worktree root ("./"), and the documented `/dev/null`
+// points at a device. In both cases Git runs no hooks, so btrain must not
+// write executable pre-commit/pre-push files there and must say the gates are
+// disabled instead of reporting a healthy repo.
+async function gitHooksDisabledByConfig(repoRoot) {
+  let configured
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "config", "--get", "core.hooksPath"], {
+      cwd: repoRoot,
+    })
+    configured = stdout.replace(/\r?\n$/, "")
+  } catch {
+    return false // unset (exit 1) or git unavailable: not disabled by config
+  }
+  if (configured.trim() === "") {
+    return true
+  }
+  const resolved = path.resolve(repoRoot, configured.trim())
+  if (resolved === path.resolve(repoRoot)) {
+    return true
+  }
+  try {
+    const stats = await fs.stat(resolved)
+    if (!stats.isDirectory()) {
+      return true // /dev/null or any non-directory target
+    }
+  } catch {
+    // does not exist yet: Git will look there once created; installable
+  }
+  return false
+}
+
 async function resolveGitHooksDir(repoRoot) {
   const gitEntryPath = path.join(repoRoot, ".git")
   if (!(await pathExists(gitEntryPath))) {
+    return null
+  }
+
+  if (await gitHooksDisabledByConfig(repoRoot)) {
     return null
   }
 
@@ -1457,6 +1494,9 @@ async function installPrePushHook(repoRoot) {
 async function installManagedHook(repoRoot, { filename, marker, content }) {
   const gitHooksDir = await resolveGitHooksDir(repoRoot)
   if (!gitHooksDir) {
+    if ((await pathExists(path.join(repoRoot, ".git"))) && (await gitHooksDisabledByConfig(repoRoot))) {
+      return { installed: false, reason: "hooks-disabled" }
+    }
     return { installed: false, reason: "not-a-git-repo" }
   }
 
@@ -9528,6 +9568,11 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     }
   }
 
+  if ((await pathExists(path.join(repoRoot, ".git"))) && (await gitHooksDisabledByConfig(repoRoot))) {
+    warnings.push(
+      "`core.hooksPath` disables git hooks for this repository, so btrain's pre-commit and pre-push gates never run. Unset it (`git config --unset core.hooksPath`) or point it at a directory, then run `btrain hooks`.",
+    )
+  }
   for (const hook of staleHooks) {
     warnings.push(
       hook.reason === "not-executable"
