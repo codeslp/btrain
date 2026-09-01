@@ -26,7 +26,7 @@ Produce a structured, reviewer-ready verdict on whether the invariants in a TLA+
    - **counterexample** — "Error: Invariant <name> is violated." → extract the trace as an ordered list of `{step, action, state_delta}` plus the violated invariant name
    - **state_space_exhausted** — wall clock hit before completion or memory exhausted → `{status: "state_space_exhausted", states_explored, depth_reached, reason}`
 5. On counterexample, add a one-line summary: e.g. `"AdvisoryLifecycle: NoLostSignal violated after 7 steps — resolve on lane b dropped under concurrent status call."` This line is what a reviewer reads first.
-6. Cache the structured verdict at `specs/tla/.tlc-results/<tla-name>.json`, keyed by the `.tla` content hash, so pre-handoff, CI, and `tla-trace-explain` consume it without re-running TLC.
+6. Cache the structured verdict at `specs/tla/.tlc-results/<tla-name>.json`, keyed by every semantic input (`.tla` hash, `.cfg` hash, pinned prose hash, harness files hash, source commit, tla2tools hash, and the harness seed/runs that validated it), so pre-handoff, CI, and `tla-trace-explain` can consume it without re-running TLC. Consumers verify it first with `python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/<tla-name>.json`.
 7. Return the verdict and the cache path. Exit codes match spec 002 §5.4:
    - 0 on pass
    - 1 on counterexample (CI blocks)
@@ -38,7 +38,7 @@ Produce a structured, reviewer-ready verdict on whether the invariants in a TLA+
 - Do not silently override the timeout. If a spec needs longer, document it in the `.tla` header and the CI config.
 - Do not parse TLC stdout with brittle regex. Use the documented output markers ("Model checking completed.", "Error: ", "Invariant ... is violated.", "Finished in ...").
 - Do not discard the trace on counterexample. The trace IS the value of this skill's output.
-- Do not re-run TLC when a fresh `.tlc-results/<name>.json` already exists for the current `.tla` content hash. Cache by content hash and invalidate on edit.
+- Do not re-run TLC when `python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/<name>.json` exits 0 (every key FRESH and status `pass`). Any STALE key, a missing harness seed/runs, or a status other than `pass` is a cache miss: re-run TLC and `npm run test:formal`. Never reuse a verdict on the `.tla` content hash alone; a `.cfg`, prose, harness, or tool change invalidates it too.
 - Do not conflate state-space exhaustion with failure. Exhaustion is a bound problem, not a correctness problem; narrate as warning and exit 124.
 
 ## Default Output
