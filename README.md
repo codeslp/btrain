@@ -288,10 +288,10 @@ Every active lane may carry a structured `Delegation Packet` describing the cont
 | `resolved` | Anyone | Review approved — lane recyclable |
 
 Locks are retained through `ready-for-pr`, `pr-review`, and `ready-to-merge`,
-and release when the PR merges. Spec 002 v1.1.2 designates close-without-merge
-to release too, but the current implementation routes closure to
-`repair-needed` and keeps the locks — a designated drift the formal harness
-witnesses (see Formal Verification below).
+and release when the PR merges. A PR that is closed without merging also
+resolves the lane and releases its locks. Closure was previously routed to
+`repair-needed` with the locks retained; the checks below caught that, and a
+regression test now holds the corrected behavior in place.
 
 ### Review Context Fields
 
@@ -317,122 +317,109 @@ btrain rejects `needs-review` transitions with placeholder context or empty diff
 
 ---
 
-## Formal Verification (Spec 014 Pilot)
+## Machine-Checked Coordination Rules (pilot)
 
-btrain pilots formal verification on its own coordination contract: lane
-transitions, actor authority, lock exclusivity and release, review routing,
-the PR lifecycle, and repair bounds. The authority chain runs from prose to
-proof to practice:
+btrain's coordination rules — who may move a lane, when files stay locked,
+and when locks release — are written down as a precise contract and checked
+by machines in two ways.
 
-```text
-approved intended behavior in prose   (specs 002/005/006, designated by spec 014)
-    -> pinned TLA+ model + TLC        (phase 1 — not set up yet)
-    -> code-to-model validation harness   (available now: test/formal/)
-    -> conventional tests             (available now)
-```
+**Design checking** (pilot, not yet on `main`). A model checker
+(TLA+/TLC) explores every reachable state of the intended workflow and
+checks rules that must always hold: no two lanes ever lock the same files,
+locks never outlive their lane, review always involves a second agent, and
+no lane reaches the pull-request stage without a peer approval. The model
+passes against a deliberately small configuration. The full rule list will
+live in `specs/tla/LaneLock.cfg`, with the latest verified run cached beside
+the model (both arrive with PR #35), so no counts are restated here to drift.
 
-| Artifact | Location |
-|----------|----------|
-| Governance, lifecycle, verdict policy | `specs/014-specula-formal-verification-pilot.md` |
-| Modeling brief (scope, invariants, entry points) | `specs/014-specula-modeling-guidance.md` |
-| Engine evaluation and revisit conditions | `research/fastcheck-engine-choice.md` |
-| Contract model, harness, findings ledger | `test/formal/` |
+**Code checking** (available now). A test harness generates random workflow
+sequences (claims, reviews, PR outcomes, repairs), runs them against the
+real btrain code, and compares every step with the contract. A difference
+that is not already on the list of known open findings is shrunk to a minimal
+command sequence and reported with a seed and a trace that replay it exactly.
+Differences already on that list are counted by label instead, so they stay
+visible without failing the run that found them. This is how the rules stay
+enforced as the code changes, when the suite is run: a new regression against
+the contract fails a test instead of shipping quietly. It is opt-in locally
+and advisory in CI today, so run it before handing off.
 
-### First-Time Setup
+### Run the checks
 
-1. Install dependencies: `npm install`. The harness engine (fast-check) is a
-   devDependency.
-2. Run the harness: `npm run test:formal`.
-3. Read the result:
-   - **contract mode** must pass. Designated drift is ledgered and candidate
-     findings are tallied; a divergence outside the documented ledger fails
-     as `validation_mismatch`. A divergent lane adopts the real state and is
-     excluded for the rest of that sequence, so the remaining lanes stay
-     fully checked.
-   - the **candidate findings** test fails — and the formal gate exits
-     non-zero — while any ledger candidate exists in the implementation:
-     that is the `validation_mismatch` verdict, which spec 014 blocks on.
-     It goes green as candidates are fixed or designated. The default
-     `npm test` is unaffected.
-   - **implementation mode** must pass. It checks real behavior against
-     recorded reality and catches new drift.
-   - The **drift witnesses** (close-without-merge, `--final` from
-     needs-review) report as `todo` failures. They assert the contract, so
-     the change that repairs a designated drift must also remove that
-     witness's `todo` marker — turning it into a normal passing regression
-     test (Node reports a passing `todo` as `todo`, not `pass`).
-4. Tune runs when needed:
-   - `BTRAIN_FORMAL_RUNS=<n>` — property runs per mode (default 15)
-   - `BTRAIN_FORMAL_SEED=<n>` — reproduce a recorded failure exactly
-   - `BTRAIN_FORMAL_TRACE_DIR=<path>` — where failing traces are written
-5. Nothing else is required. Runs are deterministic from a seed and need no
-   credentials, network, or provider.
+1. `npm install`
+2. `npm run test:formal`
+3. Read the result. The command exits non-zero today, for two reasons that
+   mean different things:
+   - **A held-open gap, working as designed.** One check keeps the candidate
+     findings visible: differences between the code and the rules that are
+     still waiting on a decision about which side should change. It fails
+     while any candidate remains, so the gaps cannot be forgotten. Each is
+     described in `test/formal/README.md`.
+   - **A test's stale copy of expected behavior, fixed in PR #34.** One
+     conformance check also failed because the test's copy of current
+     behavior lagged a repair that had already landed. That was staleness in
+     the test, not a regression; the fix is in PR #34 and the check is a
+     regression signal again once it merges.
+   - Three earlier gaps have been fixed: a closed-but-unmerged PR left its
+     files locked, a shortcut flag let a lane skip peer review, and dropping
+     another lane's locks needed no audited sign-off. Each now has a passing
+     regression test, and a return of any of them fails the suite.
+   - The regular `npm test` suite is unaffected; these checks are opt-in.
+4. Optional settings:
+   - `BTRAIN_FORMAL_RUNS=<n>` — random sequences per check (default 15,
+     each 3 to 12 commands long)
+   - `BTRAIN_FORMAL_SEED=<n>` — replay a recorded run exactly
+   - `BTRAIN_FORMAL_TRACE_DIR=<path>` — where failure traces are written
+5. No credentials, network, or AI provider is needed. Runs are repeatable
+   from a seed.
 
-TLA+/TLC model checking (`specs/tla/`, pin sync, exact-head CI) is pilot
-phase 1–2. While `specs/tla/` is empty, `tla-pin-sync` and `speckit-formal`
-no-op cleanly; `tla-author` is the skill that bootstraps the first `.tla`
-and `.cfg` pair under TLC feedback.
+The design check is not runnable from this branch yet. When the phase 1
+work merges, `specs/tla/` will carry the model, its configuration, the setup
+instructions, and the latest cached result.
 
-### A Change in Practice
+### Changing behavior the rules cover
 
-Formal checks ride the normal handoff cycle. A change to modeled workflow
-code moves through these steps:
+1. Decide what kind of change you are making:
+   - **Documentation or comments only** (formatting, comments, docs that do
+     not change a workflow rule) — run the pin check,
+     `python3 scripts/tla_pin.py --check`, once that script exists (it lands
+     with the phase 1 model in PR #35; until then there is nothing to check
+     and the step is skipped). Each model records a fingerprint of the exact
+     spec paragraphs it was built from; the check fails if you edited those
+     paragraphs without deliberately updating the fingerprint, so a model can
+     never silently drift from the prose it claims to follow. A prose edit
+     that changes an authoritative rule in `specs/` is a behavior change and
+     follows the third path below, not this one.
+   - **Code changes that keep behavior the same** (a refactor) — run
+     `npm run test:formal` to confirm the code still matches the rules.
+   - **Behavior changes** — update the written rules first (in `specs/`),
+     then the model, then the code. The code follows the rules, never the
+     reverse.
+2. Work in your lane as usual, run the checks before handing off, and
+   include in your review notes: which of the three kinds of change this is
+   and why, which spec paragraphs it touches, the fingerprint-check verdict,
+   the check results, and anything left unverified. The reviewer uses the first item
+   to decide whether the checks you ran were the right ones.
+3. The reviewer confirms the rules say what was intended and that the
+   checks ran against the exact change.
 
-1. **Claim.** `btrain handoff claim --lane <id> --task "..." --owner <you>
-   --files "src/..."`. Locks acquire and the lane is `in-progress`.
-2. **Declare formal impact** in the packet. Three classes:
-   - *Code-free, no semantic impact* (prose formatting, comments, docs):
-     pin check only.
-   - *No semantic impact, touches a modeled entry point or the executable
-     harness* (equivalent refactor, harness edit): also run focused
-     validation — `npm run test:formal`.
-   - *Semantic impact* (intended behavior changes): update the designated
-     prose first, then the model and harness, then the code.
-3. **Work.** Intended behavior stays authoritative. Never regenerate the
-   model from the code to make a check pass.
-4. **Verify before handoff.** Run the class-required checks plus
-   conventional tests. The `pre-handoff` skill gates this step: diff,
-   code-review rules, and reviewer context.
-5. **Hand off.** `btrain handoff update --lane <id> --status needs-review`
-   with the full review context and the formal-impact classification.
-   Placeholder context and empty diffs are rejected.
-6. **Review.** The reviewer checks that the model expresses intent, not
-   accidental code behavior, and that the evidence matches the exact
-   change. Approve with `btrain handoff resolve`; return findings with
-   `btrain handoff request-changes` (the same lane routes back to the
-   writer).
-7. **PR flow.** With `[pr_flow].enabled`, local approval advances to
-   `ready-for-pr` and locks stay held. Run `btrain pr create --lane <id>
-   --bots all`, then loop until bots are clear: `btrain pr poll --lane <id>
-   --apply` (bot findings move the lane to `changes-requested`), fix and
-   push, `btrain pr request-review --lane <id> --bots all`, then re-enter
-   the loop with `btrain handoff update --lane <id> --status pr-review
-   --actor <you>` (request-review posts comments but does not change the
-   status). Merge the PR, then run `btrain pr poll --lane <id> --apply`
-   once more:
-   the poll observes the merge, releases the locks, and resolves the lane.
-   Merging alone does not update the local handoff.
-8. **CI (phase 2).** Once the pilot gate is enabled, CI reruns the
-   deterministic checks on the exact PR head before merge.
+### What the results mean
 
-### Verdicts
+| Result | Meaning | What happens |
+|--------|---------|--------------|
+| `pass` | The design holds and the code matches the rules | Ready to review or merge |
+| `stale_model` | The written rules changed but the model was not updated | Blocked until the model catches up |
+| `counterexample` | The model checker found a sequence that breaks a safety rule | Blocked; the design or the rule needs fixing |
+| `validation_mismatch` | The real code behaved differently from the rules | Blocked; fix the code or change the rules deliberately |
+| `state_space_exhausted` | The model checker ran out of time or memory | Reported as a warning; a reviewer decides |
+| `tool_unavailable` | A required tool or service was missing | Reported as an infrastructure problem, never as a pass or a failure |
+| `policy_blocked` | An AI provider declined to perform a step | Reported separately; the step routes to an alternative or a human |
 
-| Verdict | Meaning | Pilot policy |
-|---------|---------|--------------|
-| `pass` | Pins current, no counterexample, validation matched | Eligible for review or merge |
-| `stale_model` | Pinned prose changed without a model decision | Block |
-| `counterexample` | An invariant failed in the bounded model | Block |
-| `validation_mismatch` | A real trace does not conform to the approved model | Block |
-| `state_space_exhausted` | TLC hit its resource bounds | Warn; reviewer decides |
-| `tool_unavailable` | Binary, credential, or provider missing | Infrastructure failure — never reported as pass or as a correctness failure |
-| `policy_blocked` | A provider refused or could not perform a phase | Reported separately from verification evidence; route to an approved alternative or a human |
-
-The harness has already earned its keep. The property runs surfaced eight
-candidate findings and classify all three designated drifts. Deterministic
-todo witnesses cover two of them — close-without-merge routing and the
-`--final` review bypass — while unaudited lock release is exercised and
-classified by the property harness. The findings ledger lives in
-`test/formal/README.md`.
+For the full policy, history, and current findings: the governing spec in
+`specs/`, the harness and its findings ledger in `test/formal/README.md`,
+and the tooling write-up in `research/`. One caveat while reading them: the
+specs still describe the three fixed behaviors as outstanding drift. The
+code and the regression tests are ahead of that prose, and correcting it is
+tracked separately.
 
 ---
 
