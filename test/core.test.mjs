@@ -5946,3 +5946,55 @@ describe("btrain doctor detects stale managed hooks", () => {
     )
   })
 })
+
+// ──────────────────────────────────────────────
+// Claim atomicity: rollback when publication fails
+// ──────────────────────────────────────────────
+
+describe("a failed claim publication leaves no locks behind", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+    await fs.chmod(handoffB, 0o644).catch(() => {})
+    await rmDir(tmpDir)
+  })
+
+  it("does not persist locks when the lane status cannot be published", async () => {
+    // Locks are written to the registry before the lane status is published.
+    // If publication fails, the lane ends up holding locks with no status
+    // that authorizes them — the exact state an audited release treats as
+    // stale, so its locks can then be dropped with no override.
+    const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+    await fs.chmod(handoffB, 0o444)
+
+    const claim = await runBtrain(
+      [
+        "handoff", "claim", "--repo", tmpDir, "--lane", "b",
+        "--task", "publication will fail", "--owner", "Codex", "--reviewer", "Claude",
+        "--files", "src/b/",
+      ],
+      tmpDir,
+    )
+    assert.notEqual(claim.code, 0, `claim should fail when it cannot publish: ${claim.stdout}`)
+
+    const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
+    assert.equal(
+      laneBLocks.length,
+      0,
+      "a claim that could not publish its status must not leave its locks in the registry",
+    )
+  })
+})

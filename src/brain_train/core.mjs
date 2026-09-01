@@ -1179,6 +1179,9 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock 
       })
     }
 
+    // Snapshot before mutating so a failed publication can be rolled back.
+    const priorLocks = [...registry.locks]
+
     // Remove existing locks for this lane first
     registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
 
@@ -1194,7 +1197,20 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock 
     }
 
     await writeLockRegistry(repoRoot, registry)
-    if (publishInsideLock) await publishInsideLock()
+
+    if (publishInsideLock) {
+      try {
+        await publishInsideLock()
+      } catch (publishError) {
+        // The locks and the lane status must land together. Without this
+        // rollback a failed publication leaves the lane holding locks that
+        // no status authorizes, which an audited release then reads as
+        // stale coverage and drops with no override.
+        await writeLockRegistry(repoRoot, { ...registry, locks: priorLocks })
+        throw publishError
+      }
+    }
+
     return registry.locks.filter((lock) => lock.lane === laneId)
   })
 }
