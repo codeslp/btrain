@@ -209,7 +209,7 @@ function runHarness(root) {
   if (!packageJson.scripts?.["test:formal"]) {
     return {
       name: "fast-check",
-      verdict: "no_formal_surface",
+      verdict: "infrastructure_failure",
       durationMs: 0,
       command: "npm run test:formal",
       detail: "package.json does not define test:formal.",
@@ -222,7 +222,10 @@ function runHarness(root) {
 
 export function classifyHarnessResult(run) {
   if (run.status === 0) return "pass"
-  if (run.status === 1) return "validation_mismatch"
+  const output = `${run.stdout || ""}\n${run.stderr || ""}`
+  if (run.status === 1 && /validation_mismatch|ERR_ASSERTION|AssertionError/.test(output)) {
+    return "validation_mismatch"
+  }
   return "infrastructure_failure"
 }
 
@@ -302,6 +305,14 @@ function runSelfTest() {
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }), "validation_mismatch")
+  assert.equal(classifyHarnessResult({ status: 1, stdout: "", stderr: "Error [ERR_MODULE_NOT_FOUND]" }), "infrastructure_failure")
+  const missingScriptRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-package-test-"))
+  try {
+    fs.writeFileSync(path.join(missingScriptRoot, "package.json"), "{}\n")
+    assert.equal(runHarness(missingScriptRoot).verdict, "infrastructure_failure")
+  } finally {
+    fs.rmSync(missingScriptRoot, { recursive: true, force: true })
+  }
   runExecutionTreeSelfTest()
   process.stdout.write("formal_advisory self-test passed\n")
 }
