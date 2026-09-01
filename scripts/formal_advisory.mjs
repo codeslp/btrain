@@ -237,8 +237,19 @@ function runPinCheck(root, tlaFiles) {
     }
   }
   const run = command("python3", [script, "--check"], { cwd: root, measureMemory: true })
-  const verdict = run.status === 0 ? "pass" : run.status === 1 ? "stale_pin" : "infrastructure_failure"
+  const verdict = classifyPinResult(run)
   return { name: "pin", verdict, ...run }
+}
+
+export function classifyPinResult(run) {
+  if (run.status === 0) return "pass"
+  const stdout = run.stdout || ""
+  const stderr = run.stderr || ""
+  const reportedStalePin = /^STALE\s+specs\/tla\/.*$/m.test(stdout)
+    && /^\d+ stale pin\(s\)\. Re-pin with:/m.test(stdout)
+  const toolCrashed = /Traceback|SyntaxError|ImportError|ModuleNotFoundError/i.test(stderr)
+  if (run.status === 1 && reportedStalePin && !toolCrashed) return "stale_pin"
+  return "infrastructure_failure"
 }
 
 function runTlc(root, tlaFiles) {
@@ -321,16 +332,16 @@ function runCliContractTests(root) {
 function exitCodeFor(checks) {
   const verdicts = checks.map((check) => check.verdict)
   if (verdicts.some((verdict) => BLOCKING_VERDICTS.has(verdict))) return 1
-  if (verdicts.includes("state_space_exhausted")) return 124
   if (verdicts.includes("infrastructure_failure")) return 2
+  if (verdicts.includes("state_space_exhausted")) return 124
   return 0
 }
 
 function overallVerdict(checks) {
   const code = exitCodeFor(checks)
   if (code === 1) return "fail"
-  if (code === 124) return "warn"
   if (code === 2) return "infrastructure_failure"
+  if (code === 124) return "warn"
   if (checks.every((check) => check.verdict === "no_formal_surface")) return "no_formal_surface"
   return "pass"
 }
@@ -443,6 +454,24 @@ function runSelfTest() {
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }, { modeledAssertions: true }), "validation_mismatch")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - unrelated CLI assertion", stderr: "AssertionError" }), "infrastructure_failure")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "", stderr: "Error [ERR_MODULE_NOT_FOUND]" }), "infrastructure_failure")
+  assert.equal(
+    classifyPinResult({
+      status: 1,
+      stdout: "STALE specs/tla/LaneLock.tla: hash mismatch\n1 stale pin(s). Re-pin with: scripts/tla_pin.py --repin <file.tla>",
+      stderr: "",
+    }),
+    "stale_pin",
+  )
+  assert.equal(
+    classifyPinResult({ status: 1, stdout: "", stderr: "Traceback (most recent call last):\nSyntaxError" }),
+    "infrastructure_failure",
+  )
+  const exhaustedWithInfrastructure = [
+    { verdict: "state_space_exhausted" },
+    { verdict: "infrastructure_failure" },
+  ]
+  assert.equal(exitCodeFor(exhaustedWithInfrastructure), 2)
+  assert.equal(overallVerdict(exhaustedWithInfrastructure), "infrastructure_failure")
   assert.equal(runPinCheck("/tmp/unused", []).verdict, "infrastructure_failure")
   assert.equal(runTlc("/tmp/unused", [])[0].verdict, "infrastructure_failure")
   const missingScriptRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-package-test-"))
