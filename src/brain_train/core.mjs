@@ -5323,7 +5323,6 @@ async function patchHandoff(repoRoot, options) {
             fix: `btrain handoff update --lane ${laneId} --status ${nextStatus} --files "src/,..." --actor "${effectiveOwner}"`,
           })
         }
-        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles)
         updates.lockedFiles = effectiveFiles
       } else if (currentLane.lockCount > 0 || currentLane.handoffPaths.length > 0 || options.files !== undefined) {
         await releaseLocks(repoRoot, laneId)
@@ -5351,7 +5350,7 @@ async function patchHandoff(repoRoot, options) {
             })
           : null
 
-      const updatedCurrent = await updateHandoff(repoRoot, updates, {
+      const updateHandoffArgs = [repoRoot, updates, {
         actorLabel: resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
@@ -5374,7 +5373,20 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
-      })
+      }]
+
+      // Publish the active-status handoff inside the lock mutex so that
+      // a concurrent release-lane audit cannot observe stale (inactive)
+      // status between lock acquisition and handoff publication.
+      let updatedCurrent
+      if (isLaneActiveStatus(nextStatus) && effectiveFiles.length > 0) {
+        const publishUpdate = async () => {
+          updatedCurrent = await updateHandoff(...updateHandoffArgs)
+        }
+        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, { publishInsideLock: publishUpdate })
+      } else {
+        updatedCurrent = await updateHandoff(...updateHandoffArgs)
+      }
       return finishPatchWithReviewerDispatch(repoRoot, {
         previousStatus: existingCurrent.status,
         nextStatus,

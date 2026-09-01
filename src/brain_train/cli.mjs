@@ -1673,6 +1673,9 @@ async function run() {
     }
 
     if (subcommand === "resolve") {
+      // viaPrOutcome is internal-only (set by applyPrStatusToHandoff);
+      // block CLI callers from forging it to bypass --final guards.
+      delete options.viaPrOutcome
       await resolveHandoff(repoRoot, options)
       const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)

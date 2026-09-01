@@ -7,6 +7,7 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import {
+  BtrainError,
   checkHandoff,
   getPrFlowConfig,
   normalizePrNumber,
@@ -611,7 +612,19 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     : undefined
   const actorLabel = actor || lane.owner || "owner"
 
+  // Terminal PR outcomes (merged/closed) require the lane to be in a
+  // PR-flow state. An explicit --pr on an in-progress lane must not
+  // short-circuit through here and abandon work / release locks.
+  const prFlowStatuses = new Set(["ready-for-pr", "pr-review", "ready-to-merge", "changes-requested"])
+
   if (status.overall === "merged") {
+    if (!prFlowStatuses.has(lane.status)) {
+      throw new BtrainError({
+        message: `Cannot apply merged-PR outcome to lane ${laneId} in \`${lane.status}\`.`,
+        reason: "Only lanes in a PR-flow state can be terminally resolved by a PR outcome.",
+        fix: `Move the lane into PR-flow first, or claim a fresh lane.`,
+      })
+    }
     await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
@@ -627,6 +640,13 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     // release — the same terminal outcome as a merge, not `repair-needed`
     // (spec 006 retention covers workflow-integrity repair, not GitHub
     // close).
+    if (!prFlowStatuses.has(lane.status)) {
+      throw new BtrainError({
+        message: `Cannot apply closed-PR outcome to lane ${laneId} in \`${lane.status}\`.`,
+        reason: "Only lanes in a PR-flow state can be terminally resolved by a PR outcome.",
+        fix: `Move the lane into PR-flow first, or claim a fresh lane.`,
+      })
+    }
     await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
