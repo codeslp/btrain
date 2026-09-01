@@ -378,10 +378,11 @@ instructions, and the latest cached result.
 ### Changing behavior the rules cover
 
 1. Decide what kind of change you are making:
-   - **Documentation or comments only** — run the pin check
-     (`python3 scripts/tla_pin.py --check`) once the phase 1 model lands. A
-     prose edit inside a range the model pins must repin deliberately, even
-     when nothing about the behavior changed.
+   - **Documentation or comments only** — run the pin check,
+     `python3 scripts/tla_pin.py --check`. It is required for every prose
+     edit, with or without a behavior change: it no-ops while `specs/tla/`
+     is empty and blocks a stale pin once a model pins the range you edited,
+     so a repin is always a deliberate step.
    - **Code changes that keep behavior the same** (a refactor) — run
      `npm run test:formal` to confirm the code still matches the rules.
    - **Behavior changes** — update the written rules first (in `specs/`),

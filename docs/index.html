@@ -382,8 +382,8 @@ btrain-chat status</code></pre>
       <h2>The rules are checked, not assumed.</h2>
       <div class="security-grid">
         <div class="security-item">
-          <h3>&#128737; Catches rule-breaking before it ships</h3>
-          <p>An opt-in test harness generates random workflow sequences &mdash; agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can produce. Each step is compared against the written rules. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; the test fails. The harness runs on demand today (<code>npm run test:formal</code>); CI integration is planned but not yet merged.</p>
+          <h3>&#128737; Catches rule-breaking when run</h3>
+          <p>An opt-in test harness generates random workflow sequences &mdash; agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can produce. Each step is compared against the written rules. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; the test fails. The harness runs on demand today (<code>npm run test:formal</code>). It is not yet a required pre-merge gate: CI integration is planned but not merged, so a change can ship without it having run unless the author runs it.</p>
         </div>
         <div class="security-item">
           <h3>&#128027; Real gaps it surfaced</h3>
