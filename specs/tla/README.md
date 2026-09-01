@@ -40,11 +40,14 @@ Verify before reusing:
 python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/LaneLock.json
 ```
 
-Every key is recomputed and reported FRESH or STALE. Any STALE key, a missing
-seed/runs pair, a status other than `pass`, or a `pass` whose recorded TLC or
-validation outcomes (contract mode, candidate gate, implementation mode, trace
-validation) are not all passes means the file must not be reused; re-run TLC
-and `npm run test:formal`. The verifier is the only sanctioned way to consume
+Every key is recomputed and reported FRESH or STALE, including the tool hash
+(`TLC_JAR` or `--tool-jar`; unverifiable means STALE, never SKIP) and the
+source commit (it must be an ancestor of HEAD with no change to any semantic
+input since, so the verdict describes the exact head being reviewed). Any
+STALE key, a missing seed/runs pair, a status other than `pass`, or a `pass`
+whose recorded TLC or validation outcomes (contract mode, candidate gate,
+implementation mode, trace validation) are not all passes means the file must
+not be reused; re-run TLC and `npm run test:formal`. The verifier is the only sanctioned way to consume
 this file. Consumer wiring lands in its own lanes because those files are
 outside this lane's locks: `tla-run-tlc` (PR #40), `tla-trace-explain`, the
 `formal-advisory` CI workflow, and `pre-handoff`. TLC baseline: 95,390,161 states generated, 8,236,969 distinct, depth
