@@ -1364,6 +1364,16 @@ function decorateLaneStates(laneStates, locks) {
   return (laneStates || []).map((laneState) => decorateLaneState(laneState, getLaneLocks(locks, laneState._laneId)))
 }
 
+// The one registry of btrain-managed hooks. Install and drift detection
+// both read it, so a new managed hook cannot be added to one and missed by
+// the other.
+function managedHookSpecs() {
+  return [
+    { key: "preCommit", filename: "pre-commit", marker: PRE_COMMIT_HOOK_MARKER, content: renderPreCommitHook() },
+    { key: "prePush", filename: "pre-push", marker: PRE_PUSH_HOOK_MARKER, content: renderPrePushHook() },
+  ]
+}
+
 async function installPreCommitHook(repoRoot) {
   return installManagedHook(repoRoot, {
     filename: "pre-commit",
@@ -1404,11 +1414,31 @@ async function installManagedHook(repoRoot, { filename, marker, content }) {
   return { installed: true, reason: "created" }
 }
 
-async function installGitHooks(repoRoot) {
-  return {
-    preCommit: await installPreCommitHook(repoRoot),
-    prePush: await installPrePushHook(repoRoot),
+// A managed hook is generated from a template, so improving the template
+// leaves every already-initialized repo silently running the old logic.
+// Compare what is installed against what we would write now. Hooks without
+// our marker belong to the user and are never reported.
+async function findStaleManagedHooks(repoRoot) {
+  const gitHooksDir = await resolveGitHooksDir(repoRoot)
+  if (!gitHooksDir) return []
+
+  const stale = []
+  for (const hook of managedHookSpecs()) {
+    const hookPath = path.join(gitHooksDir, hook.filename)
+    if (!(await pathExists(hookPath))) continue
+    const existing = await readText(hookPath)
+    if (!existing.includes(hook.marker)) continue
+    if (existing !== hook.content) stale.push(hook.filename)
   }
+  return stale
+}
+
+async function installGitHooks(repoRoot) {
+  const results = {}
+  for (const hook of managedHookSpecs()) {
+    results[hook.key] = await installManagedHook(repoRoot, hook)
+  }
+  return results
 }
 
 function renderHandoffTemplate(repoName) {
@@ -9397,6 +9427,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     ? activeOverrides.filter((record) => record.scope !== "lane" || record.laneId === scopedLane)
     : activeOverrides
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
+  const staleHooks = await findStaleManagedHooks(repoRoot)
   const cgraph = await getDoctorCgraphSummary(repoRoot, config)
 
   if (!(await pathExists(repoRoot))) {
@@ -9407,6 +9438,12 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
       issues,
       warnings,
     }
+  }
+
+  for (const filename of staleHooks) {
+    warnings.push(
+      `\`${filename}\` hook differs from the managed btrain template. Run \`btrain hooks\`.`,
+    )
   }
 
   if (!(await pathExists(repoPaths.projectTomlPath))) {

@@ -5898,3 +5898,51 @@ describe("claim publication is atomic with lock acquisition", () => {
     )
   })
 })
+
+// ──────────────────────────────────────────────
+// Managed hook drift detection
+// ──────────────────────────────────────────────
+
+describe("btrain doctor detects stale managed hooks", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("warns when an installed managed hook no longer matches the template", async () => {
+    // A managed hook is generated, so improving the template silently leaves
+    // every already-initialized repo running the old logic. Nothing detected
+    // that, so a repo ran an outdated pre-commit gate indefinitely.
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    const current = await fs.readFile(hookPath, "utf8")
+    assert.ok(current.includes("# btrain:pre-commit-hook"), "expected a managed hook marker")
+
+    const clean = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!/pre-commit.*differs/i.test(clean.stdout), `fresh install must not warn: ${clean.stdout}`)
+
+    // Simulate an older generated revision that still carries the marker.
+    await fs.writeFile(hookPath, "#!/bin/sh\n# btrain:pre-commit-hook\n# stale revision\nexit 0\n")
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(
+      stale.stdout,
+      /pre-commit/i,
+      "doctor must report the stale managed pre-commit hook",
+    )
+    assert.match(
+      stale.stdout,
+      /btrain hooks/,
+      "the warning must name `btrain hooks` as the fix",
+    )
+  })
+})
