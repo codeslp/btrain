@@ -335,10 +335,13 @@ with the phase 1 work.
 
 **Code checking** (available now). A test harness generates random workflow
 sequences (claims, reviews, PR outcomes, repairs), runs them against the
-real btrain code, and compares every step with the contract. Any difference
-is reported with a minimal reproduction and a seed that replays it exactly.
-This is how the rules stay enforced as the code changes: a regression
-against the contract fails a test instead of shipping quietly.
+real btrain code, and compares every step with the contract. A difference no
+ledger entry explains is shrunk to a minimal command sequence and reported
+with a seed and a trace that replay it exactly. Differences already listed as
+open candidates are counted by label instead, so they stay visible without
+failing the run that found them. This is how the rules stay enforced as the
+code changes: a new regression against the contract fails a test instead of
+shipping quietly.
 
 ### Run the checks
 
@@ -351,10 +354,10 @@ against the contract fails a test instead of shipping quietly.
      still waiting on a decision about which side should change. It fails
      while any candidate remains, so the gaps cannot be forgotten. Each is
      described in `test/formal/README.md`.
-   - **An unexplained difference, being tracked.** One conformance check is
-     also failing on a difference that no ledger entry accounts for. Until
-     that is resolved, this command cannot go green, and a green run is not
-     the bar for merging today. It is reproducible from a seed.
+   - **A stale test double, fixed in PR #34.** One conformance check also
+     failed because the test's copy of current behavior lagged a repair that
+     had already landed. That was a stale double, not a regression; the fix
+     is in PR #34 and the check is a regression signal again once it merges.
    - Three earlier gaps have been fixed: a closed-but-unmerged PR left its
      files locked, a shortcut flag let a lane skip peer review, and dropping
      another lane's locks needed no audited sign-off. Each now has a passing
@@ -375,7 +378,10 @@ instructions, and the latest cached result.
 ### Changing behavior the rules cover
 
 1. Decide what kind of change you are making:
-   - **Documentation or comments only** — nothing extra.
+   - **Documentation or comments only** — run the pin check
+     (`python3 scripts/tla_pin.py --check`) once the phase 1 model lands. A
+     prose edit inside a range the model pins must repin deliberately, even
+     when nothing about the behavior changed.
    - **Code changes that keep behavior the same** (a refactor) — run
      `npm run test:formal` to confirm the code still matches the rules.
    - **Behavior changes** — update the written rules first (in `specs/`),
