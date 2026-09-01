@@ -148,7 +148,13 @@ export function classifyTlcResult(run) {
 
 function runPinCheck(root, tlaFiles) {
   if (tlaFiles.length === 0) {
-    return { name: "pin", verdict: "no_formal_surface", durationMs: 0, command: "" }
+    return {
+      name: "pin",
+      verdict: "infrastructure_failure",
+      durationMs: 0,
+      command: "python3 scripts/tla_pin.py --check",
+      detail: "No TLA model exists for the selected semantic surface.",
+    }
   }
   const script = path.join(root, "scripts", "tla_pin.py")
   if (!fs.existsSync(script)) {
@@ -167,7 +173,13 @@ function runPinCheck(root, tlaFiles) {
 
 function runTlc(root, tlaFiles) {
   if (tlaFiles.length === 0) {
-    return [{ name: "tlc", verdict: "no_formal_surface", durationMs: 0, command: "" }]
+    return [{
+      name: "tlc",
+      verdict: "infrastructure_failure",
+      durationMs: 0,
+      command: "java -cp $TLC_JAR tlc2.TLC ...",
+      detail: "No TLA model exists for the selected semantic surface.",
+    }]
   }
   const jar = process.env.TLC_JAR || ""
   if (!jar || !fs.existsSync(jar)) {
@@ -216,14 +228,16 @@ function runHarness(root) {
     }
   }
   const run = command("npm", ["run", "test:formal"], { cwd: root })
-  const verdict = classifyHarnessResult(run)
+  const verdict = classifyHarnessResult(run, { modeledAssertions: true })
   return { name: "fast-check", verdict, ...run }
 }
 
-export function classifyHarnessResult(run) {
+export function classifyHarnessResult(run, { modeledAssertions = false } = {}) {
   if (run.status === 0) return "pass"
   const output = `${run.stdout || ""}\n${run.stderr || ""}`
-  if (run.status === 1 && /validation_mismatch|ERR_ASSERTION|AssertionError/.test(output)) {
+  const explicitMismatch = /validation_mismatch/.test(output)
+  const modeledAssertion = modeledAssertions && /ERR_ASSERTION|AssertionError/.test(output)
+  if (run.status === 1 && (explicitMismatch || modeledAssertion)) {
     return "validation_mismatch"
   }
   return "infrastructure_failure"
@@ -304,8 +318,11 @@ function runSelfTest() {
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
-  assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }), "validation_mismatch")
+  assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }, { modeledAssertions: true }), "validation_mismatch")
+  assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - unrelated CLI assertion", stderr: "AssertionError" }), "infrastructure_failure")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "", stderr: "Error [ERR_MODULE_NOT_FOUND]" }), "infrastructure_failure")
+  assert.equal(runPinCheck("/tmp/unused", []).verdict, "infrastructure_failure")
+  assert.equal(runTlc("/tmp/unused", [])[0].verdict, "infrastructure_failure")
   const missingScriptRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-package-test-"))
   try {
     fs.writeFileSync(path.join(missingScriptRoot, "package.json"), "{}\n")
