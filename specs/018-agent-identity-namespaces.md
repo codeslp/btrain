@@ -95,9 +95,11 @@ review, or resolve a lane.
 ### FR-3: No id in both sets
 
 `btrain doctor` reports an error when any `[agents].active` name equals any
-bot id, before or after the prefix. `codex` and `gh-codex` are treated as the
-same word for this check, so a repository cannot recreate the ambiguity by
-prefixing only one side.
+bot id string exactly, when a bot id lacks the `gh-` prefix (FR-1), or when a
+local id carries it (FR-2). The pair `codex` (local) and `gh-codex` (bot) is
+legal and is the intended end state of the migration: the prefix is the
+discriminator, and FR-4 labels carry the rest. The rule does not treat the
+prefixed and unprefixed forms as the same word.
 
 ### FR-4: Labeled rendering
 
