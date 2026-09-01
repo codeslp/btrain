@@ -305,7 +305,7 @@ argue with itself indefinitely.
   Reassign row and follows prose, model, code.
 - **Spec 015** (PR #37, unmerged at the time of writing): rows 2 through 5
   apply unchanged with suffixed identities. Row 20 (Reassign) gets its first
-  designated case from FR-6.
+  designated cases from FR-6 and FR-8 fall-through (FR-7).
 - **`LaneLock.tla`** (PR #35, unmerged at the time of writing): the
   `ReviewerSeparation` invariant compares agent identities; `#review` is one
   more element of `Agents`.
