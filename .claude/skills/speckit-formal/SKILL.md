@@ -14,20 +14,20 @@ Single-command answer to "does the formal surface of the spec pass right now, an
 ## Workflow
 
 1. Run `tla-pin-sync` across all `.tla` under `specs/tla/`. If any pin is stale, stop and return the stale list. Do not proceed to TLC — a stale pin means the `.tla` may be checking a spec that no longer matches its current prose, and a passing verdict would be misleading.
-2. For each `.tla`, run `tla-run-tlc`. Collect the per-spec verdicts.
+2. For each `.tla`, run `tla-run-tlc`. It verifies any cached `specs/tla/.tlc-results/<name>.json` with `python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/<name>.json` (requires `TLC_JAR` or `--tool-jar`) and re-runs TLC on a cache miss, so this orchestrator never folds in a stale or overclaiming result. Collect, per model, the recorded `status`, the `tlc` and `validation` blocks, and the verifier exit code.
 3. Aggregate:
    - Counts: total pass / counterexample / state_space_exhausted.
    - For each counterexample: run `tla-trace-explain` and attach the narrative.
    - For each state_space_exhausted: attach the depth reached and the bound-reduction suggestion.
 4. Produce a consolidated output:
-   - **Top line:** overall status — `pass` (all TLAs pass), `fail` (any counterexample), or `warn` (no counterexamples but at least one exhaustion).
+   - **Top line:** overall status derived from each model's recorded status, never from exit codes alone (spec 014 verification outcomes): `pass` only when every model is `pass`; `fail` when any model is `counterexample`, `validation_mismatch`, or `stale_model`; `warn` when there is no `fail` but at least one `state_space_exhausted`; `tool_unavailable` and `policy_blocked` are reported in their own line and never counted as a pass.
    - **Per-TLA table:** name, verdict, invariants checked, states explored.
    - Counterexample narratives inline under the table.
 5. Exit codes, matching spec 002 §5.4:
    - 0 on overall `pass`
    - 1 on overall `fail` (CI blocks)
    - 124 on overall `warn` (CI comments but does not block)
-6. Before aggregating, run `python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/<name>.json` for every per-model verdict (one invocation per `<name>.tla`); a STALE key or an overclaiming file (exit 1) is a cache miss, so re-run `tla-run-tlc` for that model rather than folding the stale result in. Then cache the consolidated result at `specs/tla/.tlc-results/_aggregate.json` so pre-handoff, CI comments, and review packets consume the same artifact, and record each model's verifier exit code in it.
+6. Cache the consolidated result at `specs/tla/.tlc-results/_aggregate.json` so pre-handoff, CI comments, and review packets consume the same artifact. Record each model's recorded status and the verifier exit code from step 2 in it.
 
 ## Constraints
 
