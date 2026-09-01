@@ -54,6 +54,10 @@ function resolveGnuTimeBinary() {
   return ""
 }
 
+export function buildMeasuredCommandArgs(commandName, args, measurementPath) {
+  return ["-q", "-f", "%M", "-o", measurementPath, commandName, ...args]
+}
+
 function command(commandName, args, options = {}) {
   const startedAt = Date.now()
   const memoryTool = options.measureMemory && process.platform === "linux"
@@ -66,7 +70,7 @@ function command(commandName, args, options = {}) {
   const measurementPath = measurementDirectory ? path.join(measurementDirectory, "peak-rss-kb.txt") : ""
   const executable = canMeasureMemory ? memoryTool : commandName
   const executableArgs = canMeasureMemory
-    ? ["-f", "%M", "-o", measurementPath, commandName, ...args]
+    ? buildMeasuredCommandArgs(commandName, args, measurementPath)
     : args
   const result = spawnSync(executable, executableArgs, {
     cwd: options.cwd,
@@ -525,6 +529,10 @@ function runSelfTest() {
   assert.deepEqual(
     buildTlcArgs("/tmp/tla2tools.jar", "LaneLock.cfg", "LaneLock.tla"),
     ["-Xmx1024m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "2", "LaneLock.tla"],
+  )
+  assert.deepEqual(
+    buildMeasuredCommandArgs("npm", ["run", "test:formal"], "/tmp/peak-rss-kb.txt"),
+    ["-q", "-f", "%M", "-o", "/tmp/peak-rss-kb.txt", "npm", "run", "test:formal"],
   )
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }, { modeledAssertions: true }), "validation_mismatch")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - unrelated CLI assertion", stderr: "AssertionError" }), "infrastructure_failure")
