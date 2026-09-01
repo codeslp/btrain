@@ -27,7 +27,8 @@ Expected: `Model checking completed. No error has been found.` The structured
 verdict is cached at `.tlc-results/LaneLock.json`. It is keyed by every
 semantic input spec 014 names (`keys`): the `.tla` content hash, the `.cfg`
 hash, the pinned prose hash from the module header, the hash of the FR-6
-harness files, the source commit the run used, and the tla2tools hash. The
+harness files, the content hash of every semantic input (`inputs_sha256`),
+and the tla2tools hash; the source commit is recorded for provenance only. The
 `validation` block records the harness seed, run count, candidate tally, and
 whether trace validation ran, so the verdict is also keyed by the trace set
 that was actually executed. The top-level `status` is the spec 014 verdict
