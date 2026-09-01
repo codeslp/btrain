@@ -457,6 +457,21 @@ async function resolveGitHooksDir(repoRoot) {
     return null
   }
 
+  // Git looks in .git/hooks only "by default": core.hooksPath and worktree
+  // layouts move the effective directory. Ask Git so install and drift
+  // detection inspect the hooks Git actually runs.
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "--git-path", "hooks"], {
+      cwd: repoRoot,
+    })
+    const effective = stdout.trim()
+    if (effective) {
+      return path.resolve(repoRoot, effective)
+    }
+  } catch {
+    // git missing or too old; fall through to the manual layout resolution.
+  }
+
   const gitEntryStats = await fs.stat(gitEntryPath)
   if (gitEntryStats.isDirectory()) {
     return path.join(gitEntryPath, "hooks")
@@ -1156,7 +1171,19 @@ function getLocksLockfilePath(repoRoot) {
 // that authorizes them. Claim uses this: acquiring locks and publishing
 // in-progress were two phases, and an audited release landing between them
 // read an idle lane, skipped the override, and dropped the fresh locks.
-async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock } = {}) {
+// True when the lane's handoff file already carries the update that
+// `publishInsideLock` was asked to write. `lastUpdated` is unique per call, so
+// it is the commit marker of a publication.
+async function handoffPublished(handoffPath, lastUpdated) {
+  try {
+    const current = parseCurrentSection(await readText(handoffPath))
+    return Boolean(lastUpdated) && current.lastUpdated === lastUpdated
+  } catch {
+    return false
+  }
+}
+
+async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock, isPublished } = {}) {
   if (!files || files.length === 0) {
     // No locks to take, so there is no critical section to publish inside.
     if (publishInsideLock) await publishInsideLock()
@@ -1202,6 +1229,22 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock 
       try {
         await publishInsideLock()
       } catch (publishError) {
+        // Publication writes the handoff file and then appends the workflow
+        // event. If the handoff already carries the update, the failure came
+        // after the commit point: the lane now says it holds these locks, so
+        // rolling the registry back would leave an active lane with an empty
+        // registry that another lane could claim. Keep the locks and report
+        // the event failure instead.
+        if (isPublished && (await isPublished())) {
+          const published = new BtrainError({
+            message: `Lane ${laneId} was published but its workflow event could not be recorded.`,
+            reason: publishError instanceof Error ? publishError.message : String(publishError),
+            fix: "Check that `.btrain/events/` is a writable directory, then run `btrain doctor` to confirm the lane and its locks agree.",
+            context: "The handoff file and the lock registry are consistent; only the event log entry is missing.",
+          })
+          published.cause = publishError
+          throw published
+        }
         // The locks and the lane status must land together. Without this
         // rollback a failed publication leaves the lane holding locks that
         // no status authorizes, which an audited release then reads as
@@ -1449,7 +1492,19 @@ async function findStaleManagedHooks(repoRoot) {
     if (!(await pathExists(hookPath))) continue
     const existing = await readText(hookPath)
     if (!existing.includes(hook.marker)) continue
-    if (existing !== hook.content) stale.push(hook.filename)
+    if (existing !== hook.content) {
+      stale.push({ filename: hook.filename, reason: "content" })
+      continue
+    }
+    // Git ignores a hook without the executable bit ("was ignored because
+    // it's not set as executable"), so a byte-identical hook can still be
+    // dead. The installer sets 0o755; require some execute bit here.
+    if (process.platform !== "win32") {
+      const stats = await fs.stat(hookPath)
+      if ((stats.mode & 0o111) === 0) {
+        stale.push({ filename: hook.filename, reason: "not-executable" })
+      }
+    }
   }
   return stale
 }
@@ -5147,7 +5202,10 @@ async function claimHandoff(repoRoot, options) {
       },
       )
     }
-    await acquireLocks(repoRoot, laneId, options.owner, files, { publishInsideLock: publishClaim })
+    await acquireLocks(repoRoot, laneId, options.owner, files, {
+      publishInsideLock: publishClaim,
+      isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
+    })
     await compactHandoffHistory(repoRoot, { config, laneId, actorLabel: options.owner })
     return result
   }
@@ -5434,7 +5492,10 @@ async function patchHandoff(repoRoot, options) {
         const publishUpdate = async () => {
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
-        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, { publishInsideLock: publishUpdate })
+        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
+          publishInsideLock: publishUpdate,
+          isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
+        })
       } else {
         updatedCurrent = await updateHandoff(...updateHandoffArgs)
       }
@@ -9461,9 +9522,11 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     }
   }
 
-  for (const filename of staleHooks) {
+  for (const hook of staleHooks) {
     warnings.push(
-      `\`${filename}\` hook differs from the managed btrain template. Run \`btrain hooks\`.`,
+      hook.reason === "not-executable"
+        ? `\`${hook.filename}\` hook is not executable, so git skips it. Run \`btrain hooks\`.`
+        : `\`${hook.filename}\` hook differs from the managed btrain template. Run \`btrain hooks\`.`,
     )
   }
 

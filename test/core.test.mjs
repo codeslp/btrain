@@ -6,6 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import {
   DEFAULT_LOCK_TTL_MS,
+  acquireLocks,
   installGitHooks,
   isLockExpired,
   parseCsvList,
@@ -5978,6 +5979,19 @@ describe("btrain doctor detects stale managed hooks", () => {
 
     await fs.writeFile(hookPath, managed)
   })
+
+  it("warns when a managed hook is not executable", async () => {
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    const managed = await fs.readFile(hookPath, "utf8")
+    await fs.writeFile(hookPath, managed, { mode: 0o644 })
+    await fs.chmod(hookPath, 0o644)
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-commit/i, "doctor must report a non-executable managed hook")
+    assert.match(stale.stdout, /btrain hooks/, "the warning must name `btrain hooks` as the fix")
+
+    await fs.chmod(hookPath, 0o755)
+  })
 })
 
 // ──────────────────────────────────────────────
@@ -5999,8 +6013,6 @@ describe("a failed claim publication leaves no locks behind", () => {
   })
 
   after(async () => {
-    const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
-    await fs.chmod(handoffB, 0o644).catch(() => {})
     await rmDir(tmpDir)
   })
 
@@ -6009,18 +6021,14 @@ describe("a failed claim publication leaves no locks behind", () => {
     // If publication fails, the lane ends up holding locks with no status
     // that authorizes them — the exact state an audited release treats as
     // stale, so its locks can then be dropped with no override.
-    const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
-    await fs.chmod(handoffB, 0o444)
-
-    const claim = await runBtrain(
-      [
-        "handoff", "claim", "--repo", tmpDir, "--lane", "b",
-        "--task", "publication will fail", "--owner", "Codex", "--reviewer", "Claude",
-        "--files", "src/b/",
-      ],
-      tmpDir,
+    await assert.rejects(
+      acquireLocks(tmpDir, "b", "Codex", ["src/b/"], {
+        publishInsideLock: async () => {
+          throw new Error("injected publication failure")
+        },
+      }),
+      /injected publication failure/,
     )
-    assert.notEqual(claim.code, 0, `claim should fail when it cannot publish: ${claim.stdout}`)
 
     const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
     const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
@@ -6029,5 +6037,80 @@ describe("a failed claim publication leaves no locks behind", () => {
       0,
       "a claim that could not publish its status must not leave its locks in the registry",
     )
+  })
+
+  it("keeps the locks when the failure comes after the handoff was published", async () => {
+    // updateHandoff writes the handoff file, then appends the workflow event.
+    // A failure in the append happens after the commit point: the lane already
+    // says in-progress with these locked files. Rolling the registry back
+    // there would leave an active lane with an empty registry, and another
+    // lane could claim the same paths. The event log path is made a plain
+    // file so the append fails deterministically for any uid.
+    const eventsDir = path.join(tmpDir, ".btrain", "events")
+    await fs.rm(eventsDir, { recursive: true, force: true })
+    await fs.writeFile(eventsDir, "not a directory\n")
+
+    const claim = await runBtrain(
+      [
+        "handoff", "claim", "--repo", tmpDir, "--lane", "c",
+        "--task", "event append will fail", "--owner", "Codex", "--reviewer", "Claude",
+        "--files", "src/c/",
+      ],
+      tmpDir,
+    )
+    assert.notEqual(claim.code, 0, `claim must surface the event failure: ${claim.stdout}`)
+    assert.match(claim.stderr, /published but its workflow event could not be recorded/, claim.stderr)
+
+    const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneCLocks = registry.locks.filter((lock) => lock.lane === "c").map((lock) => lock.path)
+    assert.deepStrictEqual(laneCLocks, ["src/c/"], "the published lane keeps its registry locks")
+
+    const handoffC = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_C.md"), "utf8")
+    assert.match(handoffC, /^Status: in-progress$/m, "the handoff shows the published status")
+    assert.match(handoffC, /^Locked Files: src\/c\/$/m, "the handoff lists the locked files the registry holds")
+
+    await fs.rm(eventsDir, { force: true })
+    await fs.mkdir(eventsDir, { recursive: true })
+  })
+})
+
+// ──────────────────────────────────────────────
+// Managed hooks follow core.hooksPath
+// ──────────────────────────────────────────────
+
+describe("managed hooks honor core.hooksPath", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await exec("git", ["-C", tmpDir, "config", "core.hooksPath", ".githooks"])
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("installs into the directory git actually runs and detects drift there", async () => {
+    // Git documents .git/hooks as the default only; core.hooksPath moves it.
+    // Writing to .git/hooks in such a repo installs gates that never execute,
+    // and doctor then reports a healthy repo whose gates are dead.
+    const effectiveHook = path.join(tmpDir, ".githooks", "pre-commit")
+    const installed = await fs.readFile(effectiveHook, "utf8")
+    assert.ok(installed.includes("# btrain:pre-commit-hook"), "hook must be written under core.hooksPath")
+    const defaultHook = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    const defaultContent = await fs.readFile(defaultHook, "utf8").catch(() => "")
+    assert.ok(!defaultContent.includes("# btrain:pre-commit-hook"), "nothing managed lands in the ignored default dir")
+
+    const clean = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!/pre-commit.*(differs|not executable)/i.test(clean.stdout), `fresh install must not warn: ${clean.stdout}`)
+
+    await fs.writeFile(effectiveHook, "#!/bin/sh\n# btrain:pre-commit-hook\n# stale revision\nexit 0\n")
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-commit.*differs/i, "doctor must inspect the hooks under core.hooksPath")
   })
 })
