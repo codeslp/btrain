@@ -68,6 +68,13 @@ VARIABLES
 vars == <<status, owner, reviewer, locked, registry, uncovered, prLinked,
           repairCount, peerApproved>>
 
+\* Authority predicates (spec 002 PR-flow actors; spec 006 FR-7 responsible
+\* actor). Named once so the authority rule is reviewable in one place
+\* instead of being restated inside each action.
+IsOwner(l, a) == a = owner[l]
+IsReviewer(l, a) == a = reviewer[l]
+IsLaneAgent(l, a) == a \in {owner[l], reviewer[l]}
+
 NoConflictWithOthers(l, fs) ==
   \A m \in Lanes \ {l} : \A p \in fs, q \in registry[m] : ~Conflicts(p, q)
 
@@ -101,7 +108,7 @@ Claim(l, o, r, fs) ==
 \* spec 005 status model / FR-7: the owner hands off from in-progress or,
 \* after rework, from changes-requested. Locks are retained.
 ToNeedsReview(l, a) ==
-  /\ a = owner[l]
+  /\ IsOwner(l, a)
   /\ status[l] \in {"in-progress", "changes-requested"}
   /\ status' = [status EXCEPT ![l] = "needs-review"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
@@ -110,7 +117,7 @@ ToNeedsReview(l, a) ==
 \* spec 005 FR-2/FR-3/FR-5/FR-10: the reviewer returns findings; the lane
 \* stays active with the same owner, reviewer, and locks.
 RequestChanges(l, a) ==
-  /\ a = reviewer[l]
+  /\ IsReviewer(l, a)
   /\ status[l] = "needs-review"
   /\ status' = [status EXCEPT ![l] = "changes-requested"]
   /\ peerApproved' = [peerApproved EXCEPT ![l] = FALSE]
@@ -120,7 +127,7 @@ RequestChanges(l, a) ==
 \* spec 002 v1.1.2: peer resolve at needs-review is local approval — the
 \* reviewer advances the lane to nonterminal ready-for-pr; locks retained.
 PeerResolve(l, a) ==
-  /\ a = reviewer[l]
+  /\ IsReviewer(l, a)
   /\ a # owner[l]
   /\ status[l] = "needs-review"
   /\ status' = [status EXCEPT ![l] = "ready-for-pr"]
@@ -130,7 +137,7 @@ PeerResolve(l, a) ==
 
 \* spec 002 PR-flow actors: the owner creates or links the PR.
 LinkPr(l, a) ==
-  /\ a = owner[l]
+  /\ IsOwner(l, a)
   /\ status[l] = "ready-for-pr"
   /\ status' = [status EXCEPT ![l] = "pr-review"]
   /\ prLinked' = [prLinked EXCEPT ![l] = TRUE]
@@ -168,7 +175,7 @@ PrTerminal(l) ==
 \* Terminal resolve outside the review/PR flow: the owner or reviewer
 \* abandons or supersedes the lane. Terminal resolved releases locks.
 AbandonResolve(l, a) ==
-  /\ a \in {owner[l], reviewer[l]}
+  /\ IsLaneAgent(l, a)
   /\ status[l] \in {"in-progress", "changes-requested"}
   /\ status' = [status EXCEPT ![l] = "resolved"]
   /\ locked' = [locked EXCEPT ![l] = {}]
@@ -196,7 +203,7 @@ RepairEnter(l) ==
 \* clears the repair and same-lane work continues. The budget count
 \* persists so a same-problem re-entry escalates.
 RepairClear(l, a) ==
-  /\ a \in {owner[l], reviewer[l]}
+  /\ IsLaneAgent(l, a)
   /\ status[l] = "repair-needed"
   /\ status' = [status EXCEPT ![l] = "in-progress"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
@@ -206,7 +213,7 @@ RepairClear(l, a) ==
 \* disposition AFTER the FR-18 escalation decides the lane will not
 \* continue. Terminal release applies.
 RepairResolve(l, a) ==
-  /\ a \in {owner[l], reviewer[l]}
+  /\ IsLaneAgent(l, a)
   /\ status[l] = "repair-needed"
   /\ repairCount[l] >= MaxRepair
   /\ status' = [status EXCEPT ![l] = "resolved"]
@@ -223,8 +230,7 @@ RepairResolve(l, a) ==
 \* spec 006 FR-20). The new set is non-empty, exclusive, and both records
 \* reflect it; a rescope also restores coverage after a force-release.
 Rescope(l, a, fs) ==
-  /\ IF status[l] = "repair-needed" THEN a \in {owner[l], reviewer[l]}
-                                    ELSE a = owner[l]
+  /\ IF status[l] = "repair-needed" THEN IsLaneAgent(l, a) ELSE IsOwner(l, a)
   /\ status[l] \in {"in-progress", "changes-requested", "repair-needed"}
   /\ NoConflictWithOthers(l, fs)
   /\ locked' = [locked EXCEPT ![l] = fs]
