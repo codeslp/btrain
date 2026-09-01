@@ -27,7 +27,7 @@ Single-command answer to "does the formal surface of the spec pass right now, an
    - 0 on overall `pass`
    - 1 on overall `fail` (CI blocks)
    - 124 on overall `warn` (CI comments but does not block)
-6. Before aggregating, run `python3 scripts/tla_pin.py --verify-verdict` on every per-model `specs/tla/.tlc-results/<name>.json`; a STALE key or an overclaiming file (exit 1) is a cache miss, so re-run `tla-run-tlc` for that model rather than folding the stale result in. Then cache the consolidated result at `specs/tla/.tlc-results/_aggregate.json` so pre-handoff, CI comments, and review packets consume the same artifact, and record each model's verifier exit code in it.
+6. Before aggregating, run `python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/<name>.json` for every per-model verdict (one invocation per `<name>.tla`); a STALE key or an overclaiming file (exit 1) is a cache miss, so re-run `tla-run-tlc` for that model rather than folding the stale result in. Then cache the consolidated result at `specs/tla/.tlc-results/_aggregate.json` so pre-handoff, CI comments, and review packets consume the same artifact, and record each model's verifier exit code in it.
 
 ## Constraints
 
