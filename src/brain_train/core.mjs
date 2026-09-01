@@ -1158,7 +1158,9 @@ function getLocksLockfilePath(repoRoot) {
 // read an idle lane, skipped the override, and dropped the fresh locks.
 async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock } = {}) {
   if (!files || files.length === 0) {
-    return publishInsideLock ? publishInsideLock().then(() => []) : []
+    // No locks to take, so there is no critical section to publish inside.
+    if (publishInsideLock) await publishInsideLock()
+    return []
   }
 
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
