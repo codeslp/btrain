@@ -59,6 +59,25 @@ them and `REASON_TAG_PATTERN` (`core.mjs:259`) allows lowercase letters,
 digits, and hyphens only. `gh_codex` would make every PR-feedback transition
 fail validation.
 
+Hyphens are not an option either until one parser bug is fixed.
+`parseProjectToml` (`core.mjs:6274`) matches table headers with
+`/^\[([A-Za-z0-9_.]+)\]$/` and bare keys with `[A-Za-z0-9_]+`, so
+`[pr_flow.bots.gh-codex]` is silently skipped and the bot falls back to
+default aliases (`[id]`) and request body (`@gh-codex review`). Real bot
+reviews then stop matching and the review-request comment no longer
+triggers the bot. This was observed on PR #39 on 2026-09-01. TOML permits
+`A-Za-z0-9_-` in bare keys; the parser is wrong, not the config. The fix is
+two regexes:
+
+```js
+const sectionMatch = /^\[([A-Za-z0-9_.-]+)\]$/.exec(trimmed)
+const entryMatch = /^("(?:[^"\\]|\\.)+"|[A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(trimmed)
+```
+
+plus a test that a hyphenated bot table round-trips through
+`getPrFlowConfig`. The config rename in this spec's lane must not merge
+before that fix.
+
 ## Functional Requirements
 
 ### FR-1: Bot ids carry the `gh-` prefix
@@ -102,6 +121,8 @@ are external events (`PrClear`, `PrFeedback`, `PrTerminal`). No change.
 
 ### FR-7: Migration
 
+0. Land the parser fix above (`parseProjectToml` accepts `-` in table headers
+   and bare keys) with its test. Steps 1 through 3 depend on it.
 1. Rename each `[pr_flow.bots.<id>]` table and `required_bots` entry to
    `gh-<id>`.
 2. For each open PR-flow lane, run `btrain pr request-review --lane <id>
