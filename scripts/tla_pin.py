@@ -150,7 +150,6 @@ def cmd_repin(path: str) -> int:
 
 
 def _sha256_file(path: Path) -> str:
-    import hashlib
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -160,6 +159,25 @@ def _sha256_file(path: Path) -> str:
 # survives squash merges and rebases: the verdict applies to any head whose
 # semantic inputs are byte-identical.
 IMPLEMENTATION_INPUT_DIRS = ("src/brain_train",)
+# Files outside the directories above whose content also decides what a
+# validation run meant: the ledger that classifies candidate findings and the
+# dependency manifest that pins the harness engine version.
+EXTRA_SEMANTIC_INPUTS = ("test/formal/README.md", "package.json", "package-lock.json")
+
+
+def _tracked_files(rel_dir: str) -> list[Path]:
+    """Tracked files under rel_dir via git; falls back to rglob without
+    dotfiles when git is unavailable so stray editor files never flip a key."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", "--", rel_dir],
+                             capture_output=True, text=True, check=True).stdout
+        return sorted(REPO_ROOT / line for line in out.splitlines() if line)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        base = REPO_ROOT / rel_dir
+        if not base.is_dir():
+            return []
+        return sorted(p for p in base.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.relative_to(base).parts))
 
 
 def semantic_inputs(tla: Path, cfg: Path, pins, harness_files) -> list[Path]:
@@ -167,9 +185,8 @@ def semantic_inputs(tla: Path, cfg: Path, pins, harness_files) -> list[Path]:
     paths += [REPO_ROOT / rel for rel, _ in pins]
     paths += [REPO_ROOT / rel for rel in harness_files]
     for rel_dir in IMPLEMENTATION_INPUT_DIRS:
-        base = REPO_ROOT / rel_dir
-        if base.is_dir():
-            paths += sorted(p for p in base.rglob("*") if p.is_file())
+        paths += _tracked_files(rel_dir)
+    paths += [REPO_ROOT / rel for rel in EXTRA_SEMANTIC_INPUTS if (REPO_ROOT / rel).is_file()]
     seen, ordered = set(), []
     for p in paths:
         rp = p.resolve()
@@ -180,7 +197,6 @@ def semantic_inputs(tla: Path, cfg: Path, pins, harness_files) -> list[Path]:
 
 
 def inputs_sha256(paths) -> str:
-    import hashlib
     h = hashlib.sha256()
     for p in sorted(paths, key=lambda q: str(q.relative_to(REPO_ROOT))):
         h.update(str(p.relative_to(REPO_ROOT)).encode("utf-8") + b"\0")
@@ -193,31 +209,50 @@ def cmd_verify_verdict(path: str, tool_jar: str | None = None) -> int:
     cached results are reusable only when keyed by all semantic inputs) and
     report FRESH/STALE per key. Any STALE key, a missing validation block, or a
     top-level status other than pass makes the cache unusable as a pass."""
-    import hashlib
     import json
     import os
     import subprocess
     verdict_path = Path(path).resolve()
-    data = json.loads(verdict_path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(verdict_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"STALE verdict: cannot read {verdict_path}: {error}")
+        return 1
     keys = data.get("keys") or {}
+    tlc_block = data.get("tlc") if isinstance(data.get("tlc"), dict) else {}
     name = verdict_path.stem
     tla = TLA_DIR / f"{name}.tla"
-    cfg = TLA_DIR / (data.get("tlc", {}).get("config") or f"{name}.cfg")
+    cfg = TLA_DIR / (tlc_block.get("config") or f"{name}.cfg")
     stale = []
     def check(label, recorded, current):
-        ok = recorded == current
+        ok = recorded is not None and recorded == current
         print(f"{'FRESH' if ok else 'STALE'} {label}: recorded {str(recorded)[:12]}… current {str(current)[:12]}…")
         if not ok:
             stale.append(label)
-    check("tla_content_sha256", keys.get("tla_content_sha256"), _sha256_file(tla))
-    check("cfg_sha256", keys.get("cfg_sha256"), _sha256_file(cfg))
-    pins, _, recorded_pin, _ = parse_pins(tla)
+    def safe(label, fn):
+        # A missing input is a STALE key with a reason, never a traceback
+        # (spec 014 FR-10: failure classes stay distinguishable).
+        try:
+            return fn()
+        except (OSError, KeyError, ValueError) as error:
+            print(f"STALE {label}: cannot compute ({error})")
+            stale.append(label)
+            return None
+    current_tla = safe("tla_content_sha256", lambda: _sha256_file(tla))
+    if current_tla is not None:
+        check("tla_content_sha256", keys.get("tla_content_sha256"), current_tla)
+    current_cfg = safe("cfg_sha256", lambda: _sha256_file(cfg))
+    if current_cfg is not None:
+        check("cfg_sha256", keys.get("cfg_sha256"), current_cfg)
+    pins, _, recorded_pin, _ = parse_pins(tla) if tla.is_file() else ([], None, None, [])
     check("pinned_prose_sha256 (header)", keys.get("pinned_prose_sha256"), recorded_pin)
-    check("pinned_prose_sha256 (prose)", keys.get("pinned_prose_sha256"), compute_hash(pins) if pins else None)
-    h = hashlib.sha256()
-    for rel in keys.get("harness_files") or []:
-        h.update((REPO_ROOT / rel).read_bytes())
-    check("harness_sha256", keys.get("harness_sha256"), h.hexdigest())
+    current_prose = safe("pinned_prose_sha256 (prose)", lambda: compute_hash(pins) if pins else None)
+    if current_prose is not None:
+        check("pinned_prose_sha256 (prose)", keys.get("pinned_prose_sha256"), current_prose)
+    harness_paths = [REPO_ROOT / rel for rel in (keys.get("harness_files") or [])]
+    current_harness = safe("harness_sha256", lambda: inputs_sha256(harness_paths))
+    if current_harness is not None:
+        check("harness_sha256 (path, sha pairs)", keys.get("harness_sha256"), current_harness)
     jar = tool_jar or os.environ.get("TLC_JAR")
     if jar and Path(jar).is_file():
         check("tla2tools_sha256", keys.get("tla2tools_sha256"), _sha256_file(Path(jar)))
@@ -232,9 +267,15 @@ def cmd_verify_verdict(path: str, tool_jar: str | None = None) -> int:
     # reusable on this head only if every semantic input, including the
     # implementation files the harness drives, is byte-identical to the run.
     inputs = semantic_inputs(tla, cfg, pins, keys.get("harness_files") or [])
-    check("inputs_sha256 (tla, cfg, pinned prose, harness, src/brain_train)", keys.get("inputs_sha256"), inputs_sha256(inputs))
+    current_inputs = safe("inputs_sha256", lambda: inputs_sha256(inputs))
+    if current_inputs is not None:
+        check("inputs_sha256 (tla, cfg, pinned prose, harness, tracked src/brain_train, ledger, package manifests)", keys.get("inputs_sha256"), current_inputs)
     src = keys.get("source_commit")
-    print(f"info  source_commit: {str(src)[:12] if src else 'none'} (provenance only; the content keys above decide reuse)")
+    if src:
+        anc = subprocess.run(["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", src, "HEAD"], capture_output=True).returncode == 0
+        print(f"info  source_commit: {str(src)[:12]} ({'ancestor of HEAD' if anc else 'not an ancestor of HEAD, e.g. after a squash merge'}; provenance only, the content keys above decide reuse)")
+    else:
+        print("info  source_commit: none recorded (provenance only)")
     validation = data.get("validation") or {}
     if not validation.get("seed") or not validation.get("runs"):
         print("STALE validation: no seed/runs recorded; the verdict is not keyed by a trace set")

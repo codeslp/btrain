@@ -20,7 +20,7 @@ sha256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
 
 ```bash
 cd specs/tla
-java -cp "$TLC_JAR" tlc2.TLC -config LaneLock.cfg -workers auto LaneLock.tla
+java -cp "$TLC_JAR" tlc2.TLC -config LaneLock.cfg -workers auto -deadlock LaneLock.tla
 ```
 
 Expected: `Model checking completed. No error has been found.` The structured
@@ -32,7 +32,8 @@ harness files, the source commit the run used, and the tla2tools hash. The
 whether trace validation ran, so the verdict is also keyed by the trace set
 that was actually executed. The top-level `status` is the spec 014 verdict
 for the whole chain, not for TLC alone; today it is `validation_mismatch`
-because the FR-6 harness tallies ledgered candidates, even though TLC passed.
+because the FR-6 candidate gate tallies ledgered candidates, even though TLC
+and implementation mode pass.
 
 Verify before reusing:
 
@@ -56,7 +57,8 @@ not be reused; re-run TLC and `npm run test:formal`. The verifier is the only sa
 this file. Consumer wiring lands in its own lanes because those files are
 outside this lane's locks: `tla-run-tlc` (PR #40), `tla-trace-explain`, the
 `formal-advisory` CI workflow, and `pre-handoff`. TLC baseline: 88,436,305 states generated, 8,236,969 distinct, depth
-25, 4 min 3 s with 10 workers.
+25, 1 min 17 s with 10 workers (the model now carries 12 invariants and 4
+action properties).
 
 ## Pin check
 
@@ -98,15 +100,23 @@ design; widen only after the small model passes.
 | `RepairOwnerAssigned` | spec 006 FR-7: a `repair-needed` lane always carries a responsible actor, and it is the lane's owner or reviewer (the most recent canonical workflow actor); outside repair none is assigned |
 | `LastActorIsLaneAgent` | spec 006 FR-7 support: the recorded canonical actor of an active lane is always a lane agent, never GitHub, the watchdog, or an override requester |
 | `LinkedLaneStaysActive` | spec 002 PR-flow states and actors: a lane with a linked PR never reaches a terminal status except through `PrTerminal` or a post-escalation `RepairResolve`; `AbandonResolve` is guarded on `~prLinked` |
+| `RepairResolveNeedsEscalation` (action property) | spec 014 designation of FR-18: the step repair-needed → resolved requires `repairCount >= MaxRepair` before it; this is what makes the `RepairResolve` guard checkable rather than structural |
+| `RepairClearByResponsibleActor` (action property) | spec 006 FR-15: the actor who clears repair-needed is the recorded repair owner |
+| `RepairEnterAssignsLastActor` (action property) | spec 006 FR-7: entering repair assigns the most recent canonical actor |
+| `PrFlowEntryByReviewer` (action property) | spec 002 v1.1.2: entry to `ready-for-pr` happens only from `needs-review` by the assigned reviewer, distinct from the owner; `PrFlowNeedsPeerApproval` now also checks the recorded `approver` |
 | `TypeOK` | state-space sanity, no prose claim |
 
 ### Verification hygiene
 
-The baseline run includes mutation checks so the invariants are load-bearing,
-not vacuous: removing `NoConflictWithOthers` from `Claim` makes TLC report
-`Invariant Exclusivity is violated`; recording `peerApproved = FALSE` in
-`PeerResolve` violates `PrFlowNeedsPeerApproval`; assigning `NoAgent` as the
-repair owner in `RepairEnter` violates `RepairOwnerAssigned`.
+The baseline run includes mutation checks that remove or swap a GUARD (not
+merely the field an invariant reads), so the properties are load-bearing:
+removing `NoConflictWithOthers` from `Claim` violates `Exclusivity`; deleting
+`repairCount[l] >= MaxRepair` from `RepairResolve` violates
+`RepairResolveNeedsEscalation`; changing `PeerResolve`'s guard to `IsOwner`
+violates `PrFlowNeedsPeerApproval` and `PrFlowEntryByReviewer`; changing
+`RepairClear`'s guard to `IsLaneAgent` violates
+`RepairClearByResponsibleActor`; assigning `owner[l]` instead of
+`lastActor[l]` in `RepairEnter` violates `RepairEnterAssignsLastActor`.
 
 ### Actor authority
 
@@ -133,6 +143,19 @@ the harness transcription rejects agent-pool repair rescopes the same way.
 - Two hand transcriptions of the same contract exist (this model and
   `test/formal/lane-lock-model.mjs`); they are kept independent and
   cross-checked by review, and spec 015 FR-7 adds an executable cross-check.
+  Known differences, each an undesignated prose question (spec 016 WS4):
+  (a) the harness accepts `pr-poll` `clear` and `waiting` from PR-flow
+  `changes-requested` (changes-requested → ready-to-merge / pr-review); the
+  model has no such action and routes PR feedback back through
+  `ToNeedsReview` → `PeerResolve` → `LinkPr`, which also voids
+  `peerApproved`. Whether local approval survives GitHub feedback is not
+  decided in prose. (b) the harness's contract-mode `resolve()` lets a lane
+  agent terminal-resolve PR-flow `changes-requested` with a linked PR; the
+  model forbids it (`AbandonResolve` requires `~prLinked`,
+  `LinkedLaneStaysActive`). The harness must tighten to `~prLinked` when the
+  spec 002 line 77 reconciliation lands. (c) `Claim` with reviewer = owner is
+  rejected by the model and silently reassigned to a distinct peer by the
+  harness; reachable states are equivalent.
 - Crash windows between the handoff write and the registry write are not
   modeled; the writes are atomic in the model.
 - TLC trace validation against harness-emitted traces is future work
