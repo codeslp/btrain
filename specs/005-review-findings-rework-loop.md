@@ -4,6 +4,7 @@
 **Version**: 0.1.0
 **Author**: btrain
 **Date**: 2026-04-04
+**Updated**: 2026-09-01 (FR-7 owner-only clause)
 
 ## Summary
 
@@ -129,6 +130,8 @@ The writer must address findings in the same lane rather than resolving the lane
 ### FR-7: Clean re-handoff path
 
 After addressing findings, the writer must be able to move the same lane back to `needs-review` with refreshed reviewer context and verification notes.
+
+Only the lane owner (the writer) may move a lane to `needs-review`, whether from `in-progress` or from `changes-requested`. When any other actor requests that transition, including the assigned reviewer, `btrain` must reject it. It must not accept the transition and reassign the reviewer to satisfy the owner/reviewer separation in FR-5. Designated 2026-09-01 for ledger finding 6 in `test/formal/README.md`; see spec 015.
 
 ### FR-8: CLI support for review return
 
