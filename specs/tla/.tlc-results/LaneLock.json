@@ -1,12 +1,22 @@
 {
   "status": "pass",
-  "tla_content_sha256": "aa95187f19f3bea01cf2e5864f661d47f7464d90846b6b561896ee422f69fdaf",
+  "tla_content_sha256": "0ba6c7bd3de1d6b00b01c530d37a9a9c029d3b7eccfd555f26798ed06296ad3a",
+  "cfg_sha256": "eb6efaa5cf0b665a747913ea389c841ba5edea9d8c0ab1ed3a70b07de0909663",
+  "pinned_prose_sha256": "90cb75546bfdf3d0874a2bbc616fdca16624a48fb356e30daf66f6c63fd613ed",
+  "harness_sha256": "99d0274ff64e1687904aeb4159b7fc7286be7b7e6f9bc4e836aa1e808cdb1524",
+  "harness_files": [
+    "test/formal/lane-lock-model.mjs",
+    "test/formal/lane-lock-harness.test.mjs"
+  ],
+  "source_commit": "bc09ea2c4d6f8e7a066ff67af7c62ec0d1d9bdae",
+  "source_commit_note": "HEAD when TLC ran; this results file is committed on top of it, so verifiers recompute the hashes above rather than trusting the commit id",
   "tlc_version": "2.19 (tla2tools v1.7.4)",
+  "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
   "config": "LaneLock.cfg",
-  "states_generated": 50278897,
-  "distinct_states": 3821089,
-  "depth": 24,
-  "wall_clock_seconds": 50,
+  "states_generated": 95390161,
+  "distinct_states": 8236969,
+  "depth": 26,
+  "wall_clock_seconds": 145,
   "invariants": [
     "TypeOK",
     "Exclusivity",
@@ -16,8 +26,10 @@
     "ActiveHasLocks",
     "PrFlowRetention",
     "RepairBudgetBounded",
-    "PrFlowNeedsPeerApproval"
+    "PrFlowNeedsPeerApproval",
+    "RepairOwnerAssigned",
+    "LastActorIsLaneAgent"
   ],
-  "mutation_check": "PeerResolve recording peerApproved=FALSE violates PrFlowNeedsPeerApproval (verified on the actor-aware revision)",
-  "run_at": "2026-09-01T05:45:40Z"
+  "mutation_check": "PeerResolve recording peerApproved=FALSE violates PrFlowNeedsPeerApproval (verified on the actor-aware revision); RepairEnter assigning NoAgent as repairOwner violates RepairOwnerAssigned (see README)",
+  "run_at": "2026-09-01T21:36:48Z"
 }

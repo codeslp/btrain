@@ -24,9 +24,13 @@ java -cp "$TLC_JAR" tlc2.TLC -config LaneLock.cfg -workers auto LaneLock.tla
 ```
 
 Expected: `Model checking completed. No error has been found.` The structured
-verdict is cached at `.tlc-results/LaneLock.json`, keyed by the `.tla`
-content hash. Baseline: 50,278,897 states generated, 3,821,089 distinct,
-depth 24, ~50 seconds.
+verdict is cached at `.tlc-results/LaneLock.json`. It is keyed by every
+semantic input spec 014 names: the `.tla` content hash, the `.cfg` hash, the
+pinned prose hash from the module header, the hash of the FR-6 harness files,
+the source commit TLC ran on, and the tla2tools hash. A verifier recomputes
+those hashes; a cached `pass` whose keys do not all match is stale, not a
+pass. Baseline: 95,390,161 states generated, 8,236,969 distinct, depth 26,
+2 min 25 s with 10 workers.
 
 ## Pin check
 
@@ -64,21 +68,44 @@ design; widen only after the small model passes.
 | `ActiveHasLocks` | designated active-lane lock requirement (spec 014 v0.1.9) |
 | `PrFlowRetention` | spec 002 v1.1.2: locks retained through `ready-for-pr`, `pr-review`, `ready-to-merge` |
 | `RepairBudgetBounded` | spec 014 designation of spec 006 FR-18: repair resolves only after the escalation budget is exhausted (structural guard on `RepairResolve`); terminal lanes carry a reset count |
+| `PrFlowNeedsPeerApproval` | spec 002 v1.1.2 review routing: no lane sits in the PR flow without a peer approval by a reviewer distinct from the owner |
+| `RepairOwnerAssigned` | spec 006 FR-7: a `repair-needed` lane always carries a responsible actor, and it is the lane's owner or reviewer (the most recent canonical workflow actor); outside repair none is assigned |
+| `LastActorIsLaneAgent` | spec 006 FR-7 support: the recorded canonical actor of an active lane is always a lane agent, never GitHub, the watchdog, or an override requester |
 | `TypeOK` | state-space sanity, no prose claim |
 
 ### Verification hygiene
 
-The baseline run includes a mutation check: removing `NoConflictWithOthers`
-from `Claim` makes TLC report `Invariant Exclusivity is violated`, so the
-invariants are load-bearing, not vacuous.
+The baseline run includes mutation checks so the invariants are load-bearing,
+not vacuous: removing `NoConflictWithOthers` from `Claim` makes TLC report
+`Invariant Exclusivity is violated`; recording `peerApproved = FALSE` in
+`PeerResolve` violates `PrFlowNeedsPeerApproval`; assigning `NoAgent` as the
+repair owner in `RepairEnter` violates `RepairOwnerAssigned`.
+
+### Actor authority
+
+`RepairClear` is guarded on `IsRepairOwner`, the actor `RepairEnter` copied
+from `lastActor` (spec 006 FR-7/FR-15). `RepairResolve` stays `IsLaneAgent`:
+the FR-18 escalation is a human decision, and either lane agent may carry out
+the terminal disposition, matching `test/formal/lane-lock-model.mjs`
+`resolve()`. `Rescope` has no `repair-needed` branch: FR-20 reserves repair
+rescoping for a guardian or human, neither of which is in the agent pool, and
+the harness transcription rejects agent-pool repair rescopes the same way.
 
 ### Known gaps
 
 - FR-18 is modeled as a per-lane `repairCount` (0..2) without reason
   identity; distinct-reason repair sequences share one budget in the model.
-- The model pins spec 014's Normative-source prerequisite section, which
-  names the spec 002/005/006 ranges by reference; the upstream sections are
-  not directly pinned.
+- Prose conflict to reconcile before the model leaves pilot: spec 002
+  `PR-flow states and actors`, row `resolved after close without merge`,
+  permits "a human/owner intentionally resolving". The model has no
+  lane-agent exit from a PR-flow status; only `PrTerminal` (a GitHub outcome)
+  terminates one. Spec 014 FR-2 treats conflicting prose as blocking model
+  approval. The reconciliation (read the phrase as `btrain pr poll --apply`
+  after the PR is closed on GitHub) is scheduled in spec 016 WS4 because the
+  section is pinned by this model and editing it forces a repin.
+- Two hand transcriptions of the same contract exist (this model and
+  `test/formal/lane-lock-model.mjs`); they are kept independent and
+  cross-checked by review, and spec 015 FR-7 adds an executable cross-check.
 - Crash windows between the handoff write and the registry write are not
   modeled; the writes are atomic in the model.
 - TLC trace validation against harness-emitted traces is future work
