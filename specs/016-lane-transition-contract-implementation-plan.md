@@ -179,7 +179,7 @@ rules to encode.
   `npm run test:formal` fails only on the candidate gate
 - reword ledger #9 (terminal half repaired in PR #33) and extend #5 (missing
   file reads repo state and fabricates history)
-- add `src/brain_train/transitions.mjs` with rows 1-20 and L1-L14 from spec 015, plus the `primary` marker per status
+- add `src/brain_train/transitions.mjs` with rows 1-20, L1-L15, and the system row L16 from spec 015, plus the `primary` marker per status
   as data, `owner` and `state` included
 - add `applyTransition` and route `claimHandoff`, `patchHandoff`,
   `requestChangesHandoff`, `resolveHandoff`, `applyPrStatusToHandoff`, the
@@ -214,7 +214,7 @@ rules to encode.
 - cross-check test passes
 - one regression test per fixed defect: `ENOENT`, missing-file resolve,
   reviewer inference
-- `btrain transitions --format json` lists 34 rows (20 contract, 14 legacy)
+- `btrain transitions --format json` lists 36 rows (20 contract, 15 legacy, 1 system lock-release row)
 
 **Formal impact**: no semantic impact, touches modeled entry points and the
 harness. Pin check plus focused implementation validation plus focused harness
