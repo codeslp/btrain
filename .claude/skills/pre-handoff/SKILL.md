@@ -37,6 +37,11 @@ Block bad review handoffs before they reach the reviewer.
    - Record the impact class, exact command, source commit, verdict, duration, and
      result path in `--verification`. Record each unavailable tool or provider as a
      separate `--gap`.
+   - For a code-free modeled-prose edit that changes only formatting, comments, or
+     other non-semantic presentation, add the exact line `Formal impact: no-semantic`
+     to the PR description. Exact-head CI then runs the pin check without scheduling
+     irrelevant TLC or harness work. Do not use this declaration when intended
+     behavior, TLA+, executable validation, or modeled runtime code changes.
    - During Phase 2, record a stale pin, TLC counterexample, or
      `validation_mismatch` as `FAIL` evidence and a specific review ask. The
      advisory result does not block handoff until the Phase 3 selective gate.

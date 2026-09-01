@@ -17,15 +17,26 @@ const TLC_MAX_HEAP_MB = 1024
 const TLC_WORKERS = 2
 
 function parseArgs(argv) {
-  const options = { base: "origin/main", head: "", output: "", classifyOnly: false, selfTest: false }
+  const options = {
+    base: "origin/main",
+    head: "",
+    output: "",
+    impact: "auto",
+    classifyOnly: false,
+    selfTest: false,
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === "--base") options.base = argv[++index] || ""
     else if (arg === "--head") options.head = argv[++index] || ""
     else if (arg === "--output") options.output = argv[++index] || ""
+    else if (arg === "--impact") options.impact = argv[++index] || ""
     else if (arg === "--classify-only") options.classifyOnly = true
     else if (arg === "--self-test") options.selfTest = true
     else throw new Error(`Unknown option: ${arg}`)
+  }
+  if (!new Set(["auto", "no-semantic"]).has(options.impact)) {
+    throw new Error("--impact must be auto or no-semantic.")
   }
   return options
 }
@@ -136,22 +147,30 @@ export function verifyExecutionTree(root, requestedHead) {
   return { head }
 }
 
-export function classifyPaths(files) {
+export function classifyPaths(files, declaredImpact = "auto") {
   const modeledProse = files.some((file) => /^specs\/(002|005|006|014)[^/]*\.md$/.test(file))
   const tlaArtifacts = files.some((file) => file.startsWith("specs/tla/"))
   const pinTool = files.includes("scripts/tla_pin.py")
   const cli = files.includes("src/brain_train/cli.mjs")
   const advisoryWorkflow = files.includes(".github/workflows/formal-advisory.yml")
-  const harness = advisoryWorkflow || modeledProse || tlaArtifacts || files.some((file) =>
+  const harnessSurface = advisoryWorkflow || tlaArtifacts || files.some((file) =>
     file.startsWith("test/formal/")
     || file === "package.json"
     || file === "package-lock.json"
     || file === "scripts/formal_advisory.mjs"
     || MODELED_RUNTIME_FILES.has(file),
   )
+  const codeFreeNoSemanticProse = declaredImpact === "no-semantic"
+    && modeledProse
+    && !harnessSurface
+    && !pinTool
+  const harness = !codeFreeNoSemanticProse && (modeledProse || harnessSurface)
   const pin = modeledProse || tlaArtifacts || pinTool
-  const tlc = modeledProse || tlaArtifacts
-  const impact = tlc ? "semantic" : harness || pinTool ? "validation" : "none"
+  const tlc = !codeFreeNoSemanticProse && (modeledProse || tlaArtifacts)
+  let impact = "none"
+  if (codeFreeNoSemanticProse) impact = "no-semantic"
+  else if (tlc) impact = "semantic"
+  else if (harness || pinTool) impact = "validation"
   return {
     impact,
     pin,
@@ -400,6 +419,15 @@ function runSelfTest() {
   const semanticSelection = classifyPaths(["specs/014-specula-formal-verification-pilot.md"])
   assert.equal(semanticSelection.impact, "semantic")
   assert.equal(semanticSelection.harness, true)
+  assert.deepEqual(
+    classifyPaths(["specs/014-specula-formal-verification-pilot.md"], "no-semantic"),
+    { impact: "no-semantic", pin: true, tlc: false, harness: false, cli: false, formalSurface: true },
+  )
+  assert.equal(
+    classifyPaths(["specs/014-specula-formal-verification-pilot.md", "src/brain_train/core.mjs"], "no-semantic").impact,
+    "semantic",
+  )
+  assert.equal(classifyPaths(["scripts/tla_pin.py"]).harness, false)
   assert.equal(classifyPaths(["src/brain_train/core.mjs"]).harness, true)
   assert.equal(classifyPaths(["src/brain_train/cli.mjs"]).cli, true)
   assert.equal(classifyPaths([".github/workflows/formal-advisory.yml"]).impact, "validation")
@@ -437,6 +465,7 @@ function runSelfTest() {
   }
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github", "workflows", "formal-advisory.yml"), "utf8")
   assert.match(workflow, /Peak RSS \(KiB\)/)
+  assert.match(workflow, /types: \[opened, synchronize, reopened, edited\]/)
   process.stdout.write("formal_advisory self-test passed\n")
 }
 
@@ -450,7 +479,7 @@ async function main() {
   const startedAt = Date.now()
   const executionTree = verifyExecutionTree(root, options.head)
   const files = changedFiles(root, options.base, options.head)
-  const selection = classifyPaths(files)
+  const selection = classifyPaths(files, options.impact)
   const result = {
     schemaVersion: 1,
     advisory: true,
