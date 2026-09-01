@@ -35,10 +35,11 @@ From this spec on, the two live in separate namespaces:
 
 What is not being done: local agent identities are not renamed to
 `local-<name>`. Those strings are stored in every lane's handoff file as owner
-and reviewer, keyed in `[agents.runners]`, matched by runtime detection
-tokens, and used as `Agents` in `LaneLock.tla` and the FR-6 harness. Renaming
-them mid-flight would flag every active lane as `actor-mismatch` and push it
-to `repair-needed`. The display label gives the same discrimination without
+and reviewer and keyed in `[agents.runners]`. Renaming them mid-flight would
+flag every active lane as `actor-mismatch` (`analyzeLaneIntegrity` compares
+the owner against `[agents].active`) and the watchdog would push it to
+`repair-needed`. (The formal model and harness use abstract agents
+`alpha`, `beta`, `gamma`, so they are unaffected either way.) The display label gives the same discrimination without
 identity churn. If a repository wants `local-` in identifiers, it may use it;
 btrain treats any non-`gh-` id as local.
 
@@ -60,9 +61,10 @@ digits, and hyphens only. `gh_codex` would make every PR-feedback transition
 fail validation.
 
 Hyphens are not an option either until one parser bug is fixed.
-`parseProjectToml` (`core.mjs:6274`) matches table headers with
-`/^\[([A-Za-z0-9_.]+)\]$/` and bare keys with `[A-Za-z0-9_]+`, so
-`[pr_flow.bots.gh-codex]` is silently skipped and the bot falls back to
+`parseProjectToml` (`core.mjs:6264`, regex at `:6274`) matches table headers
+with `/^\[([A-Za-z0-9_.]+)\]$/` and bare keys with `[A-Za-z0-9_]+`, so the
+`[pr_flow.bots.gh-codex]` header is skipped and the entries beneath it are
+misattributed to the previous table (`[pr_flow]`); the bot then falls back to
 default aliases (`[id]`) and request body (`@gh-codex review`). Real bot
 reviews then stop matching and the review-request comment no longer
 triggers the bot. This was observed on PR #39 on 2026-09-01. TOML permits
@@ -106,9 +108,11 @@ log without ever being an actor.
 
 ### FR-3: No id in both sets
 
-`btrain doctor` reports an error when any `[agents].active` name equals any
-bot id string exactly, when a bot id lacks the `gh-` prefix (FR-1), or when a
-local id carries it (FR-2). The pair `codex` (local) and `gh-codex` (bot) is
+`btrain doctor` reports an error when any name in the effective local roster
+(`getConfiguredAgentNames(config)`, which covers `[agents].active` and the
+default and runner-map fallbacks FR-2 lists) equals any bot id, compared
+case-insensitively as `getConfiguredAgentNames` itself dedupes, when a bot id
+lacks the `gh-` prefix (FR-1), or when a local id carries it (FR-2). The pair `codex` (local) and `gh-codex` (bot) is
 legal and is the intended end state of the migration: the prefix is the
 discriminator, and FR-4 labels carry the rest. The rule does not treat the
 prefixed and unprefixed forms as the same word.
@@ -116,10 +120,12 @@ prefixed and unprefixed forms as the same word.
 ### FR-4: Labeled rendering
 
 Every btrain output that can show a local agent and a bot in the same view
-prefixes them: `agent <name>` and `bot <id>`. This covers `btrain handoff`
-next-action text for PR feedback, `btrain pr status`, `btrain status`, the
-dashboard, and PR bodies. Where only one kind can appear, the label is
-omitted.
+prefixes them: `agent <name>` and `bot <id>`. Today two sites mix kinds: the
+PR-feedback next-action text written by `applyPrStatusToHandoff`
+(`pr-flow.mjs:669`), and `btrain pr status`, to which this spec adds one
+`owner:` line so a reader sees who acts on the bot's feedback. `btrain
+status`, the dashboard, and PR bodies show local agents only and omit the
+label until they render bot state.
 
 ### FR-5: Reason tags and markers use the prefixed id
 
@@ -136,16 +142,26 @@ are external events (`PrClear`, `PrFeedback`, `PrTerminal`). No change.
 ### FR-7: Migration
 
 0. Land the parser fix above (`parseProjectToml` accepts `-` in table headers
-   and bare keys) with its test. Steps 1 through 3 depend on it.
-1. Rename each `[pr_flow.bots.<id>]` table and `required_bots` entry to
-   `gh-<id>`.
-2. For each open PR-flow lane, run `btrain pr request-review --lane <id>
-   --bots all` once so the marker carries the new id.
-3. Existing `changes-requested` lanes keep their old reason tag until the
+   and bare keys) with its test. Steps 1 through 4 depend on it.
+1. Move btrain's own defaults to the new namespace in the same change that
+   turns FR-1 on: the `required_bots` default in `getPrFlowConfig`
+   (`["codex", "unblocked"]` today), the id special cases in
+   `normalizePrBotConfig`, the `btrain init` template's `[pr_flow]` block, and
+   the harness fixtures. FR-1 rejects only what a repository configures; the
+   defaults must already be `gh-codex` and `gh-unblocked`, or every repository
+   without a `[pr_flow]` block would fail on `handoff resolve`, which reads
+   the PR-flow config unconditionally.
+2. Rename each configured `[pr_flow.bots.<id>]` table and `required_bots`
+   entry to `gh-<id>`.
+3. Immediately, before any `btrain pr poll --apply`, run `btrain pr
+   request-review --lane <id> --bots all` once per open PR-flow lane so the
+   marker carries the new id. A clear that came only from a +1 reaction to an
+   old-id marker is not recognized until the new marker exists.
+4. Existing `changes-requested` lanes keep their old reason tag until the
    next transition; no history rewrite.
 
-This repository performs step 1 in this spec's lane. Steps 2 and 3 happen
-when the lane merges.
+This repository performs step 2 in this spec's lane. Step 0 is in PR #34;
+step 1 ships with the FR-1 code; steps 3 and 4 happen when this lane merges.
 
 ## Non-Goals
 
@@ -171,8 +187,8 @@ contracts as stated here: local actor predicates are the four above, and
 
 ## Acceptance Criteria
 
-- `btrain pr status --lane <id>` prints `gh-codex` for the bot and the lane
-  owner prints without a prefix.
+- `btrain pr status --lane <id>` prints `bot gh-codex` in the required-bots
+  block and `agent <owner>` in the new owner line.
 - A `changes-requested` lane created from bot feedback carries reason tag
   `gh-codex` and a next action reading "Address bot gh-codex feedback".
 - `btrain doctor` errors when `[agents].active` contains `codex` and
