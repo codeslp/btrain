@@ -15,8 +15,13 @@ const MODELED_RUNTIME_FILES = new Set([
 ])
 const TLC_MAX_HEAP_MB = 1024
 const TLC_WORKERS = 2
+const MAX_TLA_FILES = 1
 const FORMAL_HARNESS_TIMEOUT_MS = 300_000
 const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000
+const PIN_CHECK_TIMEOUT_MS = 30_000
+const ADVISORY_SELF_TEST_TIMEOUT_MS = 60_000
+const CLI_CONTRACT_TIMEOUT_MS = 300_000
+const EXECUTABLE_MODEL_FILES = new Set(["test/formal/lane-lock-model.mjs"])
 
 function parseArgs(argv) {
   const options = {
@@ -156,6 +161,7 @@ export function verifyExecutionTree(root, requestedHead) {
 export function classifyPaths(files, declaredImpact = "auto") {
   const modeledProse = files.some((file) => /^specs\/(002|005|006|014)[^/]*\.md$/.test(file))
   const tlaArtifacts = files.some((file) => file.startsWith("specs/tla/"))
+  const executableModel = files.some((file) => EXECUTABLE_MODEL_FILES.has(file))
   const pinTool = files.includes("scripts/tla_pin.py")
   const cli = files.includes("src/brain_train/cli.mjs")
   const advisoryWorkflow = files.includes(".github/workflows/formal-advisory.yml")
@@ -173,8 +179,8 @@ export function classifyPaths(files, declaredImpact = "auto") {
     && !harnessSurface
     && !pinTool
   const harness = !codeFreeNoSemanticProse && (modeledProse || harnessSurface)
-  const pin = modeledProse || tlaArtifacts || pinTool
-  const tlc = !codeFreeNoSemanticProse && (modeledProse || tlaArtifacts)
+  const pin = modeledProse || tlaArtifacts || executableModel || pinTool
+  const tlc = !codeFreeNoSemanticProse && (modeledProse || tlaArtifacts || executableModel)
   let impact = "none"
   if (codeFreeNoSemanticProse) impact = "no-semantic"
   else if (tlc) impact = "semantic"
@@ -253,7 +259,11 @@ function runPinCheck(root, tlaFiles) {
       detail: "scripts/tla_pin.py is missing.",
     }
   }
-  const run = command("python3", [script, "--check"], { cwd: root, measureMemory: true })
+  const run = command(
+    "python3",
+    [script, "--check"],
+    { cwd: root, timeoutMs: PIN_CHECK_TIMEOUT_MS, measureMemory: true },
+  )
   const verdict = classifyMeasuredVerdict(run, classifyPinResult(run))
   return { name: "pin", verdict, ...run }
 }
@@ -322,6 +332,15 @@ function runTlc(root, tlaFiles) {
       detail: "No TLA model exists for the selected semantic surface.",
     }]
   }
+  if (tlaFiles.length > MAX_TLA_FILES) {
+    return [{
+      name: "tlc",
+      verdict: "infrastructure_failure",
+      durationMs: 0,
+      command: "java -cp $TLC_JAR tlc2.TLC ...",
+      detail: `The bounded pilot supports exactly one TLA model; found ${tlaFiles.length}.`,
+    }]
+  }
   const jar = process.env.TLC_JAR || ""
   if (!jar || !fs.existsSync(jar)) {
     return [{
@@ -381,7 +400,7 @@ function runAdvisorySelfTest(root) {
   const run = command(
     "node",
     ["scripts/formal_advisory.mjs", "--self-test"],
-    { cwd: root, measureMemory: true },
+    { cwd: root, timeoutMs: ADVISORY_SELF_TEST_TIMEOUT_MS, measureMemory: true },
   )
   const verdict = classifyMeasuredVerdict(run, classifyHarnessResult(run))
   return { name: "advisory-self-test", verdict, ...run }
@@ -399,7 +418,11 @@ export function classifyHarnessResult(run, { modeledAssertions = false } = {}) {
 }
 
 function runCliContractTests(root) {
-  const run = command("node", ["--test", "test/core.test.mjs"], { cwd: root, measureMemory: true })
+  const run = command(
+    "node",
+    ["--test", "test/core.test.mjs"],
+    { cwd: root, timeoutMs: CLI_CONTRACT_TIMEOUT_MS, measureMemory: true },
+  )
   return { name: "cli-contract", verdict: classifyMeasuredVerdict(run, classifyHarnessResult(run)), ...run }
 }
 
@@ -520,6 +543,10 @@ function runSelfTest() {
   assert.equal(classifyPaths(["scripts/formal_advisory.mjs"]).selfTest, true)
   assert.equal(classifyPaths(["src/brain_train/core.mjs"]).selfTest, false)
   assert.equal(classifyPaths(["scripts/tla_pin.py"]).pinToolTest, true)
+  const executableModelSelection = classifyPaths(["test/formal/lane-lock-model.mjs"])
+  assert.equal(executableModelSelection.impact, "semantic")
+  assert.equal(executableModelSelection.pin, true)
+  assert.equal(executableModelSelection.tlc, true)
   assert.equal(classifyMeasuredVerdict({ memoryMeasurement: "unavailable" }, "pass"), "infrastructure_failure")
   assert.equal(classifyMeasuredVerdict({ memoryMeasurement: "linux-time-max-rss" }, "pass"), "pass")
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
@@ -557,6 +584,7 @@ function runSelfTest() {
   assert.equal(overallVerdict(exhaustedWithInfrastructure), "infrastructure_failure")
   assert.equal(runPinCheck("/tmp/unused", []).verdict, "infrastructure_failure")
   assert.equal(runPinToolSelfTest("/tmp/unused").verdict, "infrastructure_failure")
+  assert.match(runTlc("/tmp/unused", ["one.tla", "two.tla"])[0].detail, /supports exactly one TLA model/)
   assert.equal(runTlc("/tmp/unused", [])[0].verdict, "infrastructure_failure")
   const missingScriptRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-package-test-"))
   try {
@@ -582,7 +610,7 @@ function runSelfTest() {
   assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
   assert.match(workflow, /FORMAL_IMPACT: \$\{\{ steps\.select\.outputs\.formal_impact \}\}/)
   assert.match(workflow, /jq -r '\.verdict'.*== "no_formal_surface"/)
-  assert.match(workflow, /timeout-minutes: 10/)
+  assert.match(workflow, /timeout-minutes: 25/)
   const source = fs.readFileSync(new URL(import.meta.url), "utf8")
   assert.match(source, /timeoutMs: FORMAL_HARNESS_TIMEOUT_MS/)
   process.stdout.write("formal_advisory self-test passed\n")
