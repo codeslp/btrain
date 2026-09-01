@@ -3,6 +3,7 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import process from "node:process"
 
@@ -29,7 +30,18 @@ function parseArgs(argv) {
 
 function command(commandName, args, options = {}) {
   const startedAt = Date.now()
-  const result = spawnSync(commandName, args, {
+  const canMeasureMemory = options.measureMemory
+    && process.platform === "linux"
+    && fs.existsSync("/usr/bin/time")
+  const measurementDirectory = canMeasureMemory
+    ? fs.mkdtempSync(path.join(os.tmpdir(), "formal-advisory-memory-"))
+    : ""
+  const measurementPath = measurementDirectory ? path.join(measurementDirectory, "peak-rss-kb.txt") : ""
+  const executable = canMeasureMemory ? "/usr/bin/time" : commandName
+  const executableArgs = canMeasureMemory
+    ? ["-f", "%M", "-o", measurementPath, commandName, ...args]
+    : args
+  const result = spawnSync(executable, executableArgs, {
     cwd: options.cwd,
     encoding: "utf8",
     env: { ...process.env, ...(options.env || {}) },
@@ -42,6 +54,14 @@ function command(commandName, args, options = {}) {
     if (stdout) process.stdout.write(stdout)
     if (stderr) process.stderr.write(stderr)
   }
+  let peakRssKb = null
+  if (measurementPath) {
+    const measured = fs.existsSync(measurementPath)
+      ? Number.parseInt(fs.readFileSync(measurementPath, "utf8").trim(), 10)
+      : Number.NaN
+    if (Number.isInteger(measured) && measured >= 0) peakRssKb = measured
+    fs.rmSync(measurementDirectory, { recursive: true, force: true })
+  }
   return {
     command: [commandName, ...args].join(" "),
     status: result.status,
@@ -50,6 +70,8 @@ function command(commandName, args, options = {}) {
     stdout,
     stderr,
     durationMs: Date.now() - startedAt,
+    peakRssKb,
+    memoryMeasurement: canMeasureMemory ? "linux-time-max-rss" : options.measureMemory ? "unavailable" : "not-requested",
   }
 }
 
@@ -61,9 +83,8 @@ function repoRoot() {
 
 function changedFiles(root, base, head) {
   if (!base) throw new Error("--base must name the review base commit or branch.")
-  const args = ["diff", "--name-only", base]
-  if (head) args.push(head)
-  args.push("--")
+  const target = head || "HEAD"
+  const args = ["diff", "--name-only", `${base}...${target}`, "--"]
   const result = command("git", args, { cwd: root, echo: false })
   if (result.status !== 0) {
     throw new Error(`Could not classify the diff from ${base}${head ? ` to ${head}` : ""}.\n${result.stderr}`)
@@ -138,7 +159,12 @@ function findTlaFiles(root) {
 
 export function classifyTlcResult(run) {
   const output = `${run.stdout}\n${run.stderr}`
-  if (run.errorCode === "ETIMEDOUT" || run.status === 124 || run.signal === "SIGTERM") {
+  if (
+    run.errorCode === "ETIMEDOUT"
+    || run.status === 124
+    || run.signal === "SIGTERM"
+    || /OutOfMemoryError|Java heap space|GC overhead limit exceeded/i.test(output)
+  ) {
     return "state_space_exhausted"
   }
   if (/Invariant\s+.+\s+is violated|Error:\s+Invariant/i.test(output)) return "counterexample"
@@ -166,7 +192,7 @@ function runPinCheck(root, tlaFiles) {
       detail: "scripts/tla_pin.py is missing.",
     }
   }
-  const run = command("python3", [script, "--check"], { cwd: root })
+  const run = command("python3", [script, "--check"], { cwd: root, measureMemory: true })
   const verdict = run.status === 0 ? "pass" : run.status === 1 ? "stale_pin" : "infrastructure_failure"
   return { name: "pin", verdict, ...run }
 }
@@ -206,7 +232,7 @@ function runTlc(root, tlaFiles) {
     const run = command(
       "java",
       ["-cp", jar, "tlc2.TLC", "-config", path.basename(config), "-workers", "auto", path.basename(tlaFile)],
-      { cwd: parsed.dir, timeoutMs: 300_000 },
+      { cwd: parsed.dir, timeoutMs: 300_000, measureMemory: true },
     )
     return { name: `tlc:${parsed.name}`, verdict: classifyTlcResult(run), ...run }
   })
@@ -227,7 +253,7 @@ function runHarness(root) {
       detail: "package.json does not define test:formal.",
     }
   }
-  const run = command("npm", ["run", "test:formal"], { cwd: root })
+  const run = command("npm", ["run", "test:formal"], { cwd: root, measureMemory: true })
   const verdict = classifyHarnessResult(run, { modeledAssertions: true })
   return { name: "fast-check", verdict, ...run }
 }
@@ -244,7 +270,7 @@ export function classifyHarnessResult(run, { modeledAssertions = false } = {}) {
 }
 
 function runCliContractTests(root) {
-  const run = command("node", ["--test", "test/core.test.mjs"], { cwd: root })
+  const run = command("node", ["--test", "test/core.test.mjs"], { cwd: root, measureMemory: true })
   return { name: "cli-contract", verdict: classifyHarnessResult(run), ...run }
 }
 
@@ -304,6 +330,44 @@ function runExecutionTreeSelfTest() {
   }
 }
 
+function runMergeBaseSelfTest() {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "formal-advisory-merge-base-test-"))
+  try {
+    assert.equal(command("git", ["init", "-q", "-b", "main"], { cwd: root, echo: false }).status, 0)
+    fs.writeFileSync(path.join(root, "shared.txt"), "shared\n")
+    assert.equal(command("git", ["add", "shared.txt"], { cwd: root, echo: false }).status, 0)
+    assert.equal(command(
+      "git",
+      ["-c", "user.name=Formal Test", "-c", "user.email=formal@example.invalid", "commit", "-qm", "shared"],
+      { cwd: root, echo: false },
+    ).status, 0)
+
+    assert.equal(command("git", ["checkout", "-qb", "feature"], { cwd: root, echo: false }).status, 0)
+    fs.writeFileSync(path.join(root, "feature.txt"), "feature\n")
+    assert.equal(command("git", ["add", "feature.txt"], { cwd: root, echo: false }).status, 0)
+    assert.equal(command(
+      "git",
+      ["-c", "user.name=Formal Test", "-c", "user.email=formal@example.invalid", "commit", "-qm", "feature"],
+      { cwd: root, echo: false },
+    ).status, 0)
+
+    assert.equal(command("git", ["checkout", "-q", "main"], { cwd: root, echo: false }).status, 0)
+    fs.mkdirSync(path.join(root, "specs"))
+    fs.writeFileSync(path.join(root, "specs", "014-base-only.md"), "base only\n")
+    assert.equal(command("git", ["add", "specs/014-base-only.md"], { cwd: root, echo: false }).status, 0)
+    assert.equal(command(
+      "git",
+      ["-c", "user.name=Formal Test", "-c", "user.email=formal@example.invalid", "commit", "-qm", "base"],
+      { cwd: root, echo: false },
+    ).status, 0)
+
+    assert.equal(command("git", ["checkout", "-q", "feature"], { cwd: root, echo: false }).status, 0)
+    assert.deepEqual(changedFiles(root, "main", "HEAD"), ["feature.txt"])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
 function runSelfTest() {
   assert.deepEqual(classifyPaths(["README.md"]), {
     impact: "none", pin: false, tlc: false, harness: false, cli: false, formalSurface: false,
@@ -318,6 +382,7 @@ function runSelfTest() {
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
+  assert.equal(classifyTlcResult({ stdout: "", stderr: "java.lang.OutOfMemoryError: Java heap space" }), "state_space_exhausted")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }, { modeledAssertions: true }), "validation_mismatch")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - unrelated CLI assertion", stderr: "AssertionError" }), "infrastructure_failure")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "", stderr: "Error [ERR_MODULE_NOT_FOUND]" }), "infrastructure_failure")
@@ -331,6 +396,13 @@ function runSelfTest() {
     fs.rmSync(missingScriptRoot, { recursive: true, force: true })
   }
   runExecutionTreeSelfTest()
+  runMergeBaseSelfTest()
+  if (process.platform === "linux") {
+    const measured = command("node", ["-e", "process.exit(0)"], { echo: false, measureMemory: true })
+    assert.ok(Number.isInteger(measured.peakRssKb) && measured.peakRssKb > 0)
+  }
+  const workflow = fs.readFileSync(path.join(repoRoot(), ".github", "workflows", "formal-advisory.yml"), "utf8")
+  assert.match(workflow, /Peak RSS \(KiB\)/)
   process.stdout.write("formal_advisory self-test passed\n")
 }
 

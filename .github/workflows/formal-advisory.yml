@@ -118,9 +118,9 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Verdict: \`$(jq -r '.verdict' "$result")\` (advisory)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Check | Verdict | Duration (ms) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | --- | ---: |" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.checks[] | "| \(.name) | \(.verdict) | \(.durationMs) |"' "$result" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Verdict | Duration (ms) | Peak RSS (KiB) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | ---: | ---: |" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.checks[] | "| \(.name) | \(.verdict) | \(.durationMs) | \(.peakRssKb // "n/a") |"' "$result" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$(jq -r '.selection.formalSurface' "$result")" != "true" ]]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "No modeled prose, TLA+, formal harness, or modeled runtime file changed." >> "$GITHUB_STEP_SUMMARY"
