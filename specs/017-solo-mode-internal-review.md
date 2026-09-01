@@ -131,10 +131,18 @@ a form that cannot resume: btrain passes an explicit fresh-session flag when
 the runner has one, strips known resume flags from the `[agents.runners]`
 value, and sets a per-dispatch working directory for any session store the
 runner keys by path. A repository may define a dedicated
-`[agents.runners]."<runtime>#review"` entry; when present it is used verbatim
-and must be a fresh-session invocation. The dispatcher never passes the
-writer's session, transcript, scratch files, or environment beyond the
-repository and the handoff packet.
+`[agents.runners]."<runtime>#review"` entry; when present it is validated the
+same way, never used verbatim: `btrain doctor` and dispatch reject an entry
+containing a resume or session option (`--resume`, `--continue`, `-r`, `-c`,
+`--session`, `--session-id`, or a runner-specific equivalent listed in
+btrain's runner table), and the fresh-session flag is added when the runner
+has one. The reviewer's environment is an allowlist, not the writer's
+environment: `PATH`, `HOME`, `TMPDIR`, proxy variables, the runner's
+authentication and configuration variables (any name ending in `_API_KEY`
+or `_API_TOKEN`, plus names in `[solo].env_allow`), and btrain's own
+`BTRAIN_AGENT`, `BTRAIN_LANE`, `BTRAIN_REPO`. Session-identifying variables
+(any name matching `*SESSION*` and names in `[solo].env_deny`) are removed.
+The writer's transcript, scratch files, and conversation are never passed.
 
 ### FR-4: No protocol relaxation
 
@@ -178,18 +186,30 @@ workflow event, and rendered as `review tier: other-model | human |
 same-model`. A same-model review is the explicit exception this spec
 declares; it is never silent.
 
+Availability is operational, not installation. Before selecting a tier btrain
+probes the runner with a short timeout (`<runner> --version`, then the
+runner's cheapest authenticated call when the runner table defines one). A
+failed probe, or a dispatch that ends as `tool_unavailable` or
+`policy_blocked` (spec 014 failure classes), marks that tier unavailable for
+the rest of the solo period, records the reason on the lane, and btrain
+immediately retries the next tier. A lane is never left in `needs-review`
+because the first tier failed; an installed CLI whose quota is exhausted is
+therefore skipped, which is the motivating case for this spec.
+
 ### FR-10: Model family is configured, not inferred from names
 
 FR-9 compares model families, so btrain needs a trustworthy source for them.
 Each configured agent's family comes from, in order: an explicit
 `[agents.families]` entry (`GPT = "codex"`), else the basename of the
-executable in its `[agents.runners]` value (`claude -p` is family `claude`,
-`codex` is family `codex`), else the agent name itself. Two identities with
-the same family are the same model for FR-9 even when their names differ;
-this repository's `GPT` alias resolves to the `codex` runner and therefore to
-the `codex` family. A `notify` runner has family `human`. `btrain doctor`
-lists the resolved family of every configured agent so an operator can see
-and correct the mapping.
+executable in its `[agents.runners]` value only when that basename is a
+known runtime (`claude`, `codex`, `gemini`). A wrapper or launcher (`npx
+codex`, `env ... codex`, a shell script) yields no family, and `btrain
+doctor` errors until `[agents.families]` names it explicitly; the agent name
+is never used as a family. Two identities with the same family are the same
+model for FR-9 even when their names differ; this repository's `GPT` alias
+resolves to the `codex` runner and therefore to the `codex` family. A
+`notify` runner has family `human`. `btrain doctor` lists the resolved family
+of every configured agent so an operator can see and correct the mapping.
 
 ### FR-8: Rate and budget guard
 
