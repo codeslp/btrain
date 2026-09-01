@@ -43,7 +43,7 @@
   Finding: L4 matches any `update --status`, overlapping rows 2, 7, 12, 13, 14. The spec does not say the contract row wins and the legacy row applies only to the residual, which matters for what the advisory field records.
 - [x] CHK017 - Do FR-2 (hand-authored, never generated) and FR-7 (cross-check) agree on how independence is preserved? [Consistency, Spec §FR-2, §FR-7]
 - [x] CHK018 - Does row 2's `owner` actor agree with FR-9 and designation #6? [Consistency, row 2, §FR-9, §Designation #6]
-- [x] CHK019 - Do the seven legacy rows map one-to-one onto ledger findings named in the Designation section? [Consistency, rows L1–L7, §Designation]
+- [x] CHK019 - Do legacy rows L1–L7 map one-to-one onto ledger findings named in the Designation section, and do L8–L15 each name the code path they preserve? [Consistency, rows L1–L15, §Designation]
 - [ ] CHK020 - Does the `action` column's "matching the `LaneLock.tla` action where one exists" hold against a model that is not yet merged? [Assumption, Spec §Contract shape]
   Finding: PR #35 is open; action names may change in review. The spec should state the dependency or drop the naming coupling.
 - [x] CHK021 - Do the Sequencing constraints agree with the pinned-section list in `LaneLock.tla`? [Consistency, Spec §Sequencing constraints]

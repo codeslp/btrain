@@ -560,14 +560,14 @@ states and actors`, `Force-release override`, `CLI Commands`; spec 005
 FR-20; spec 014 `Normative-source prerequisite`, which contains the repair-exit
 and rescope designations.
 
-Unpinned and editable now: spec 002 line 9 and the `handoff resolve --final`
-section (lines 83-91), both of which still describe repaired drift as live;
-spec 005 FR-7; a new spec 006 FR-29; `test/formal/README.md`.
+Unpinned and edited in this change: spec 002 line 9 and the `handoff resolve
+--final` section (lines 83-91), which described repaired drift as live; spec
+005 FR-7; the new spec 006 FR-29. `test/formal/README.md` was updated in PR
+#34.
 
-Lane locks in this repository: lane `b` (PR #34, `changes-requested`) holds
-`src/brain_train/` and `test/`. Phase A cannot be claimed under btrain's own
-rules until PR #34 merges or lane `b` is rescoped. Phase A therefore waits on
-#34; Phase B steps 3 and 4 wait on #35.
+Lane locks in this repository: PR #34 merged on 2026-09-01 and lane `b`
+released `src/brain_train/` and `test/`, so Phase A can be claimed. Phase B
+steps 3 and 4 wait on #35.
 
 Assumption: the `action` names in the rows follow `LaneLock.tla` as it stands
 on PR #35. If review renames an action there, the rows follow the model, not
