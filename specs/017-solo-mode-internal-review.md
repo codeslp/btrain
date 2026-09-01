@@ -14,10 +14,10 @@ runtime that is available**. The subagent acts under a distinct btrain
 identity, so owner/reviewer separation stays an enforceable rule rather than a
 waived one.
 
-Solo mode is a routing change, not a protocol change. Nothing about what a
-handoff must contain, what a reviewer must check, when locks release, or how a
-PR terminates a lane is relaxed. What changes is who is asked, and one
-governing rule changes with it, explicitly: btrain's handoff gate today says
+Solo mode changes one governing rule and leaves the rest of the protocol
+intact. Nothing about what a handoff must contain, what a reviewer must
+check, when locks release, or how a PR terminates a lane is relaxed. The rule
+that changes, explicitly and only while solo mode is on: btrain's handoff gate today says
 "one model writes, the other reviews" (`CLAUDE.md`, Handoff Gate). Solo mode
 migrates that rule to "one context writes, a different context reviews, with a
 different model preferred". While solo mode is on, the same model may fill
@@ -124,10 +124,17 @@ that lane after solo mode ends (grandfathering); only new assignments stop.
 
 ### FR-3: Fresh context
 
-The reviewer subagent runs in a new process with no access to the writer's
-conversation, scratch files, or environment beyond the repository and the
-handoff packet. The dispatcher must not pass the writer's session or
-transcript to it.
+The reviewer subagent runs in a fresh model session, not merely a new OS
+process. Runners that can reconnect to a persistent session (session ids,
+`--resume`, `--continue`, workspace-scoped session stores) must be invoked in
+a form that cannot resume: btrain passes an explicit fresh-session flag when
+the runner has one, strips known resume flags from the `[agents.runners]`
+value, and sets a per-dispatch working directory for any session store the
+runner keys by path. A repository may define a dedicated
+`[agents.runners]."<runtime>#review"` entry; when present it is used verbatim
+and must be a fresh-session invocation. The dispatcher never passes the
+writer's session, transcript, scratch files, or environment beyond the
+repository and the handoff packet.
 
 ### FR-4: No protocol relaxation
 
@@ -145,9 +152,11 @@ identity.
 ### FR-6: Reassignment is a command, not a hand edit
 
 `btrain solo adopt --lane <id>` reassigns a lane whose owner or reviewer is an
-unavailable runtime: the owner becomes the available runtime, the reviewer
-becomes `<runtime>#review`, locks re-register under the new owner, and the
-event records the previous roles. This replaces the sequence of
+unavailable runtime: the owner becomes the available runtime, the reviewer is
+chosen by the same FR-9 preference order a claim uses (a different model
+family first, then a configured human, then `<runtime>#review`), locks
+re-register under the new owner, and the event records the previous roles and
+the review tier that applied. This replaces the sequence of
 `handoff update --owner/--reviewer` edits the operator performed by hand.
 
 ### FR-7: Model compatibility
@@ -168,6 +177,19 @@ the `notify` runner when one is configured; and only then the same-runtime
 workflow event, and rendered as `review tier: other-model | human |
 same-model`. A same-model review is the explicit exception this spec
 declares; it is never silent.
+
+### FR-10: Model family is configured, not inferred from names
+
+FR-9 compares model families, so btrain needs a trustworthy source for them.
+Each configured agent's family comes from, in order: an explicit
+`[agents.families]` entry (`GPT = "codex"`), else the basename of the
+executable in its `[agents.runners]` value (`claude -p` is family `claude`,
+`codex` is family `codex`), else the agent name itself. Two identities with
+the same family are the same model for FR-9 even when their names differ;
+this repository's `GPT` alias resolves to the `codex` runner and therefore to
+the `codex` family. A `notify` runner has family `human`. `btrain doctor`
+lists the resolved family of every configured agent so an operator can see
+and correct the mapping.
 
 ### FR-8: Rate and budget guard
 
