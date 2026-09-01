@@ -1496,12 +1496,15 @@ async function findStaleManagedHooks(repoRoot) {
       stale.push({ filename: hook.filename, reason: "content" })
       continue
     }
-    // Git ignores a hook without the executable bit ("was ignored because
-    // it's not set as executable"), so a byte-identical hook can still be
-    // dead. The installer sets 0o755; require some execute bit here.
+    // Git ignores a hook the invoking user cannot execute ("was ignored
+    // because it's not set as executable"), so a byte-identical hook can
+    // still be dead. Check effective X_OK for this user rather than whether
+    // any permission class carries an execute bit: mode 0655 after
+    // `chmod u-x` has group/other execute and is still skipped by Git.
     if (process.platform !== "win32") {
-      const stats = await fs.stat(hookPath)
-      if ((stats.mode & 0o111) === 0) {
+      try {
+        await fs.access(hookPath, fs.constants.X_OK)
+      } catch {
         stale.push({ filename: hook.filename, reason: "not-executable" })
       }
     }

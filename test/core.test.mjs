@@ -5994,6 +5994,31 @@ describe("btrain doctor detects stale managed hooks", () => {
 
     await fs.chmod(hookPath, 0o755)
   })
+
+  it("judges executability for the invoking user, not any permission class", async (t) => {
+    // Mode 0655 (chmod u-x) keeps group/other execute bits, yet Git skips the
+    // hook for the owning user. A "(mode & 0o111) !== 0" check calls it
+    // healthy; an effective X_OK check does not. Root can execute anything,
+    // so this case only means something for an unprivileged uid.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      t.skip("running as root: X_OK is always granted")
+      return
+    }
+    // Earlier cases in this suite leave pre-commit with stale content; a
+    // content mismatch is reported first, so reinstall the managed hooks to
+    // isolate the permission check.
+    const reinstalled = await runBtrain(["hooks", "--repo", tmpDir], tmpDir)
+    assert.equal(reinstalled.code, 0, reinstalled.stderr)
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    await fs.chmod(hookPath, 0o655)
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-commit.*not executable/i, "0655 must be reported as not executable for the owner")
+
+    await fs.chmod(hookPath, 0o755)
+    const clean = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!/pre-commit.*not executable/i.test(clean.stdout), clean.stdout)
+  })
 })
 
 // ──────────────────────────────────────────────
