@@ -215,7 +215,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -1151,8 +1151,17 @@ function getLocksLockfilePath(repoRoot) {
   return getLocksPath(repoRoot) + ".lock"
 }
 
-async function acquireLocks(repoRoot, laneId, owner, files) {
-  if (!files || files.length === 0) return []
+// publishInsideLock runs after the registry write but before the mutex is
+// released, so no observer can see a lane's locks without the lane status
+// that authorizes them. Claim uses this: acquiring locks and publishing
+// in-progress were two phases, and an audited release landing between them
+// read an idle lane, skipped the override, and dropped the fresh locks.
+async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock } = {}) {
+  if (!files || files.length === 0) {
+    // No locks to take, so there is no critical section to publish inside.
+    if (publishInsideLock) await publishInsideLock()
+    return []
+  }
 
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     const registry = await readLockRegistry(repoRoot)
@@ -1185,17 +1194,84 @@ async function acquireLocks(repoRoot, laneId, owner, files) {
     }
 
     await writeLockRegistry(repoRoot, registry)
+    if (publishInsideLock) await publishInsideLock()
     return registry.locks.filter((lock) => lock.lane === laneId)
   })
 }
 
-async function releaseLocks(repoRoot, laneId) {
+async function releaseLocks(repoRoot, laneId, { auditInsideLock } = {}) {
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
+    // Runs inside the registry critical section so the audit cannot be
+    // invalidated before the mutation below.
+    if (auditInsideLock) await auditInsideLock()
     const registry = await readLockRegistry(repoRoot)
     const released = registry.locks.filter((lock) => lock.lane === laneId)
     registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
     await writeLockRegistry(repoRoot, registry)
     return released
+  })
+}
+
+// spec 002 v1.1.2 Force-release override + spec 006 FR-2c/FR-2d: suspending
+// an ACTIVE lane's lock coverage requires a verified, human-confirmed
+// override (grant then consume). Releasing locks of inactive lanes (stale
+// cleanup) needs no override. Terminal resolution releases through
+// releaseLocks directly — that is the contract's own release path, not a
+// suspension.
+async function consumeForceReleaseOverride(repoRoot, laneId, actorLabel) {
+  try {
+    return await consumeOverride(repoRoot, { action: "force-release", lane: laneId, actorLabel })
+  } catch (laneScopedError) {
+    try {
+      return await consumeOverride(repoRoot, { action: "force-release", actorLabel })
+    } catch {
+      throw new BtrainError({
+        message: `Releasing active lane ${laneId}'s locks requires an audited force-release override.`,
+        reason:
+          "Spec 002 v1.1.2 and spec 006 FR-2c/FR-2d: lock coverage of an active lane may be suspended only after a human-confirmed override is granted and consumed.",
+        fix: `btrain override grant --action force-release --lane ${laneId} --requested-by <agent> --confirmed-by <human> --reason "..." — then re-run this command.`,
+        context: laneScopedError instanceof BtrainError ? laneScopedError.message : String(laneScopedError),
+      })
+    }
+  }
+}
+
+// Single home for the active-lane audit. Both audited release paths call
+// this so the trust boundary cannot drift between them.
+async function auditActiveLanesForRelease(repoRoot, config, laneIds, actorLabel) {
+  for (const laneId of laneIds) {
+    const lane = await readLaneState(repoRoot, config, laneId)
+    if (isLaneActiveStatus(lane.status)) {
+      await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
+    }
+  }
+}
+
+async function releaseLaneLocksAudited(repoRoot, laneId, options = {}) {
+  const config = options.config || (await readProjectConfig(repoRoot))
+  const actorLabel = options.actorLabel || "btrain"
+  // Reading lane status before taking the registry lock is a TOCTOU: a lane
+  // that turns active in that window loses its coverage with no audited
+  // override. Terminal resolution and stale cleanup are unaffected — they
+  // call releaseLocks with no audit hook, and an inactive lane needs none.
+  return releaseLocks(repoRoot, laneId, {
+    auditInsideLock: () => auditActiveLanesForRelease(repoRoot, config, [laneId], actorLabel),
+  })
+}
+
+async function forceReleaseLockAudited(repoRoot, lockPath, options = {}) {
+  const config = options.config || (await readProjectConfig(repoRoot))
+  const actorLabel = options.actorLabel || "btrain"
+  return forceReleaseLock(repoRoot, lockPath, {
+    ...options,
+    auditInsideLock: (registry) => {
+      const owningLanes = [...new Set(
+        registry.locks
+          .filter((lock) => lock.path === lockPath && (!options.lane || lock.lane === options.lane))
+          .map((lock) => lock.lane),
+      )]
+      return auditActiveLanesForRelease(repoRoot, config, owningLanes, actorLabel)
+    },
   })
 }
 
@@ -1206,8 +1282,12 @@ async function listLocks(repoRoot) {
 
 async function forceReleaseLock(repoRoot, lockPath, options = {}) {
   const laneId = typeof options.lane === "string" ? options.lane.trim().toLowerCase() : ""
+  const auditInsideLock = options.auditInsideLock
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     const registry = await readLockRegistry(repoRoot)
+    // Audit against the registry observed inside the critical section, not
+    // one read before the lock was held.
+    if (auditInsideLock) await auditInsideLock(registry)
     const before = registry.locks.length
     registry.locks = registry.locks.filter(
       (lock) => lock.path !== lockPath || (laneId && lock.lane !== laneId),
@@ -4930,7 +5010,8 @@ async function claimHandoff(repoRoot, options) {
         fix: `btrain handoff claim --lane ${laneId} --task "${options.task || '...'}" --owner "${options.owner}" --files "src/,docs/"`,
       })
     }
-    await acquireLocks(repoRoot, laneId, options.owner, files)
+    // Acquisition is deferred to the publish step below so both land in one
+    // registry critical section.
   }
 
   const resolvedReviewer = inferPeerReviewer({
@@ -4990,7 +5071,9 @@ async function claimHandoff(repoRoot, options) {
   // If lanes enabled, write to lane-specific handoff file
   if (laneConfigs && laneId) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
-    const result = await updateHandoff(
+    let result
+    const publishClaim = async () => {
+      result = await updateHandoff(
       repoRoot,
       updates,
       {
@@ -5011,7 +5094,9 @@ async function claimHandoff(repoRoot, options) {
         },
         overrideHandoffPath: handoffPath,
       },
-    )
+      )
+    }
+    await acquireLocks(repoRoot, laneId, options.owner, files, { publishInsideLock: publishClaim })
     await compactHandoffHistory(repoRoot, { config, laneId, actorLabel: options.owner })
     return result
   }
@@ -5238,7 +5323,6 @@ async function patchHandoff(repoRoot, options) {
             fix: `btrain handoff update --lane ${laneId} --status ${nextStatus} --files "src/,..." --actor "${effectiveOwner}"`,
           })
         }
-        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles)
         updates.lockedFiles = effectiveFiles
       } else if (currentLane.lockCount > 0 || currentLane.handoffPaths.length > 0 || options.files !== undefined) {
         await releaseLocks(repoRoot, laneId)
@@ -5266,7 +5350,7 @@ async function patchHandoff(repoRoot, options) {
             })
           : null
 
-      const updatedCurrent = await updateHandoff(repoRoot, updates, {
+      const updateHandoffArgs = [repoRoot, updates, {
         actorLabel: resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
@@ -5289,7 +5373,20 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
-      })
+      }]
+
+      // Publish the active-status handoff inside the lock mutex so that
+      // a concurrent release-lane audit cannot observe stale (inactive)
+      // status between lock acquisition and handoff publication.
+      let updatedCurrent
+      if (isLaneActiveStatus(nextStatus) && effectiveFiles.length > 0) {
+        const publishUpdate = async () => {
+          updatedCurrent = await updateHandoff(...updateHandoffArgs)
+        }
+        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, { publishInsideLock: publishUpdate })
+      } else {
+        updatedCurrent = await updateHandoff(...updateHandoffArgs)
+      }
       return finishPatchWithReviewerDispatch(repoRoot, {
         previousStatus: existingCurrent.status,
         nextStatus,
@@ -5590,6 +5687,25 @@ async function resolveHandoff(repoRoot, options) {
       : null
 
   const finalResolve = !!options.final || !!options["final"]
+  // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
+  // bypass. From needs-review the reviewer's plain resolve enters
+  // ready-for-pr, and PR-flow lanes terminate through PR outcomes
+  // (applyPrStatusToHandoff passes viaPrOutcome).
+  const reviewFlowStatuses = new Set(["needs-review", "ready-for-pr", "pr-review", "ready-to-merge"])
+  if (
+    prFlow.enabled &&
+    finalResolve &&
+    options.viaPrOutcome !== true &&
+    reviewFlowStatuses.has(existingCurrent.status)
+  ) {
+    throw new BtrainError({
+      message: "`--final` is the merge path, not a review bypass.",
+      reason: `Lane ${laneId || "(single)"} is \`${existingCurrent.status}\`. Spec 002 v1.1.2: peer resolve at needs-review enters ready-for-pr with locks retained, and PR-flow lanes terminate through merge or closure.`,
+      fix: existingCurrent.status === "needs-review"
+        ? `Peer approval: btrain handoff resolve --lane ${laneId || "<id>"} --summary "..." --actor "<reviewer>" (without --final).`
+        : `Let the PR outcome terminate the lane: btrain pr poll --lane ${laneId || "<id>"} --apply.`,
+    })
+  }
   if (prFlow.enabled && existingCurrent.status === "needs-review" && !finalResolve) {
     const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
     if (laneId && retainedFiles.length > 0) {
@@ -9565,6 +9681,8 @@ export {
   findAvailableLane,
   findRepoRoot,
   forceReleaseLock,
+  forceReleaseLockAudited,
+  releaseLaneLocksAudited,
   getBrainTrainHome,
   getLaneConfigs,
   getRepoPaths,

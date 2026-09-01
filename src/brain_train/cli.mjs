@@ -11,7 +11,7 @@ import {
   consumeOverride,
   doctor,
   extractSpillPathFromNextAction,
-  forceReleaseLock,
+  forceReleaseLockAudited,
   getBrainTrainHome,
   getLaneConfigs,
   getReviewStatus,
@@ -29,7 +29,7 @@ import {
   readSpilledNextActionBody,
   registerRepo,
   removeRepo,
-  releaseLocks,
+  releaseLaneLocksAudited,
   requestChangesHandoff,
   resolveHandoff,
   resolveRepoRoot,
@@ -130,7 +130,7 @@ Usage:
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
-  btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
+  btrain override grant --action <push|needs-review|force-release> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
   btrain repos [--json]                                                          List registered repos, including disabled repos
   btrain repos enable|disable|remove <name-or-path>                              Control whether a repo appears in global operations and the dashboard
@@ -1673,6 +1673,9 @@ async function run() {
     }
 
     if (subcommand === "resolve") {
+      // viaPrOutcome is internal-only (set by applyPrStatusToHandoff);
+      // block CLI callers from forging it to bypass --final guards.
+      delete options.viaPrOutcome
       await resolveHandoff(repoRoot, options)
       const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
@@ -2329,7 +2332,10 @@ async function run() {
           })
         }
       }
-      const removed = await forceReleaseLock(repoRoot, options.path, { lane: scopedLane })
+      const removed = await forceReleaseLockAudited(repoRoot, options.path, {
+        lane: scopedLane,
+        actorLabel: options.actor,
+      })
       console.log(removed > 0 ? `Released lock: ${options.path}` : `No lock found: ${options.path}`)
       return
     }
@@ -2343,7 +2349,9 @@ async function run() {
           context: "Run `btrain locks` to see which lanes have active locks.",
         })
       }
-      const released = await releaseLocks(repoRoot, options.lane)
+      const released = await releaseLaneLocksAudited(repoRoot, options.lane, {
+        actorLabel: options.actor,
+      })
       console.log(`Released ${released.length} lock(s) for lane ${options.lane}`)
       for (const lock of released) {
         console.log(`  ${lock.path} (${lock.owner})`)

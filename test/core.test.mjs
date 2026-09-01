@@ -1513,8 +1513,10 @@ console.log("ready-for-pr owner ran")
     assert.match(stdout, /Bash\(rtk gh pr merge \*\)/)
   })
 
-  it("final resolve releases locks after the PR phase completes", async () => {
-    const resolved = await runBtrain(
+  it("rejects a direct --final during the PR phase; plain resolve releases", async () => {
+    // spec 002 v1.1.2: --final is the merge path (pr poll --apply), not a
+    // review bypass. A direct --final from a PR-flow status is rejected.
+    const rejected = await runBtrain(
       [
         "handoff",
         "resolve",
@@ -1530,7 +1532,13 @@ console.log("ready-for-pr owner ran")
       ],
       tmpDir,
     )
+    assert.notEqual(rejected.code, 0, rejected.stdout)
+    assert.ok(rejected.stderr.includes("merge path"), rejected.stderr)
 
+    const resolved = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Superseded.", "--actor", "TestBot"],
+      tmpDir,
+    )
     assert.equal(resolved.code, 0, resolved.stderr)
     assert.ok(resolved.stdout.includes("status: resolved"), resolved.stdout)
 
@@ -3781,6 +3789,29 @@ describe("btrain loop lane-scoped dispatch", () => {
       assert.notEqual(crossLaneRelease.code, 0)
       assert.match(crossLaneRelease.stderr, /scoped to lane b; refusing to release a lock outside that lane/)
 
+      // Releasing an active lane's own lock now requires the audited
+      // force-release override (spec 002 v1.1.2 / spec 006 FR-2c/FR-2d).
+      const unauditedOwnRelease = await runBtrain(
+        ["locks", "release", "--repo", repoDir, "--path", "src/lane-b.ts"],
+        repoDir,
+        scopedEnv,
+      )
+      assert.notEqual(unauditedOwnRelease.code, 0)
+      assert.match(unauditedOwnRelease.stderr, /force-release/)
+
+      // The grant comes from an unscoped session: lane-locked runners cannot
+      // self-grant overrides.
+      const grantOwnRelease = await runBtrain(
+        [
+          "override", "grant", "--repo", repoDir,
+          "--action", "force-release", "--lane", "b",
+          "--requested-by", "OwnerB", "--confirmed-by", "human",
+          "--reason", "test: audited own-lane lock release",
+        ],
+        repoDir,
+      )
+      assert.equal(grantOwnRelease.code, 0, grantOwnRelease.stderr)
+
       const ownLaneRelease = await runBtrain(
         ["locks", "release", "--repo", repoDir, "--path", "src/lane-b.ts"],
         repoDir,
@@ -4963,7 +4994,30 @@ describe("multi-lane handoff lifecycle", () => {
     assert.ok(laneBLocks.length > 0, "Lane B should still have locks")
   })
 
-  it("locks release-lane clears all locks for a lane", async () => {
+  it("locks release-lane requires an audited override for an active lane", async () => {
+    // spec 002 v1.1.2 + spec 006 FR-2c/FR-2d: suspending an active lane's
+    // lock coverage requires a granted, human-confirmed force-release
+    // override.
+    const rejected = await runBtrain(
+      ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
+      tmpDir,
+    )
+    assert.notEqual(rejected.code, 0, rejected.stdout)
+    assert.ok(rejected.stderr.includes("force-release"), rejected.stderr)
+
+    const granted = await runBtrain(
+      [
+        "override", "grant", "--repo", tmpDir,
+        "--action", "force-release",
+        "--lane", "b",
+        "--requested-by", "Gemini",
+        "--confirmed-by", "human",
+        "--reason", "test: audited release of lane b",
+      ],
+      tmpDir,
+    )
+    assert.equal(granted.code, 0, granted.stderr)
+
     const { stdout } = await runBtrain(
       ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
       tmpDir,
@@ -5710,5 +5764,137 @@ describe("lock TTL", () => {
     } finally {
       await rmDir(tmpDir)
     }
+  })
+})
+
+// ──────────────────────────────────────────────
+// Force-release TOCTOU (spec 002 v1.1.2 / spec 006 FR-2c/FR-2d)
+// ──────────────────────────────────────────────
+
+describe("force-release audit is atomic with the registry mutation", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("keeps locks when the lane turns active between the audit check and the release", async () => {
+    const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+
+    // Fixture: lane b is INACTIVE but still carries lock coverage (stale
+    // locks). Stale cleanup is legitimately override-free, so the audit
+    // check inside release-lane passes.
+    await fs.writeFile(
+      locksPath,
+      JSON.stringify(
+        { locks: [{ path: "src/", lane: "b", owner: "Codex", acquired_at: new Date().toISOString() }] },
+        null,
+        2,
+      ),
+    )
+
+    let releasePromise
+    // Hold the registry lockfile so release-lane stalls between its audit
+    // check and its mutation — precisely the TOCTOU window.
+    await withFileLock(locksPath + ".lock", async () => {
+      releasePromise = runBtrain(
+        ["locks", "release-lane", "--repo", tmpDir, "--lane", "b"],
+        tmpDir,
+      )
+      // Let release-lane read lane b's status (inactive → no override).
+      await new Promise((resolve) => setTimeout(resolve, 800))
+
+      // Another agent brings lane b back to active. Writing the handoff
+      // state never touches the registry lockfile, so it lands while
+      // release-lane is stalled.
+      const handoffB = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+      const before = await fs.readFile(handoffB, "utf8")
+      await fs.writeFile(handoffB, before.replace(/^Status:.*$/m, "Status: in-progress"))
+      assert.match(await fs.readFile(handoffB, "utf8"), /^Status: in-progress$/m)
+    })
+
+    const released = await releasePromise
+
+    const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+    const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
+
+    assert.ok(
+      laneBLocks.length > 0,
+      "lane b was active before the mutation, so its locks must survive without an audited force-release override",
+    )
+    assert.notEqual(released.code, 0, `release-lane must fail once lane b is active: ${released.stdout}`)
+    assert.ok(/force-release/.test(released.stderr), released.stderr)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Claim publication atomicity (lock-atomicity review finding)
+// ──────────────────────────────────────────────
+
+describe("claim publication is atomic with lock acquisition", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("does not let an audited release drop the locks of a claim still publishing", async () => {
+    // acquireLocks and the in-progress publication were two phases. A
+    // release landing between them read an idle lane, skipped the override,
+    // and dropped the freshly acquired locks while the claim still reported
+    // success.
+    const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+    let claim
+    let release
+
+    // Park both processes on the registry mutex so the release resumes the
+    // instant the claim's acquireLocks lets go — i.e. inside the window
+    // before the claim publishes in-progress.
+    await withFileLock(locksPath + ".lock", async () => {
+      claim = runBtrain(
+        [
+          "handoff", "claim", "--repo", tmpDir, "--lane", "b",
+          "--task", "atomic claim", "--owner", "Codex", "--reviewer", "Claude",
+          "--files", "src/b/",
+        ],
+        tmpDir,
+      )
+      // Give the claim a head start so it is first in the retry queue.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      release = runBtrain(["locks", "release-lane", "--repo", tmpDir, "--lane", "b"], tmpDir)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+
+    await release
+    const claimResult = await claim
+    assert.equal(claimResult.code, 0, claimResult.stderr)
+
+    const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
+    assert.ok(
+      laneBLocks.length > 0,
+      "the claim reported success, so a concurrent audited release must not have dropped its locks",
+    )
   })
 })

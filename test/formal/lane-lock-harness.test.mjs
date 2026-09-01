@@ -1,8 +1,8 @@
 // spec 014 FR-6 code-to-model validation harness.
 //
 // Drives the real btrain entry points (claimHandoff, patchHandoff,
-// requestChangesHandoff, resolveHandoff, releaseLocks, and pr-flow's
-// applyPrStatusToHandoff) with fast-check-generated command sequences
+// requestChangesHandoff, resolveHandoff, releaseLaneLocksAudited, and
+// pr-flow's applyPrStatusToHandoff) with fast-check-generated command sequences
 // against throwaway repos, and checks every step against the executable
 // contract transcription in lane-lock-model.mjs.
 //
@@ -32,14 +32,14 @@ import {
   patchHandoff,
   requestChangesHandoff,
   resolveHandoff,
-  releaseLocks,
+  releaseLaneLocksAudited,
   readAllLaneStates,
   readLockRegistry,
   readProjectConfig,
   BtrainError,
 } from "../../src/brain_train/core.mjs"
 import { applyPrStatusToHandoff } from "../../src/brain_train/pr-flow.mjs"
-import { KNOWN_DRIFTS, LaneLockModel } from "./lane-lock-model.mjs"
+import { LaneLockModel } from "./lane-lock-model.mjs"
 
 const ENABLED = process.env.BTRAIN_FORMAL === "1"
 const NUM_RUNS = Number(process.env.BTRAIN_FORMAL_RUNS || 15)
@@ -254,7 +254,9 @@ async function runReal(repo, cmd, actor) {
         }),
       )
     case "releaseLane":
-      return releaseLocks(repo, cmd.lane)
+      // The audited CLI path: rejects unaudited releases of active lanes
+      // (no override is ever granted in the throwaway repos).
+      return releaseLaneLocksAudited(repo, cmd.lane)
     default:
       throw new Error(`unknown command ${cmd.t}`)
   }
@@ -315,53 +317,13 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["repair-clear-requires-repair-owner", "update-actor-unchecked"],
 ])
 
-// Designated classifications are non-failing, so each verifies that the
-// observed real state matches the KNOWN drift shape before ledgering — a
-// different wrong state on the same command is an unknown divergence and
-// fails. Candidate classifications feed a failing gate, so shape precision
-// there cannot hide a new mismatch.
+// No designated drift remains after the drift-repair lane — the three
+// former entries (close-without-merge, unaudited release, --final bypass)
+// are enforced by the implementation and witnessed by passing regression
+// tests below. Only candidate findings classify; they feed a failing gate,
+// so classification cannot hide a new mismatch. Anything else — including a
+// reappearance of a repaired drift — is an unknown divergence and fails.
 function classifyDivergence(cmd, modelReason, kind, realLane, ctx = {}) {
-  const sameSet = (a, b) => JSON.stringify(a) === JSON.stringify(b)
-  const pre = ctx.pre || null
-  if (kind === "state" && cmd.t === "prOutcome" && cmd.outcome === "closed") {
-    // Drift shape, complete: routed to repair-needed with locks retained and
-    // EVERY non-designated field unchanged from the pre-command contract
-    // state (owner, reviewer, locked set), the drift's canonical reason
-    // code, and the FR-7 repair owner. Any additional corruption riding the
-    // closed outcome is an unknown divergence.
-    const shapeOk =
-      pre !== null &&
-      realLane.status === "repair-needed" &&
-      realLane.owner === pre.owner &&
-      realLane.reviewer === pre.reviewer &&
-      realLane.reasonCode === "invalid-handoff" &&
-      sameSet(realLane.lockedFiles, [...pre.lockedFiles].sort()) &&
-      sameSet(realLane.registry, realLane.lockedFiles) &&
-      realLane.lockedFiles.length > 0 &&
-      (!ctx.realRepair || ctx.realRepair.owner === (pre.lastActor || pre.owner))
-    return shapeOk ? { designated: true, label: "close-without-merge" } : null
-  }
-  if (kind === "allow" && cmd.t === "releaseLane" && modelReason === "unaudited-release-forbidden") {
-    // Drift shape, complete: registry emptied while the handoff record and
-    // every other field keep their pre-command values.
-    const shapeOk =
-      pre !== null &&
-      realLane.registry.length === 0 &&
-      realLane.status === pre.status &&
-      realLane.owner === pre.owner &&
-      realLane.reviewer === pre.reviewer &&
-      sameSet(realLane.lockedFiles, [...pre.lockedFiles].sort()) &&
-      realLane.lockedFiles.length > 0
-    return shapeOk ? { designated: true, label: "unaudited-release" } : null
-  }
-  if (kind === "allow" && cmd.t === "resolve" && modelReason === KNOWN_DRIFTS.finalFromPrFlow) {
-    // Drift shape: terminal resolved with everything released.
-    const shapeOk =
-      realLane.status === "resolved" &&
-      realLane.registry.length === 0 &&
-      realLane.lockedFiles.length === 0
-    return shapeOk ? { designated: true, label: "final-resolve-bypass" } : null
-  }
   if (kind === "allow" && CANDIDATE_REASON_LABELS.has(modelReason)) {
     return { designated: false, label: CANDIDATE_REASON_LABELS.get(modelReason) }
   }
@@ -651,24 +613,22 @@ test(
   },
 )
 
-// Deterministic classifier check: the close-without-merge chain must ledger
-// as designated drift, never fail as an unknown divergence.
+// Deterministic contract check: the full close-without-merge chain now
+// conforms end to end — no divergences, no tallies. A reappearance of the
+// repaired drift fails this and the property as an unknown divergence.
 test(
-  "close-without-merge classifies as designated drift (contract mode)",
+  "close-without-merge chain conforms end to end (contract mode)",
   { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
   async () => {
-    const { designatedTally } = await executeSequence("contract", [
+    const { designatedTally, candidateTally } = await executeSequence("contract", [
       { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
       { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
       { t: "resolve", lane: "x", actorSel: "reviewer", final: false },
       { t: "update", lane: "x", actorSel: "owner", status: "pr-review" },
       { t: "prOutcome", lane: "x", outcome: "closed" },
     ])
-    assert.equal(
-      designatedTally.get("close-without-merge"),
-      1,
-      "the close-without-merge divergence must be ledgered, not unknown",
-    )
+    assert.equal(designatedTally.size, 0, "no designated drift remains on the closed chain")
+    assert.equal(candidateTally.size, 0, "no candidate finding fires on the legal closed chain")
   },
 )
 
@@ -681,16 +641,12 @@ test(
   },
 )
 
-// Deterministic witness for KNOWN_DRIFTS.closeWithoutMerge: asserts the
-// CONTRACT (close without merge → terminal resolved + lock release), so it
-// stays todo-red until pr-flow.mjs applyPrStatusToHandoff is repaired, and
-// flips green the moment it is.
+// Regression witness for the repaired close-without-merge drift: the
+// contract holds — close is terminal resolved plus lock release. The todo
+// marker came off with the repair.
 test(
-  "designated drift witness: close-without-merge resolves and releases",
-  {
-    skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness",
-    todo: "pr-flow.mjs routes close-without-merge to repair-needed (designated drift)",
-  },
+  "repaired drift: close-without-merge resolves and releases",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
   async () => {
     const { root, repo } = await makeRepo()
     try {
@@ -806,12 +762,13 @@ test(
   },
 )
 
+// Regression witness for the repaired --final bypass: a direct --final from
+// needs-review is rejected and the lane stays in review with its locks; the
+// reviewer's plain resolve then enters ready-for-pr. The todo marker came
+// off with the repair.
 test(
-  "designated drift witness: --final from needs-review does not skip ready-for-pr",
-  {
-    skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness",
-    todo: "resolveHandoff honors --final from needs-review (designated drift)",
-  },
+  "repaired drift: --final from needs-review is rejected, plain resolve enters ready-for-pr",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
   async () => {
     const { root, repo } = await makeRepo()
     try {
@@ -828,12 +785,48 @@ test(
           ...NEEDS_REVIEW_CONTEXT,
         }),
       )
-      await asAgent("beta", () =>
-        resolveHandoff(repo, { lane: "x", actor: "beta", final: true, summary: "illegal final" }),
+      await assert.rejects(
+        asAgent("beta", () =>
+          resolveHandoff(repo, { lane: "x", actor: "beta", final: true, summary: "illegal final" }),
+        ),
+        BtrainError,
+        "contract: --final is the merge path, not a review bypass",
       )
-      const { lanes } = await realSnapshot(repo, config)
-      assert.equal(lanes.x.status, "ready-for-pr", "contract: reviewer plain resolve enters ready-for-pr; --final is not a bypass")
-      assert.deepEqual(lanes.x.registry, ["src/a/"], "contract: ready-for-pr retains locks")
+      let snap = await realSnapshot(repo, config)
+      assert.equal(snap.lanes.x.status, "needs-review", "the rejected --final left the lane in review")
+      assert.deepEqual(snap.lanes.x.registry, ["src/a/"], "locks retained after the rejection")
+      await asAgent("beta", () =>
+        resolveHandoff(repo, { lane: "x", actor: "beta", summary: "peer approval" }),
+      )
+      snap = await realSnapshot(repo, config)
+      assert.equal(snap.lanes.x.status, "ready-for-pr", "plain peer resolve enters ready-for-pr")
+      assert.deepEqual(snap.lanes.x.registry, ["src/a/"], "ready-for-pr retains locks")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
+// Regression witness for the repaired unaudited release: releasing an
+// active lane's locks without a consumed force-release override is
+// rejected; after a grant, the release succeeds and is audited.
+test(
+  "repaired drift: unaudited release-lane is rejected for active lanes",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  async () => {
+    const { root, repo } = await makeRepo()
+    try {
+      const config = await readProjectConfig(repo)
+      await asAgent("alpha", () =>
+        claimHandoff(repo, { lane: "x", task: "release witness", owner: "alpha", reviewer: "beta", files: "src/a/" }),
+      )
+      await assert.rejects(
+        releaseLaneLocksAudited(repo, "x"),
+        BtrainError,
+        "contract: active-lane lock suspension requires an audited override",
+      )
+      const snap = await realSnapshot(repo, config)
+      assert.deepEqual(snap.lanes.x.registry, ["src/a/"], "locks intact after the rejected release")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }
