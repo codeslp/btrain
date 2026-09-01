@@ -6152,6 +6152,34 @@ describe("project.toml parser accepts hyphens in bare keys and table headers", (
 // core.hooksPath that disables hooks
 // ──────────────────────────────────────────────
 
+describe("an explicit core.hooksPath equal to the repository root is a valid hooks dir", () => {
+  it("installs there and doctor does not call the gates disabled", async () => {
+    // Git accepts absolute or relative core.hooksPath values and runs an
+    // executable root-level pre-commit. Only an EMPTY value or a non-directory
+    // target means "hooks off"; a root path that happens to equal the
+    // worktree root must not be misclassified as disabled.
+    const tmpDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", tmpDir])
+      const realRoot = await fs.realpath(tmpDir)
+      await exec("git", ["-C", tmpDir, "config", "core.hooksPath", realRoot])
+
+      const init = await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+      assert.equal(init.code, 0, init.stderr)
+      const rootHook = await fs.readFile(path.join(realRoot, "pre-commit"), "utf8")
+      assert.ok(rootHook.includes("# btrain:pre-commit-hook"), "managed hook must be installed at the configured root path")
+
+      const doctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+      assert.ok(!/disables git hooks/i.test(doctor.stdout), doctor.stdout)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
 describe("managed hooks treat a disabling core.hooksPath as unavailable", () => {
   const cases = [
     { label: "empty value", value: "" },

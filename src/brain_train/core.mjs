@@ -452,10 +452,12 @@ async function appendText(targetPath, content) {
 }
 
 // core.hooksPath can also switch hooks OFF: an empty value makes Git resolve
-// the hooks dir to the worktree root ("./"), and the documented `/dev/null`
-// points at a device. In both cases Git runs no hooks, so btrain must not
-// write executable pre-commit/pre-push files there and must say the gates are
-// disabled instead of reporting a healthy repo.
+// the hooks dir to the worktree root ("./") while running nothing, and the
+// documented `/dev/null` points at a device. In both cases btrain must not
+// write executable pre-commit/pre-push files and must say the gates are
+// disabled instead of reporting a healthy repo. An explicit path (absolute or
+// relative, including one that equals the repository root) is a valid hooks
+// directory: Git documents both forms and runs hooks found there.
 async function gitHooksDisabledByConfig(repoRoot) {
   let configured
   try {
@@ -470,9 +472,6 @@ async function gitHooksDisabledByConfig(repoRoot) {
     return true
   }
   const resolved = path.resolve(repoRoot, configured.trim())
-  if (resolved === path.resolve(repoRoot)) {
-    return true
-  }
   try {
     const stats = await fs.stat(resolved)
     if (!stats.isDirectory()) {
