@@ -13,7 +13,7 @@ Turn a raw TLC trace into a step-by-step narrative that points at the exact pros
 
 ## Workflow
 
-1. Load the structured verdict at `specs/tla/.tlc-results/<name>.json` produced by `tla-run-tlc`. If it is not present, run `tla-run-tlc` first — this skill never narrates from a raw run.
+1. Verify the cached verdict before loading it: `python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/<name>.json`. Exit 0 means every key (`.tla`, `.cfg`, pinned prose, harness files, tool) is FRESH and the recorded outcomes are consistent; exit 3 means the keys are fresh but the verdict is not a pass (a counterexample is fine to narrate); exit 1 means a key is STALE or the file overclaims. On exit 1, or when the file is absent, run `tla-run-tlc` first — this skill never narrates from a raw run and never narrates a stale trace against current prose.
 2. Read the `.tla` header to resolve which prose file and line range the spec is pinned to. If the file is unpinned, stop and point the user at `tla-pin-sync` — you cannot map to prose without a pin.
 3. Read the prose section so every action name in the trace maps back to a prose verb. Build a map inline: "action `Surface`" → "§5.1 bullet 3: 'surface the advisory'".
 4. For each step in the trace, write one line:
