@@ -387,7 +387,7 @@ btrain-chat status</code></pre>
         </div>
         <div class="security-item">
           <h3>&#128027; Real gaps it surfaced</h3>
-          <p>The checks compare real behavior against the written rules and hold each difference open until it is fixed or the rule changes deliberately. Three gaps they found have been repaired, each now guarded by a regression test that fails if the behavior returns:</p>
+          <p>Each difference the checks find stays on the record until the code is fixed or the rule changes deliberately. Three of them have been fixed, and each fix is now held in place by a regression test that fails if the old behavior returns:</p>
           <table class="security-table">
             <thead>
               <tr><th>Gap</th><th>Status</th></tr>

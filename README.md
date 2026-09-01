@@ -348,7 +348,7 @@ against the contract fails a test instead of shipping quietly.
    - Every conformance check must pass.
    - One check lists candidate gaps between the code and the rules that are
      still awaiting a decision. It fails — and the command exits non-zero —
-     while any candidate remains. Eight are open today. Each is described in
+     while any candidate remains. Each is described in
      `test/formal/README.md` and stays there until the code is fixed or the
      rule is deliberately changed.
    - Three earlier gaps have been fixed: a closed-but-unmerged PR left its
