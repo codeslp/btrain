@@ -20,10 +20,10 @@ row in the production list is enforced until its owning prose exists.
 
 Primary input:
 
-- [specs/015-lane-transition-contract.md](/Users/bfaris96/btrain/specs/015-lane-transition-contract.md)
-- [specs/014-specula-formal-verification-pilot.md](/Users/bfaris96/btrain/specs/014-specula-formal-verification-pilot.md)
-- [specs/checklists/015-transition-contract.md](/Users/bfaris96/btrain/specs/checklists/015-transition-contract.md)
-- [test/formal/README.md](/Users/bfaris96/btrain/test/formal/README.md)
+- [specs/015-lane-transition-contract.md](015-lane-transition-contract.md)
+- [specs/014-specula-formal-verification-pilot.md](014-specula-formal-verification-pilot.md)
+- [specs/checklists/015-transition-contract.md](checklists/015-transition-contract.md)
+- [test/formal/README.md](../test/formal/README.md)
 
 ## Review Goals
 
@@ -152,12 +152,12 @@ rules to encode.
 
 **Likely files**
 
-- [specs/015-lane-transition-contract.md](/Users/bfaris96/btrain/specs/015-lane-transition-contract.md)
-- [specs/016-lane-transition-contract-implementation-plan.md](/Users/bfaris96/btrain/specs/016-lane-transition-contract-implementation-plan.md)
-- [specs/checklists/015-transition-contract.md](/Users/bfaris96/btrain/specs/checklists/015-transition-contract.md)
-- [specs/002-multi-lane-handoffs.md](/Users/bfaris96/btrain/specs/002-multi-lane-handoffs.md)
-- [specs/005-review-findings-rework-loop.md](/Users/bfaris96/btrain/specs/005-review-findings-rework-loop.md)
-- [specs/006-workflow-resilience-and-guardian.md](/Users/bfaris96/btrain/specs/006-workflow-resilience-and-guardian.md)
+- [specs/015-lane-transition-contract.md](015-lane-transition-contract.md)
+- [specs/016-lane-transition-contract-implementation-plan.md](016-lane-transition-contract-implementation-plan.md)
+- [specs/checklists/015-transition-contract.md](checklists/015-transition-contract.md)
+- [specs/002-multi-lane-handoffs.md](002-multi-lane-handoffs.md)
+- [specs/005-review-findings-rework-loop.md](005-review-findings-rework-loop.md)
+- [specs/006-workflow-resilience-and-guardian.md](006-workflow-resilience-and-guardian.md)
 
 **Tests**
 
@@ -197,13 +197,13 @@ rules to encode.
 
 **Likely files**
 
-- [src/brain_train/core.mjs](/Users/bfaris96/btrain/src/brain_train/core.mjs)
-- [src/brain_train/pr-flow.mjs](/Users/bfaris96/btrain/src/brain_train/pr-flow.mjs)
-- [src/brain_train/cli.mjs](/Users/bfaris96/btrain/src/brain_train/cli.mjs)
+- [src/brain_train/core.mjs](../src/brain_train/core.mjs)
+- [src/brain_train/pr-flow.mjs](../src/brain_train/pr-flow.mjs)
+- [src/brain_train/cli.mjs](../src/brain_train/cli.mjs)
 - new `src/brain_train/transitions.mjs`
-- [test/formal/lane-lock-model.mjs](/Users/bfaris96/btrain/test/formal/lane-lock-model.mjs)
-- [test/formal/lane-lock-harness.test.mjs](/Users/bfaris96/btrain/test/formal/lane-lock-harness.test.mjs)
-- [test/formal/README.md](/Users/bfaris96/btrain/test/formal/README.md)
+- [test/formal/lane-lock-model.mjs](../test/formal/lane-lock-model.mjs)
+- [test/formal/lane-lock-harness.test.mjs](../test/formal/lane-lock-harness.test.mjs)
+- [test/formal/README.md](../test/formal/README.md)
 - new `test/transitions.test.mjs`
 
 **Tests**
