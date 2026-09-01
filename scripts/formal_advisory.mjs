@@ -13,6 +13,8 @@ const MODELED_RUNTIME_FILES = new Set([
   "src/brain_train/core.mjs",
   "src/brain_train/pr-flow.mjs",
 ])
+const TLC_MAX_HEAP_MB = 1024
+const TLC_WORKERS = 2
 
 function parseArgs(argv) {
   const options = { base: "origin/main", head: "", output: "", classifyOnly: false, selfTest: false }
@@ -28,16 +30,28 @@ function parseArgs(argv) {
   return options
 }
 
+function resolveGnuTimeBinary() {
+  const configured = (process.env.BTRAIN_FORMAL_TIME_BIN || "").trim()
+  const candidates = configured ? [configured] : ["time"]
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ["--version"], { encoding: "utf8" })
+    const output = `${probe.stdout || ""}\n${probe.stderr || ""}`
+    if (probe.status === 0 && /GNU time/i.test(output)) return candidate
+  }
+  return ""
+}
+
 function command(commandName, args, options = {}) {
   const startedAt = Date.now()
-  const canMeasureMemory = options.measureMemory
-    && process.platform === "linux"
-    && fs.existsSync("/usr/bin/time")
+  const memoryTool = options.measureMemory && process.platform === "linux"
+    ? resolveGnuTimeBinary()
+    : ""
+  const canMeasureMemory = Boolean(memoryTool)
   const measurementDirectory = canMeasureMemory
     ? fs.mkdtempSync(path.join(os.tmpdir(), "formal-advisory-memory-"))
     : ""
   const measurementPath = measurementDirectory ? path.join(measurementDirectory, "peak-rss-kb.txt") : ""
-  const executable = canMeasureMemory ? "/usr/bin/time" : commandName
+  const executable = canMeasureMemory ? memoryTool : commandName
   const executableArgs = canMeasureMemory
     ? ["-f", "%M", "-o", measurementPath, commandName, ...args]
     : args
@@ -172,6 +186,17 @@ export function classifyTlcResult(run) {
   return "infrastructure_failure"
 }
 
+function buildTlcArgs(jar, configName, tlaName) {
+  return [
+    `-Xmx${TLC_MAX_HEAP_MB}m`,
+    "-cp", jar,
+    "tlc2.TLC",
+    "-config", configName,
+    "-workers", String(TLC_WORKERS),
+    tlaName,
+  ]
+}
+
 function runPinCheck(root, tlaFiles) {
   if (tlaFiles.length === 0) {
     return {
@@ -231,7 +256,7 @@ function runTlc(root, tlaFiles) {
     }
     const run = command(
       "java",
-      ["-cp", jar, "tlc2.TLC", "-config", path.basename(config), "-workers", "auto", path.basename(tlaFile)],
+      buildTlcArgs(jar, path.basename(config), path.basename(tlaFile)),
       { cwd: parsed.dir, timeoutMs: 300_000, measureMemory: true },
     )
     return { name: `tlc:${parsed.name}`, verdict: classifyTlcResult(run), ...run }
@@ -383,6 +408,10 @@ function runSelfTest() {
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "java.lang.OutOfMemoryError: Java heap space" }), "state_space_exhausted")
+  assert.deepEqual(
+    buildTlcArgs("/tmp/tla2tools.jar", "LaneLock.cfg", "LaneLock.tla"),
+    ["-Xmx1024m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "2", "LaneLock.tla"],
+  )
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - canonical finding", stderr: "AssertionError" }, { modeledAssertions: true }), "validation_mismatch")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "not ok 1 - unrelated CLI assertion", stderr: "AssertionError" }), "infrastructure_failure")
   assert.equal(classifyHarnessResult({ status: 1, stdout: "", stderr: "Error [ERR_MODULE_NOT_FOUND]" }), "infrastructure_failure")
@@ -399,7 +428,12 @@ function runSelfTest() {
   runMergeBaseSelfTest()
   if (process.platform === "linux") {
     const measured = command("node", ["-e", "process.exit(0)"], { echo: false, measureMemory: true })
-    assert.ok(Number.isInteger(measured.peakRssKb) && measured.peakRssKb > 0)
+    if (resolveGnuTimeBinary()) {
+      assert.ok(Number.isInteger(measured.peakRssKb) && measured.peakRssKb > 0)
+    } else {
+      assert.equal(measured.peakRssKb, null)
+      assert.equal(measured.memoryMeasurement, "unavailable")
+    }
   }
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github", "workflows", "formal-advisory.yml"), "utf8")
   assert.match(workflow, /Peak RSS \(KiB\)/)
