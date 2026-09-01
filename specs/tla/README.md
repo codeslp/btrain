@@ -25,12 +25,27 @@ java -cp "$TLC_JAR" tlc2.TLC -config LaneLock.cfg -workers auto LaneLock.tla
 
 Expected: `Model checking completed. No error has been found.` The structured
 verdict is cached at `.tlc-results/LaneLock.json`. It is keyed by every
-semantic input spec 014 names: the `.tla` content hash, the `.cfg` hash, the
-pinned prose hash from the module header, the hash of the FR-6 harness files,
-the source commit TLC ran on, and the tla2tools hash. A verifier recomputes
-those hashes; a cached `pass` whose keys do not all match is stale, not a
-pass. Baseline: 95,390,161 states generated, 8,236,969 distinct, depth 26,
-2 min 25 s with 10 workers.
+semantic input spec 014 names (`keys`): the `.tla` content hash, the `.cfg`
+hash, the pinned prose hash from the module header, the hash of the FR-6
+harness files, the source commit the run used, and the tla2tools hash. The
+`validation` block records the harness seed, run count, candidate tally, and
+whether trace validation ran, so the verdict is also keyed by the trace set
+that was actually executed. The top-level `status` is the spec 014 verdict
+for the whole chain, not for TLC alone; today it is `validation_mismatch`
+because the FR-6 harness tallies ledgered candidates, even though TLC passed.
+
+Verify before reusing:
+
+```bash
+python3 scripts/tla_pin.py --verify-verdict specs/tla/.tlc-results/LaneLock.json
+```
+
+Every key is recomputed and reported FRESH or STALE. Any STALE key, a missing
+seed/runs pair, or a status other than `pass` means the file must not be
+reused as a pass; re-run TLC and `npm run test:formal`. Consumers (pre-handoff,
+CI, `tla-run-tlc`) call this verifier rather than comparing the `.tla` hash
+alone. TLC baseline: 95,390,161 states generated, 8,236,969 distinct, depth
+26, 2 min 25 s with 10 workers.
 
 ## Pin check
 

@@ -16,6 +16,9 @@ Commands:
     tla_pin.py --check [file.tla ...]   exit 0 clean, 1 stale, 2 usage/error
     tla_pin.py --show-range file.tla    print pinned sections and content
     tla_pin.py --repin file.tla         rewrite the Pinned-hash line
+    tla_pin.py --verify-verdict specs/tla/.tlc-results/NAME.json
+                                        recompute every cache key of a cached
+                                        verdict; STALE keys make it unusable
 
 Stdlib only. No TLC required.
 """
@@ -146,18 +149,76 @@ def cmd_repin(path: str) -> int:
     return 0
 
 
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def cmd_verify_verdict(path: str) -> int:
+    """Recompute every semantic-input key of a cached TLC verdict (spec 014:
+    cached results are reusable only when keyed by all semantic inputs) and
+    report FRESH/STALE per key. Any STALE key, a missing validation block, or a
+    top-level status other than pass makes the cache unusable as a pass."""
+    import hashlib
+    import json
+    import os
+    verdict_path = Path(path).resolve()
+    data = json.loads(verdict_path.read_text(encoding="utf-8"))
+    keys = data.get("keys") or {}
+    name = verdict_path.stem
+    tla = TLA_DIR / f"{name}.tla"
+    cfg = TLA_DIR / (data.get("tlc", {}).get("config") or f"{name}.cfg")
+    stale = []
+    def check(label, recorded, current):
+        ok = recorded == current
+        print(f"{'FRESH' if ok else 'STALE'} {label}: recorded {str(recorded)[:12]}… current {str(current)[:12]}…")
+        if not ok:
+            stale.append(label)
+    check("tla_content_sha256", keys.get("tla_content_sha256"), _sha256_file(tla))
+    check("cfg_sha256", keys.get("cfg_sha256"), _sha256_file(cfg))
+    pins, _, recorded_pin, _ = parse_pins(tla)
+    check("pinned_prose_sha256 (header)", keys.get("pinned_prose_sha256"), recorded_pin)
+    check("pinned_prose_sha256 (prose)", keys.get("pinned_prose_sha256"), compute_hash(pins) if pins else None)
+    h = hashlib.sha256()
+    for rel in keys.get("harness_files") or []:
+        h.update((REPO_ROOT / rel).read_bytes())
+    check("harness_sha256", keys.get("harness_sha256"), h.hexdigest())
+    jar = os.environ.get("TLC_JAR")
+    if jar and Path(jar).is_file():
+        check("tla2tools_sha256", keys.get("tla2tools_sha256"), _sha256_file(Path(jar)))
+    else:
+        print("SKIP  tla2tools_sha256: set TLC_JAR to verify the tool hash")
+    validation = data.get("validation") or {}
+    if not validation.get("seed") or not validation.get("runs"):
+        print("STALE validation: no seed/runs recorded; the verdict is not keyed by a trace set")
+        stale.append("validation")
+    status = data.get("status")
+    print(f"status: {status}")
+    if stale:
+        print(f"{len(stale)} stale key(s); do not reuse this verdict. Re-run TLC and the harness.")
+        return 1
+    if status != "pass":
+        print("keys are fresh but the recorded verdict is not `pass`; nothing to reuse as a pass.")
+        return 3
+    print("verdict is fresh and reusable")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true")
     group.add_argument("--show-range", metavar="FILE")
     group.add_argument("--repin", metavar="FILE")
+    group.add_argument("--verify-verdict", metavar="JSON")
     parser.add_argument("files", nargs="*", help="explicit .tla targets for --check")
     args = parser.parse_args()
     if args.check:
         return cmd_check(args.files)
     if args.show_range:
         return cmd_show_range(args.show_range)
+    if args.verify_verdict:
+        return cmd_verify_verdict(args.verify_verdict)
     return cmd_repin(args.repin)
 
 
