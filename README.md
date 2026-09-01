@@ -288,7 +288,10 @@ Every active lane may carry a structured `Delegation Packet` describing the cont
 | `resolved` | Anyone | Review approved — lane recyclable |
 
 Locks are retained through `ready-for-pr`, `pr-review`, and `ready-to-merge`,
-and release when the PR merges or closes.
+and release when the PR merges. A PR that is closed without merging should
+release them too, but the code currently routes closure to `repair-needed`
+and keeps the locks. The checks below record this gap and hold it open until
+the code is fixed.
 
 ### Review Context Fields
 
@@ -320,13 +323,14 @@ btrain's coordination rules — who may move a lane, when files stay locked,
 and when locks release — are written down as a precise contract and checked
 by machines in two ways.
 
-**Design checking.** A model checker (TLA+/TLC) explores every reachable
-state of the intended workflow, millions of states in seconds, and proves
-the safety rules always hold: no two lanes ever lock the same files, locks
-never outlive their lane, and review always involves a second agent. The
-model and its setup instructions live in `specs/tla/`.
+**Design checking** (in progress, not yet on `main`). A model checker
+(TLA+/TLC) explores every reachable state of the intended workflow and
+proves the safety rules always hold: no two lanes ever lock the same files,
+locks never outlive their lane, and review always involves a second agent.
+The model is written and passing against a bounded configuration. It merges
+into `specs/tla/` with the phase 1 work.
 
-**Code checking.** A test harness generates thousands of random workflow
+**Code checking** (available now). A test harness generates random workflow
 sequences (claims, reviews, PR outcomes, repairs), runs them against the
 real btrain code, and compares every step with the contract. Any difference
 is reported with a minimal reproduction and a seed that replays it exactly.
@@ -345,16 +349,16 @@ against the contract fails a test instead of shipping quietly.
      code is fixed or the rule is deliberately changed.
    - The regular `npm test` suite is unaffected; these checks are opt-in.
 4. Optional settings:
-   - `BTRAIN_FORMAL_RUNS=<n>` — random sequences per check (default 15)
+   - `BTRAIN_FORMAL_RUNS=<n>` — random sequences per check (default 15,
+     each 3 to 12 commands long)
    - `BTRAIN_FORMAL_SEED=<n>` — replay a recorded run exactly
    - `BTRAIN_FORMAL_TRACE_DIR=<path>` — where failure traces are written
 5. No credentials, network, or AI provider is needed. Runs are repeatable
    from a seed.
 
-To check the design itself, install the TLA+ tools (see
-`specs/tla/README.md`) and run the model checker on
-`specs/tla/LaneLock.tla`. The latest verified result is cached next to the
-model.
+The design check is not runnable from this branch yet. When the phase 1
+work merges, `specs/tla/` will carry the model, its configuration, the setup
+instructions, and the latest cached result.
 
 ### Changing behavior the rules cover
 
@@ -383,8 +387,8 @@ model.
 | `policy_blocked` | An AI provider declined to perform a step | Reported separately; the step routes to an alternative or a human |
 
 For the full policy, history, and current findings: the governing spec in
-`specs/`, the model in `specs/tla/`, the harness and its findings in
-`test/formal/README.md`, and the tooling write-up in `research/`.
+`specs/`, the harness and its findings ledger in `test/formal/README.md`,
+and the tooling write-up in `research/`.
 
 ---
 

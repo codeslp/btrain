@@ -383,26 +383,26 @@ btrain-chat status</code></pre>
       <div class="security-grid">
         <div class="security-item">
           <h3>&#128737; Catches rule-breaking before it ships</h3>
-          <p>Every change to btrain's coordination code gets stress-tested against thousands of simulated workdays: agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can dream up. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; a test fails before the change lands.</p>
+          <p>Every change to btrain's coordination code gets stress-tested against generated runs of simulated workdays: agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can dream up. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; a test fails before the change lands.</p>
         </div>
         <div class="security-item">
-          <h3>&#128027; Real bugs it already caught</h3>
-          <p>These were found by the checks, not by people, and each came with the exact steps to reproduce it:</p>
+          <h3>&#128027; Real gaps it surfaced</h3>
+          <p>The checks compare real behavior against the written rules and hold each difference open until it is fixed or the rule changes deliberately. Open gaps today:</p>
           <table class="security-table">
             <thead>
-              <tr><th>Found</th><th>Fixed</th></tr>
+              <tr><th>Gap</th><th>Status</th></tr>
             </thead>
             <tbody>
-              <tr><td>Closing a PR without merging left its files locked forever</td><td>Locks now release on close</td></tr>
-              <tr><td>A shortcut flag let a lane skip peer review entirely</td><td>The shortcut is rejected</td></tr>
-              <tr><td>Anyone could drop another lane's file locks, no sign-off</td><td>Now requires a human-approved override</td></tr>
+              <tr><td>Closing a PR without merging leaves its files locked</td><td>Open &mdash; repair in progress</td></tr>
+              <tr><td>A shortcut flag lets a lane skip peer review</td><td>Open &mdash; repair in progress</td></tr>
+              <tr><td>Dropping another lane's file locks needs no audited sign-off</td><td>Open &mdash; repair in progress</td></tr>
             </tbody>
           </table>
         </div>
         <div class="security-item">
           <h3>&#127922; Every failure comes with a recipe</h3>
           <p>A failing check prints a seed. Run one command with that seed and you watch the exact same sequence fail again &mdash; no flaky mysteries, no "works on my machine." The failing scenario is shrunk to the fewest steps that still break, usually two or three commands.</p>
-          <p style="font-size:0.85rem; color: var(--text-muted);">Under the hood: a machine-checked model of the workflow design plus generated conformance tests against the real code. Details live in the repo.</p>
+          <p style="font-size:0.85rem; color: var(--text-muted);">Under the hood: generated conformance tests against the real code, with a machine-checked model of the workflow design landing next. Details live in the repo.</p>
         </div>
       </div>
     </div>
