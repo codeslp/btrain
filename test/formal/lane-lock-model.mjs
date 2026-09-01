@@ -373,8 +373,18 @@ export class LaneLockModel {
 
     // Terminal outcomes route through resolveHandoff (final, viaPrOutcome):
     // merge and close-without-merge are both terminal resolved plus lock
-    // release (spec 002 v1.1.2; the close drift is repaired).
+    // release (spec 002 v1.1.2; the close drift is repaired). Since PR #33
+    // the implementation also refuses a terminal outcome unless the lane is
+    // in a PR-flow status or PR-flow changes-requested, so the mirror must
+    // refuse too; a mirror that accepted it reported a false regression.
     if (outcome === "merged" || outcome === "closed") {
+      if (
+        this.mode === "implementation" &&
+        !PR_FLOW_STATUSES.has(s.status) &&
+        s.status !== "changes-requested"
+      ) {
+        return this.#reject("pr-outcome-from-invalid-status")
+      }
       s.status = "resolved"
       s.lockedFiles = []
       s.fileExists = true

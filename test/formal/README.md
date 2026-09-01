@@ -72,7 +72,10 @@ by contract mode and keeps the candidate todo test red:
    plain resolve from a PR-flow status terminally releases retained locks.
    The designated contract assigns `ready-for-pr` entry to the reviewer and
    terminates PR-flow lanes through merge or closure.
-5. `resolveHandoff` resolves an idle, never-claimed lane.
+5. `resolveHandoff` resolves an idle, never-claimed lane. When the lane's
+   handoff file is absent it also falls back to repo-level state and writes a
+   `Previous Handoffs` entry into a newly created lane file using another
+   lane's task text (reproduced 2026-09-01).
 6. When the reviewer (not the owner) moves a lane to `needs-review`,
    `inferPeerReviewer` reassigns the reviewer to the owner. The lane then
    waits for review with reviewer == owner, which breaks owner/reviewer
@@ -82,8 +85,11 @@ by contract mode and keeps the candidate todo test red:
    and direct `ready-to-merge` updates are all accepted.
 8. `patchHandoff` crashes with a raw `ENOENT` (not a `BtrainError`) when the
    lane has never been claimed.
-9. `applyPrStatusToHandoff` with an explicit `--pr` applies outcomes from any
-   lane status, so a merged PR can terminally resolve an `in-progress` lane.
+9. `applyPrStatusToHandoff` with an explicit `--pr` applies the non-terminal
+   outcomes (`waiting`, `feedback`, `ready-to-merge`) from any lane status,
+   so an `in-progress` lane can enter `pr-review` without peer approval.
+   The terminal half (merged or closed from a non-PR-flow lane) was repaired
+   in PR #33 and is now rejected.
 10. `patchHandoff --files` (the designated rescope path) enforces no actor
     or source-status restrictions: any agent can rescope any active lane,
     including during `needs-review` and PR-flow retention, against the
@@ -91,6 +97,11 @@ by contract mode and keeps the candidate todo test red:
 11. `resolveHandoff` resolves a `repair-needed` lane before the FR-18
     escalation, releasing contained locks early. Spec 014 designates repair
     exit-to-resolved only as a terminal disposition after escalation.
+
+Mirror maintenance: after PR #33 the implementation mirror still accepted
+terminal PR outcomes from any status, so implementation mode reported a
+`validation_mismatch` that was a stale double, not a regression. Fixed on
+2026-09-01; implementation mode is a regression signal again.
 
 Verified working (positive witnesses): spec 006 FR-18 same-reason repair
 re-entry escalates to a human (`repairEscalation: "human"`, attempts
