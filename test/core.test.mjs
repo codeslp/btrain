@@ -5835,3 +5835,66 @@ describe("force-release audit is atomic with the registry mutation", () => {
     assert.ok(/force-release/.test(released.stderr), released.stderr)
   })
 })
+
+// ──────────────────────────────────────────────
+// Claim publication atomicity (lock-atomicity review finding)
+// ──────────────────────────────────────────────
+
+describe("claim publication is atomic with lock acquisition", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await configureGitIdentity(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("does not let an audited release drop the locks of a claim still publishing", async () => {
+    // acquireLocks and the in-progress publication were two phases. A
+    // release landing between them read an idle lane, skipped the override,
+    // and dropped the freshly acquired locks while the claim still reported
+    // success.
+    const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+    let claim
+    let release
+
+    // Park both processes on the registry mutex so the release resumes the
+    // instant the claim's acquireLocks lets go — i.e. inside the window
+    // before the claim publishes in-progress.
+    await withFileLock(locksPath + ".lock", async () => {
+      claim = runBtrain(
+        [
+          "handoff", "claim", "--repo", tmpDir, "--lane", "b",
+          "--task", "atomic claim", "--owner", "Codex", "--reviewer", "Claude",
+          "--files", "src/b/",
+        ],
+        tmpDir,
+      )
+      // Give the claim a head start so it is first in the retry queue.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      release = runBtrain(["locks", "release-lane", "--repo", tmpDir, "--lane", "b"], tmpDir)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+
+    await release
+    const claimResult = await claim
+    assert.equal(claimResult.code, 0, claimResult.stderr)
+
+    const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
+    assert.ok(
+      laneBLocks.length > 0,
+      "the claim reported success, so a concurrent audited release must not have dropped its locks",
+    )
+  })
+})

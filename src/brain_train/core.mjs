@@ -1151,8 +1151,15 @@ function getLocksLockfilePath(repoRoot) {
   return getLocksPath(repoRoot) + ".lock"
 }
 
-async function acquireLocks(repoRoot, laneId, owner, files) {
-  if (!files || files.length === 0) return []
+// publishInsideLock runs after the registry write but before the mutex is
+// released, so no observer can see a lane's locks without the lane status
+// that authorizes them. Claim uses this: acquiring locks and publishing
+// in-progress were two phases, and an audited release landing between them
+// read an idle lane, skipped the override, and dropped the fresh locks.
+async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock } = {}) {
+  if (!files || files.length === 0) {
+    return publishInsideLock ? publishInsideLock().then(() => []) : []
+  }
 
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     const registry = await readLockRegistry(repoRoot)
@@ -1185,6 +1192,7 @@ async function acquireLocks(repoRoot, laneId, owner, files) {
     }
 
     await writeLockRegistry(repoRoot, registry)
+    if (publishInsideLock) await publishInsideLock()
     return registry.locks.filter((lock) => lock.lane === laneId)
   })
 }
@@ -5000,7 +5008,8 @@ async function claimHandoff(repoRoot, options) {
         fix: `btrain handoff claim --lane ${laneId} --task "${options.task || '...'}" --owner "${options.owner}" --files "src/,docs/"`,
       })
     }
-    await acquireLocks(repoRoot, laneId, options.owner, files)
+    // Acquisition is deferred to the publish step below so both land in one
+    // registry critical section.
   }
 
   const resolvedReviewer = inferPeerReviewer({
@@ -5060,7 +5069,9 @@ async function claimHandoff(repoRoot, options) {
   // If lanes enabled, write to lane-specific handoff file
   if (laneConfigs && laneId) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
-    const result = await updateHandoff(
+    let result
+    const publishClaim = async () => {
+      result = await updateHandoff(
       repoRoot,
       updates,
       {
@@ -5081,7 +5092,9 @@ async function claimHandoff(repoRoot, options) {
         },
         overrideHandoffPath: handoffPath,
       },
-    )
+      )
+    }
+    await acquireLocks(repoRoot, laneId, options.owner, files, { publishInsideLock: publishClaim })
     await compactHandoffHistory(repoRoot, { config, laneId, actorLabel: options.owner })
     return result
   }

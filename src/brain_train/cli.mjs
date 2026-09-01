@@ -130,7 +130,7 @@ Usage:
   btrain status [--repo <path>]                                                  Show handoff state across repos
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
-  btrain override grant --action <push|needs-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
+  btrain override grant --action <push|needs-review|force-release> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
   btrain repos [--json]                                                          List registered repos, including disabled repos
   btrain repos enable|disable|remove <name-or-path>                              Control whether a repo appears in global operations and the dashboard
