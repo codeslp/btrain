@@ -84,13 +84,25 @@ before that fix.
 
 `getPrFlowConfig` rejects a `[pr_flow.bots.<id>]` table or a
 `required_bots` entry whose id does not start with `gh-`, with a fix that
-names the rename. Aliases are untouched; they already carry the GitHub login.
+names the rename. The whole id must match `^gh-[a-z0-9]+(-[a-z0-9]+)*$`: the
+reason-tag slug grammar (`REASON_TAG_PATTERN`, `core.mjs:259`) behind the
+prefix, because PR feedback copies the id into `--reason-tag`. `gh-Foo`,
+`gh--codex`, and a bare `gh-` are rejected at load time rather than failing
+later inside a `changes-requested` transition. Aliases are untouched; they
+already carry the GitHub login.
 
 ### FR-2: Local ids never carry the `gh-` prefix
 
-`[agents].active` entries, `--owner`, `--reviewer`, `--actor`, and
-`BTRAIN_AGENT` values starting with `gh-` are rejected. A bot cannot claim,
-review, or resolve a lane.
+`[agents].active` entries, `[agents].writer_default`,
+`[agents].reviewer_default`, `[agents.runners]` keys, `--owner`, `--reviewer`,
+`--actor`, and `BTRAIN_AGENT` values starting with `gh-` are rejected. The
+defaults and runner keys are included because `getCollaborationAgentNames`
+and `getConfiguredAgentNames` fall back to them when `active` is empty, so a
+bot-prefixed name must not be able to enter the local roster through that
+path. A bot cannot claim, review, or resolve a lane. Outcomes that a bot's
+review produces (feedback, clear, merged, closed) are applied as `system`
+events whose details record `bot: <id>`; the bot is attributed in the event
+log without ever being an actor.
 
 ### FR-3: No id in both sets
 
@@ -144,6 +156,12 @@ when the lane merges.
 
 ## Relation to other specs
 
+Merge dependencies: spec 015 (PR #37) for the actor predicates `owner`,
+`reviewer`, `lane-agent`, `system`, and spec 017 (PR #36) for the `#<role>`
+suffix grammar. Until they merge, this spec relies on exactly those two
+contracts as stated here: local actor predicates are the four above, and
+`#<role>` is the only reserved suffix on a local id.
+
 - **Spec 002**: `[pr_flow]` configuration gains the prefix rule; the
   PR-flow states table is unchanged.
 - **Spec 015**: actor predicates apply to local ids only; `system` covers bot
@@ -169,8 +187,6 @@ when the lane merges.
 
 ## Open questions
 
-1. Should `--actor gh-codex` be rejected outright (FR-2) or accepted for
-   internal `system` events raised while applying a bot outcome, so the
-   event log can attribute the outcome to the bot?
-2. Should the FR-3 same-word check be an error or a warning during the
-   migration window?
+None open. Bot attribution is decided in FR-2 (system events carry
+`bot: <id>`; `--actor gh-<id>` is always rejected), and the single FR-3 rule
+makes the former migration-window question moot.
