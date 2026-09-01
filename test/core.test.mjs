@@ -6,6 +6,9 @@ import os from "node:os"
 import path from "node:path"
 import {
   DEFAULT_LOCK_TTL_MS,
+  acquireLocks,
+  getPrFlowConfig,
+  readProjectConfig,
   installGitHooks,
   isLockExpired,
   parseCsvList,
@@ -5896,5 +5899,408 @@ describe("claim publication is atomic with lock acquisition", () => {
       laneBLocks.length > 0,
       "the claim reported success, so a concurrent audited release must not have dropped its locks",
     )
+  })
+})
+
+// ──────────────────────────────────────────────
+// Managed hook drift detection
+// ──────────────────────────────────────────────
+
+describe("btrain doctor detects stale managed hooks", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("warns when an installed managed hook no longer matches the template", async () => {
+    // A managed hook is generated, so improving the template silently leaves
+    // every already-initialized repo running the old logic. Nothing detected
+    // that, so a repo ran an outdated pre-commit gate indefinitely.
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    const current = await fs.readFile(hookPath, "utf8")
+    assert.ok(current.includes("# btrain:pre-commit-hook"), "expected a managed hook marker")
+
+    const clean = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!/pre-commit.*differs/i.test(clean.stdout), `fresh install must not warn: ${clean.stdout}`)
+
+    // Simulate an older generated revision that still carries the marker.
+    await fs.writeFile(hookPath, "#!/bin/sh\n# btrain:pre-commit-hook\n# stale revision\nexit 0\n")
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(
+      stale.stdout,
+      /pre-commit/i,
+      "doctor must report the stale managed pre-commit hook",
+    )
+    assert.match(
+      stale.stdout,
+      /btrain hooks/,
+      "the warning must name `btrain hooks` as the fix",
+    )
+  })
+
+  it("covers every managed hook, not just pre-commit", async () => {
+    // Install and drift detection read one shared registry of managed hooks.
+    // Testing only pre-commit would let a hook be added to the installer and
+    // missed by drift detection without any test noticing.
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const current = await fs.readFile(hookPath, "utf8")
+    assert.ok(current.includes("# btrain:pre-push-hook"), "expected a managed pre-push marker")
+
+    await fs.writeFile(hookPath, "#!/bin/sh\n# btrain:pre-push-hook\n# stale revision\nexit 0\n")
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-push/i, "doctor must report the stale managed pre-push hook")
+
+    // Restore so the shared fixture stays clean for any later assertion.
+    await fs.writeFile(hookPath, current)
+  })
+
+  it("ignores a hook that does not carry the btrain marker", async () => {
+    // Hooks without our marker belong to the user. Reporting them as stale
+    // would tell people to overwrite their own work.
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const managed = await fs.readFile(hookPath, "utf8")
+    await fs.writeFile(hookPath, "#!/bin/sh\n# hand-written by the user\nexit 0\n")
+
+    const result = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(
+      !/pre-push.*differs/i.test(result.stdout),
+      `an unmarked hook is not btrain's to report: ${result.stdout}`,
+    )
+
+    await fs.writeFile(hookPath, managed)
+  })
+
+  it("warns when a managed hook is not executable", async () => {
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    const managed = await fs.readFile(hookPath, "utf8")
+    await fs.writeFile(hookPath, managed, { mode: 0o644 })
+    await fs.chmod(hookPath, 0o644)
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-commit/i, "doctor must report a non-executable managed hook")
+    assert.match(stale.stdout, /btrain hooks/, "the warning must name `btrain hooks` as the fix")
+
+    await fs.chmod(hookPath, 0o755)
+  })
+
+  it("judges executability for the invoking user, not any permission class", async (t) => {
+    // Mode 0655 (chmod u-x) keeps group/other execute bits, yet Git skips the
+    // hook for the owning user. A "(mode & 0o111) !== 0" check calls it
+    // healthy; an effective X_OK check does not. Root can execute anything,
+    // so this case only means something for an unprivileged uid.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      t.skip("running as root: X_OK is always granted")
+      return
+    }
+    // Earlier cases in this suite leave pre-commit with stale content; a
+    // content mismatch is reported first, so reinstall the managed hooks to
+    // isolate the permission check.
+    const reinstalled = await runBtrain(["hooks", "--repo", tmpDir], tmpDir)
+    assert.equal(reinstalled.code, 0, reinstalled.stderr)
+    const hookPath = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    await fs.chmod(hookPath, 0o655)
+
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-commit.*not executable/i, "0655 must be reported as not executable for the owner")
+
+    await fs.chmod(hookPath, 0o755)
+    const clean = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!/pre-commit.*not executable/i.test(clean.stdout), clean.stdout)
+  })
+})
+
+// ──────────────────────────────────────────────
+// Claim atomicity: rollback when publication fails
+// ──────────────────────────────────────────────
+
+describe("a failed claim publication leaves no locks behind", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("does not persist locks when the lane status cannot be published", async () => {
+    // Locks are written to the registry before the lane status is published.
+    // If publication fails, the lane ends up holding locks with no status
+    // that authorizes them — the exact state an audited release treats as
+    // stale, so its locks can then be dropped with no override.
+    await assert.rejects(
+      acquireLocks(tmpDir, "b", "Codex", ["src/b/"], {
+        publishInsideLock: async () => {
+          throw new Error("injected publication failure")
+        },
+      }),
+      /injected publication failure/,
+    )
+
+    const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneBLocks = registry.locks.filter((lock) => lock.lane === "b")
+    assert.equal(
+      laneBLocks.length,
+      0,
+      "a claim that could not publish its status must not leave its locks in the registry",
+    )
+  })
+
+  it("keeps the locks when the failure comes after the handoff was published", async () => {
+    // updateHandoff writes the handoff file, then appends the workflow event.
+    // A failure in the append happens after the commit point: the lane already
+    // says in-progress with these locked files. Rolling the registry back
+    // there would leave an active lane with an empty registry, and another
+    // lane could claim the same paths. The event log path is made a plain
+    // file so the append fails deterministically for any uid.
+    const eventsDir = path.join(tmpDir, ".btrain", "events")
+    await fs.rm(eventsDir, { recursive: true, force: true })
+    await fs.writeFile(eventsDir, "not a directory\n")
+
+    const claim = await runBtrain(
+      [
+        "handoff", "claim", "--repo", tmpDir, "--lane", "c",
+        "--task", "event append will fail", "--owner", "Codex", "--reviewer", "Claude",
+        "--files", "src/c/",
+      ],
+      tmpDir,
+    )
+    assert.notEqual(claim.code, 0, `claim must surface the event failure: ${claim.stdout}`)
+    assert.match(claim.stderr, /published but its workflow event could not be recorded/, claim.stderr)
+
+    const registry = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    const laneCLocks = registry.locks.filter((lock) => lock.lane === "c").map((lock) => lock.path)
+    assert.deepStrictEqual(laneCLocks, ["src/c/"], "the published lane keeps its registry locks")
+
+    const handoffC = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_C.md"), "utf8")
+    assert.match(handoffC, /^Status: in-progress$/m, "the handoff shows the published status")
+    assert.match(handoffC, /^Locked Files: src\/c\/$/m, "the handoff lists the locked files the registry holds")
+
+    await fs.rm(eventsDir, { force: true })
+    await fs.mkdir(eventsDir, { recursive: true })
+  })
+})
+
+// ──────────────────────────────────────────────
+// project.toml: hyphenated bare keys and table headers
+// ──────────────────────────────────────────────
+
+describe("project.toml parser accepts hyphens in bare keys and table headers", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    await fs.mkdir(path.join(tmpDir, ".btrain"), { recursive: true })
+    await fs.writeFile(
+      path.join(tmpDir, ".btrain", "project.toml"),
+      [
+        "[project]",
+        'name = "hyphen-keys"',
+        "",
+        "[pr_flow]",
+        "enabled = true",
+        'required_bots = ["gh-codex"]',
+        "",
+        "[pr_flow.bots.gh-codex]",
+        'aliases = ["chatgpt-codex-connector[bot]"]',
+        'request_body = "@codex review"',
+        'poll-hint = "hyphenated bare key"',
+        "",
+      ].join("\n"),
+    )
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("reads a [pr_flow.bots.gh-codex] table instead of falling back to defaults", async () => {
+    // TOML permits A-Za-z0-9_- in bare keys. The parser matched only
+    // [A-Za-z0-9_.] in table headers, so a hyphenated bot table was skipped
+    // and the bot silently reverted to default aliases and "@gh-codex review",
+    // which the real GitHub bot never answers (spec 018).
+    const config = await readProjectConfig(tmpDir)
+    const prFlow = getPrFlowConfig(config)
+    assert.deepStrictEqual(prFlow.requiredBots, ["gh-codex"])
+    assert.deepStrictEqual(prFlow.bots["gh-codex"].aliases, ["chatgpt-codex-connector[bot]"])
+    assert.equal(prFlow.bots["gh-codex"].requestBody, "@codex review")
+    assert.equal(config.pr_flow.bots["gh-codex"]["poll-hint"], "hyphenated bare key")
+  })
+})
+
+// ──────────────────────────────────────────────
+// core.hooksPath that disables hooks
+// ──────────────────────────────────────────────
+
+describe("an explicit core.hooksPath equal to the repository root is a valid hooks dir", () => {
+  it("installs there and doctor does not call the gates disabled", async () => {
+    // Git accepts absolute or relative core.hooksPath values and runs an
+    // executable root-level pre-commit. Only an EMPTY value or a non-directory
+    // target means "hooks off"; a root path that happens to equal the
+    // worktree root must not be misclassified as disabled.
+    const tmpDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", tmpDir])
+      const realRoot = await fs.realpath(tmpDir)
+      await exec("git", ["-C", tmpDir, "config", "core.hooksPath", realRoot])
+
+      const init = await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+      assert.equal(init.code, 0, init.stderr)
+      const rootHook = await fs.readFile(path.join(realRoot, "pre-commit"), "utf8")
+      assert.ok(rootHook.includes("# btrain:pre-commit-hook"), "managed hook must be installed at the configured root path")
+
+      const doctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+      assert.ok(!/disables git hooks/i.test(doctor.stdout), doctor.stdout)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+describe("core.hooksPath pathname expansion is honored", () => {
+  it("tests the path git expands, so ~/dir installs there and ~/file disables", async () => {
+    // Git expands `~` in core.hooksPath. Resolving the literal `~` under the
+    // repository root misclassifies both cases: a real ~/shared-hooks directory
+    // looks missing, and a ~/file target looks like a fresh directory to
+    // create, so doctor stays silent and `btrain hooks` later hits a raw
+    // filesystem error. HOME is redirected to the temp dir for the subprocess.
+    const tmpDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      const home = path.join(tmpDir, "home")
+      await fs.mkdir(path.join(home, "shared-hooks"), { recursive: true })
+      await fs.writeFile(path.join(home, "notdir"), "a file, not a hooks dir\n")
+      const repo = path.join(tmpDir, "repo")
+      await fs.mkdir(repo)
+      await exec("git", ["init", repo])
+      const env = { HOME: home }
+
+      await exec("git", ["-C", repo, "config", "core.hooksPath", "~/shared-hooks"])
+      const okInit = await runBtrain(["init", repo, "--hooks"], repo, env)
+      assert.equal(okInit.code, 0, okInit.stderr)
+      const installed = await fs.readFile(path.join(home, "shared-hooks", "pre-commit"), "utf8")
+      assert.ok(installed.includes("# btrain:pre-commit-hook"), "hook must land in the expanded ~/shared-hooks")
+      const okDoctor = await runBtrain(["doctor", "--repo", repo], repo, env)
+      assert.ok(!/disables git hooks/i.test(okDoctor.stdout), okDoctor.stdout)
+
+      await exec("git", ["-C", repo, "config", "core.hooksPath", "~/notdir"])
+      const badDoctor = await runBtrain(["doctor", "--repo", repo], repo, env)
+      assert.match(badDoctor.stdout, /core\.hooksPath.*disables git hooks/i, badDoctor.stdout)
+      const badHooks = await runBtrain(["hooks", "--repo", repo], repo, env)
+      assert.match(badHooks.stdout, /not installed.*core\.hooksPath/i, "btrain hooks must say the gate was not installed")
+      assert.equal(await fs.stat(path.join(home, "notdir")).then((s) => s.isFile()), true, "the file target is untouched")
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
+describe("managed hooks treat a disabling core.hooksPath as unavailable", () => {
+  const cases = [
+    { label: "empty value", value: "" },
+    { label: "/dev/null", value: "/dev/null" },
+  ]
+
+  for (const { label, value } of cases) {
+    it(`does not install into the worktree root or a device when core.hooksPath is ${label}`, async () => {
+      // An empty core.hooksPath makes `git rev-parse --git-path hooks` print
+      // "./", so joining hook filenames onto it writes executable pre-commit
+      // and pre-push files into the repository root that Git never runs;
+      // /dev/null used to surface as a raw EEXIST from mkdir. Both mean
+      // "hooks are off", and doctor must say so.
+      const tmpDir = await makeTmpDir()
+      try {
+        const { execFile } = await import("node:child_process")
+        const { promisify } = await import("node:util")
+        const exec = promisify(execFile)
+        await exec("git", ["init", tmpDir])
+        await exec("git", ["-C", tmpDir, "config", "core.hooksPath", value])
+
+        const init = await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+        assert.equal(init.code, 0, init.stderr)
+        for (const name of ["pre-commit", "pre-push"]) {
+          const atRoot = await fs.stat(path.join(tmpDir, name)).then(() => true, () => false)
+          assert.equal(atRoot, false, `${name} must not be written into the worktree root`)
+          const atDefault = await fs.readFile(path.join(tmpDir, ".git", "hooks", name), "utf8").catch(() => "")
+          assert.ok(!atDefault.includes("# btrain:"), `${name} must not be written into the ignored default dir`)
+        }
+
+        const doctor = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+        assert.match(doctor.stdout, /core\.hooksPath.*disables git hooks/i, doctor.stdout)
+
+        // `btrain hooks` must not report success while installing nothing.
+        const hooks = await runBtrain(["hooks", "--repo", tmpDir], tmpDir)
+        assert.match(hooks.stdout, /not installed.*core\.hooksPath disables git hooks/i, hooks.stdout)
+        assert.notEqual(hooks.code, 0, "btrain hooks should exit non-zero when no gate was installed")
+      } finally {
+        await rmDir(tmpDir)
+      }
+    })
+  }
+})
+
+// ──────────────────────────────────────────────
+// Managed hooks follow core.hooksPath
+// ──────────────────────────────────────────────
+
+describe("managed hooks honor core.hooksPath", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await exec("git", ["-C", tmpDir, "config", "core.hooksPath", ".githooks"])
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("installs into the directory git actually runs and detects drift there", async () => {
+    // Git documents .git/hooks as the default only; core.hooksPath moves it.
+    // Writing to .git/hooks in such a repo installs gates that never execute,
+    // and doctor then reports a healthy repo whose gates are dead.
+    const effectiveHook = path.join(tmpDir, ".githooks", "pre-commit")
+    const installed = await fs.readFile(effectiveHook, "utf8")
+    assert.ok(installed.includes("# btrain:pre-commit-hook"), "hook must be written under core.hooksPath")
+    const defaultHook = path.join(tmpDir, ".git", "hooks", "pre-commit")
+    const defaultContent = await fs.readFile(defaultHook, "utf8").catch(() => "")
+    assert.ok(!defaultContent.includes("# btrain:pre-commit-hook"), "nothing managed lands in the ignored default dir")
+
+    const clean = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.ok(!/pre-commit.*(differs|not executable)/i.test(clean.stdout), `fresh install must not warn: ${clean.stdout}`)
+
+    await fs.writeFile(effectiveHook, "#!/bin/sh\n# btrain:pre-commit-hook\n# stale revision\nexit 0\n")
+    const stale = await runBtrain(["doctor", "--repo", tmpDir], tmpDir)
+    assert.match(stale.stdout, /pre-commit.*differs/i, "doctor must inspect the hooks under core.hooksPath")
   })
 })

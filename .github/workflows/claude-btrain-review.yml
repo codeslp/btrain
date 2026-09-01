@@ -53,16 +53,23 @@ jobs:
                code-simplifier pass was performed (look for "code-simplifier passed"
                in verification lines).
 
-            4. **State-transition correctness**: If HANDOFF_*.md files are modified,
+            4. **Formal-impact evidence**: Classify the pull request as `none`,
+               `validation`, or `semantic` under spec 014. For `validation` or
+               `semantic`, confirm that the review evidence names the exact command,
+               source commit, verdict, duration, and result artifact. Treat a stale
+               pin, TLC counterexample, or `validation_mismatch` as FAIL. Treat
+               state-space exhaustion or unavailable tooling as WARN, not PASS.
+
+            5. **State-transition correctness**: If HANDOFF_*.md files are modified,
                verify the status transitions are valid per btrain's lane state machine:
                idle -> in-progress -> needs-review -> ready-for-pr -> pr-review ->
                ready-to-merge -> resolved.
 
-            5. **No hardcoded secrets**: Flag any hardcoded API keys, tokens, or
+            6. **No hardcoded secrets**: Flag any hardcoded API keys, tokens, or
                credentials. Check for patterns like API_KEY=, Bearer tokens, or
                .env file contents in the diff.
 
-            6. **Lock integrity**: If .btrain/locks.json is modified, verify the
+            7. **Lock integrity**: If .btrain/locks.json is modified, verify the
                changes are consistent with the lane state in HANDOFF files.
 
             Post your findings as a structured review comment with sections for each

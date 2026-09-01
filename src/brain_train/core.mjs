@@ -451,10 +451,72 @@ async function appendText(targetPath, content) {
   await fs.appendFile(targetPath, content, "utf8")
 }
 
+// core.hooksPath can also switch hooks OFF: an empty value makes Git resolve
+// the hooks dir to the worktree root ("./") while running nothing, and the
+// documented `/dev/null` points at a device. In both cases btrain must not
+// write executable pre-commit/pre-push files and must say the gates are
+// disabled instead of reporting a healthy repo. An explicit path (absolute or
+// relative, including one that equals the repository root) is a valid hooks
+// directory: Git documents both forms and runs hooks found there.
+async function gitHooksDisabledByConfig(repoRoot) {
+  let configured
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "config", "--get", "core.hooksPath"], {
+      cwd: repoRoot,
+    })
+    configured = stdout.replace(/\r?\n$/, "")
+  } catch {
+    return false // unset (exit 1) or git unavailable: not disabled by config
+  }
+  if (configured.trim() === "") {
+    return true
+  }
+  // Git applies its own pathname expansion to core.hooksPath (`~/shared-hooks`
+  // means $HOME/shared-hooks). Test the EFFECTIVE path Git reports, never the
+  // raw config value resolved under the repo root.
+  let effective
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "--git-path", "hooks"], {
+      cwd: repoRoot,
+    })
+    effective = path.resolve(repoRoot, stdout.trim())
+  } catch {
+    effective = path.resolve(repoRoot, configured.trim())
+  }
+  try {
+    const stats = await fs.stat(effective)
+    if (!stats.isDirectory()) {
+      return true // /dev/null, a regular file, or any non-directory target
+    }
+  } catch {
+    // does not exist yet: Git will look there once created; installable
+  }
+  return false
+}
+
 async function resolveGitHooksDir(repoRoot) {
   const gitEntryPath = path.join(repoRoot, ".git")
   if (!(await pathExists(gitEntryPath))) {
     return null
+  }
+
+  if (await gitHooksDisabledByConfig(repoRoot)) {
+    return null
+  }
+
+  // Git looks in .git/hooks only "by default": core.hooksPath and worktree
+  // layouts move the effective directory. Ask Git so install and drift
+  // detection inspect the hooks Git actually runs.
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "--git-path", "hooks"], {
+      cwd: repoRoot,
+    })
+    const effective = stdout.trim()
+    if (effective) {
+      return path.resolve(repoRoot, effective)
+    }
+  } catch {
+    // git missing or too old; fall through to the manual layout resolution.
   }
 
   const gitEntryStats = await fs.stat(gitEntryPath)
@@ -1156,7 +1218,19 @@ function getLocksLockfilePath(repoRoot) {
 // that authorizes them. Claim uses this: acquiring locks and publishing
 // in-progress were two phases, and an audited release landing between them
 // read an idle lane, skipped the override, and dropped the fresh locks.
-async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock } = {}) {
+// True when the lane's handoff file already carries the update that
+// `publishInsideLock` was asked to write. `lastUpdated` is unique per call, so
+// it is the commit marker of a publication.
+async function handoffPublished(handoffPath, lastUpdated) {
+  try {
+    const current = parseCurrentSection(await readText(handoffPath))
+    return Boolean(lastUpdated) && current.lastUpdated === lastUpdated
+  } catch {
+    return false
+  }
+}
+
+async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock, isPublished } = {}) {
   if (!files || files.length === 0) {
     // No locks to take, so there is no critical section to publish inside.
     if (publishInsideLock) await publishInsideLock()
@@ -1179,6 +1253,9 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock 
       })
     }
 
+    // Snapshot before mutating so a failed publication can be rolled back.
+    const priorLocks = [...registry.locks]
+
     // Remove existing locks for this lane first
     registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
 
@@ -1194,7 +1271,43 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock 
     }
 
     await writeLockRegistry(repoRoot, registry)
-    if (publishInsideLock) await publishInsideLock()
+
+    if (publishInsideLock) {
+      try {
+        await publishInsideLock()
+      } catch (publishError) {
+        // Publication writes the handoff file and then appends the workflow
+        // event. If the handoff already carries the update, the failure came
+        // after the commit point: the lane now says it holds these locks, so
+        // rolling the registry back would leave an active lane with an empty
+        // registry that another lane could claim. Keep the locks and report
+        // the event failure instead.
+        if (isPublished && (await isPublished())) {
+          const published = new BtrainError({
+            message: `Lane ${laneId} was published but its workflow event could not be recorded.`,
+            reason: publishError instanceof Error ? publishError.message : String(publishError),
+            fix: "Check that `.btrain/events/` is a writable directory, then run `btrain doctor` to confirm the lane and its locks agree.",
+            context: "The handoff file and the lock registry are consistent; only the event log entry is missing.",
+          })
+          published.cause = publishError
+          throw published
+        }
+        // The locks and the lane status must land together. Without this
+        // rollback a failed publication leaves the lane holding locks that
+        // no status authorizes, which an audited release then reads as
+        // stale coverage and drops with no override.
+        try {
+          await writeLockRegistry(repoRoot, { ...registry, locks: priorLocks })
+        } catch (rollbackError) {
+          // Report why publication failed, not why the cleanup failed. The
+          // rollback failure rides along so the registry can still be
+          // diagnosed.
+          publishError.cause = publishError.cause ?? rollbackError
+        }
+        throw publishError
+      }
+    }
+
     return registry.locks.filter((lock) => lock.lane === laneId)
   })
 }
@@ -1364,25 +1477,36 @@ function decorateLaneStates(laneStates, locks) {
   return (laneStates || []).map((laneState) => decorateLaneState(laneState, getLaneLocks(locks, laneState._laneId)))
 }
 
+// The one registry of btrain-managed hooks. Install and drift detection
+// both read it, so a new managed hook cannot be added to one and missed by
+// the other.
+function managedHookSpecs() {
+  return [
+    { key: "preCommit", filename: "pre-commit", marker: PRE_COMMIT_HOOK_MARKER, content: renderPreCommitHook() },
+    { key: "prePush", filename: "pre-push", marker: PRE_PUSH_HOOK_MARKER, content: renderPrePushHook() },
+  ]
+}
+
+function managedHookSpec(key) {
+  const spec = managedHookSpecs().find((hook) => hook.key === key)
+  if (!spec) throw new Error(`Unknown managed hook: ${key}`)
+  return spec
+}
+
 async function installPreCommitHook(repoRoot) {
-  return installManagedHook(repoRoot, {
-    filename: "pre-commit",
-    marker: PRE_COMMIT_HOOK_MARKER,
-    content: renderPreCommitHook(),
-  })
+  return installManagedHook(repoRoot, managedHookSpec("preCommit"))
 }
 
 async function installPrePushHook(repoRoot) {
-  return installManagedHook(repoRoot, {
-    filename: "pre-push",
-    marker: PRE_PUSH_HOOK_MARKER,
-    content: renderPrePushHook(),
-  })
+  return installManagedHook(repoRoot, managedHookSpec("prePush"))
 }
 
 async function installManagedHook(repoRoot, { filename, marker, content }) {
   const gitHooksDir = await resolveGitHooksDir(repoRoot)
   if (!gitHooksDir) {
+    if ((await pathExists(path.join(repoRoot, ".git"))) && (await gitHooksDisabledByConfig(repoRoot))) {
+      return { installed: false, reason: "hooks-disabled" }
+    }
     return { installed: false, reason: "not-a-git-repo" }
   }
 
@@ -1404,11 +1528,46 @@ async function installManagedHook(repoRoot, { filename, marker, content }) {
   return { installed: true, reason: "created" }
 }
 
-async function installGitHooks(repoRoot) {
-  return {
-    preCommit: await installPreCommitHook(repoRoot),
-    prePush: await installPrePushHook(repoRoot),
+// A managed hook is generated from a template, so improving the template
+// leaves every already-initialized repo silently running the old logic.
+// Compare what is installed against what we would write now. Hooks without
+// our marker belong to the user and are never reported.
+async function findStaleManagedHooks(repoRoot) {
+  const gitHooksDir = await resolveGitHooksDir(repoRoot)
+  if (!gitHooksDir) return []
+
+  const stale = []
+  for (const hook of managedHookSpecs()) {
+    const hookPath = path.join(gitHooksDir, hook.filename)
+    if (!(await pathExists(hookPath))) continue
+    const existing = await readText(hookPath)
+    if (!existing.includes(hook.marker)) continue
+    if (existing !== hook.content) {
+      stale.push({ filename: hook.filename, reason: "content" })
+      continue
+    }
+    // Git ignores a hook the invoking user cannot execute ("was ignored
+    // because it's not set as executable"), so a byte-identical hook can
+    // still be dead. Check effective X_OK for this user rather than whether
+    // any permission class carries an execute bit: mode 0655 after
+    // `chmod u-x` has group/other execute and is still skipped by Git.
+    if (process.platform !== "win32") {
+      try {
+        await fs.access(hookPath, fs.constants.X_OK)
+      } catch {
+        stale.push({ filename: hook.filename, reason: "not-executable" })
+      }
+    }
   }
+  return stale
+}
+
+async function installGitHooks(repoRoot) {
+  const results = {}
+  for (const hook of managedHookSpecs()) {
+    results[hook.key] = await installManagedHook(repoRoot, hook)
+  }
+  return results
 }
 
 function renderHandoffTemplate(repoName) {
@@ -5096,7 +5255,10 @@ async function claimHandoff(repoRoot, options) {
       },
       )
     }
-    await acquireLocks(repoRoot, laneId, options.owner, files, { publishInsideLock: publishClaim })
+    await acquireLocks(repoRoot, laneId, options.owner, files, {
+      publishInsideLock: publishClaim,
+      isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
+    })
     await compactHandoffHistory(repoRoot, { config, laneId, actorLabel: options.owner })
     return result
   }
@@ -5383,7 +5545,10 @@ async function patchHandoff(repoRoot, options) {
         const publishUpdate = async () => {
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
-        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, { publishInsideLock: publishUpdate })
+        await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
+          publishInsideLock: publishUpdate,
+          isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
+        })
       } else {
         updatedCurrent = await updateHandoff(...updateHandoffArgs)
       }
@@ -6271,14 +6436,17 @@ function parseProjectToml(content) {
       continue
     }
 
-    const sectionMatch = /^\[([A-Za-z0-9_.]+)\]$/.exec(trimmed)
+    // TOML bare keys allow A-Za-z0-9_- (hyphen included). Bot ids such as
+    // gh-codex live in table headers, so a header regex without "-" silently
+    // skips the table and the bot falls back to default aliases.
+    const sectionMatch = /^\[([A-Za-z0-9_.-]+)\]$/.exec(trimmed)
     if (sectionMatch) {
       currentSection = sectionMatch[1].split(".").filter(Boolean)
       ensureTomlSection(result, currentSection)
       continue
     }
 
-    const entryMatch = /^("(?:[^"\\]|\\.)+"|[A-Za-z0-9_]+)\s*=\s*(.+)$/.exec(trimmed)
+    const entryMatch = /^("(?:[^"\\]|\\.)+"|[A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(trimmed)
     if (!entryMatch) {
       continue
     }
@@ -9397,6 +9565,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     ? activeOverrides.filter((record) => record.scope !== "lane" || record.laneId === scopedLane)
     : activeOverrides
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
+  const staleHooks = await findStaleManagedHooks(repoRoot)
   const cgraph = await getDoctorCgraphSummary(repoRoot, config)
 
   if (!(await pathExists(repoRoot))) {
@@ -9407,6 +9576,19 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
       issues,
       warnings,
     }
+  }
+
+  if ((await pathExists(path.join(repoRoot, ".git"))) && (await gitHooksDisabledByConfig(repoRoot))) {
+    warnings.push(
+      "`core.hooksPath` disables git hooks for this repository, so btrain's pre-commit and pre-push gates never run. Unset it (`git config --unset core.hooksPath`) or point it at a directory, then run `btrain hooks`.",
+    )
+  }
+  for (const hook of staleHooks) {
+    warnings.push(
+      hook.reason === "not-executable"
+        ? `\`${hook.filename}\` hook is not executable, so git skips it. Run \`btrain hooks\`.`
+        : `\`${hook.filename}\` hook differs from the managed btrain template. Run \`btrain hooks\`.`,
+    )
   }
 
   if (!(await pathExists(repoPaths.projectTomlPath))) {

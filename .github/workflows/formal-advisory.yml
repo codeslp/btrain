@@ -1,0 +1,146 @@
+name: Formal verification advisory
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-advisory-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  formal-advisory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Select affected formal checks
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          FORMAL_IMPACT=auto
+          if grep -Fqx 'Formal impact: no-semantic' <<< "$PR_BODY"; then
+            FORMAL_IMPACT=no-semantic
+          fi
+          if ! node scripts/formal_advisory.mjs \
+              --classify-only \
+              --base "$BASE_SHA" \
+              --head "$HEAD_SHA" \
+              --impact "$FORMAL_IMPACT" \
+              --output "$RUNNER_TEMP/formal-selection.json"; then
+            jq -n \
+              --arg base "$BASE_SHA" \
+              --arg head "$HEAD_SHA" \
+              '{schemaVersion: 1, advisory: true, base: $base, head: $head,
+                changedFiles: [],
+                selection: {impact: "unknown", pin: false, tlc: false, harness: false, formalSurface: false},
+                checks: [{name: "selection", verdict: "infrastructure_failure", durationMs: 0, command: "node scripts/formal_advisory.mjs --classify-only"}],
+                verdict: "infrastructure_failure", exitCode: 2}' \
+              > "$RUNNER_TEMP/formal-selection.json"
+          fi
+          echo "needs_harness=$(jq -r '.selection.harness' "$RUNNER_TEMP/formal-selection.json")" >> "$GITHUB_OUTPUT"
+          echo "needs_tlc=$(jq -r '.selection.tlc' "$RUNNER_TEMP/formal-selection.json")" >> "$GITHUB_OUTPUT"
+          echo "formal_surface=$(jq -r '.selection.formalSurface' "$RUNNER_TEMP/formal-selection.json")" >> "$GITHUB_OUTPUT"
+          echo "formal_impact=$FORMAL_IMPACT" >> "$GITHUB_OUTPUT"
+
+      - name: Install project dependencies
+        if: steps.select.outputs.needs_harness == 'true'
+        continue-on-error: true
+        run: npm ci
+
+      - name: Set up Java
+        if: steps.select.outputs.needs_tlc == 'true' && hashFiles('specs/tla/*.tla') != ''
+        continue-on-error: true
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install the pinned TLC tool
+        if: steps.select.outputs.needs_tlc == 'true' && hashFiles('specs/tla/*.tla') != ''
+        continue-on-error: true
+        env:
+          TLC_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          TLC_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+        run: |
+          curl --fail --location --silent --show-error "$TLC_URL" --output "$RUNNER_TEMP/tla2tools.jar"
+          echo "$TLC_SHA256  $RUNNER_TEMP/tla2tools.jar" | sha256sum --check
+
+      - name: Run affected formal checks
+        id: formal
+        if: steps.select.outputs.formal_surface == 'true'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FORMAL_IMPACT: ${{ steps.select.outputs.formal_impact }}
+          TLC_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          set +e
+          node scripts/formal_advisory.mjs \
+              --base "$BASE_SHA" \
+              --head "$HEAD_SHA" \
+              --impact "$FORMAL_IMPACT" \
+              --output "$RUNNER_TEMP/formal-advisory.json"
+          status=$?
+          if [[ ! -f "$RUNNER_TEMP/formal-advisory.json" ]]; then
+            jq -n \
+              --arg base "$BASE_SHA" \
+              --arg head "$HEAD_SHA" \
+              '{schemaVersion: 1, advisory: true, base: $base, head: $head,
+                changedFiles: [],
+                selection: {impact: "unknown", pin: false, tlc: false, harness: false, formalSurface: true},
+                checks: [{name: "runner", verdict: "infrastructure_failure", durationMs: 0, command: "node scripts/formal_advisory.mjs"}],
+                verdict: "infrastructure_failure", exitCode: 2}' \
+              > "$RUNNER_TEMP/formal-advisory.json"
+          fi
+          exit "$status"
+
+      - name: Record the no-op reason
+        if: steps.select.outputs.formal_surface != 'true'
+        run: cp "$RUNNER_TEMP/formal-selection.json" "$RUNNER_TEMP/formal-advisory.json"
+
+      - name: Publish the advisory summary
+        if: always()
+        run: |
+          result="$RUNNER_TEMP/formal-advisory.json"
+          echo "## Formal verification advisory" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Exact head: \`$(jq -r '.head' "$result")\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Formal impact: \`$(jq -r '.selection.impact' "$result")\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verdict: \`$(jq -r '.verdict' "$result")\` (advisory)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Verdict | Duration (ms) | Peak RSS (KiB) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | ---: | ---: |" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.checks[] | "| \(.name) | \(.verdict) | \(.durationMs) | \(.peakRssKb // "n/a") |"' "$result" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$(jq -r '.verdict' "$result")" == "no_formal_surface" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No modeled prose, TLA+, formal harness, or modeled runtime file changed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the formal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-advisory-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/formal-advisory.json
+          if-no-files-found: error
+          retention-days: 30
