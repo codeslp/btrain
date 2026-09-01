@@ -466,6 +466,8 @@ function runSelfTest() {
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github", "workflows", "formal-advisory.yml"), "utf8")
   assert.match(workflow, /Peak RSS \(KiB\)/)
   assert.match(workflow, /types: \[opened, synchronize, reopened, edited\]/)
+  assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
+  assert.match(workflow, /FORMAL_IMPACT: \$\{\{ steps\.select\.outputs\.formal_impact \}\}/)
   process.stdout.write("formal_advisory self-test passed\n")
 }
 

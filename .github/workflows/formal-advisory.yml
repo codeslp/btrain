@@ -31,8 +31,12 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          FORMAL_IMPACT: ${{ contains(github.event.pull_request.body, 'Formal impact: no-semantic') && 'no-semantic' || 'auto' }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
+          FORMAL_IMPACT=auto
+          if grep -Fqx 'Formal impact: no-semantic' <<< "$PR_BODY"; then
+            FORMAL_IMPACT=no-semantic
+          fi
           if ! node scripts/formal_advisory.mjs \
               --classify-only \
               --base "$BASE_SHA" \
@@ -52,6 +56,7 @@ jobs:
           echo "needs_harness=$(jq -r '.selection.harness' "$RUNNER_TEMP/formal-selection.json")" >> "$GITHUB_OUTPUT"
           echo "needs_tlc=$(jq -r '.selection.tlc' "$RUNNER_TEMP/formal-selection.json")" >> "$GITHUB_OUTPUT"
           echo "formal_surface=$(jq -r '.selection.formalSurface' "$RUNNER_TEMP/formal-selection.json")" >> "$GITHUB_OUTPUT"
+          echo "formal_impact=$FORMAL_IMPACT" >> "$GITHUB_OUTPUT"
 
       - name: Install project dependencies
         if: steps.select.outputs.needs_harness == 'true'
@@ -83,7 +88,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          FORMAL_IMPACT: ${{ contains(github.event.pull_request.body, 'Formal impact: no-semantic') && 'no-semantic' || 'auto' }}
+          FORMAL_IMPACT: ${{ steps.select.outputs.formal_impact }}
           TLC_JAR: ${{ runner.temp }}/tla2tools.jar
         run: |
           set +e
