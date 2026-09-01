@@ -4,6 +4,7 @@
 **Version**: 0.1.0
 **Author**: btrain
 **Date**: 2026-04-04
+**Updated**: 2026-09-01 (FR-29 added)
 
 ## Summary
 
@@ -393,6 +394,25 @@ History compaction should run primarily on lane lifecycle transitions such as:
 - other safe handoff-boundary transitions
 
 The watchdog may also run periodic cleanup as a backstop when transition-based cleanup was missed or state drift accumulated.
+
+### FR-29: `repair-needed` transitions
+
+Spec 014 designated the legal `repair-needed` transitions provisionally for its first model. This requirement adopts that designation as spec 006 prose and adds one exit.
+
+Entry: a lane enters `repair-needed` only from an active lane status (`in-progress`, `needs-review`, `changes-requested`, `ready-for-pr`, `pr-review`, `ready-to-merge`), and only for a workflow-integrity failure with a reason code from the `repair-needed` taxonomy. Entry from `idle` or `resolved` is invalid. Each entry counts against the FR-18 budget.
+
+Exit to `in-progress`: the responsible repair actor (FR-7, FR-15) clears the repair and same-lane work continues. The lane's locks are retained (FR-20).
+
+Exit to `resolved`: a terminal disposition, legal only when one of two conditions holds:
+
+- the FR-18 escalation has already fired for this lane, so a human has decided the lane will not continue, or
+- the resolve is carried out through the FR-2c/FR-2d audited override, with the human confirmation recorded in canonical workflow history.
+
+Terminal `resolved` releases the lane's locks, as spec 002 specifies. A plain `btrain handoff resolve` on a `repair-needed` lane that meets neither condition must be rejected with guidance to clear the repair first or to request an override.
+
+No other exit is legal. A lane must not move from `repair-needed` directly to `needs-review`, `changes-requested`, or any PR-flow status.
+
+Designated 2026-09-01 for ledger finding 11 in `test/formal/README.md`; see spec 015. Spec 014's Normative-source prerequisite should point here once its pinned section reopens.
 
 ## Edge Case Categories
 

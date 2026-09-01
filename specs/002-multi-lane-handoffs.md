@@ -4,9 +4,9 @@
 **Version**: 1.1.2
 **Author**: btrain
 **Date**: 2026-03-15
-**Updated**: 2026-08-31
+**Updated**: 2026-09-01
 
-The multi-lane lock baseline through v1.1.1 is implemented. Version 1.1.2 is the designated contract, including close-without-merge as terminal `resolved` and audited force-release. Those two paths remain CLI drift and are not yet delivered.
+The multi-lane lock baseline through v1.1.1 is implemented. Version 1.1.2 is the designated contract, including close-without-merge as terminal `resolved` and audited force-release. Both paths, and the `--final` review bypass, were repaired in PR #33 (merged 2026-09-01). The drift notes that remain inside the sections pinned by `specs/tla/LaneLock.tla` are kept verbatim until that model's pin is refreshed; read them as history, not as open drift.
 
 ## Summary
 
@@ -84,11 +84,11 @@ Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-neede
 
 `--final` marks a resolve as terminal: the lane becomes `resolved` and locks release. It does not enter `ready-for-pr`.
 
-In a PR-flow-enabled repository this is not a reviewer bypass of local approval. From `needs-review`, the assigned reviewer uses plain `handoff resolve` (no `--final`) to enter `ready-for-pr` with locks retained. `--final` from `needs-review` or from any PR-flow status (`ready-for-pr`, `pr-review`, `ready-to-merge`) is implementation drift and a candidate counterexample.
+In a PR-flow-enabled repository this is not a reviewer bypass of local approval. From `needs-review`, the assigned reviewer uses plain `handoff resolve` (no `--final`) to enter `ready-for-pr` with locks retained. `--final` from `needs-review` or from any PR-flow status (`ready-for-pr`, `pr-review`, `ready-to-merge`) is rejected. Earlier CLI versions honored it; that was implementation drift, repaired in PR #33.
 
 `--final` is valid only when terminal `resolved` is already the designated next status: in repositories without PR-flow, where resolve is terminal, or as the explicit terminal disposition after merge or close handling. The actor is the same as for that terminal resolve.
 
-Current `resolveHandoff` honoring `--final` from `needs-review` in this PR-flow repository (`src/brain_train/core.mjs`) is drift, not the contract.
+`resolveHandoff` (`src/brain_train/core.mjs`) enforces this since PR #33: with `[pr_flow].enabled`, `--final` from `needs-review` or a PR-flow status fails unless the resolve is the internal PR-outcome path. The `test/formal/` harness carries a regression witness for it.
 
 ### Force-release override
 
