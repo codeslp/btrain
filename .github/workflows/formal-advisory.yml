@@ -130,7 +130,7 @@ jobs:
           echo "| Check | Verdict | Duration (ms) | Peak RSS (KiB) |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- | ---: | ---: |" >> "$GITHUB_STEP_SUMMARY"
           jq -r '.checks[] | "| \(.name) | \(.verdict) | \(.durationMs) | \(.peakRssKb // "n/a") |"' "$result" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$(jq -r '.selection.formalSurface' "$result")" != "true" ]]; then
+          if [[ "$(jq -r '.verdict' "$result")" == "no_formal_surface" ]]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "No modeled prose, TLA+, formal harness, or modeled runtime file changed." >> "$GITHUB_STEP_SUMMARY"
           fi
