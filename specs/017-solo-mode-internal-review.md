@@ -16,7 +16,19 @@ waived one.
 
 Solo mode is a routing change, not a protocol change. Nothing about what a
 handoff must contain, what a reviewer must check, when locks release, or how a
-PR terminates a lane is relaxed. The only thing that changes is who is asked.
+PR terminates a lane is relaxed. What changes is who is asked, and one
+governing rule changes with it, explicitly: btrain's handoff gate today says
+"one model writes, the other reviews" (`CLAUDE.md`, Handoff Gate). Solo mode
+migrates that rule to "one context writes, a different context reviews, with a
+different model preferred". While solo mode is on, the same model may fill
+both roles only when no other model family or human is available (FR-9), and
+every such review is labeled so the weaker guarantee is visible. This is a
+declared, time-boxed exception with an audit trail, not a reinterpretation of
+the existing rule.
+
+Dependencies: rows and invariants cited below live in spec 015 (PR #37) and
+`specs/tla/LaneLock.tla` (PR #35). Until those merge, the references point
+at the PRs; this spec does not merge before them.
 
 What is not being done: no new statuses, no new lock semantics, no change to
 the transition rules in spec 015, no change to the formal model's invariants.
@@ -85,10 +97,14 @@ explicit, auditable, and reversible.
    unavailable, the operator edits `required_bots` deliberately; solo mode
    does not do it for them.
 
-7. **Expiry.** When `until` passes, solo mode turns off. Lanes whose reviewer
-   is a `#review` identity keep working until they resolve; new claims go
-   back to inferring a distinct configured agent. `btrain doctor` warns while
-   solo mode is on and reports how many lanes were reviewed under it.
+7. **Expiry.** When `until` passes, solo mode stops assigning `#review`
+   identities to new claims and new handoffs; new claims infer a distinct
+   configured agent again. Lanes already assigned a `#review` reviewer are
+   grandfathered: `resolveVerifiedActor` keeps accepting that identity for
+   those lanes until each resolves, and the runner map keeps resolving it, so
+   an active lane never loses its reviewer or its locks at expiry. `btrain
+   doctor` warns while solo mode is on, lists grandfathered lanes after it
+   ends, and reports how many lanes were reviewed under it.
 
 ## Functional Requirements
 
@@ -102,7 +118,9 @@ Solo mode never turns itself on.
 
 The reviewer subagent acts as `<runtime>#review`. Every owner/reviewer
 separation check compares identity strings and therefore holds. Runner
-resolution maps `<runtime>#review` to the same runner as `<runtime>`.
+resolution maps `<runtime>#review` to the same runner as `<runtime>`. A
+`#review` identity assigned to a lane while solo mode was on stays valid for
+that lane after solo mode ends (grandfathering); only new assignments stop.
 
 ### FR-3: Fresh context
 
@@ -141,6 +159,16 @@ Spec 014 formal impact for enabling solo mode: none. Formal impact for FR-6
 spec 015 row 20 (Reassign) is undesignated; FR-6 designates it for solo mode
 only.
 
+### FR-9: Different model first
+
+When solo mode assigns a reviewer, it tries, in order: a configured agent of
+a different model family whose runner is available; a human reviewer through
+the `notify` runner when one is configured; and only then the same-runtime
+`#review` subagent. The tier that applied is recorded on the lane and in the
+workflow event, and rendered as `review tier: other-model | human |
+same-model`. A same-model review is the explicit exception this spec
+declares; it is never silent.
+
 ### FR-8: Rate and budget guard
 
 The reviewer subagent runs under the same `btrain loop` timeout and round
@@ -169,8 +197,15 @@ runtime also runs out of budget, the dispatch fails as `tool_unavailable`
   the fresh-process requirement.
 - **Spec 014**: no new invariants. `adopt` is a semantic-impact change to the
   Reassign row and follows prose, model, code.
-- **Spec 015**: rows 2 through 5 apply unchanged with suffixed identities.
-  Row 20 (Reassign) gets its first designated case from FR-6.
+- **Spec 015** (PR #37, unmerged at the time of writing): rows 2 through 5
+  apply unchanged with suffixed identities. Row 20 (Reassign) gets its first
+  designated case from FR-6.
+- **`LaneLock.tla`** (PR #35, unmerged at the time of writing): the
+  `ReviewerSeparation` invariant compares agent identities; `#review` is one
+  more element of `Agents`.
+- **`CLAUDE.md` Handoff Gate**: the sentence "One model writes, the other
+  reviews" gains the solo-mode exception described in the Decision. That edit
+  ships with the implementation lane, not with this spec.
 
 ## Acceptance Criteria
 
