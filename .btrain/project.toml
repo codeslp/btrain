@@ -39,13 +39,13 @@ handoff_path = ".claude/collab/HANDOFF_F.md"
 [pr_flow]
 enabled = true
 base = "main"
-required_bots = ["codex"]
+required_bots = ["gh-codex"]
 
-[pr_flow.bots.codex]
+[pr_flow.bots.gh-codex]
 aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
 request_body = "@codex review"
 
-[pr_flow.bots.unblocked]
+[pr_flow.bots.gh-unblocked]
 aliases = ["unblocked[bot]", "unblocked"]
 request_body = "@unblocked review again"
 
