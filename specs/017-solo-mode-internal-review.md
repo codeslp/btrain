@@ -21,7 +21,7 @@ that changes, explicitly and only while solo mode is on: btrain's handoff gate t
 "one model writes, the other reviews" (`CLAUDE.md`, Handoff Gate). Solo mode
 migrates that rule to "one context writes, a different context reviews, with a
 different model preferred". While solo mode is on, the same model may fill
-both roles only when no other model family or human is available (FR-9), and
+both roles only when no other model family or human is available (FR-8), and
 every such review is labeled so the weaker guarantee is visible. The
 same-model tier is last and labeled because it gives something up: a
 different model brings decorrelated blind spots (training, tool habits, the
@@ -103,7 +103,8 @@ auditable, and reversible when only the last tier is left.
    ends with `handoff resolve` or `handoff request-changes` under its own
    identity. Both commands record `mode: solo` in the event. Every gate that
    applies to a peer reviewer applies to the subagent: reviewer context must
-   be complete, the diff must be real, the reviewer must not be the owner.
+   be complete, the diff must be real, and the reviewer must not be the owner
+   wherever that check exists today (see the prerequisite in the Decision).
 
 6. **PR flow.** Unchanged. The GitHub bot list in `[pr_flow].required_bots`
    is not touched by solo mode. If a required bot is the runtime that is
@@ -194,7 +195,7 @@ identity.
 
 `btrain solo adopt --lane <id>` reassigns a lane whose owner or reviewer is an
 unavailable runtime: the owner becomes the available runtime, the reviewer is
-chosen by the same FR-9 preference order a claim uses (a different model
+chosen by the same FR-8 preference order a claim uses (a different model
 family first, then an opted-in human, then `<runtime>#review`), locks
 re-register under the new owner, and the event records the previous roles and
 the review tier that applied.
@@ -204,17 +205,21 @@ the review tier that applied.
 `LaneLock.tla` and `lane-lock-model.mjs` treat identities as opaque agents. A
 `#review` identity is one more element of `Agents`. No invariant changes.
 Spec 014 formal impact for enabling solo mode: none. Formal impact for FR-6
-(`adopt` changes owner and reviewer of an active lane): semantic, because
-spec 015 row 20 (Reassign) is undesignated; FR-6 designates it for solo mode
-only.
+(`adopt` changes owner and reviewer of an active lane) and for FR-8 tier
+fall-through (the system changes a lane's reviewer after a probe failure,
+`tool_unavailable`, or a human timeout): semantic, because spec 015 row 20
+(Reassign) is undesignated. This spec designates row 20 for exactly those two
+cases: actor `lane-agent` for `adopt`, actor `system` with the reason recorded
+for fall-through. Both are explicit reassignments in the sense of spec 005
+FR-5, which otherwise preserves the reviewer identity.
 
-### FR-9: Different model first
+### FR-8: Different model first
 
 When solo mode assigns a reviewer, it tries tiers in order and records which
 one applied on the lane and in the workflow event, rendered as `review tier:
 other-model | human | same-model`:
 
-1. A configured agent of a different model family (FR-10) whose runner is
+1. A configured agent of a different model family (FR-9) whose runner is
    operationally available.
 2. A human, only when the repository opts in with `[solo].human_reviewer =
    "<agent with a notify runner>"`. A `notify` runner executes nothing and can
@@ -243,16 +248,16 @@ is unavailable the lane stays `needs-review` with a `no reviewer available`
 warning in `btrain handoff` and `btrain doctor`, and new claims still succeed
 with the reviewer marked `pending`; nothing is silently approved.
 
-### FR-10: Model family is configured, not inferred from names
+### FR-9: Model family is configured, not inferred from names
 
-FR-9 compares model families, so btrain needs a trustworthy source for them.
+FR-8 compares model families, so btrain needs a trustworthy source for them.
 Each configured agent's family comes from, in order: an explicit
 `[agents.families]` entry, else the basename of the executable in its
 `[agents.runners]` value only when that basename is a known runtime
 (`claude`, `codex`, `gemini`). A wrapper or launcher (`npx codex`,
 `env ... codex`, a shell script) yields no family, and `btrain doctor` errors
 until `[agents.families]` names it explicitly; the agent name is never used as
-a family. Two identities with the same family are the same model for FR-9
+a family. Two identities with the same family are the same model for FR-8
 even when their names differ. Example: a repository that configures an agent
 named `GPT` with runner `codex` (the scaffold heuristic
 `inferDefaultAgentRunner` produces exactly that) has `GPT` in the `codex`
@@ -260,12 +265,21 @@ family, so `GPT` and `codex` are never each other's other-model reviewer. A
 `notify` runner has family `human`. `btrain doctor` lists the resolved family
 of every configured agent so an operator can see and correct the mapping.
 
-### FR-11: Rate and budget guard
+### FR-10: Rate and budget guard
 
 The reviewer subagent runs under the same `btrain loop` timeout and round
-budget as a peer reviewer. Solo mode does not add rounds. If the available
-runtime also runs out of budget, the dispatch fails as `tool_unavailable`
-(spec 014 failure classes) and the lane stays `needs-review`.
+budget as a peer reviewer. Solo mode does not add rounds. If the last tier
+also runs out of budget, the dispatch is classified `tool_unavailable` (FR-8)
+and the lane stays `needs-review` with the `no reviewer available` warning
+until a tier recovers or `btrain solo retry` succeeds.
+
+A second `request-changes` on the same lane under the same-model tier is an
+escalation, not a third round: when `[solo].human_reviewer` is set the lane is
+reassigned to that human (`review tier: human`); when it is not, the lane stays
+`needs-review` with an `escalation required` warning in `btrain handoff` and
+`btrain doctor`, and a third same-model dispatch is blocked until an operator
+runs `btrain solo adopt --lane <id>` or `btrain solo retry`. One model does not
+argue with itself indefinitely.
 
 ## Non-Goals
 
@@ -284,8 +298,9 @@ runtime also runs out of budget, the dispatch fails as `tool_unavailable`
   registry write path so the owner label on locks follows the new owner.
 - **Spec 005**: `changes-requested` routing is untouched; the writer is still
   the owner identity, the reviewer is still the `#review` identity.
-- **Spec 007**: reviewer dispatch gains the identity environment variable and
-  the fresh-process requirement.
+- **Reviewer dispatch** (`dispatchNeedsReviewReviewer` in `core.mjs`; routing
+  per spec 005 FR-11): gains the identity environment variable, the
+  per-runner fresh-session normalization, and the environment allowlist.
 - **Spec 014**: no new invariants. `adopt` is a semantic-impact change to the
   Reassign row and follows prose, model, code.
 - **Spec 015** (PR #37, unmerged at the time of writing): rows 2 through 5
@@ -308,9 +323,10 @@ runtime also runs out of budget, the dispatch fails as `tool_unavailable`
   the request-changes reviewer check, PR-flow lock retention, and every spec
   015 row.
 - `canonicalizeAgentName` treats `claude` and `claude#review` as distinct
-  (case-insensitive compare), and `getAgentRunnerValue` resolves the reviewer
-  runner for `claude#review` to the normalized `claude` runner with the fresh
-  flag added and no reject flag present. Both are unit tests.
+  (case-insensitive compare); the runner lookup strips the `#review` suffix and
+  returns the base `claude` runner value; and `normalizeLoopCliRunner` for a
+  `#review` identity yields the per-runner fresh flag with no reject flag
+  present. All three are unit tests.
 - A dispatch whose runner exits with a configured quota or auth signal is
   recorded `tool_unavailable` and the next tier is tried within the same
   handoff.
@@ -322,7 +338,7 @@ runtime also runs out of budget, the dispatch fails as `tool_unavailable`
 ## Open questions
 
 Decided in this revision: a second `request-changes` under the same-model
-tier escalates to a human (FR-11); solo mode is per repository, with
+tier escalates to a human (FR-10); solo mode is per repository, with
 `solo adopt` acting per lane, and a per-lane toggle is out of scope for the
 first version.
 
