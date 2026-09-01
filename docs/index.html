@@ -383,7 +383,7 @@ btrain-chat status</code></pre>
       <div class="security-grid">
         <div class="security-item">
           <h3>&#128737; Catches rule-breaking when run</h3>
-          <p>An opt-in test harness generates random workflow sequences &mdash; agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can produce. Each step is compared against the written rules. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; the test fails. The harness runs on demand today (<code>npm run test:formal</code>). It is not yet a required pre-merge gate: CI integration is planned but not merged, so a change can ship without it having run unless the author runs it.</p>
+          <p>An opt-in test harness generates random workflow sequences &mdash; agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can produce. Each step is compared against the written rules. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; the test fails. The harness runs on demand today (<code>npm run test:formal</code>). It is not yet a required pre-merge gate: a CI job runs it on every pull request that touches the covered code and posts the result, but the result is advisory. A red run does not block the merge, and a pull request that touches none of the covered files does not run it at all.</p>
         </div>
         <div class="security-item">
           <h3>&#128027; Real gaps it surfaced</h3>
@@ -398,7 +398,7 @@ btrain-chat status</code></pre>
               <tr><td>Dropping another lane's file locks needed no audited sign-off</td><td>Repaired &mdash; regression test in place</td></tr>
             </tbody>
           </table>
-          <p style="font-size:0.85rem; color: var(--text-muted);">Further candidate findings are still open, waiting on decisions about which side should change &mdash; the code or the rule. They hold <code>npm run test:formal</code> red on purpose, so they cannot be quietly forgotten. A stale test double also failed one check; its fix is in PR #34. The open candidates are listed in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger" style="color: var(--accent, #7c3aed);">full findings ledger</a>.</p>
+          <p style="font-size:0.85rem; color: var(--text-muted);">Further candidate findings are still open, waiting on decisions about which side should change &mdash; the code or the rule. They hold <code>npm run test:formal</code> red on purpose, so they cannot be quietly forgotten. The test's own copy of expected behavior had also gone stale and failed one check; its fix is in PR #34. The open candidates are listed in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger" style="color: var(--accent, #7c3aed);">full findings ledger</a>.</p>
         </div>
         <div class="security-item">
           <h3>&#127922; Every failure comes with a recipe</h3>

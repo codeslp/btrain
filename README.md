@@ -317,7 +317,7 @@ btrain rejects `needs-review` transitions with placeholder context or empty diff
 
 ---
 
-## Verified Coordination Rules
+## Machine-Checked Coordination Rules (pilot)
 
 btrain's coordination rules — who may move a lane, when files stay locked,
 and when locks release — are written down as a precise contract and checked
@@ -328,20 +328,20 @@ by machines in two ways.
 checks rules that must always hold: no two lanes ever lock the same files,
 locks never outlive their lane, review always involves a second agent, and
 no lane reaches the pull-request stage without a peer approval. The model
-passes against a deliberately small configuration. The full rule list lives
-in `specs/tla/LaneLock.cfg` and the latest verified run is cached beside the
-model, so no counts are restated here to drift. It merges into `specs/tla/`
-with the phase 1 work.
+passes against a deliberately small configuration. The full rule list will
+live in `specs/tla/LaneLock.cfg`, with the latest verified run cached beside
+the model (both arrive with PR #35), so no counts are restated here to drift.
 
 **Code checking** (available now). A test harness generates random workflow
 sequences (claims, reviews, PR outcomes, repairs), runs them against the
-real btrain code, and compares every step with the contract. A difference no
-ledger entry explains is shrunk to a minimal command sequence and reported
-with a seed and a trace that replay it exactly. Differences already listed as
-open candidates are counted by label instead, so they stay visible without
-failing the run that found them. This is how the rules stay enforced as the
-code changes: a new regression against the contract fails a test instead of
-shipping quietly.
+real btrain code, and compares every step with the contract. A difference
+that is not already on the list of known open findings is shrunk to a minimal
+command sequence and reported with a seed and a trace that replay it exactly.
+Differences already on that list are counted by label instead, so they stay
+visible without failing the run that found them. This is how the rules stay
+enforced as the code changes, when the suite is run: a new regression against
+the contract fails a test instead of shipping quietly. It is opt-in locally
+and advisory in CI today, so run it before handing off.
 
 ### Run the checks
 
@@ -354,10 +354,11 @@ shipping quietly.
      still waiting on a decision about which side should change. It fails
      while any candidate remains, so the gaps cannot be forgotten. Each is
      described in `test/formal/README.md`.
-   - **A stale test double, fixed in PR #34.** One conformance check also
-     failed because the test's copy of current behavior lagged a repair that
-     had already landed. That was a stale double, not a regression; the fix
-     is in PR #34 and the check is a regression signal again once it merges.
+   - **A test's stale copy of expected behavior, fixed in PR #34.** One
+     conformance check also failed because the test's copy of current
+     behavior lagged a repair that had already landed. That was staleness in
+     the test, not a regression; the fix is in PR #34 and the check is a
+     regression signal again once it merges.
    - Three earlier gaps have been fixed: a closed-but-unmerged PR left its
      files locked, a shortcut flag let a lane skip peer review, and dropping
      another lane's locks needed no audited sign-off. Each now has a passing
@@ -381,11 +382,13 @@ instructions, and the latest cached result.
    - **Documentation or comments only** (formatting, comments, docs that do
      not change a workflow rule) — run the pin check,
      `python3 scripts/tla_pin.py --check`, once that script exists (it lands
-     with the phase 1 model in PR #35; until then there is nothing to pin and
-     the step is skipped). It blocks a stale pin when a model pins the range
-     you edited, so a repin is a deliberate step. A prose edit that changes
-     an authoritative rule in `specs/` is a behavior change and follows the
-     third path below, not this one.
+     with the phase 1 model in PR #35; until then there is nothing to check
+     and the step is skipped). Each model records a fingerprint of the exact
+     spec paragraphs it was built from; the check fails if you edited those
+     paragraphs without deliberately updating the fingerprint, so a model can
+     never silently drift from the prose it claims to follow. A prose edit
+     that changes an authoritative rule in `specs/` is a behavior change and
+     follows the third path below, not this one.
    - **Code changes that keep behavior the same** (a refactor) — run
      `npm run test:formal` to confirm the code still matches the rules.
    - **Behavior changes** — update the written rules first (in `specs/`),
@@ -393,8 +396,8 @@ instructions, and the latest cached result.
      reverse.
 2. Work in your lane as usual, run the checks before handing off, and
    include in your review notes: which of the three kinds of change this is
-   and why, the prose range it touches, the pin-check verdict, the check
-   results, and anything left unverified. The reviewer uses the first item
+   and why, which spec paragraphs it touches, the fingerprint-check verdict,
+   the check results, and anything left unverified. The reviewer uses the first item
    to decide whether the checks you ran were the right ones.
 3. The reviewer confirms the rules say what was intended and that the
    checks ran against the exact change.
