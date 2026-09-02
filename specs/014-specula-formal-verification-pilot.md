@@ -546,8 +546,11 @@ Broader models require separate scope decisions based on pilot evidence.
 Phase 3 readiness depends on completing Spec 015 Phase B step 3
 (pinned-section designations for findings #4, #5, #7, #9, #10 after PR #35
 merges and the `LaneLock.tla` pin reopens) and step 4 (open-question
-legacy-row designations for L10–L15), plus measured Phase 2 evidence. The
-gate must not be activated before those dependencies close.
+legacy-row designations for L10–L15), plus measured Phase 2 evidence. It also
+depends on adding `src/brain_train/transitions.mjs` to the formal-impact path
+selector. A regression test must prove that a diff limited to that file selects
+the lane/lock formal checks. The gate must not be activated before these
+dependencies close.
 
 #### Gate disposition policy
 
@@ -557,7 +560,14 @@ action and required response for each outcome.
 
 > **Label reconciliation.** The canonical table uses `stale_model`; the CI
 > implementation (`formal_advisory.mjs`) currently emits `stale_pin` for the
-> same condition. Label alignment is required before gate activation.
+> same condition. The implementation also emits `infrastructure_failure` for
+> missing tools, setup failures, unavailable measurements, and other check
+> execution failures. Before gate activation, the implementation must map an
+> unavailable tool, provider, setup dependency, or measurement to
+> `tool_unavailable`. It must keep a completed correctness verdict separate
+> from unavailable measurement metadata. Any remaining
+> `infrastructure_failure` outcome must use the `tool_unavailable` retry and
+> H-3 disposition path. Label alignment is required before gate activation.
 
 **Allow outcome:**
 
