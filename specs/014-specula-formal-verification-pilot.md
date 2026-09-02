@@ -590,21 +590,23 @@ allow automatically:
 #### Evidence thresholds for gate activation (proposed)
 
 The gate should not be enabled until Phase 2 advisory data demonstrates all of
-the following. The numeric thresholds below are **proposed defaults** without
-measured Phase 2 backing; they are subject to human review (H-6) once advisory
-data exists.
+the following. This specification does not set numeric defaults before that
+data exists. H-6 must derive and record each numeric threshold from the Phase 2
+dataset before activation.
 
-1. **Stability**: the pilot model has run on at least 10 consecutive PRs
-   affecting modeled behavior without a false-positive block (`stale_model`,
-   counterexample, or validation mismatch that was later judged incorrect).
-2. **Latency**: exact-head CI formal checks complete within 5 minutes on the
-   shared runner, measured as P95 over the advisory period.
-3. **Exhaustion rate**: `state_space_exhausted` occurs on fewer than 10% of
-   formal-check runs during the advisory window.
-4. **Availability**: `tool_unavailable` occurs on fewer than 5% of applicable
-   formal-check runs during the advisory window. Applicable runs are the runs
-   required for PRs that affect modeled behavior or formal artifacts. Unrelated
-   PRs that skip the formal job do not enter the denominator.
+1. **Stability**: the pilot model meets the H-6 minimum run count on
+   consecutive PRs affecting modeled behavior without a false-positive block
+   (`stale_model`, counterexample, or validation mismatch that was later judged
+   incorrect).
+2. **Latency**: exact-head CI formal checks meet the H-6 P95 latency budget on
+   the shared runner over the measured advisory period.
+3. **Exhaustion rate**: `state_space_exhausted` stays below the H-6 maximum
+   rate for applicable formal-check runs during the advisory window.
+4. **Availability**: `tool_unavailable` stays below the H-6 maximum rate for
+   applicable formal-check runs during the advisory window. Applicable runs
+   are the runs required for PRs that affect modeled behavior or formal
+   artifacts. Unrelated PRs that skip the formal job do not enter the
+   denominator.
 5. **Coverage**: the instrumentation mapping represents every behavior in the
    Pilot Scope, and the validation harness exercises each behavior. An
    unexercised scoped behavior, including a crash or failure window, fails this
@@ -616,20 +618,24 @@ is tracked for the next review cycle.
 #### Rollback conditions (proposed)
 
 The gate must be demoted from blocking to advisory when any of the following
-occurs after activation. The numeric triggers below are **proposed defaults**;
-they share the same human-review dependency as the activation thresholds (H-6).
+occurs after activation. H-6 must derive the numeric triggers and rolling
+windows from measured Phase 2 evidence before activation.
 
 - A false-positive block is confirmed on a PR that should have merged: demote
   immediately, file a bug, and require the bug fix plus a new advisory period
   before re-enabling.
-- `state_space_exhausted` exceeds 25% of formal-check runs over any rolling
-  7-day window: demote until bounds or decomposition restore the threshold.
-- `tool_unavailable` exceeds 15% of applicable formal-check runs over any
-  rolling 7-day window: demote until infrastructure reliability is restored.
-  Unrelated PRs that skip the formal job do not enter the denominator.
-- A model or harness change introduces a regression that causes three or more
-  spurious blocks within 48 hours: demote, revert the offending change, and
-  re-enter the advisory period.
+- `state_space_exhausted` exceeds the H-6 rollback rate over its calibrated
+  rolling window: demote until bounds or decomposition restore the threshold.
+- `tool_unavailable` exceeds the H-6 rollback rate over its calibrated rolling
+  window: demote until infrastructure reliability is restored. Unrelated PRs
+  that skip the formal job do not enter the denominator.
+- A model or harness change stops representing or exercising any required
+  Pilot Scope behavior: demote immediately and re-enter the advisory period
+  after coverage is restored. This condition applies even when the weakened
+  harness produces no blocks.
+- A model or harness regression reaches the H-6 spurious-block trigger within
+  its calibrated window: demote, revert the offending change, and re-enter the
+  advisory period.
 
 Rollback is always to advisory mode, never to disabled. The advisory verdicts
 continue to be recorded for diagnosis.
@@ -658,11 +664,12 @@ as open items, not as policy.
 - **H-5: Gate activation authority.** Who activates the blocking gate: the
   spec 014 owner, a designated human, or an automated trigger when all evidence
   thresholds are met?
-- **H-6: Numeric threshold calibration.** Are the proposed activation
-  thresholds (10 consecutive PRs, 5 min P95, <10% exhaustion, <5%
-  unavailability) and rollback triggers (25% exhaustion / 15% unavailability
-  over 7 days, 3 spurious blocks in 48 h) appropriate, or should they be
-  adjusted based on Phase 2 advisory data?
+- **H-6: Numeric threshold calibration.** Using the Phase 2 advisory dataset,
+  what minimum run count, measurement period, P95 latency budget, exhaustion
+  and unavailability rates, rolling rollback windows, and spurious-block
+  trigger are appropriate? The activation decision must record the dataset,
+  calculation, and selected values. No numeric threshold has a default before
+  that decision.
 
 #### Continuing constraints
 
