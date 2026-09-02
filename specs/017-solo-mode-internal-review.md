@@ -29,9 +29,9 @@ same misreading of a spec), and a fresh session of the same model removes
 self-approval but does not restore that independence. This is a declared,
 time-boxed exception with an audit trail.
 
-Dependencies: rows and invariants cited below live in spec 015 (PR #37) and
-`specs/tla/LaneLock.tla` (PR #35). Until those merge, the references point
-at the PRs; this spec does not merge before them. One further prerequisite
+Dependencies: rows and invariants cited below landed through spec 015 (PR
+#37) and `specs/tla/LaneLock.tla` (PR #35). Both prerequisites are now on
+`main`. One further prerequisite
 for the separation claim below: today `resolveHandoff` compares no actor
 (spec 015 legacy row L8), so owner/reviewer separation is enforced only on
 `handoff request-changes` (`core.mjs:5595-5600`). Solo mode's identity rule
@@ -306,10 +306,10 @@ argue with itself indefinitely.
   per-runner fresh-session normalization, and the environment allowlist.
 - **Spec 014**: no new invariants. `adopt` is a semantic-impact change to the
   Reassign row and follows prose, model, code.
-- **Spec 015** (PR #37, unmerged at the time of writing): rows 2 through 5
+- **Spec 015** (PR #37, merged): rows 2 through 5
   apply unchanged with suffixed identities. Row 20 (Reassign) gets its first
   designated cases from FR-6 and FR-8 fall-through (FR-7).
-- **`LaneLock.tla`** (PR #35, unmerged at the time of writing): the
+- **`LaneLock.tla`** (PR #35, merged): the
   `ReviewerSeparation` invariant compares agent identities; `#review` is one
   more element of `Agents`.
 - **`CLAUDE.md` Handoff Gate**: the sentence "One model writes, the other
@@ -337,10 +337,12 @@ argue with itself indefinitely.
   and the PR body, with its tier.
 - Solo mode cannot be on without an expiry; `btrain doctor` reports it and
   lists grandfathered lanes after expiry.
-- Automatic bot pending and deferral records store the requested head SHA. A
-  new head cancels the old timer or deferral and starts a new request window.
-- A repo-wide deferral processes current-head approvals and continues. It
-  rejects only when an affected lane has active current-head requested changes.
+- Options D and E store the requested head SHA in automatic pending and
+  deferral records. A new head cancels the old record and starts a new request
+  window.
+- Options C and D-ii process current-head approvals before a repo-wide
+  deferral. They reject only when an affected lane has active current-head
+  requested changes.
 
 ## Open questions
 
@@ -482,6 +484,17 @@ three things:
      active.
    - **Locks**: retain.
 
+   This is a semantic-impact change under spec 015 FR-10. Before an option
+   uses restoration, add `BotRequirementRestore` to `LaneLock.tla` `Next`,
+   the implementation mirror, and the spec 015 ledger. Run TLC and the
+   cross-check before implementation. The action keeps `lockedFiles`,
+   `peerApproved`, `approver`, `owner`, and `reviewer` unchanged. The
+   implementation records the relaxation identifier on the workflow event
+   that moves the lane to `ready-to-merge`. The restore caller supplies a
+   guard input that proves the active record has the same identifier. This
+   answers the open `ready-to-merge` to `pr-review` edge in spec 015 finding
+   #9 without changing that spec in this docs-only lane.
+
    The implementation must add this designated transition to the spec 015
    ledger and both formal-model representations before it enforces any option
    that uses expiry restoration. The event restores the bot requirement and
@@ -519,6 +532,8 @@ A new command temporarily exempts a named bot from one lane's PR gate.
   `CHANGES_REQUESTED`, the command rejects the exemption, records the feedback,
   and moves the open lane to `changes-requested` with reason
   `pr-review-feedback`. An exemption never suppresses current-head findings.
+- **Head change**: The exemption is bound to the granted `headRefOid`. A new
+  head cancels it and requires a new grant after the current-head review poll.
 - **Event**: `bot-exempted` and `bot-unexempted` events in canonical workflow
   history, recording: actor, bot name, lane, reason, failure class, expiry,
   and whether solo mode was active.
@@ -539,8 +554,8 @@ A new command temporarily exempts a named bot from one lane's PR gate.
 
 Same mechanism as B but scoped to the repository rather than a single lane.
 
-- **Status**: All lanes currently in PR-flow evaluate the gate without the
-  deferred bot.
+- **Status**: All current and future PR-flow gate evaluations use the
+  repo-wide deferral until it expires, subject to the head rule below.
 - **Command**: `btrain pr defer-bot --bot <name> --reason "..." --until <ISO>`
   to grant. `btrain pr undefer-bot --bot <name>` to revoke.
 - **Grant guard**: Before it grants a repo-wide deferral, btrain applies B's
@@ -550,6 +565,9 @@ Same mechanism as B but scoped to the repository rather than a single lane.
   other lanes. A `CHANGES_REQUESTED` verdict moves its lane to
   `changes-requested` with reason `pr-review-feedback` and rejects the
   repo-wide deferral. Only active requested changes block the command.
+- **Head change**: Each affected lane records the head evaluated by the grant
+  guard. A new or changed PR head is not covered until the command polls that
+  head and extends the deferral record to it.
 - **Event**: `bot-deferred` and `bot-undeferred` in workflow history with the
   same fields as B.
 - **Expiry**: Required. On expiry or early revocation, btrain re-evaluates
@@ -593,12 +611,18 @@ must choose one scope:
 - **Command**: `btrain solo on` starts detection when the mapping exists.
   Deferral is implicit only after the selected D-i or D-ii signal.
   `btrain solo off` or expiry restores the requirement.
+- **Activation timing**: If the original request is already older than the
+  configured timeout when solo mode starts, activation begins a fresh pending
+  window. It does not emit `bot-auto-deferred` in the same evaluation. A
+  documented bot-originated signal can still trigger the selected policy
+  immediately.
 - **Event**: `bot-pending` when solo-on detects the mapping and a lane has
   an open review request for the mapped bot. `bot-auto-deferred` when the
   D-i pending window expires (`unknown/timeout`) or a bot-originated
   documented signal classifies the bot as unavailable. Each event records
   `scope: lane | repo`; D-ii requires the repo-wide signal before recording
-  repo scope. Both events record the requested head SHA. `bot-auto-restored`
+  repo scope. Both events record the requested head SHA.
+  `bot-requirement-restored`
   on solo-off, expiry, late approval from the bot before merge, or when
   the GitHub API poll confirms the bot posted a review before merge. After
   merge, a late review (approval or `CHANGES_REQUESTED`) is recorded as a
@@ -636,7 +660,7 @@ Different failure classes get different default responses, configured in TOML:
 unknown   = "defer-lane"    # per-lane deferral, retry after bot_pending_timeout
 outage    = "defer-lane"    # per-lane deferral; requires bot-documented outage signal
 quota     = "defer-lane"    # requires bot-documented provider-specific signal; otherwise unknown/timeout
-auth      = "block"         # lane blocked; requires bot-documented auth signal (none currently defined ¹)
+auth      = "block"         # lane blocked; no bot-auth signal is defined
 policy    = "block"         # lane blocked, requires human decision; requires bot-documented signal
 ```
 
@@ -651,10 +675,12 @@ policy    = "block"         # lane blocked, requires human decision; requires bo
 - **Event**: `bot-unavailable` with the failure class and requested head SHA
   (classified from the
   response timeout or a bot-originated documented signal — never from a
-  local runner signal or review-request HTTP errors); `bot-recovered` when
+  local runner signal or review-request HTTP errors);
+  `bot-requirement-restored` when
   the GitHub API poll confirms the bot posted a review or a documented
   provider-specific recovery signal fires. A runner probe failure may
-  shorten the next pending window but does not emit `bot-recovered`.
+  shorten the next pending window but does not emit
+  `bot-requirement-restored`.
 - **Expiry**: Deferrals are retried on `[pr_flow.bot_unavailable].retry_after`
   (default 6h) and on `btrain pr retry-bot --lane <id>`. They lapse when the
   GitHub API poll confirms the bot posted a review. `block` has no automatic
@@ -699,6 +725,9 @@ policy    = "block"         # lane blocked, requires human decision; requires bo
 **Options can be combined.** For example: B as the per-lane mechanism,
 E's failure-class defaults to decide when to auto-invoke B vs. block, and
 C or D as an optional broader scope.
+All combinations use `bot-requirement-restored` as the canonical recovery,
+expiry, revocation, and solo-off event. Its trigger field distinguishes those
+causes; one restoration emits one event.
 
 #### Decision inputs needed
 
