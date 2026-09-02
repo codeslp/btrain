@@ -10,7 +10,7 @@
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "62ddcc8",
+    "source_commit": "faa0f955a6ca12d2d80197d5651f3dae44f094bc",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
     "inputs_sha256": "36b72033e5313db4f3934d635c4a5f29b0c3d92ead7ca7f60e1ccecea4d1f2b3",
