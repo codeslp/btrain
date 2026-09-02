@@ -46,6 +46,7 @@ import {
   buildClaimReviewContextFields,
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
+import { applyTransition, classifyTransitionEvent, getPrimaryTransition } from "./transitions.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -1011,31 +1012,31 @@ function validateHandoffStatus(status, label = "--status") {
 }
 
 function defaultNextActionForStatus(status, { owner = "", reviewer = "" } = {}) {
-  switch (status) {
-    case "in-progress":
+  const primaryAction = getPrimaryTransition(status)?.action
+  switch (primaryAction) {
+    case "ToNeedsReview":
+      if (status === "changes-requested") {
+        return reviewer
+          ? `Address ${reviewer}'s review findings in the same lane and re-handoff for review.`
+          : "Address the review findings in the same lane and re-handoff for review."
+      }
       return "Work within the locked files, keep the lane in-progress, and hand off for review when ready."
-    case "needs-review":
+    case "PeerResolve":
       return reviewer
         ? `Waiting on ${reviewer} to review the lane.`
         : "Waiting on peer review."
-    case "ready-for-pr":
+    case "LinkPr":
       return "Local peer review is approved. Create or link the GitHub PR, then enter the PR review loop."
-    case "pr-review":
+    case "PrRepoll":
       return "Waiting on GitHub PR review feedback from required bots and checks."
-    case "ready-to-merge":
+    case "PrTerminal":
       return "PR feedback is clear. Merge the PR, then mark the lane resolved."
-    case "changes-requested":
-      return reviewer
-        ? `Address ${reviewer}'s review findings in the same lane and re-handoff for review.`
-        : "Address the review findings in the same lane and re-handoff for review."
-    case "repair-needed":
+    case "RepairClear":
       return owner
         ? `Workflow repair needed before normal work resumes. ${owner} should inspect the lane state and repair it manually.`
         : "Workflow repair needed before normal work resumes."
-    case "resolved":
-      return "Await the next task."
-    case "idle":
-      return "Claim the next task."
+    case "Claim":
+      return status === "resolved" ? "Await the next task." : "Claim the next task."
     default:
       return ""
   }
@@ -1312,7 +1313,11 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock,
   })
 }
 
-async function releaseLocks(repoRoot, laneId, { auditInsideLock } = {}) {
+async function releaseLocks(
+  repoRoot,
+  laneId,
+  { auditInsideLock, publishInsideLock, isPublished } = {},
+) {
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     // Runs inside the registry critical section so the audit cannot be
     // invalidated before the mutation below.
@@ -1321,6 +1326,23 @@ async function releaseLocks(repoRoot, laneId, { auditInsideLock } = {}) {
     const released = registry.locks.filter((lock) => lock.lane === laneId)
     registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
     await writeLockRegistry(repoRoot, registry)
+    if (publishInsideLock) {
+      try {
+        await publishInsideLock()
+      } catch (publishError) {
+        if (!(isPublished && (await isPublished()))) {
+          try {
+            await writeLockRegistry(repoRoot, {
+              ...registry,
+              locks: [...registry.locks, ...released],
+            })
+          } catch (rollbackError) {
+            publishError.cause = publishError.cause ?? rollbackError
+          }
+        }
+        throw publishError
+      }
+    }
     return released
   })
 }
@@ -1351,11 +1373,16 @@ async function consumeForceReleaseOverride(repoRoot, laneId, actorLabel) {
 
 // Single home for the active-lane audit. Both audited release paths call
 // this so the trust boundary cannot drift between them.
-async function auditActiveLanesForRelease(repoRoot, config, laneIds, actorLabel) {
+async function auditActiveLanesForRelease(repoRoot, config, laneIds, actorLabel, event = "locks release-lane") {
   for (const laneId of laneIds) {
     const lane = await readLaneState(repoRoot, config, laneId)
     if (isLaneActiveStatus(lane.status)) {
-      await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
+      const override = await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
+      applyTransition(lane, event, {
+        to: lane.status,
+        actor: actorLabel,
+        override,
+      })
     }
   }
 }
@@ -1368,7 +1395,7 @@ async function releaseLaneLocksAudited(repoRoot, laneId, options = {}) {
   // override. Terminal resolution and stale cleanup are unaffected — they
   // call releaseLocks with no audit hook, and an inactive lane needs none.
   return releaseLocks(repoRoot, laneId, {
-    auditInsideLock: () => auditActiveLanesForRelease(repoRoot, config, [laneId], actorLabel),
+    auditInsideLock: () => auditActiveLanesForRelease(repoRoot, config, [laneId], actorLabel, "locks release-lane"),
   })
 }
 
@@ -1383,7 +1410,7 @@ async function forceReleaseLockAudited(repoRoot, lockPath, options = {}) {
           .filter((lock) => lock.path === lockPath && (!options.lane || lock.lane === options.lane))
           .map((lock) => lock.lane),
       )]
-      return auditActiveLanesForRelease(repoRoot, config, owningLanes, actorLabel)
+      return auditActiveLanesForRelease(repoRoot, config, owningLanes, actorLabel, "locks release")
     },
   })
 }
@@ -5150,18 +5177,26 @@ async function claimHandoff(repoRoot, options) {
 
   // Acquire file locks if lanes enabled and files specified
   const files = options.files ? parseCsvList(options.files) : []
-  if (laneConfigs && laneId) {
-    const existingLane = await readLaneState(repoRoot, config, laneId)
-    if (!["idle", "resolved"].includes(existingLane.status)) {
+  const validateLaneClaim = (source) => {
+    if (!["idle", "resolved"].includes(source.status)) {
       throw new BtrainError({
-        message: `Lane ${laneId} is already \`${existingLane.status}\`.`,
+        message: `Lane ${laneId} is already \`${source.status}\`.`,
         reason: "You can only claim a lane that is idle or resolved.",
-        fix: existingLane.status === "needs-review"
+        fix: source.status === "needs-review"
           ? `Review and resolve the lane first: btrain handoff resolve --lane ${laneId} --summary "..."`
           : `Continue or update the existing work: btrain handoff update --lane ${laneId} --status needs-review --actor "${options.owner}"`,
-        context: `Current task: ${existingLane.task || "(none)"}. Owner: ${existingLane.owner || "(unassigned)"}.`,
+        context: `Current task: ${source.task || "(none)"}. Owner: ${source.owner || "(unassigned)"}.`,
       })
     }
+    applyTransition(source, "handoff claim", {
+      to: "in-progress",
+      actor: options.owner,
+      changes: { owner: options.owner, reviewer: options.reviewer, lockedFiles: files },
+    })
+  }
+  if (laneConfigs && laneId) {
+    const existingLane = await readLaneState(repoRoot, config, laneId)
+    validateLaneClaim(existingLane)
     if (files.length === 0) {
       throw new BtrainError({
         message: `Lane ${laneId} claims require --files.`,
@@ -5232,6 +5267,8 @@ async function claimHandoff(repoRoot, options) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
     let result
     const publishClaim = async () => {
+      const latestLane = await readLaneState(repoRoot, config, laneId)
+      validateLaneClaim(latestLane)
       result = await updateHandoff(
       repoRoot,
       updates,
@@ -5263,6 +5300,12 @@ async function claimHandoff(repoRoot, options) {
     return result
   }
 
+  const existingCurrent = await readCurrentState(repoRoot)
+  applyTransition(existingCurrent, "handoff claim", {
+    to: "in-progress",
+    actor: options.owner,
+    changes: updates,
+  })
   const result = await updateHandoff(
     repoRoot,
     updates,
@@ -5343,6 +5386,13 @@ async function patchHandoff(repoRoot, options) {
   if (laneId) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
     if (handoffPath) {
+      if (!(await pathExists(handoffPath))) {
+        throw new BtrainError({
+          message: `Lane ${laneId} handoff file is missing.`,
+          reason: "Update cannot validate or preserve the lane state without its canonical handoff file.",
+          fix: `Restore the configured lane handoff file, then run btrain doctor --repo ${repoRoot} before updating lane ${laneId}.`,
+        })
+      }
       const existingCurrent = await readLaneState(repoRoot, config, laneId)
       const existingContent = await readText(handoffPath)
       const locks = await listLocks(repoRoot)
@@ -5352,6 +5402,25 @@ async function patchHandoff(repoRoot, options) {
       const reasonMetadata = resolveReasonMetadata(existingCurrent, nextStatus, options, {
         requireReasonOnTransition: options.status !== undefined,
       })
+
+      const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
+      const validateStructuralTransition = (source) =>
+        applyTransition(source, transitionEvent, {
+          to: nextStatus,
+          actor: resolvedActor,
+          prFlowEnabled: getPrFlowConfig(config).enabled,
+          prLinked: !!(updates.prNumber || source.prNumber),
+          reasonCode: reasonMetadata.reasonCode,
+          feedbackReason: reasonMetadata.reasonCode,
+          structuralCompatibility: options.transitionCompatibility === true,
+          filesChanged:
+            options.files === undefined
+              ? undefined
+              : JSON.stringify(normalizePathList(updates.lockedFiles)) !==
+                JSON.stringify(normalizePathList(source.lockedFiles)),
+          changes: updates,
+        })
+      validateStructuralTransition(existingCurrent)
 
       if (options.status === "needs-review") {
         const inferredReviewer = inferPeerReviewer({
@@ -5543,6 +5612,8 @@ async function patchHandoff(repoRoot, options) {
       let updatedCurrent
       if (isLaneActiveStatus(nextStatus) && effectiveFiles.length > 0) {
         const publishUpdate = async () => {
+          const latestCurrent = await readLaneState(repoRoot, config, laneId)
+          validateStructuralTransition(latestCurrent)
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
         await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
@@ -5600,6 +5671,20 @@ async function patchHandoff(repoRoot, options) {
   })
   updates.reasonCode = reasonMetadata.reasonCode
   updates.reasonTags = reasonMetadata.reasonTags
+  const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
+  applyTransition(existingCurrent, transitionEvent, {
+    to: nextStatus,
+    actor: resolvedActor,
+    prFlowEnabled: getPrFlowConfig(config).enabled,
+    prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+    reasonCode: reasonMetadata.reasonCode,
+    feedbackReason: reasonMetadata.reasonCode,
+    structuralCompatibility: options.transitionCompatibility === true,
+    filesChanged: options.files === undefined
+      ? undefined
+      : JSON.stringify(normalizePathList(updates.lockedFiles)) !== JSON.stringify(normalizePathList(existingCurrent.lockedFiles)),
+    changes: updates,
+  })
   let repairMetadata = {
     repairOwner: existingCurrent.repairOwner || "",
     repairEscalation: existingCurrent.repairEscalation || "",
@@ -5747,26 +5832,70 @@ async function requestChangesHandoff(repoRoot, options) {
       ? parseCurrentSection(await readText(overrideHandoffPath))
       : await readCurrentState(repoRoot)
 
-  if (existingCurrent.status !== "needs-review") {
-    throw new BtrainError({
-      message: `Cannot request changes — lane status is \`${existingCurrent.status || "unknown"}\`, not \`needs-review\`.`,
-      reason: "Changes can only be requested when a lane is waiting for peer review.",
-      fix: laneId
-        ? `Run \`btrain handoff\` to check the lane status. The owner must first move to needs-review with: btrain handoff update --lane ${laneId} --status needs-review --actor "${existingCurrent.owner || 'owner'}"`
-        : "Run `btrain handoff` to check the current handoff status.",
-    })
-  }
+  const validateRequestChanges = (source) => {
+    if (source.status !== "needs-review") {
+      throw new BtrainError({
+        message: `Cannot request changes — lane status is \`${source.status || "unknown"}\`, not \`needs-review\`.`,
+        reason: "Changes can only be requested when a lane is waiting for peer review.",
+        fix: laneId
+          ? `Run \`btrain handoff\` to check the lane status. The owner must first move to needs-review with: btrain handoff update --lane ${laneId} --status needs-review --actor "${source.owner || 'owner'}"`
+          : "Run `btrain handoff` to check the current handoff status.",
+      })
+    }
 
-  if (existingCurrent.reviewer && resolvedActor && existingCurrent.reviewer !== resolvedActor) {
-    throw new BtrainError({
-      message: `Only the peer reviewer "${existingCurrent.reviewer}" can request changes.`,
-      reason: `You are identified as "${resolvedActor}", but the assigned reviewer is "${existingCurrent.reviewer}".`,
-      fix: `Either log in as the correct reviewer, or set BTRAIN_AGENT=${existingCurrent.reviewer} if the runtime detection is wrong.`,
+    if (source.reviewer && resolvedActor && source.reviewer !== resolvedActor) {
+      throw new BtrainError({
+        message: `Only the peer reviewer "${source.reviewer}" can request changes.`,
+        reason: `You are identified as "${resolvedActor}", but the assigned reviewer is "${source.reviewer}".`,
+        fix: `Either log in as the correct reviewer, or set BTRAIN_AGENT=${source.reviewer} if the runtime detection is wrong.`,
+      })
+    }
+    const reasonMetadata = resolveReasonMetadata(source, "changes-requested", options, {
+      requireReasonOnTransition: true,
     })
+    applyTransition(source, "handoff request-changes", {
+      to: "changes-requested",
+      actor: resolvedActor,
+      reasonCode: reasonMetadata.reasonCode,
+    })
+    return reasonMetadata
   }
-  const reasonMetadata = resolveReasonMetadata(existingCurrent, "changes-requested", options, {
-    requireReasonOnTransition: true,
-  })
+  validateRequestChanges(existingCurrent)
+
+  const requestChangesLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
+  let updatedCurrent
+  const publishRequestChanges = async () => {
+    const latestCurrent = overrideHandoffPath
+      ? parseCurrentSection(await readText(overrideHandoffPath))
+      : await readCurrentState(repoRoot)
+    const reasonMetadata = validateRequestChanges(latestCurrent)
+    updatedCurrent = await updateHandoff(
+      repoRoot,
+      {
+        status: "changes-requested",
+        reasonCode: reasonMetadata.reasonCode,
+        reasonTags: reasonMetadata.reasonTags,
+        nextAction:
+          options.next
+          || defaultNextActionForStatus("changes-requested", {
+            owner: latestCurrent.owner,
+            reviewer: latestCurrent.reviewer,
+          }),
+        lastUpdated: requestChangesLastUpdated,
+      },
+      {
+        actorLabel,
+        reviewResponseSummary: options.summary,
+        config,
+        eventType: "request-changes",
+        laneId,
+        eventDetails: {
+          summary: options.summary,
+        },
+        overrideHandoffPath,
+      },
+    )
+  }
 
   if (laneId) {
     const locks = await listLocks(repoRoot)
@@ -5783,36 +5912,18 @@ async function requestChangesHandoff(repoRoot, options) {
     }
 
     if (currentLane.lockState !== "active") {
-      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, effectiveFiles)
+      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, effectiveFiles, {
+        publishInsideLock: publishRequestChanges,
+        isPublished: () => handoffPublished(overrideHandoffPath, requestChangesLastUpdated),
+      })
+    } else {
+      await withFileLock(getLocksLockfilePath(repoRoot), publishRequestChanges)
     }
+  } else {
+    await publishRequestChanges()
   }
 
-  return updateHandoff(
-    repoRoot,
-    {
-      status: "changes-requested",
-      reasonCode: reasonMetadata.reasonCode,
-      reasonTags: reasonMetadata.reasonTags,
-      nextAction:
-        options.next
-        || defaultNextActionForStatus("changes-requested", {
-          owner: existingCurrent.owner,
-          reviewer: existingCurrent.reviewer,
-        }),
-      lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
-    },
-    {
-      actorLabel,
-      reviewResponseSummary: options.summary,
-      config,
-      eventType: "request-changes",
-      laneId,
-      eventDetails: {
-        summary: options.summary,
-      },
-      overrideHandoffPath,
-    },
-  )
+  return updatedCurrent
 }
 
 async function resolveHandoff(repoRoot, options) {
@@ -5839,17 +5950,19 @@ async function resolveHandoff(repoRoot, options) {
   }
 
   let existingCurrent
-  if (overrideHandoffPath && (await pathExists(overrideHandoffPath))) {
+  if (overrideHandoffPath) {
+    if (!(await pathExists(overrideHandoffPath))) {
+      throw new BtrainError({
+        message: `Lane ${laneId} handoff file is missing.`,
+        reason: "Resolve cannot validate or preserve the lane state without its canonical handoff file.",
+        fix: `Restore the configured lane handoff file, then run btrain doctor --repo ${repoRoot} before resolving lane ${laneId}.`,
+      })
+    }
     const content = await readText(overrideHandoffPath)
     existingCurrent = parseCurrentSection(content)
   } else {
     existingCurrent = await readCurrentState(repoRoot)
   }
-
-  const previousHandoffEntry =
-    existingCurrent.task || options.summary
-      ? buildPreviousHandoffEntry(existingCurrent, options.summary, actorLabel)
-      : null
 
   const finalResolve = !!options.final || !!options["final"]
   // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
@@ -5873,41 +5986,129 @@ async function resolveHandoff(repoRoot, options) {
   }
   if (prFlow.enabled && existingCurrent.status === "needs-review" && !finalResolve) {
     const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
-    if (laneId && retainedFiles.length > 0) {
-      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, retainedFiles)
+    const resolveLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
+    let resolvedCurrent
+    const publishResolve = async () => {
+      const latestCurrent = overrideHandoffPath
+        ? parseCurrentSection(await readText(overrideHandoffPath))
+        : await readCurrentState(repoRoot)
+      if (
+        latestCurrent.owner !== existingCurrent.owner
+        || !samePathList(latestCurrent.lockedFiles, retainedFiles)
+      ) {
+        throw new BtrainError({
+          message: `Lane ${laneId || "(single)"} changed while the review approval was waiting to publish.`,
+          reason: "The lane owner or locked files no longer match the state that was reviewed.",
+          fix: `Re-read lane ${laneId || "(single)"}, verify its current owner and files, then run the resolve command again.`,
+        })
+      }
+      applyTransition(latestCurrent, "handoff resolve", {
+        to: "ready-for-pr",
+        actor: resolvedActor,
+        prFlowEnabled: true,
+        prLinked: !!latestCurrent.prNumber,
+      })
+      resolvedCurrent = await updateHandoff(
+        repoRoot,
+        {
+          status: "ready-for-pr",
+          lockedFiles: retainedFiles,
+          nextAction:
+            options.next
+            || `Local review approved. ${latestCurrent.owner || "Owner"}: run \`btrain pr create --lane ${laneId || "<id>"} --base ${prFlow.base} --bots all\`, or link an existing PR with \`btrain handoff update --lane ${laneId || "<id>"} --pr <number> --status pr-review --actor "${latestCurrent.owner || "owner"}"\`.`,
+          lastUpdated: resolveLastUpdated,
+          reasonCode: "",
+          reasonTags: [],
+        },
+        {
+          actorLabel,
+          reviewResponseSummary: options.summary,
+          config,
+          eventType: "resolve",
+          laneId,
+          eventDetails: {
+            summary: options.summary || "",
+            localReviewApproved: true,
+            nextStatus: "ready-for-pr",
+          },
+          overrideHandoffPath,
+        },
+      )
     }
 
-    return updateHandoff(
+    if (laneId && retainedFiles.length > 0) {
+      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, retainedFiles, {
+        publishInsideLock: publishResolve,
+        isPublished: () => handoffPublished(overrideHandoffPath, resolveLastUpdated),
+      })
+    } else if (laneId) {
+      await withFileLock(getLocksLockfilePath(repoRoot), publishResolve)
+    } else {
+      await publishResolve()
+    }
+    return resolvedCurrent
+  }
+
+  const terminalLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
+  let result
+  const publishTerminalResolve = async () => {
+    const latestCurrent = overrideHandoffPath
+      ? parseCurrentSection(await readText(overrideHandoffPath))
+      : await readCurrentState(repoRoot)
+    if (
+      latestCurrent.status !== existingCurrent.status
+      || latestCurrent.owner !== existingCurrent.owner
+      || !samePathList(latestCurrent.lockedFiles, existingCurrent.lockedFiles)
+      || latestCurrent.prNumber !== existingCurrent.prNumber
+    ) {
+      throw new BtrainError({
+        message: `Lane ${laneId || "(single)"} changed while the terminal resolve was waiting to publish.`,
+        reason: "The status, owner, locked files, or linked PR no longer match the state that was resolved.",
+        fix: `Re-read lane ${laneId || "(single)"}, verify its current state, then run the resolve command again.`,
+      })
+    }
+    applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
+      to: "resolved",
+      actor: resolvedActor,
+      prFlowEnabled: prFlow.enabled,
+      prLinked: !!(latestCurrent.prNumber || normalizePrNumber(options.pr)),
+    })
+    const terminalPreviousHandoffEntry =
+      latestCurrent.task || options.summary
+        ? buildPreviousHandoffEntry(latestCurrent, options.summary, actorLabel)
+        : null
+    result = await updateHandoff(
       repoRoot,
       {
-        status: "ready-for-pr",
-        lockedFiles: retainedFiles,
-        nextAction:
-          options.next
-          || `Local review approved. ${existingCurrent.owner || "Owner"}: run \`btrain pr create --lane ${laneId || "<id>"} --base ${prFlow.base} --bots all\`, or link an existing PR with \`btrain handoff update --lane ${laneId || "<id>"} --pr <number> --status pr-review --actor "${existingCurrent.owner || "owner"}"\`.`,
-        lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
+        status: "resolved",
+        lockedFiles: laneId ? [] : latestCurrent.lockedFiles,
+        nextAction: options.next || options.summary || defaultNextActionForStatus("resolved"),
+        lastUpdated: terminalLastUpdated,
         reasonCode: "",
         reasonTags: [],
       },
       {
         actorLabel,
+        previousHandoffEntry: terminalPreviousHandoffEntry,
         reviewResponseSummary: options.summary,
         config,
         eventType: "resolve",
         laneId,
         eventDetails: {
           summary: options.summary || "",
-          localReviewApproved: true,
-          nextStatus: "ready-for-pr",
         },
         overrideHandoffPath,
       },
     )
   }
 
-  // Release locks for this lane
   if (laneId) {
-    await releaseLocks(repoRoot, laneId)
+    await releaseLocks(repoRoot, laneId, {
+      publishInsideLock: publishTerminalResolve,
+      isPublished: () => handoffPublished(overrideHandoffPath, terminalLastUpdated),
+    })
+  } else {
+    await publishTerminalResolve()
   }
   if (isCgraphEnabled(config)) {
     await reconcileCgraphAdvisories(repoRoot, laneId || "repo", [], {
@@ -5915,30 +6116,6 @@ async function resolveHandoff(repoRoot, options) {
       clearLane: true,
     })
   }
-
-  const result = await updateHandoff(
-    repoRoot,
-    {
-      status: "resolved",
-      lockedFiles: laneId ? [] : existingCurrent.lockedFiles,
-      nextAction: options.next || options.summary || defaultNextActionForStatus("resolved"),
-      lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
-      reasonCode: "",
-      reasonTags: [],
-    },
-    {
-      actorLabel,
-      previousHandoffEntry,
-      reviewResponseSummary: options.summary,
-      config,
-      eventType: "resolve",
-      laneId,
-      eventDetails: {
-        summary: options.summary || "",
-      },
-      overrideHandoffPath,
-    },
-  )
   await compactHandoffHistory(repoRoot, { config, laneId, actorLabel })
   return result
 }
@@ -5954,8 +6131,9 @@ function buildLaneGuidance(laneId, current) {
           ? `Locked files: ${formatLockedPaths(current.lockPaths)}.`
           : "Locked files: (none)."
 
-  switch (current.status) {
-    case "needs-review": {
+  const primaryAction = getPrimaryTransition(current.status)?.action
+  switch (primaryAction) {
+    case "PeerResolve": {
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
       const reviewMode = normalizeReviewMode(current.reviewMode) || "manual"
@@ -5974,7 +6152,7 @@ function buildLaneGuidance(laneId, current) {
         `${owner}: work on another lane, or monitor this one with \`bth wait --lane ${laneId}\`.`,
       ].join("\n")
     }
-    case "ready-for-pr": {
+    case "LinkPr": {
       const owner = current.owner || "the active agent"
       return [
         `${prefix}Local peer review is approved; PR creation is next.`,
@@ -5985,7 +6163,7 @@ function buildLaneGuidance(laneId, current) {
         "Keep the lane locks until the PR is merged or intentionally closed.",
       ].join("\n")
     }
-    case "pr-review": {
+    case "PrRepoll": {
       const owner = current.owner || "the active agent"
       return [
         `${prefix}Waiting on GitHub PR review feedback.`,
@@ -5996,7 +6174,7 @@ function buildLaneGuidance(laneId, current) {
         `${owner}: if bot feedback appears, address it in this lane, push, then run \`btrain pr request-review --lane ${laneId} --bots all\`.`,
       ].join("\n")
     }
-    case "ready-to-merge": {
+    case "PrTerminal": {
       return [
         `${prefix}PR review is clear and ready to merge.`,
         lockLine,
@@ -6005,7 +6183,16 @@ function buildLaneGuidance(laneId, current) {
           : "No PR linked; link or merge the PR before resolving.",
       ].join("\n")
     }
-    case "changes-requested": {
+    case "ToNeedsReview": {
+      if (current.status === "in-progress") {
+        const owner = current.owner || "the active agent"
+        return [
+          `${prefix}Active agent: ${owner}.`,
+          lockLine,
+          `${owner}: start with a short pre-flight review of the locked files, nearby diff, and likely risk areas before editing.`,
+          `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
+        ].join("\n")
+      }
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
       const prLine = current.prNumber
@@ -6031,7 +6218,7 @@ function buildLaneGuidance(laneId, current) {
         `${reviewer}: monitor the re-handoff with \`bth wait --lane ${laneId}\`, or continue on another lane.`,
       ].join("\n")
     }
-    case "repair-needed": {
+    case "RepairClear": {
       const owner = current.owner || "the active agent"
       const repairOwner = current.repairOwner || current.owner || "the responsible actor"
       const escalationLine =
@@ -6050,25 +6237,17 @@ function buildLaneGuidance(laneId, current) {
         current.nextAction || `${owner}: inspect the handoff, lock state, and \`btrain doctor\` output before making more transitions.`,
       ].join("\n")
     }
-    case "in-progress": {
-      const owner = current.owner || "the active agent"
-      return [
-        `${prefix}Active agent: ${owner}.`,
-        lockLine,
-        `${owner}: start with a short pre-flight review of the locked files, nearby diff, and likely risk areas before editing.`,
-        `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
-      ].join("\n")
-    }
-    case "resolved":
+    case "Claim":
+      if (current.status === "idle") {
+        return [
+          `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
+          lockLine,
+        ].join("\n")
+      }
       return [
         `${prefix}Resolved. Ready for a new task: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
         lockLine,
         current.repurposeReady ? `Repurpose ready: ${current.repurposeReason}.` : "",
-      ].join("\n")
-    case "idle":
-      return [
-        `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
-        lockLine,
       ].join("\n")
     default:
       return `${prefix}Status: ${current.status}\n${lockLine}`
@@ -7890,16 +8069,16 @@ function emitLoopBlock(onEvent, title, lines) {
 }
 
 function describeLoopAgentReason(current) {
-  if (current.status === "in-progress") {
-    return "handoff status is in-progress, so the active agent acts next"
+  const primaryAction = getPrimaryTransition(current.status)?.action
+  if (primaryAction === "ToNeedsReview") {
+    return current.status === "changes-requested"
+      ? "handoff status is changes-requested, so the writer acts next"
+      : "handoff status is in-progress, so the active agent acts next"
   }
-  if (current.status === "changes-requested") {
-    return "handoff status is changes-requested, so the writer acts next"
-  }
-  if (current.status === "repair-needed") {
+  if (primaryAction === "RepairClear") {
     return "handoff status is repair-needed, so the assigned repair owner acts next"
   }
-  if (current.status === "needs-review") {
+  if (primaryAction === "PeerResolve") {
     return "handoff status is needs-review, so the peer reviewer acts next"
   }
   return `handoff status is ${current.status}`
@@ -8814,6 +8993,10 @@ async function applyWatchdogRepairs(repoRoot, {
     // 1. Stale lock release
     if (laneState.lockState === "stale" && laneState.lockPaths.length > 0) {
       const releasedPaths = [...laneState.lockPaths]
+      applyTransition(laneState, "watchdog-lock-release", {
+        to: laneState.status,
+        actor: actorLabel,
+      })
       await releaseLocks(repoRoot, laneState._laneId)
       await appendWorkflowEvent(repoRoot, config, {
         type: "watchdog-repair",
@@ -8846,6 +9029,10 @@ async function applyWatchdogRepairs(repoRoot, {
     const expiredLocks = laneLocks.filter((l) => isLockExpired(l, handoffCfg.lockTtlMs))
     if (expiredLocks.length > 0 && laneState.lockState !== "stale") {
       const expiredPaths = expiredLocks.map((l) => l.path)
+      applyTransition(laneState, "watchdog-lock-release", {
+        to: laneState.status,
+        actor: actorLabel,
+      })
       await releaseLocks(repoRoot, laneState._laneId)
       await appendWorkflowEvent(repoRoot, config, {
         type: "watchdog-repair",
@@ -8881,6 +9068,10 @@ async function applyWatchdogRepairs(repoRoot, {
       })
 
       const laneHandoffPath = getLaneHandoffPath(repoRoot, config, laneState._laneId)
+      applyTransition(laneState, "watchdog-repair", {
+        to: "repair-needed",
+        actor: actorLabel,
+      })
       await updateHandoff(repoRoot, {
         status: "repair-needed",
         ...repairMetadata,

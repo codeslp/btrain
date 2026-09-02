@@ -15,6 +15,7 @@ import {
   resolvePrBaseBranch,
   resolvePushedHeadSha,
   selectReviewRequestHeadSha,
+  validatePrCreateTransition,
 } from "../src/brain_train/pr-flow.mjs"
 import {
   checkHandoff,
@@ -44,6 +45,20 @@ const prFlowConfig = {
     },
   },
 }
+
+describe("PR-create transition preflight", () => {
+  it("preserves Phase A non-owner acceptance before external side effects", async () => {
+    const result = validatePrCreateTransition({
+      status: "ready-for-pr",
+      owner: "Codex",
+      reviewer: "Claude",
+    }, "Claude")
+    assert.equal(result.row.id, "7")
+
+    const source = await fs.readFile(path.resolve("src/brain_train/pr-flow.mjs"), "utf8")
+    assert.ok(source.indexOf("validatePrCreateTransition(lane") < source.indexOf("execFileAsync(\"git\", [\"push\""))
+  })
+})
 
 const anyRemoteBranch = { isRemoteBranch: async () => true }
 

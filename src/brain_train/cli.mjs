@@ -78,6 +78,7 @@ import {
 import { reviewCode, formatSummary as formatReviewCodeSummary } from "./review/code-rules.mjs"
 import { reviewContext, formatReviewContextSummary } from "./review/context.mjs"
 import { runUnblockedHelper } from "./unblocked/context.mjs"
+import { TRANSITION_ROWS, formatTransitionsMermaid } from "./transitions.mjs"
 
 function printHelp() {
   console.log(`btrain
@@ -128,6 +129,7 @@ Usage:
   btrain sync-templates [--repo <path>] [--dry-run]                              Sync managed AGENTS/CLAUDE blocks from templates
   btrain sync-skills [--repo <path>] [--force] [--skill <name>]                  Sync bundled skills and their helper dependency across registered repos
   btrain status [--repo <path>]                                                  Show handoff state across repos
+  btrain transitions [--format json|mermaid]                                    Print the guarded lane-transition contract
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
   btrain override grant --action <push|needs-review|force-release> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
@@ -1492,6 +1494,7 @@ const LANE_LOCKED_ALLOWED_COMMANDS = new Set([
   "doctor",
   "review",
   "traces",
+  "transitions",
 ])
 
 async function run() {
@@ -1609,6 +1612,24 @@ async function run() {
     const repoRoot = await resolveRepoRoot(options.repo)
     await runDashboardCommand(repoRoot, subcommand, options)
     return
+  }
+
+  if (command === "transitions") {
+    const options = parseOptions(rest)
+    const format = String(options.format || "json").trim().toLowerCase()
+    if (format === "json") {
+      console.log(JSON.stringify(TRANSITION_ROWS, null, 2))
+      return
+    }
+    if (format === "mermaid") {
+      process.stdout.write(formatTransitionsMermaid())
+      return
+    }
+    throw new BtrainError({
+      message: `Unknown transitions format: ${format}.`,
+      reason: "The transition contract supports machine-readable JSON or a Mermaid state diagram.",
+      fix: "btrain transitions --format json|mermaid",
+    })
   }
 
   if (command === "handoff") {

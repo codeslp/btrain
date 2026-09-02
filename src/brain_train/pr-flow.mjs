@@ -15,6 +15,7 @@ import {
   readProjectConfig,
   resolveHandoff,
 } from "./core.mjs"
+import { applyTransition } from "./transitions.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -628,6 +629,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
+      pr: prNumber,
       final: true,
       viaPrOutcome: true,
       summary: `PR #${prNumber} merged${status.pr.mergedAt ? ` at ${status.pr.mergedAt}` : ""}.`,
@@ -650,6 +652,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
+      pr: prNumber,
       final: true,
       viaPrOutcome: true,
       summary: `PR #${prNumber} closed without a merge; lane resolved and locks released per spec 002 v1.1.2. Reopen with a fresh claim if the work should continue.`,
@@ -666,6 +669,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       pr: prNumber,
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
+      transitionEvent: "pr-poll",
       next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actorLabel}"\`.`,
     })
     return "changes-requested"
@@ -677,6 +681,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       actor,
       status: "ready-to-merge",
       pr: prNumber,
+      transitionEvent: "pr-poll",
       next: `Required bot feedback is clear on PR #${prNumber}. Merge the PR, then run \`btrain pr poll --lane ${laneId} --apply\` to resolve the lane.`,
     })
     return "ready-to-merge"
@@ -687,6 +692,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     actor,
     status: "pr-review",
     pr: prNumber,
+    transitionEvent: "pr-poll",
     next: `Waiting on required PR reviewers for PR #${prNumber}. Poll with \`btrain pr poll --lane ${laneId} --apply\`.`,
   })
   return "pr-review"
@@ -902,6 +908,8 @@ export async function runPrCreate(repoRoot, options = {}) {
     )
   }
 
+  validatePrCreateTransition(lane, options.actor || lane.owner || "btrain")
+
   const branch = await gitText(["branch", "--show-current"], repoRoot)
   if (!branch || ["main", "master"].includes(branch)) {
     throw new Error("Create a feature branch before running `btrain pr create`.")
@@ -936,6 +944,8 @@ export async function runPrCreate(repoRoot, options = {}) {
     actor: options.actor || lane.owner || "btrain",
     status: "pr-review",
     pr: number,
+    transitionEvent: "pr-create",
+    transitionCompatibility: true,
     base,
     next: `PR #${number} is open. Poll with \`btrain pr poll --lane ${laneId} --apply\`; request re-review with \`btrain pr request-review --lane ${laneId} --bots all\`.`,
   })
@@ -949,4 +959,14 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
 
   return { url, number, posted }
+}
+
+export function validatePrCreateTransition(lane, actor) {
+  return applyTransition(lane, "pr-create", {
+    to: "pr-review",
+    actor,
+    prFlowEnabled: true,
+    prLinked: true,
+    structuralCompatibility: true,
+  })
 }
