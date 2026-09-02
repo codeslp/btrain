@@ -260,7 +260,7 @@ unknown actor, and equally an actor that does not resolve to a configured
 agent, satisfies every actor predicate, because that is what the code does
 today (`canonicalizeAgentName` returns the raw string for an unconfigured
 name and `claimHandoff` proceeds). In advisory mode it warns. In enforcement mode it rejects with the
-fix `pass --actor or set BTRAIN_AGENT`. Internal `system` events are never
+fix `pass --actor or export BTRAIN_AGENT`. Internal `system` events are never
 affected.
 
 ### FR-7: Transcription cross-check
@@ -646,8 +646,12 @@ active status. Row 17 actor becomes `owner, or system` where system includes
 doctor.
 
 - Row 17 state moves from `undesignated` to `designated`.
-- `test/watchdog.test.mjs:122` (doctor resyncs a `repair-needed` lane) passes
-  without change.
+- `test/watchdog.test.mjs:122` directly invokes `handoff update --files`,
+  not `btrain doctor --repair`; it does not test the real doctor resync path.
+  Implementation must route `doctor --repair` through `applyTransition` as a
+  `system` actor, and new tests must exercise `btrain doctor` end-to-end
+  (not via bare `handoff update`) to verify that doctor restores lock
+  coverage via row 17.
 - Spec 006 FR-2 "lock/status resync" gains a one-line designation: "btrain
   doctor is a guardian actor for resync operations."
 - Safety: doctor already runs unattended (`btrain doctor` in CI or cron). If
@@ -660,7 +664,12 @@ doctor.
 In `needs-review` and PR-flow statuses the owner or an override is required.
 
 - Row 17 splits: one sub-row for doctor-permitted statuses, one for the rest.
-- `test/watchdog.test.mjs:122` still passes (it tests `repair-needed`).
+- `test/watchdog.test.mjs:122` directly invokes `handoff update --files`,
+  not `btrain doctor --repair`; it does not verify the real doctor resync
+  path. Implementation must route `doctor --repair` through
+  `applyTransition` as a `system` actor for the permitted statuses, and new
+  tests must exercise `btrain doctor` end-to-end to confirm that doctor is
+  rejected in `needs-review` and PR-flow statuses.
 - Safety: reviewer's lock view is stable during review.
 - Follow-up: split row 17 or add a status guard to the doctor path; designate.
 
@@ -750,14 +759,16 @@ The event log is the source of truth; all `repair-needed` entries for the lane
 count regardless of intervening claims. The model must change to match.
 
 - `LaneLock.tla` `Claim` keeps `repairCount` unchanged (remove the reset).
-- `RepairBudgetBounded` invariant changes: a terminal lane's count is not
-  necessarily 0 if it resolved via `AbandonResolve` without repairs.
+- `AbandonResolve` keeps the existing terminal reset (`repairCount' = 0`);
+  `RepairBudgetBounded` is unaffected. The model change is scoped to
+  `Claim` only: remove the `repairCount' = 0` reset from `Claim` so a
+  re-claimed lane inherits its prior count.
 - Safety: a lane that repeatedly breaks escalates even if different tasks
   trigger it. Catches systemic problems faster. Downside: an unrelated new
   task inherits blame for a prior task's failures.
-- Follow-up: update `LaneLock.tla`, rerun TLC, update the harness mirror;
-  decide whether `AbandonResolve` also resets (probably yes, to keep the
-  invariant).
+- Follow-up: update `LaneLock.tla` (`Claim` action only: remove
+  `repairCount' = 0`), rerun TLC, update the harness mirror; scope the
+  implementation to count repair entries across claims in the event log.
 
 **Affected rows:** 1 (Claim), 13 (RepairEnter), 14 (RepairClear), 15
 (RepairResolve).
@@ -819,12 +830,14 @@ If `resolveVerifiedActor` yields empty, the gate rejects with the fix
 "pass `--actor` or set `BTRAIN_AGENT`". No exception for single-agent repos.
 
 - FR-6 enforcement is uniform: the fix message is always correct.
-- Single-agent repos (e.g., a solo developer) must set `BTRAIN_AGENT` in
-  their shell or `.env`. This is a one-time setup cost.
+- Single-agent repos (e.g., a solo developer) must shell-export
+  `BTRAIN_AGENT` (e.g., `export BTRAIN_AGENT=claude` in `.zshrc` or
+  `.bashrc`). The CLI does not load `.env`; a shell export is required.
+  This is a one-time setup cost.
 - Safety: no implicit authority grants. The actor is always known.
 - Follow-up: update the advisory-mode warning text to mention the single-
-  agent case; add a `btrain init` prompt or `.env` template that sets
-  `BTRAIN_AGENT`.
+  agent case; add a `btrain init` prompt that reminds the user to
+  `export BTRAIN_AGENT=<name>` in their shell profile.
 
 **Option B: Infer the lone agent when exactly one is configured.**
 If `resolveVerifiedActor` yields empty and `config.agents.active` has exactly
@@ -844,7 +857,7 @@ configured agents and none can be resolved.
 
 **Option C: Reject, but with a better error message for single-agent repos.**
 Same as option A, but the rejection message for a single-agent repo says
-"set `BTRAIN_AGENT=<the-one-agent>`" with the actual name filled in.
+"`export BTRAIN_AGENT=<the-one-agent>`" with the actual name filled in.
 
 - Uniform rejection, better UX for the common case.
 - Follow-up: minor change to the error formatter; no spec change beyond FR-6.
