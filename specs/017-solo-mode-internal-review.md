@@ -344,6 +344,262 @@ first version.
 
 Still open:
 
-1. Does the GitHub bot requirement need a matching "bot unavailable" policy,
-   or is editing `required_bots` by hand acceptable? (`[pr_flow]` is spec
-   002's; this spec does not decide it.)
+### OQ-1: Required-bot unavailability policy
+
+**Context.** `[pr_flow].required_bots` names GitHub bots whose review is
+mandatory before merge. Solo mode handles *reviewer agent* unavailability
+(FR-8 tiers) but does not touch the GitHub bot gate. When the unavailable
+runtime also provides a required bot (e.g. `gh-codex` is powered by the codex
+runtime), the lane reaches `ready-for-pr` or `pr-review` and stalls because
+the bot cannot post its review. This question asks whether btrain should
+provide a structured mechanism, or leave the operator to edit TOML.
+
+**Failure classes.** A required bot can be unavailable for the same reasons
+FR-8 classifies for reviewer dispatch:
+
+| Class | Local runner signal (FR-8) | GitHub bot signal (PR-flow) | Example |
+|---|---|---|---|
+| Unknown/timeout | — | Review not posted within `bot_pending_timeout` | Bot did not respond; root cause undetermined |
+| Outage | Presence probe fails | Review-request HTTP 5xx | GitHub Actions down, webhook delivery failure |
+| Quota | Configured quota exit code/pattern | — ¹ | Token budget exhausted, rate limit |
+| Authentication | Configured auth exit code/pattern | Review-request HTTP 403 (credential scope) | API key expired, OAuth token revoked |
+| Policy refusal | `policy_blocked` pattern | Review-request HTTP 403/422 (policy body) | Provider content policy, model refusal |
+
+¹ GitHub HTTP errors describe the request and credential path to GitHub's
+API, not the bot's underlying provider state. A class more specific than
+unknown/timeout is assigned only when the GitHub API returns a diagnostic
+HTTP status (5xx → outage of the integration path, 403 → credential/scope
+failure) or when the bot documents a provider-specific signal. A bot whose
+AI provider exhausts quota but whose GitHub integration remains healthy
+simply does not post a review, which is classified unknown/timeout.
+
+Recovery timelines differ: unknown/timeout resolves when the bot posts a
+review or the root cause is identified and reclassified; outages resolve
+externally; quota may reset on a schedule; authentication requires operator
+action; and policy refusal may be permanent. These differences may warrant
+class-dependent responses.
+
+**Detection contract.** The failure classes above describe *why* a bot is
+unavailable, but not *how btrain knows*. Local runner probes (FR-8) detect
+runner unavailability on the operator's machine; they do not prove a GitHub
+review bot is unavailable. A runner and its corresponding bot are separate
+systems: the local `codex` CLI exhausting its token quota does not imply that
+`gh-codex` (which runs in GitHub's infrastructure under a different account
+and budget) is also down. `[pr_flow].bot_agent_map` records the operator's
+assertion that a runtime powers a bot, but the causal link is not guaranteed.
+
+Any option that acts automatically on bot unavailability (D, E) must name
+three things:
+
+1. **Authoritative signal**: the observable event that btrain treats as
+   evidence the bot is unavailable. Candidates:
+   - *GitHub API poll*: `btrain pr poll` already queries the PR's review
+     state. A required bot that has not posted a review within a configurable
+     `[pr_flow].bot_pending_timeout` (default: 30 min after the review was
+     requested) is classified `unknown/timeout` — the absence of a review
+     proves only that the bot did not respond, not why. A bot whose review
+     request returned a GitHub error (403, 404, 422) is classified by the
+     HTTP-specific rows of the failure-class table above.
+   - *Runner probe as weak hint*: a failed local runner probe is not
+     authoritative but may shorten the pending window (skip straight to the
+     configured response rather than waiting the full timeout) when
+     `bot_agent_map` links the runner to the bot.
+2. **Pending window**: the duration between "review requested" and
+   "classified unavailable." During this window the lane stays in its current
+   PR-flow status with a `bot-pending` annotation visible in `btrain handoff`
+   and `btrain doctor`. The window is `[pr_flow].bot_pending_timeout`
+   (default 30 min), shortened to `[pr_flow].bot_probe_shortcut` (default
+   5 min) when the mapped runner's local probe also fails.
+3. **False-positive behavior**: if the bot was available but slow, the
+   deferral fires and the bot posts its review after the gate already
+   evaluated without it. The late review is recorded as a `bot-late-review`
+   event. For Options B and C (operator-initiated), the operator chose to
+   exempt, so a late review is informational only. For D and E (automatic),
+   the late review triggers a `btrain doctor` warning recommending the
+   operator increase `bot_pending_timeout` or revoke the deferral. The late
+   review does *not* retroactively block the merge; once the gate evaluated,
+   the result stands, but the event provides an audit trail for the false
+   positive.
+
+#### Option A — Manual edit only (status quo)
+
+The operator edits `[pr_flow].required_bots` in `project.toml` by hand.
+
+- **Status**: No new lane or PR status. The lane stays in `pr-review` until
+  the operator removes the bot from `required_bots` and re-requests review.
+- **Command**: Direct TOML edit, then
+  `btrain pr request-review --lane <id> --bots all`.
+- **Event**: No dedicated workflow event. The change is visible only in git
+  history of `project.toml`.
+- **Expiry**: None. The edit persists until manually reverted.
+- **Safety**: Relies on operator discipline to restore the bot entry after
+  recovery. No mechanism prevents forgetting.
+- **PR-flow effects**: The bot is removed from the gate entirely; there is no
+  distinction between "temporarily excused" and "permanently removed."
+
+#### Option B — Per-lane audited exemption
+
+A new command temporarily exempts a named bot from one lane's PR gate.
+
+- **Status**: The lane stays in its current PR-flow status. The gate
+  evaluates without the exempted bot for that lane only.
+- **Command**: `btrain pr exempt-bot --lane <id> --bot <name> --reason "..."
+  --until <ISO>` to grant.
+  `btrain pr unexempt-bot --lane <id> --bot <name>` to revoke early.
+- **Event**: `bot-exempted` and `bot-unexempted` events in canonical workflow
+  history, recording: actor, bot name, lane, reason, failure class, expiry,
+  and whether solo mode was active.
+- **Expiry**: Required (`--until`). After expiry the exemption lapses; the
+  bot is required again for any subsequent PR check. `btrain doctor` warns
+  while exemptions are active and lists expired ones.
+- **Safety**: Scoped to one lane — other lanes still require the bot.
+  `required_bots` in TOML is never edited. The exemption and its reason are
+  shown in the PR body and `btrain handoff`.
+- **PR-flow effects**: The lane's merge gate evaluates as if the exempted bot
+  is absent from `required_bots` until expiry or early revocation. All other
+  required bots still apply.
+
+#### Option C — Repo-wide audited deferral
+
+Same mechanism as B but scoped to the repository rather than a single lane.
+
+- **Status**: All lanes currently in PR-flow evaluate the gate without the
+  deferred bot.
+- **Command**: `btrain pr defer-bot --bot <name> --reason "..." --until <ISO>`
+  to grant. `btrain pr undefer-bot --bot <name>` to revoke.
+- **Event**: `bot-deferred` and `bot-undeferred` in workflow history with the
+  same fields as B.
+- **Expiry**: Required. Same `btrain doctor` warnings as B.
+- **Safety**: Broader blast radius than B — all lanes and new PRs are
+  affected. The deferral is visible in `btrain status` and every affected PR
+  body. `required_bots` in TOML is never edited.
+- **PR-flow effects**: Same gate relaxation as B, applied to all current and
+  future PR gate evaluations until expiry.
+
+#### Option D — Automatic deferral tied to solo-mode scope
+
+When solo mode is on and the unavailable runtime maps to a required bot (via
+a new `[pr_flow].bot_agent_map`), the bot requirement is automatically
+deferred with the solo-mode expiry. No separate operator command is needed.
+
+- **Status**: The bot enters a `bot-pending` window when solo mode is on and
+  the bot-agent mapping exists. Deferral begins only after the pending
+  timeout expires (classified `unknown/timeout`) or the GitHub API returns a
+  classifiable HTTP signal — not for the entire period before classification.
+  A local runner probe failure is a weak hint that may shorten the pending
+  window (per `bot_probe_shortcut`) but never triggers or sustains a deferral
+  on its own.
+- **Command**: Implicit on `btrain solo on` when the mapping exists.
+  `btrain solo off` or expiry restores the requirement.
+- **Event**: `bot-pending` when solo-on detects the mapping and a lane has
+  an open review request for the mapped bot. `bot-auto-deferred` when the
+  pending window expires and the bot is classified unavailable
+  (unknown/timeout or an HTTP-signal class from the detection contract).
+  `bot-auto-restored` on solo-off, expiry, or when the GitHub API poll
+  confirms the bot posted a review.
+- **Expiry**: Inherits solo mode's `until`. Cannot outlive it.
+- **Safety**: Requires an explicit `[pr_flow].bot_agent_map` entry — the
+  mapping is never inferred from bot or agent names. Only fires when the
+  mapped runtime is the one solo mode replaces. `btrain doctor` warns while
+  active.
+- **Detection**: The deferral fires only after the bot is classified
+  `unknown/timeout` (pending window expired) or by an HTTP-signal class
+  (detection contract above), not on runner probe alone. When `bot_agent_map`
+  links the runner to the bot and the runner's local probe fails, the pending
+  window shortens per `bot_probe_shortcut`, but the GitHub poll is still the
+  authoritative gate. A runner outage with a healthy bot (different
+  infrastructure, different quota) results in a `bot-pending` annotation
+  that expires without deferral when the bot posts its review in time.
+- **PR-flow effects**: Same gate relaxation as B/C, scoped to the solo-mode
+  lifetime and the specific bot-agent mapping.
+
+#### Option E — Failure-class-dependent policy table
+
+Different failure classes get different default responses, configured in TOML:
+
+```toml
+[pr_flow.bot_unavailable]
+unknown   = "defer-lane"    # per-lane deferral, retry after bot_pending_timeout
+outage    = "defer-lane"    # per-lane deferral; on 5xx recovery re-request review and re-enter bot-pending
+quota     = "defer-lane"    # requires a documented provider-specific signal; otherwise unknown/timeout
+auth      = "block"         # lane blocked, operator must fix credentials
+policy    = "block"         # lane blocked, requires human decision
+```
+
+- **Status**: `defer-lane` acts like Option B. The deferral ends only when
+  the GitHub API poll confirms the bot posted a review or a documented
+  provider-specific recovery signal fires. For outage, GitHub API recovery
+  from 5xx does not end the deferral — btrain re-requests the review and
+  re-enters `bot-pending`; the deferral ends only when the bot posts.
+  `block` halts the lane with a dedicated `bot-blocked` warning.
+- **Command**: `btrain pr bot-status --lane <id>` to inspect. The operator
+  can override any class with `btrain pr exempt-bot` (Option B's mechanism).
+- **Event**: `bot-unavailable` with the failure class; `bot-recovered` when
+  the GitHub API poll confirms the bot posted a review or a documented
+  provider-specific recovery signal fires. For outage, GitHub API recovery
+  from 5xx emits `bot-re-requested` and re-enters `bot-pending` instead of
+  `bot-recovered`. A runner probe failure may shorten the next pending window
+  but does not emit `bot-recovered`.
+- **Expiry**: Deferrals are retried on `[pr_flow.bot_unavailable].retry_after`
+  (default 6h) and on `btrain pr retry-bot --lane <id>`. They lapse when the
+  GitHub API poll confirms the bot posted a review. `block` has no automatic
+  recovery. The retry timer is independent of `[solo].retry_after` because
+  this option is usable when solo mode is off.
+- **Detection**: Same GitHub API poll as the detection contract above. A
+  `defer-lane` response fires when the pending timeout expires
+  (`unknown/timeout`) or on an outage HTTP signal (5xx). Quota is classified
+  `unknown/timeout` unless the bot documents a provider-specific quota signal;
+  the `quota` class in the policy table is available for repos that configure
+  such a signal. When `bot_agent_map`
+  exists and the runner probe fails, `bot_probe_shortcut` applies. `block`
+  fires immediately on auth or policy signals from the GitHub API (403 with
+  a credential scope error, or a documented policy-refusal response). A false
+  positive (bot was slow, not down) is handled as described in the detection
+  contract: `bot-late-review` event, `btrain doctor` warning, no retroactive
+  merge block.
+- **Safety**: Auth and policy failures default to blocking, so credential
+  issues and content-policy refusals never silently waive the gate. Outage
+  and quota are deferrable because they resolve externally.
+- **PR-flow effects**: Deferred bots are skipped in gate evaluation until the
+  GitHub API poll confirms the bot posted a review. For outage, a retry that
+  finds the 5xx resolved triggers a re-request and re-enters `bot-pending`;
+  the gate continues to skip the bot until it posts. Blocked bots stall the
+  lane. An operator can always
+  escalate from `defer-lane` to `block` or from `block` to `defer-lane` with
+  an explicit command.
+
+#### Comparison
+
+| Criterion | A (manual) | B (per-lane) | C (repo-wide) | D (auto/solo) | E (class table) |
+|---|---|---|---|---|---|
+| Audit trail | git only | full | full | full | full |
+| Operator effort | high | moderate | low | none | low after config |
+| Blast radius | per-lane¹ | per-lane | repo-wide | repo-wide | configurable |
+| Silent-approval risk | discipline | command req'd | command req'd | mapping req'd | class defaults |
+| Solo-mode coupling | none | none | none | tight | works with or without |
+| Bot ≠ runtime risk | n/a | n/a (operator) | n/a (operator) | `bot_agent_map` required; probe is weak hint | GitHub poll authoritative; `bot_agent_map` optional shortcut |
+| Handles all failure classes | same response | same response | same response | same response | class-dependent |
+
+¹ Per-lane only because the operator acts on one PR at a time, but the
+underlying TOML edit is repo-wide.
+
+**Options can be combined.** For example: B as the per-lane mechanism,
+E's failure-class defaults to decide when to auto-invoke B vs. block, and
+C or D as an optional broader scope.
+
+#### Decision inputs needed
+
+To choose, the owner of this policy needs to decide:
+
+1. **Is audit-trail-free manual editing acceptable?** If no, eliminate A.
+2. **Should different failure classes get different responses?** If yes,
+   E is required as a layer; otherwise any single-response option (B–D)
+   suffices.
+3. **Should bot unavailability couple to solo mode?** If yes, D. If the
+   policy should apply independently of solo mode (e.g. a bot goes down
+   while multi-agent review is otherwise healthy), B/C/E are more general.
+4. **Per-lane or repo-wide default scope?** B and E default to per-lane;
+   C and D default to repo-wide.
+5. **Should auth and policy failures ever auto-defer?** E defaults them to
+   `block`, reflecting that they may require human intervention; the other
+   options treat all classes identically.
