@@ -1404,6 +1404,29 @@ describe("btrain PR flow handoff lifecycle", () => {
     const needsReview = await runBtrain(buildNeedsReviewArgs(tmpDir, { actor: "TestBot", lane: "a" }), tmpDir)
     assert.equal(needsReview.code, 0, needsReview.stderr)
 
+    const ownerApproval = await runBtrain(
+      [
+        "handoff",
+        "resolve",
+        "--repo",
+        tmpDir,
+        "--lane",
+        "a",
+        "--summary",
+        "The owner must not approve their own work.",
+        "--actor",
+        "TestBot",
+      ],
+      tmpDir,
+    )
+
+    assert.notEqual(ownerApproval.code, 0, ownerApproval.stdout)
+    assert.match(ownerApproval.stderr, /reviewer|ReviewBot|approve/i)
+    const rejectedContent = await fs.readFile(path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md"), "utf8")
+    assert.match(rejectedContent, /^Status: needs-review$/m)
+    const rejectedLocks = JSON.parse(await fs.readFile(path.join(tmpDir, ".btrain", "locks.json"), "utf8"))
+    assert.ok(rejectedLocks.locks.some((lock) => lock.lane === "a" && lock.path === "README.md"), JSON.stringify(rejectedLocks))
+
     const resolved = await runBtrain(
       [
         "handoff",

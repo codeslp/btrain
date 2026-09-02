@@ -320,7 +320,6 @@ function applyModel(model, cmd, actor) {
 const CANDIDATE_REASON_LABELS = new Map([
   ["resolve-from-idle", "resolve-from-idle"],
   ["resolve-requires-lane-actor", "resolve-actor-unchecked"],
-  ["ready-for-pr-entry-requires-reviewer", "resolve-actor-unchecked"],
   ["resolve-from-pr-flow-status", "resolve-from-pr-flow"],
   ["needs-review-requires-owner", "update-actor-unchecked"],
   ["pr-review-requires-owner", "update-actor-unchecked"],

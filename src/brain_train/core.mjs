@@ -5964,6 +5964,18 @@ async function resolveHandoff(repoRoot, options) {
     existingCurrent = await readCurrentState(repoRoot)
   }
 
+  if (
+    existingCurrent.status === "needs-review"
+    && normalizeAgentName(resolvedActor).toLowerCase()
+      !== normalizeAgentName(existingCurrent.reviewer).toLowerCase()
+  ) {
+    throw new BtrainError({
+      message: `Only the recorded reviewer may approve lane ${laneId || "(single)"}.`,
+      reason: `The acting agent is \`${resolvedActor || "unknown"}\`, but the lane reviewer is \`${existingCurrent.reviewer || "unassigned"}\`. Non-reviewer approval is not permitted.`,
+      fix: `Run the review as \`${existingCurrent.reviewer || "the recorded reviewer"}\`, then retry \`btrain handoff resolve${laneId ? ` --lane ${laneId}` : ""} --summary "..." --actor "${existingCurrent.reviewer || "<reviewer>"}"\`.`,
+    })
+  }
+
   const finalResolve = !!options.final || !!options["final"]
   // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
   // bypass. From needs-review the reviewer's plain resolve enters

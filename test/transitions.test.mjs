@@ -17,18 +17,18 @@ import {
 const execFileAsync = promisify(execFile)
 
 describe("lane transition contract", () => {
-  it("contains the 20 contract rows, 15 legacy rows, and one system row", () => {
-    assert.equal(TRANSITION_ROWS.length, 36)
+  it("contains the 20 contract rows, 14 remaining legacy rows, and one system row", () => {
+    assert.equal(TRANSITION_ROWS.length, 35)
     assert.deepEqual(
       TRANSITION_ROWS.map((row) => row.id),
       [
         ...Array.from({ length: 20 }, (_, index) => String(index + 1)),
-        ...Array.from({ length: 15 }, (_, index) => `L${index + 1}`),
+        ...Array.from({ length: 15 }, (_, index) => `L${index + 1}`).filter((id) => id !== "L8"),
         "L16",
       ],
     )
     assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "contract").length, 20)
-    assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "legacy").length, 15)
+    assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "legacy").length, 14)
     assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "system").length, 1)
   })
 
@@ -52,6 +52,17 @@ describe("lane transition contract", () => {
 
     assert.equal(result.row.id, "4")
     assert.equal(result.next.status, "ready-for-pr")
+  })
+
+  it("rejects owner approval from needs-review", () => {
+    assert.throws(
+      () => applyTransition(
+        { status: "needs-review", owner: "codex", reviewer: "claude" },
+        "handoff resolve",
+        { to: "ready-for-pr", actor: "codex", prFlowEnabled: true },
+      ),
+      /No transition row matches/,
+    )
   })
 
   it("cross-checks every modeled action against the hand-authored table", async () => {
@@ -238,7 +249,7 @@ describe("lane transition contract", () => {
     const cliPath = path.resolve("src/brain_train/cli.mjs")
     const jsonRun = await execFileAsync("node", [cliPath, "transitions", "--format", "json"])
     const rows = JSON.parse(jsonRun.stdout)
-    assert.equal(rows.length, 36)
+    assert.equal(rows.length, 35)
     assert.equal(rows[0].action, "Claim")
 
     const mermaidRun = await execFileAsync("node", [cliPath, "transitions", "--format", "mermaid"])
