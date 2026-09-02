@@ -486,9 +486,12 @@ A new command temporarily exempts a named bot from one lane's PR gate.
 - **Event**: `bot-exempted` and `bot-unexempted` events in canonical workflow
   history, recording: actor, bot name, lane, reason, failure class, expiry,
   and whether solo mode was active.
-- **Expiry**: Required (`--until`). After expiry the exemption lapses; the
-  bot is required again for any subsequent PR check. `btrain doctor` warns
-  while exemptions are active and lists expired ones.
+- **Expiry**: Required (`--until`). On expiry or early revocation
+  (`unexempt-bot`), btrain re-evaluates every affected open lane: a lane
+  in `ready-to-merge` whose merge gate cleared under the exemption and has
+  not yet merged returns to `pr-review` so the restored requirement takes
+  effect before merge. `btrain doctor` warns while exemptions are active
+  and lists expired ones.
 - **Safety**: Scoped to one lane — other lanes still require the bot.
   `required_bots` in TOML is never edited. The exemption and its reason are
   shown in the PR body and `btrain handoff`.
@@ -506,7 +509,11 @@ Same mechanism as B but scoped to the repository rather than a single lane.
   to grant. `btrain pr undefer-bot --bot <name>` to revoke.
 - **Event**: `bot-deferred` and `bot-undeferred` in workflow history with the
   same fields as B.
-- **Expiry**: Required. Same `btrain doctor` warnings as B.
+- **Expiry**: Required. On expiry or early revocation, btrain re-evaluates
+  every affected open lane. Any lane in `ready-to-merge` whose gate cleared
+  under the deferral and has not merged returns to `pr-review`, so the
+  restored bot requirement applies before merge. The same `btrain doctor`
+  warnings as B apply.
 - **Safety**: Broader blast radius than B — all lanes and new PRs are
   affected. The deferral is visible in `btrain status` and every affected PR
   body. `required_bots` in TOML is never edited.
@@ -518,11 +525,22 @@ Same mechanism as B but scoped to the repository rather than a single lane.
 When solo mode is on and the unavailable runtime maps to a required bot (via
 a new `[pr_flow].bot_agent_map`), the bot requirement is automatically
 deferred with the solo-mode expiry. No separate operator command is needed.
+The policy owner must choose one scope:
+
+- **(D-i) Per-lane timeout deferral.** Each lane has its own `bot-pending`
+  window. A timeout defers the bot only for that lane. A different lane where
+  the bot responded normally keeps the requirement.
+- **(D-ii) Repo-wide signal deferral.** A lane timeout is not enough to defer
+  the bot repository-wide. Repo-wide deferral requires a documented,
+  authoritative bot-originated outage, quota, or policy signal whose contract
+  explicitly states repository-wide scope.
 
 - **Status**: The bot enters a `bot-pending` window when solo mode is on and
-  the bot-agent mapping exists. Deferral begins only after the pending
-  timeout expires (classified `unknown/timeout`) or a bot-originated
-  documented signal fires — not for the entire period before classification.
+  the bot-agent mapping exists. Under D-i, deferral begins for that lane only
+  after its pending timeout expires (`unknown/timeout`) or a documented signal
+  scoped to that lane fires. Under D-ii, deferral begins repository-wide only
+  after a documented authoritative repo-wide signal fires; one lane's
+  `unknown/timeout` cannot waive the bot for other lanes.
   A local runner probe failure is a weak hint that may shorten the pending
   window (per `bot_probe_shortcut`) but never triggers or sustains a deferral
   on its own. HTTP errors from the review-request call are request-path
@@ -531,20 +549,27 @@ deferred with the solo-mode expiry. No separate operator command is needed.
   `btrain solo off` or expiry restores the requirement.
 - **Event**: `bot-pending` when solo-on detects the mapping and a lane has
   an open review request for the mapped bot. `bot-auto-deferred` when the
-  pending window expires (classified `unknown/timeout`) or a bot-originated
-  documented signal classifies the bot as unavailable. `bot-auto-restored`
+  D-i pending window expires (`unknown/timeout`) or a bot-originated
+  documented signal classifies the bot as unavailable. Each event records
+  `scope: lane | repo`; D-ii requires the repo-wide signal before recording
+  repo scope. `bot-auto-restored`
   on solo-off, expiry, late approval from the bot before merge, or when
   the GitHub API poll confirms the bot posted a review before merge. After
   merge, a late review (approval or `CHANGES_REQUESTED`) is recorded as a
   `bot-late-review` audit event without restoring or revoking the deferral.
-- **Expiry**: Inherits solo mode's `until`. Cannot outlive it.
+- **Expiry**: Inherits solo mode's `until` and cannot outlive it. On solo-off,
+  expiry, or early restoration, btrain re-evaluates every affected open lane.
+  Any uncleared lane in `ready-to-merge` whose gate used the deferral returns
+  to `pr-review` before the restored bot requirement is evaluated.
 - **Safety**: Requires an explicit `[pr_flow].bot_agent_map` entry — the
   mapping is never inferred from bot or agent names. Only fires when the
   mapped runtime is the one solo mode replaces. `btrain doctor` warns while
   active.
-- **Detection**: The deferral fires only after the bot is classified
-  `unknown/timeout` (pending window expired) or by a bot-originated
-  documented signal, never on a local runner probe and never on
+- **Detection**: D-i fires for one lane after its bot is classified
+  `unknown/timeout` or by a bot-originated signal scoped to that lane. D-ii
+  fires repository-wide only from a documented authoritative repo-wide
+  signal; a single lane timeout is insufficient. Neither path fires on a
+  local runner probe or on
   review-request HTTP errors (which are request-path failures). When
   `bot_agent_map` links the runner to the bot and the runner's local probe
   fails, the pending window shortens per `bot_probe_shortcut`, but the
@@ -553,8 +578,8 @@ deferred with the solo-mode expiry. No separate operator command is needed.
   is the authoritative gate. A runner outage with a healthy bot (different
   infrastructure, different quota) results in a `bot-pending` annotation
   that expires without deferral when the bot posts its review in time.
-- **PR-flow effects**: Same gate relaxation as B/C, scoped to the solo-mode
-  lifetime and the specific bot-agent mapping.
+- **PR-flow effects**: Same gate relaxation as B for D-i or C for D-ii,
+  scoped to the solo-mode lifetime and the specific bot-agent mapping.
 
 #### Option E — Failure-class-dependent policy table
 
@@ -618,7 +643,7 @@ policy    = "block"         # lane blocked, requires human decision; requires bo
 |---|---|---|---|---|---|
 | Audit trail | git only | full | full | full | full |
 | Operator effort | high | moderate | low | none | low after config |
-| Blast radius | repo-wide | per-lane | repo-wide | repo-wide | configurable |
+| Blast radius | repo-wide | per-lane | repo-wide | D-i per-lane; D-ii repo-wide | configurable |
 | Silent-approval risk | discipline | command req'd | command req'd | mapping req'd | class defaults |
 | Solo-mode coupling | none | none | none | tight | works with or without |
 | Bot ≠ runtime risk | n/a | n/a (operator) | n/a (operator) | `bot_agent_map` required; probe is weak hint | GitHub poll authoritative; `bot_agent_map` optional shortcut |
@@ -639,8 +664,9 @@ To choose, the owner of this policy needs to decide:
 3. **Should bot unavailability couple to solo mode?** If yes, D. If the
    policy should apply independently of solo mode (e.g. a bot goes down
    while multi-agent review is otherwise healthy), B/C/E are more general.
-4. **Per-lane or repo-wide default scope?** B and E default to per-lane;
-   C and D default to repo-wide.
+4. **Per-lane or repo-wide default scope?** B and E default to per-lane; C is
+   repo-wide. D requires an explicit choice between D-i and D-ii; it has no
+   safe default because one lane's timeout is not a repo-wide outage signal.
 5. **Should auth and policy failures ever auto-defer?** E defaults them to
    `block`, reflecting that they may require human intervention; the other
    options treat all classes identically.
