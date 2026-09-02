@@ -634,7 +634,10 @@ stays as-is.
 - Follow-up: update `buildLaneGuidance` and `defaultNextActionForStatus` to
   stop emitting the shortcut instruction; narrow or retire L4 for the
   `ReturnToPr` case (Phase B step 3, alongside the spec 002 designation that
-  replaces L4's blanket acceptance).
+  replaces L4's blanket acceptance). Put the narrowed L4 path into advisory
+  mode in the same commit that records the row-12 removal decision. Enforce
+  rejection only after the L4 advisory minimum and quiescence checks pass;
+  until then, keep accepting and recording the legacy shortcut.
 
 **Affected rows:** 12, L4, L5.
 **Safety property:** review coverage (local peer sees every fix before GitHub).
@@ -754,8 +757,11 @@ terminate.
   and harness for that guard. Both sub-options must add an override-consumed
   input and an override-authorized `RepairClear` action to the formal model
   and harness. Sub-option (b) does not add the post-clear abandonment guard,
-  but TLC must still explore the accepted override-clear followed by
-  `AbandonResolve` path.
+  but the model must add and check a named reachability witness,
+  `OverrideAbandonReachable`, for an override-authorized `RepairClear`
+  followed by `AbandonResolve`. The `RepairBudgetBounded` commentary must
+  identify that path as an accepted audited exit rather than a containment
+  violation.
 
 **Affected rows:** 15, L7.
 **Safety property:** repair containment (whether a lane can skip the repair
@@ -801,9 +807,13 @@ unrelated repair reason starts its own count. The model must change to match.
   (count = 0) before it can be re-claimed, making the Claim-only change a
   no-op. Two sub-options:
   - **(B-i) Use a persistent reason-keyed count.** Replace the scalar with a
-    count per repair reason. Each terminal action and `Claim` keeps that map
-    `UNCHANGED`; `RepairBudgetBounded` drops the `resolved ⇒ count = 0` clause
-    and applies the bound per reason. TLC must recheck all properties.
+    map such as `repairCountByReason` from each lane and repair reason to
+    `0..MaxRepair`. Each terminal action and `Claim` keeps that map
+    `UNCHANGED`. Replace the scalar invariant with
+    `RepairBudgetBoundedByReason`, which requires every lane/reason entry to
+    remain at or below `MaxRepair` and does not require resolved lanes to have
+    zero counts. Counts do not reset unless a later human decision designates
+    an explicit audited reset action. TLC must recheck all properties.
   - **(B-ii) Add a dedicated lifetime-history variable.** Keep the existing
     task-scoped `repairCount` and its terminal reset. Add a model variable such
     as `laneRepairHistory` that persists across terminal transitions and
@@ -889,7 +899,8 @@ If `resolveVerifiedActor` yields empty, the gate rejects with the fix
 - Safety: no implicit authority grants. The actor is always known.
 - Follow-up: update the advisory-mode warning text to mention the single-
   agent case; add a `btrain init` prompt that reminds the user to
-  `export BTRAIN_AGENT=<name>` in their shell profile.
+  `export BTRAIN_AGENT=<name>` in their shell profile. FR-6 owns this
+  initialization reminder and its acceptance check.
 
 **Option B: Infer the lone agent when exactly one is configured.**
 If `resolveVerifiedActor` yields empty and `config.agents.active` has exactly
@@ -966,7 +977,9 @@ reaching enforcement.
   classifying them as behavior that enforcement will reject.
 - Follow-up: add the `self-repair-audit` workflow-event field for the
   owner-declares-own-repair case; exclude it from FR-5 advisory retirement;
-  designate.
+  designate. Use the canonical lane-event JSONL schema owned by
+  `core.mjs`, as described in spec 006 FR-9 and spec 013, rather than a
+  separate audit file.
 
 **Affected rows:** 13, L4 (which accepts any status, any actor).
 **Safety property:** repair-needed entry integrity (whether the owner can
@@ -1008,6 +1021,12 @@ any active status, with the distinct-from constraint.
   - **(A-iii) Allow role reversal.** The contract explicitly accepts that
     distinct final identities and sequential updates do not guarantee review
     independence.
+- For A-i, A-ii, and Option C, the formal follow-up adds
+  `authorHistory` as a lane-indexed set of agents and checks the named
+  `AuthorSeparation` invariant: a lane's reviewer is not in that lane's
+  author history. A-ii adds an explicit consumed-override exception and a
+  reachability witness for the audited reversal. A-iii must explicitly remove
+  this invariant rather than weakening it implicitly.
 - Follow-up: designate Option A and its swap policy in spec 005 FR-5; enforce
   the selected provenance guard for single and paired updates; retire L10.
 
@@ -1032,13 +1051,17 @@ and re-claim with the new owner.
 - This option depends on Q5. If Q5 Option B also makes the owner the only
   actor that can abandon work, the decision must choose one of these policies:
   - **(B-i) Disallow the combination.** Q8 Option B cannot be selected with
-    Q5 Option B.
+    Q5 Option B. Otherwise, an unavailable owner on an unlinked active lane
+    has no authorized lane-agent exit, so the combination can deadlock until
+    an external actor returns.
   - **(B-ii) Add an audited guardian takeover.** When the current owner is
     unavailable, a verified guardian can consume an override and atomically
     assign a takeover owner without releasing locks or losing lane metadata.
     The event records the unavailable-owner evidence, override, prior owner,
     and takeover owner. The takeover owner can then continue the lane or use
-    the Q5 owner-only abandon path before a fresh claim.
+    the Q5 owner-only abandon path before a fresh claim. If the takeover also
+    changes the locked-file set through row 16, it must consume a separate
+    audited rescope override; the one-time takeover override cannot be reused.
 - The contract, formal model, and harness must represent the selected
   dependency policy before either dependent option is enforced.
 
