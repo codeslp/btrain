@@ -1416,6 +1416,49 @@ describe("reviewer authority advisory diagnostics", () => {
       }
     })
   }
+
+  it("warns and records L8 when an unconfigured actor matches the recorded reviewer", async () => {
+    const repoDir = await makeTmpDir()
+    try {
+      await runGit(["init"], repoDir)
+      await configureGitIdentity(repoDir)
+      await runBtrain(["init", repoDir, "--agent", "WriterBot", "--agent", "ReviewBot"], repoDir)
+      await enablePrFlow(repoDir)
+      await fs.writeFile(path.join(repoDir, "README.md"), "# test\n", "utf8")
+      await runGit(["add", "."], repoDir)
+      await runGit(["commit", "-m", "initial"], repoDir)
+      const claim = await runBtrain(
+        [
+          "handoff", "claim", "--repo", repoDir, "--lane", "a",
+          "--task", "Unconfigured reviewer advisory", "--owner", "WriterBot",
+          "--reviewer", "Intruder", "--files", "README.md",
+        ],
+        repoDir,
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+      await fs.appendFile(path.join(repoDir, "README.md"), "\nchange\n", "utf8")
+      const needsReview = await runBtrain(
+        buildNeedsReviewArgs(repoDir, { actor: "WriterBot", lane: "a", reviewer: "Intruder" }),
+        repoDir,
+      )
+      assert.equal(needsReview.code, 0, needsReview.stderr)
+
+      const approval = await runBtrain(
+        [
+          "handoff", "resolve", "--repo", repoDir, "--lane", "a",
+          "--summary", "Unconfigured reviewer must remain advisory.", "--actor", "Intruder",
+        ],
+        repoDir,
+      )
+
+      assert.equal(approval.code, 0, approval.stderr)
+      assert.match(approval.stdout, /warning.*L8.*recorded reviewer/i)
+      const events = await readJsonLines(path.join(repoDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.equal(events.at(-1)?.details?.["transition-advisory"], "L8")
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
 })
 
 describe("btrain PR flow handoff lifecycle", () => {

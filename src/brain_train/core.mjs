@@ -5929,7 +5929,7 @@ async function requestChangesHandoff(repoRoot, options) {
 async function resolveHandoff(repoRoot, options) {
   const config = await readProjectConfig(repoRoot)
   const prFlow = getPrFlowConfig(config)
-  const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
+  const { actor: resolvedActor, agentCheck } = resolveVerifiedActor(config, options.actor)
   const actorLabel = resolvedActor || options.owner || "btrain"
   const laneConfigs = getLaneConfigs(config)
   const laneId = options.lane
@@ -5967,9 +5967,17 @@ async function resolveHandoff(repoRoot, options) {
   const reviewerResolveTarget = prFlow.enabled ? "ready-for-pr" : "resolved"
   const normalizedResolveActor = normalizeAgentName(resolvedActor).toLowerCase()
   const normalizedReviewer = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
+  const actorIsConfigured = agentCheck.configuredAgents.some(
+    (agentName) => normalizeAgentName(agentName).toLowerCase() === normalizedResolveActor,
+  )
   const reviewerAuthorityAdvisory =
     existingCurrent.status === "needs-review"
-    && (!normalizedResolveActor || !normalizedReviewer || normalizedResolveActor !== normalizedReviewer)
+    && (
+      !normalizedResolveActor
+      || !normalizedReviewer
+      || normalizedResolveActor !== normalizedReviewer
+      || !actorIsConfigured
+    )
     ? `warning: transition-advisory L8: only the recorded reviewer should apply \`needs-review -> ${reviewerResolveTarget}\`; acting agent is \`${resolvedActor || "unknown"}\` and reviewer is \`${existingCurrent.reviewer || "unassigned"}\`.`
     : ""
 
@@ -6012,7 +6020,7 @@ async function resolveHandoff(repoRoot, options) {
           fix: `Re-read lane ${laneId || "(single)"}, verify its current owner, reviewer, and files, then run the resolve command again.`,
         })
       }
-      const transition = applyTransition(latestCurrent, "handoff resolve", {
+      applyTransition(latestCurrent, "handoff resolve", {
         to: "ready-for-pr",
         actor: resolvedActor,
         prFlowEnabled: true,
@@ -6040,7 +6048,7 @@ async function resolveHandoff(repoRoot, options) {
             summary: options.summary || "",
             localReviewApproved: true,
             nextStatus: "ready-for-pr",
-            ...(transition.row.id === "L8" ? { "transition-advisory": "L8" } : {}),
+            ...(reviewerAuthorityAdvisory ? { "transition-advisory": "L8" } : {}),
           },
           overrideHandoffPath,
         },
@@ -6080,7 +6088,7 @@ async function resolveHandoff(repoRoot, options) {
         fix: `Re-read lane ${laneId || "(single)"}, verify its current state, then run the resolve command again.`,
       })
     }
-    const transition = applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
+    applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
       to: "resolved",
       actor: resolvedActor,
       prFlowEnabled: prFlow.enabled,
@@ -6109,7 +6117,7 @@ async function resolveHandoff(repoRoot, options) {
         laneId,
         eventDetails: {
           summary: options.summary || "",
-          ...(transition.row.id === "L8" ? { "transition-advisory": "L8" } : {}),
+          ...(reviewerAuthorityAdvisory ? { "transition-advisory": "L8" } : {}),
         },
         overrideHandoffPath,
       },
