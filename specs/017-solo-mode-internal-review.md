@@ -337,6 +337,10 @@ argue with itself indefinitely.
   and the PR body, with its tier.
 - Solo mode cannot be on without an expiry; `btrain doctor` reports it and
   lists grandfathered lanes after expiry.
+- Automatic bot pending and deferral records store the requested head SHA. A
+  new head cancels the old timer or deferral and starts a new request window.
+- A repo-wide deferral processes current-head approvals and continues. It
+  rejects only when an affected lane has active current-head requested changes.
 
 ## Open questions
 
@@ -433,7 +437,11 @@ three things:
    with a `bot-pending` annotation visible in `btrain handoff` and `btrain
    doctor`. The window is `[pr_flow].bot_pending_timeout` (default 30 min),
    shortened to `[pr_flow].bot_probe_shortcut` (default 5 min) when the
-   mapped runner's local probe also fails.
+   mapped runner's local probe also fails. The pending record stores the
+   requested `headRefOid`. A head change cancels that record and any automatic
+   D or E deferral derived from it. The new head requires a successful review
+   request and starts a new pending window. No automatic deferral can transfer
+   from an earlier head.
 3. **Late-review behavior**: if the bot was available but slow, the
    deferral fires and the bot posts its review after the gate already
    evaluated without it. The late review is recorded as a `bot-late-review`
@@ -537,9 +545,11 @@ Same mechanism as B but scoped to the repository rather than a single lane.
   to grant. `btrain pr undefer-bot --bot <name>` to revoke.
 - **Grant guard**: Before it grants a repo-wide deferral, btrain applies B's
   current-head review guard to every affected open lane. If any lane has a
-  current-head bot verdict, btrain processes that verdict and rejects the
-  deferral. A `CHANGES_REQUESTED` verdict moves its lane to
-  `changes-requested` with reason `pr-review-feedback`.
+  current-head bot verdict, btrain processes that verdict first. An approval
+  satisfies that lane's requirement and does not reject the deferral for
+  other lanes. A `CHANGES_REQUESTED` verdict moves its lane to
+  `changes-requested` with reason `pr-review-feedback` and rejects the
+  repo-wide deferral. Only active requested changes block the command.
 - **Event**: `bot-deferred` and `bot-undeferred` in workflow history with the
   same fields as B.
 - **Expiry**: Required. On expiry or early revocation, btrain re-evaluates
@@ -588,7 +598,7 @@ must choose one scope:
   D-i pending window expires (`unknown/timeout`) or a bot-originated
   documented signal classifies the bot as unavailable. Each event records
   `scope: lane | repo`; D-ii requires the repo-wide signal before recording
-  repo scope. `bot-auto-restored`
+  repo scope. Both events record the requested head SHA. `bot-auto-restored`
   on solo-off, expiry, late approval from the bot before merge, or when
   the GitHub API poll confirms the bot posted a review before merge. After
   merge, a late review (approval or `CHANGES_REQUESTED`) is recorded as a
@@ -638,7 +648,8 @@ policy    = "block"         # lane blocked, requires human decision; requires bo
   HTTP errors.
 - **Command**: `btrain pr bot-status --lane <id>` to inspect. The operator
   can override any class with `btrain pr exempt-bot` (Option B's mechanism).
-- **Event**: `bot-unavailable` with the failure class (classified from the
+- **Event**: `bot-unavailable` with the failure class and requested head SHA
+  (classified from the
   response timeout or a bot-originated documented signal — never from a
   local runner signal or review-request HTTP errors); `bot-recovered` when
   the GitHub API poll confirms the bot posted a review or a documented
