@@ -21,9 +21,11 @@ Optional environment:
 
 Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST;
 claude runs with tools, settings sources, MCP servers, and skills disabled;
-codex runs with its shell tools disabled and the user's config ignored. An
-injected diff therefore has no route to host files or credentials, and no
-user/project hook, plugin, or CLAUDE.md memory enters a reviewer's context. Regression: python3 scripts/test_option_a_review.py
+codex runs with its shell tools disabled and the user's config ignored; every
+prompt has `@path` mentions neutralized before it reaches a CLI (Claude Code
+would otherwise inline the file client-side). An injected diff therefore has
+no route to host files or credentials, and no user/project hook, plugin, or
+CLAUDE.md memory enters a reviewer's context. Regression: python3 scripts/test_option_a_review.py
 (set REVIEW_LIVE_TESTS=1 to also run the real-CLI sentinel checks).
 
 No Python dependencies beyond the standard library.
@@ -61,6 +63,19 @@ CLI_ENV_ALLOWLIST = (
 
 def reviewer_env() -> dict[str, str]:
   return {key: os.environ[key] for key in CLI_ENV_ALLOWLIST if key in os.environ}
+
+
+# Claude Code expands `@path` mentions in the prompt client-side, outside the
+# tool system, so an untrusted diff containing `@/etc/passwd` would inline that
+# file even with --tools "". Every prompt passes through this before reaching a
+# CLI: an `@` that starts a path-like token becomes a fullwidth `＠`, which no
+# CLI treats as a mention. Diff hunk headers (`@@ -1 +1 @@`) are untouched
+# because their `@`s are followed by `@` or a space.
+MENTION_RE = re.compile(r"@(?=[\w./~\\-])")
+
+
+def neutralize_mentions(text: str) -> str:
+  return MENTION_RE.sub("\uff20", text)
 
 
 # ──────────────────────────────────────────────
@@ -604,6 +619,7 @@ async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
 
 
 async def call_reviewer(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
+  prompt = neutralize_mentions(prompt)
   if reviewer.provider == "claude-code":
     return await call_claude_code(reviewer, prompt)
   elif reviewer.provider == "codex-cli":
