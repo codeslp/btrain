@@ -17,7 +17,7 @@ metadata:
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+Consider the user input before proceeding, when it is not empty.
 
 ## Outline
 
@@ -66,16 +66,15 @@ The tasks.md should be immediately executable - each task must be specific enoug
 
 ## Task Generation Rules
 
-**CRITICAL**: Tasks MUST be organized by user story to enable independent implementation and testing.
+Organize tasks by user story so each story can be implemented and tested independently.
 
-**Bite-Sized Task Rule (REQUIRED)**: 
-Every task MUST be "bite-sized," meaning it should ideally take 2-5 minutes for an agent to execute. If a task is too broad (e.g., "Implement the entire service layer"), it MUST be decomposed into granular steps (e.g., "Define service interface," "Implement data mapping," "Implement validation logic"). Granular tasks reduce context sprawl, simplify reviews, and minimize file lock duration.
+**Bite-sized tasks**: Every task is small enough for one agent to finish in one short sitting and names the files it touches. If a task is too broad (e.g., "Implement the entire service layer"), decompose it into granular steps (e.g., "Define service interface," "Implement data mapping," "Implement validation logic"). Granular tasks reduce context sprawl, simplify reviews, and minimize file lock duration.
 
 **Tests are OPTIONAL**: Only generate test tasks if explicitly requested in the feature specification or if user requests TDD approach.
 
 ### Checklist Format (REQUIRED)
 
-Every task MUST strictly follow this format:
+Every task follows this format:
 
 ```text
 - [ ] [TaskID] [P?] [Story?] Description with file path
@@ -83,7 +82,7 @@ Every task MUST strictly follow this format:
 
 **Format Components**:
 
-1. **Checkbox**: ALWAYS start with `- [ ]` (markdown checkbox)
+1. **Checkbox**: start with `- [ ]` (markdown checkbox)
 2. **Task ID**: Sequential number (T001, T002, T003...) in execution order
 3. **[P] marker**: Include ONLY if task is parallelizable (different files, no dependencies on incomplete tasks)
 4. **[Story] label**: REQUIRED for user story phase tasks only

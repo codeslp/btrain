@@ -17,7 +17,7 @@ metadata:
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+Consider the user input before proceeding, when it is not empty.
 
 ## Outline
 

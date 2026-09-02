@@ -13,7 +13,7 @@ metadata:
 
 ## Checklist Purpose: "Unit Tests for English"
 
-**CRITICAL CONCEPT**: Checklists are **UNIT TESTS FOR REQUIREMENTS WRITING** - they validate the quality, clarity, and completeness of requirements in a given domain.
+**Concept**: Checklists are unit tests for requirements writing. They validate the quality, clarity, and completeness of requirements in a given domain.
 
 **NOT for verification/testing**:
 
@@ -38,7 +38,7 @@ metadata:
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+Consider the user input before proceeding, when it is not empty.
 
 ## Execution Steps
 
