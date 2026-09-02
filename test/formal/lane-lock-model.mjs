@@ -229,6 +229,7 @@ export class LaneLockModel {
       // Owner links or creates the PR after local approval (spec 002).
       if (s.status !== "ready-for-pr") return this.#reject("pr-review-from-invalid-status")
       if (actor !== s.owner) return this.#reject("pr-review-requires-owner")
+      if (!pr) return this.#reject("pr-review-requires-linked-pr")
       s.status = "pr-review"
       this.#applyUpdateEffects(s, status, actor, reason)
       if (pr) s.prNumber = String(pr)

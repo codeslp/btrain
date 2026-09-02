@@ -5389,6 +5389,8 @@ async function patchHandoff(repoRoot, options) {
           actor: resolvedActor,
           prFlowEnabled: getPrFlowConfig(config).enabled,
           prLinked: !!(updates.prNumber || source.prNumber),
+          reasonCode: reasonMetadata.reasonCode,
+          feedbackReason: reasonMetadata.reasonCode,
           structuralCompatibility: options.transitionCompatibility === true,
           filesChanged:
             options.files === undefined
@@ -5831,6 +5833,7 @@ async function requestChangesHandoff(repoRoot, options) {
     applyTransition(source, "handoff request-changes", {
       to: "changes-requested",
       actor: resolvedActor,
+      reasonCode: reasonMetadata.reasonCode,
     })
     return reasonMetadata
   }

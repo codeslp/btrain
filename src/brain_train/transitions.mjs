@@ -8,6 +8,7 @@ const ACTIVE_STATUSES = [
   "repair-needed",
 ]
 const PR_FLOW_STATUSES = ["ready-for-pr", "pr-review", "ready-to-merge"]
+const ALL_STATUSES = ["idle", ...ACTIVE_STATUSES, "resolved"]
 
 const PRIMARY_STATUSES_BY_ACTION = Object.freeze({
   Claim: ["idle", "resolved"],
@@ -88,14 +89,55 @@ function actorMatches(rowValue, state, actor) {
   return true
 }
 
-function guardMatches(rowValue, input) {
-  if (rowValue === "PR flow enabled") return input.prFlowEnabled === true
-  if (rowValue === "PR flow disabled") return input.prFlowEnabled !== true
-  if (rowValue === "no linked PR") return !input.prLinked
-  if (rowValue === "human disposition or override") return !!(input.humanDisposition || input.override)
-  if (rowValue === "non-empty and no conflict") return input.filesChanged !== false
-  if (rowValue === "no conflict") return input.filesChanged === false
-  return true
+function optionalFlag(input, name) {
+  return input[name] === undefined || input[name] === true
+}
+
+function guardMatches(rowValue, state, input) {
+  const guards = {
+    "none": () => true,
+    "files; conflicts; distinct reviewer": () =>
+      optionalFlag(input, "filesNonEmpty")
+      && optionalFlag(input, "noConflict")
+      && optionalFlag(input, "distinctReviewer"),
+    "review context and diff": () =>
+      optionalFlag(input, "reviewContextComplete") && optionalFlag(input, "diffPresent"),
+    "reason code": () => input.reasonCode === undefined || !!input.reasonCode,
+    "PR flow enabled": () => input.prFlowEnabled === true,
+    "PR flow disabled": () => input.prFlowEnabled !== true,
+    "no linked PR": () => !input.prLinked,
+    "PR number": () => input.prLinked === true,
+    "linked PR": () => input.prLinked === true,
+    "linked PR and feedback reason": () =>
+      input.prLinked === true && (input.feedbackReason === undefined || !!input.feedbackReason),
+    "reason and repair accounting": () =>
+      optionalFlag(input, "reasonPresent") && optionalFlag(input, "repairAccountingValid"),
+    "human disposition or override": () => !!(input.humanDisposition || input.override),
+    "non-empty and no conflict": () =>
+      input.filesChanged !== false
+      && optionalFlag(input, "filesNonEmpty")
+      && optionalFlag(input, "noConflict"),
+    "no conflict": () => optionalFlag(input, "noConflict"),
+    "consumed override": () => !!input.override,
+    "distinct owner and reviewer": () => optionalFlag(input, "distinctReviewer"),
+    "actor unchecked": () => true,
+    "valid status": () => ALL_STATUSES.includes(input.to ?? state.status),
+    "linked PR or stale locks": () =>
+      input.prLinked === true
+      || input.staleLocks === true
+      || (input.prLinked === undefined && input.staleLocks === undefined),
+    "current behavior": () => true,
+    "row 15 guard unmet": () => !(input.humanDisposition || input.override),
+    "lane uncovered": () => input.laneCovered !== true,
+    "single-handoff overwrite": () => true,
+    "repeat resolve": () => state.status === "resolved",
+    "reviewer absent or unverified": () => !state.reviewer || input.reviewerVerified === false,
+    "stale or expired lock": () =>
+      input.staleLocks === true
+      || input.expiredLocks === true
+      || (input.staleLocks === undefined && input.expiredLocks === undefined),
+  }
+  return guards[rowValue]?.() ?? false
 }
 
 function rowMatches(candidate, state, event, input) {
@@ -106,7 +148,7 @@ function rowMatches(candidate, state, event, input) {
     && (input.structuralCompatibility === true && candidate.id === "7"
       ? true
       : actorMatches(candidate.actor, state, input.actor))
-    && guardMatches(candidate.guard, input)
+    && guardMatches(candidate.guard, state, input)
 }
 
 export function applyTransition(state, event, input = {}) {
@@ -139,12 +181,12 @@ export function classifyTransitionEvent(options, currentStatus, nextStatus) {
 }
 
 function expandedSources(from) {
-  if (from === "$any") return ["[*]"]
+  if (from === "$any") return ALL_STATUSES
   return asArray(from)
 }
 
 function expandedTargets(to, source) {
-  if (to === "$any") return ["[*]"]
+  if (to === "$any") return ALL_STATUSES
   if (to === "$same") return [source]
   return asArray(to)
 }
