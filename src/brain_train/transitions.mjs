@@ -9,8 +9,19 @@ const ACTIVE_STATUSES = [
 ]
 const PR_FLOW_STATUSES = ["ready-for-pr", "pr-review", "ready-to-merge"]
 
+const PRIMARY_STATUSES_BY_ACTION = Object.freeze({
+  Claim: ["idle", "resolved"],
+  ToNeedsReview: ["in-progress", "changes-requested"],
+  PeerResolve: ["needs-review"],
+  LinkPr: ["ready-for-pr"],
+  PrRepoll: ["pr-review"],
+  PrTerminal: ["ready-to-merge"],
+  RepairClear: ["repair-needed"],
+})
+
 function row(id, action, event, from, to, actor, guard, locks, owner, state, kind = "contract") {
-  return Object.freeze({ id, action, event, from, to, actor, guard, locks, owner, state, kind })
+  const primary = Object.freeze([...(PRIMARY_STATUSES_BY_ACTION[action] || [])])
+  return Object.freeze({ id, action, event, from, to, actor, guard, locks, owner, state, kind, primary })
 }
 
 export const TRANSITION_ROWS = Object.freeze([
@@ -92,7 +103,9 @@ function rowMatches(candidate, state, event, input) {
   return matchesEvent(candidate.event, event)
     && matchesValue(candidate.from, state.status, state.status)
     && matchesValue(candidate.to, target, state.status)
-    && actorMatches(candidate.actor, state, input.actor)
+    && (input.structuralCompatibility === true && candidate.id === "7"
+      ? true
+      : actorMatches(candidate.actor, state, input.actor))
     && guardMatches(candidate.guard, input)
 }
 
@@ -111,6 +124,10 @@ export function applyTransition(state, event, input = {}) {
       status: target,
     },
   }
+}
+
+export function getPrimaryTransition(status) {
+  return TRANSITION_ROWS.find((entry) => entry.primary.includes(status)) || null
 }
 
 export function classifyTransitionEvent(options, currentStatus, nextStatus) {

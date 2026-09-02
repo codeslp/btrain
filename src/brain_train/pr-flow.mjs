@@ -15,6 +15,7 @@ import {
   readProjectConfig,
   resolveHandoff,
 } from "./core.mjs"
+import { applyTransition } from "./transitions.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -905,6 +906,8 @@ export async function runPrCreate(repoRoot, options = {}) {
     )
   }
 
+  validatePrCreateTransition(lane, options.actor || lane.owner || "btrain")
+
   const branch = await gitText(["branch", "--show-current"], repoRoot)
   if (!branch || ["main", "master"].includes(branch)) {
     throw new Error("Create a feature branch before running `btrain pr create`.")
@@ -940,6 +943,7 @@ export async function runPrCreate(repoRoot, options = {}) {
     status: "pr-review",
     pr: number,
     transitionEvent: "pr-create",
+    transitionCompatibility: true,
     base,
     next: `PR #${number} is open. Poll with \`btrain pr poll --lane ${laneId} --apply\`; request re-review with \`btrain pr request-review --lane ${laneId} --bots all\`.`,
   })
@@ -953,4 +957,14 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
 
   return { url, number, posted }
+}
+
+export function validatePrCreateTransition(lane, actor) {
+  return applyTransition(lane, "pr-create", {
+    to: "pr-review",
+    actor,
+    prFlowEnabled: true,
+    prLinked: true,
+    structuralCompatibility: true,
+  })
 }

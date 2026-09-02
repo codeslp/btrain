@@ -46,7 +46,7 @@ import {
   buildClaimReviewContextFields,
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
-import { applyTransition, classifyTransitionEvent } from "./transitions.mjs"
+import { applyTransition, classifyTransitionEvent, getPrimaryTransition } from "./transitions.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -1012,31 +1012,31 @@ function validateHandoffStatus(status, label = "--status") {
 }
 
 function defaultNextActionForStatus(status, { owner = "", reviewer = "" } = {}) {
-  switch (status) {
-    case "in-progress":
+  const primaryAction = getPrimaryTransition(status)?.action
+  switch (primaryAction) {
+    case "ToNeedsReview":
+      if (status === "changes-requested") {
+        return reviewer
+          ? `Address ${reviewer}'s review findings in the same lane and re-handoff for review.`
+          : "Address the review findings in the same lane and re-handoff for review."
+      }
       return "Work within the locked files, keep the lane in-progress, and hand off for review when ready."
-    case "needs-review":
+    case "PeerResolve":
       return reviewer
         ? `Waiting on ${reviewer} to review the lane.`
         : "Waiting on peer review."
-    case "ready-for-pr":
+    case "LinkPr":
       return "Local peer review is approved. Create or link the GitHub PR, then enter the PR review loop."
-    case "pr-review":
+    case "PrRepoll":
       return "Waiting on GitHub PR review feedback from required bots and checks."
-    case "ready-to-merge":
+    case "PrTerminal":
       return "PR feedback is clear. Merge the PR, then mark the lane resolved."
-    case "changes-requested":
-      return reviewer
-        ? `Address ${reviewer}'s review findings in the same lane and re-handoff for review.`
-        : "Address the review findings in the same lane and re-handoff for review."
-    case "repair-needed":
+    case "RepairClear":
       return owner
         ? `Workflow repair needed before normal work resumes. ${owner} should inspect the lane state and repair it manually.`
         : "Workflow repair needed before normal work resumes."
-    case "resolved":
-      return "Await the next task."
-    case "idle":
-      return "Claim the next task."
+    case "Claim":
+      return status === "resolved" ? "Await the next task." : "Claim the next task."
     default:
       return ""
   }
@@ -5371,16 +5371,21 @@ async function patchHandoff(repoRoot, options) {
       })
 
       const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
-      applyTransition(existingCurrent, transitionEvent, {
-        to: nextStatus,
-        actor: resolvedActor,
-        prFlowEnabled: getPrFlowConfig(config).enabled,
-        prLinked: !!(updates.prNumber || existingCurrent.prNumber),
-        filesChanged: options.files === undefined
-          ? undefined
-          : JSON.stringify(normalizePathList(updates.lockedFiles)) !== JSON.stringify(normalizePathList(existingCurrent.lockedFiles)),
-        changes: updates,
-      })
+      const validateStructuralTransition = (source) =>
+        applyTransition(source, transitionEvent, {
+          to: nextStatus,
+          actor: resolvedActor,
+          prFlowEnabled: getPrFlowConfig(config).enabled,
+          prLinked: !!(updates.prNumber || source.prNumber),
+          structuralCompatibility: options.transitionCompatibility === true,
+          filesChanged:
+            options.files === undefined
+              ? undefined
+              : JSON.stringify(normalizePathList(updates.lockedFiles)) !==
+                JSON.stringify(normalizePathList(source.lockedFiles)),
+          changes: updates,
+        })
+      validateStructuralTransition(existingCurrent)
 
       if (options.status === "needs-review") {
         const inferredReviewer = inferPeerReviewer({
@@ -5572,6 +5577,8 @@ async function patchHandoff(repoRoot, options) {
       let updatedCurrent
       if (isLaneActiveStatus(nextStatus) && effectiveFiles.length > 0) {
         const publishUpdate = async () => {
+          const latestCurrent = await readLaneState(repoRoot, config, laneId)
+          validateStructuralTransition(latestCurrent)
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
         await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
@@ -5635,6 +5642,7 @@ async function patchHandoff(repoRoot, options) {
     actor: resolvedActor,
     prFlowEnabled: getPrFlowConfig(config).enabled,
     prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+    structuralCompatibility: options.transitionCompatibility === true,
     filesChanged: options.files === undefined
       ? undefined
       : JSON.stringify(normalizePathList(updates.lockedFiles)) !== JSON.stringify(normalizePathList(existingCurrent.lockedFiles)),
@@ -5883,7 +5891,14 @@ async function resolveHandoff(repoRoot, options) {
   }
 
   let existingCurrent
-  if (overrideHandoffPath && (await pathExists(overrideHandoffPath))) {
+  if (overrideHandoffPath) {
+    if (!(await pathExists(overrideHandoffPath))) {
+      throw new BtrainError({
+        message: `Lane ${laneId} handoff file is missing.`,
+        reason: "Resolve cannot validate or preserve the lane state without its canonical handoff file.",
+        fix: `Restore the configured lane handoff file, then run btrain doctor --repo ${repoRoot} before resolving lane ${laneId}.`,
+      })
+    }
     const content = await readText(overrideHandoffPath)
     existingCurrent = parseCurrentSection(content)
   } else {
@@ -6011,8 +6026,9 @@ function buildLaneGuidance(laneId, current) {
           ? `Locked files: ${formatLockedPaths(current.lockPaths)}.`
           : "Locked files: (none)."
 
-  switch (current.status) {
-    case "needs-review": {
+  const primaryAction = getPrimaryTransition(current.status)?.action
+  switch (primaryAction) {
+    case "PeerResolve": {
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
       const reviewMode = normalizeReviewMode(current.reviewMode) || "manual"
@@ -6031,7 +6047,7 @@ function buildLaneGuidance(laneId, current) {
         `${owner}: work on another lane, or monitor this one with \`bth wait --lane ${laneId}\`.`,
       ].join("\n")
     }
-    case "ready-for-pr": {
+    case "LinkPr": {
       const owner = current.owner || "the active agent"
       return [
         `${prefix}Local peer review is approved; PR creation is next.`,
@@ -6042,7 +6058,7 @@ function buildLaneGuidance(laneId, current) {
         "Keep the lane locks until the PR is merged or intentionally closed.",
       ].join("\n")
     }
-    case "pr-review": {
+    case "PrRepoll": {
       const owner = current.owner || "the active agent"
       return [
         `${prefix}Waiting on GitHub PR review feedback.`,
@@ -6053,7 +6069,7 @@ function buildLaneGuidance(laneId, current) {
         `${owner}: if bot feedback appears, address it in this lane, push, then run \`btrain pr request-review --lane ${laneId} --bots all\`.`,
       ].join("\n")
     }
-    case "ready-to-merge": {
+    case "PrTerminal": {
       return [
         `${prefix}PR review is clear and ready to merge.`,
         lockLine,
@@ -6062,7 +6078,16 @@ function buildLaneGuidance(laneId, current) {
           : "No PR linked; link or merge the PR before resolving.",
       ].join("\n")
     }
-    case "changes-requested": {
+    case "ToNeedsReview": {
+      if (current.status === "in-progress") {
+        const owner = current.owner || "the active agent"
+        return [
+          `${prefix}Active agent: ${owner}.`,
+          lockLine,
+          `${owner}: start with a short pre-flight review of the locked files, nearby diff, and likely risk areas before editing.`,
+          `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
+        ].join("\n")
+      }
       const reviewer = current.reviewer || "the peer reviewer"
       const owner = current.owner || "the active agent"
       const prLine = current.prNumber
@@ -6088,7 +6113,7 @@ function buildLaneGuidance(laneId, current) {
         `${reviewer}: monitor the re-handoff with \`bth wait --lane ${laneId}\`, or continue on another lane.`,
       ].join("\n")
     }
-    case "repair-needed": {
+    case "RepairClear": {
       const owner = current.owner || "the active agent"
       const repairOwner = current.repairOwner || current.owner || "the responsible actor"
       const escalationLine =
@@ -6107,25 +6132,17 @@ function buildLaneGuidance(laneId, current) {
         current.nextAction || `${owner}: inspect the handoff, lock state, and \`btrain doctor\` output before making more transitions.`,
       ].join("\n")
     }
-    case "in-progress": {
-      const owner = current.owner || "the active agent"
-      return [
-        `${prefix}Active agent: ${owner}.`,
-        lockLine,
-        `${owner}: start with a short pre-flight review of the locked files, nearby diff, and likely risk areas before editing.`,
-        `When done: \`btrain handoff update --lane ${laneId} --status needs-review --actor "${owner}"\`.`,
-      ].join("\n")
-    }
-    case "resolved":
+    case "Claim":
+      if (current.status === "idle") {
+        return [
+          `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
+          lockLine,
+        ].join("\n")
+      }
       return [
         `${prefix}Resolved. Ready for a new task: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
         lockLine,
         current.repurposeReady ? `Repurpose ready: ${current.repurposeReason}.` : "",
-      ].join("\n")
-    case "idle":
-      return [
-        `${prefix}Idle. Claim: \`btrain handoff claim --lane ${laneId} --task "..." --owner "..." --reviewer "..."\`.`,
-        lockLine,
       ].join("\n")
     default:
       return `${prefix}Status: ${current.status}\n${lockLine}`
@@ -7947,16 +7964,16 @@ function emitLoopBlock(onEvent, title, lines) {
 }
 
 function describeLoopAgentReason(current) {
-  if (current.status === "in-progress") {
-    return "handoff status is in-progress, so the active agent acts next"
+  const primaryAction = getPrimaryTransition(current.status)?.action
+  if (primaryAction === "ToNeedsReview") {
+    return current.status === "changes-requested"
+      ? "handoff status is changes-requested, so the writer acts next"
+      : "handoff status is in-progress, so the active agent acts next"
   }
-  if (current.status === "changes-requested") {
-    return "handoff status is changes-requested, so the writer acts next"
-  }
-  if (current.status === "repair-needed") {
+  if (primaryAction === "RepairClear") {
     return "handoff status is repair-needed, so the assigned repair owner acts next"
   }
-  if (current.status === "needs-review") {
+  if (primaryAction === "PeerResolve") {
     return "handoff status is needs-review, so the peer reviewer acts next"
   }
   return `handoff status is ${current.status}`

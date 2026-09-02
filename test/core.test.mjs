@@ -5902,6 +5902,37 @@ describe("claim publication is atomic with lock acquisition", () => {
   })
 })
 
+describe("lane resolve state source", () => {
+  it("rejects a missing lane handoff file without releasing its locks", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      const claim = await runBtrain([
+        "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+        "--task", "missing lane source", "--owner", "Claude", "--reviewer", "Codex",
+        "--files", "src/missing.ts",
+      ], repoRoot)
+      assert.equal(claim.code, 0, claim.stderr)
+
+      await fs.rm(path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md"))
+      const result = await runBtrain([
+        "handoff", "resolve", "--repo", repoRoot, "--lane", "a",
+        "--summary", "must not resolve", "--actor", "Codex",
+      ], repoRoot)
+
+      assert.notEqual(result.code, 0, result.stdout)
+      assert.match(result.stderr, /handoff file.*missing|missing.*handoff file/i)
+      const locks = JSON.parse(await fs.readFile(path.join(repoRoot, ".btrain", "locks.json"), "utf8"))
+      assert.ok(locks.locks.some((lock) => lock.lane === "a"))
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
+})
+
 // ──────────────────────────────────────────────
 // Managed hook drift detection
 // ──────────────────────────────────────────────

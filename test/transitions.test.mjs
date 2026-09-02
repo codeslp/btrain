@@ -10,6 +10,7 @@ import {
   applyTransition,
   classifyTransitionEvent,
   formatTransitionsMermaid,
+  getPrimaryTransition,
 } from "../src/brain_train/transitions.mjs"
 
 const execFileAsync = promisify(execFile)
@@ -28,6 +29,17 @@ describe("lane transition contract", () => {
     assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "contract").length, 20)
     assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "legacy").length, 15)
     assert.equal(TRANSITION_ROWS.filter((row) => row.kind === "system").length, 1)
+  })
+
+  it("identifies one primary transition for every lane status", () => {
+    for (const status of [
+      "idle", "in-progress", "needs-review", "changes-requested", "ready-for-pr",
+      "pr-review", "ready-to-merge", "repair-needed", "resolved",
+    ]) {
+      const primary = getPrimaryTransition(status)
+      assert.ok(primary, `missing primary transition for ${status}`)
+      assert.ok(primary.primary.includes(status), `${primary.id} is not primary for ${status}`)
+    }
   })
 
   it("prefers a contract row over a compatible legacy fallback", () => {
@@ -49,6 +61,14 @@ describe("lane transition contract", () => {
     const tableActions = new Set(TRANSITION_ROWS.map((entry) => entry.action))
 
     assert.deepEqual(modeledActions.filter((name) => !tableActions.has(name)), [])
+  })
+
+  it("revalidates lane transitions inside the registry publication lock", async () => {
+    const core = await fs.readFile(path.resolve("src/brain_train/core.mjs"), "utf8")
+    assert.match(
+      core,
+      /const publishUpdate = async \(\) => \{\s+const latestCurrent = await readLaneState[\s\S]*?validateStructuralTransition\(latestCurrent\)[\s\S]*?updateHandoff/,
+    )
   })
 
   it("keeps currently accepted undesignated status updates on a legacy row", () => {

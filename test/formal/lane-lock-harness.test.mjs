@@ -107,6 +107,28 @@ async function makeRepo() {
   await fs.mkdir(path.join(repo, ".btrain"), { recursive: true })
   await fs.mkdir(path.join(repo, ".claude", "collab"), { recursive: true })
   await fs.writeFile(path.join(repo, ".btrain", "project.toml"), PROJECT_TOML)
+  for (const lane of LANES) {
+    await fs.writeFile(
+      path.join(repo, ".claude", "collab", `HANDOFF_${lane.toUpperCase()}.md`),
+      [
+        "## Current",
+        "",
+        `Lane: ${lane}`,
+        "Task: ",
+        "Active Agent: ",
+        "Peer Reviewer: ",
+        "Status: idle",
+        "Review Mode: manual",
+        "Locked Files: ",
+        "Next Action: Claim the next task.",
+        "Base: ",
+        "Last Updated: formal harness",
+        "",
+        "## Previous Handoffs",
+        "",
+      ].join("\n"),
+    )
+  }
   process.env.BRAIN_TRAIN_HOME = path.join(root, "home")
   return { root, repo }
 }
@@ -352,6 +374,7 @@ async function executeSequence(mode, cmds) {
   try {
     const config = await readProjectConfig(repo)
     const model = new LaneLockModel({ lanes: LANES, agents: AGENTS, prFlowEnabled: true, mode })
+    for (const lane of LANES) model.lane(lane).fileExists = true
 
     for (const [i, cmd] of cmds.entries()) {
       const actor = "actorSel" in cmd ? resolveActor(model, cmd.lane, cmd.actorSel) : cmd.owner || ""
