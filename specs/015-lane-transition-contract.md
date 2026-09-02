@@ -949,12 +949,17 @@ themselves (not currently possible) or ask the reviewer to declare repair.
 
 **Option C: Any configured agent, but advisory warning when the owner declares
 repair on their own lane.**
-Compromise: the owner can declare, but the transition-advisory field records
-it so the pattern is visible in audit.
+Compromise: the owner can declare, but a separate `self-repair-audit` field
+records the declaration so the pattern is visible in the workflow event log.
+This field is not a `transition-advisory` and does not count against the FR-5
+retirement gate. An accepted self-repair therefore cannot block row 13 from
+reaching enforcement.
 
-- No hard rejection; audit trail flags self-repair declarations.
-- Follow-up: implement the advisory condition in the gate for the
-  owner-declares-own-repair case; designate.
+- No hard rejection. The audit trail flags self-repair declarations without
+  classifying them as behavior that enforcement will reject.
+- Follow-up: add the `self-repair-audit` workflow-event field for the
+  owner-declares-own-repair case; exclude it from FR-5 advisory retirement;
+  designate.
 
 **Affected rows:** 13, L4 (which accepts any status, any actor).
 **Safety property:** repair-needed entry integrity (whether the owner can
@@ -979,10 +984,18 @@ any active status, with the distinct-from constraint.
   in-progress lane.
 - Safety: flexible; enables hand-off of ownership without losing the lane's
   state, locks, and PR linkage. Risk: an agent reassigns ownership to dodge
-  review (new owner reviews their own prior work). Mitigated by the
-  distinct-from constraint (reviewer ≠ owner).
-- Follow-up: designate in spec 005 FR-5 (one sentence: "a lane agent may
-  reassign the owner of an active lane"); retire L10.
+  review. The distinct-from constraint does not preserve review independence:
+  one update can swap the current owner and reviewer while the final identities
+  remain distinct. The original author then becomes reviewer of their own work.
+- If Option A is selected, the designation must also choose a swap policy:
+  - **(A-i) Reject a simultaneous owner-reviewer swap.** A later role change
+    remains possible, but one update cannot reverse the current pair.
+  - **(A-ii) Require an audited override for the simultaneous swap.** The
+    workflow event records the override and both role changes.
+  - **(A-iii) Allow the simultaneous swap.** The contract explicitly accepts
+    that distinct identities do not guarantee review independence.
+- Follow-up: designate Option A and its swap policy in spec 005 FR-5; enforce
+  the selected paired-update guard; retire L10.
 
 **Option B: Owner reassignment only through claim.**
 Remove `--owner` from `handoff update`. To change the owner, resolve the lane
@@ -991,8 +1004,10 @@ and re-claim with the new owner.
 - Row 20 loses the `--owner` case; only `--reviewer` reassignment remains.
 - Forces a clean break: new owner starts with a fresh claim, fresh locks,
   fresh reviewer context.
-- Safety: strongest isolation — no mid-stream ownership transfer. Downside:
-  the lane loses its PR linkage, review history, and lock state on re-claim.
+- Safety: strongest isolation — no mid-stream ownership transfer. The lane
+  loses its active reviewer context, PR linkage, and lock state on re-claim.
+  It retains audit history: resolve appends a `Previous Handoffs` entry, and
+  the workflow event log persists across claims.
 - Linked-PR consequence: a lane in `pr-review` or `ready-to-merge` cannot be
   resolved and re-claimed without first closing or merging the PR (row 11
   `PrTerminal` is the only exit from PR-flow to `resolved`). Closing or
@@ -1009,9 +1024,12 @@ their own ownership). The reviewer can still be reassigned by either agent.
 - Prevents a reviewer from seizing ownership but allows the owner to
   voluntarily transfer.
 - Safety: moderate — the owner consents to the transfer. Still allows
-  mid-stream changes but only at the owner's initiative.
+  mid-stream changes but only at the owner's initiative. As in Option A, a
+  simultaneous owner-reviewer swap can make the original author the reviewer.
+  The designation must apply swap policy A-i, A-ii, or A-iii to Option C too.
 - Follow-up: split row 20 into two sub-rows (one for `--owner` with actor
-  `owner`, one for `--reviewer` with actor `lane-agent`); designate.
+  `owner`, one for `--reviewer` with actor `lane-agent`); enforce the selected
+  paired-update guard; designate.
 
 **Affected rows:** 20, L10.
 **Safety property:** ownership integrity (whether ownership can change without
