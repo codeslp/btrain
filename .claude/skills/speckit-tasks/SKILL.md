@@ -68,7 +68,7 @@ The tasks.md should be immediately executable - each task must be specific enoug
 
 Organize tasks by user story so each story can be implemented and tested independently.
 
-**Bite-sized tasks**: Every task is small enough for one agent to finish in one short sitting and names the files it touches. If a task is too broad (e.g., "Implement the entire service layer"), decompose it into granular steps (e.g., "Define service interface," "Implement data mapping," "Implement validation logic"). Granular tasks reduce context sprawl, simplify reviews, and minimize file lock duration.
+**Bite-sized tasks**: Every task takes an agent about 2-5 minutes to execute and names the files it touches. If a task is too broad (e.g., "Implement the entire service layer"), decompose it into granular steps (e.g., "Define service interface," "Implement data mapping," "Implement validation logic"). Granular tasks reduce context sprawl, simplify reviews, and minimize file lock duration.
 
 **Tests are OPTIONAL**: Only generate test tasks if explicitly requested in the feature specification or if user requests TDD approach.
 
