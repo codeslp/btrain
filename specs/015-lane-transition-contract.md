@@ -751,7 +751,11 @@ terminate.
 - Follow-up: spec 006 FR-29 exit-to-resolved paragraph names only the
   disposition path; no override disjunct. If sub-option (a), add a guard to
   row 6 or a post-override flag on `RepairClear`, then update the formal model
-  and harness for that guard. If sub-option (b), the model stays as-is.
+  and harness for that guard. Both sub-options must add an override-consumed
+  input and an override-authorized `RepairClear` action to the formal model
+  and harness. Sub-option (b) does not add the post-clear abandonment guard,
+  but TLC must still explore the accepted override-clear followed by
+  `AbandonResolve` path.
 
 **Affected rows:** 15, L7.
 **Safety property:** repair containment (whether a lane can skip the repair
@@ -799,21 +803,22 @@ count regardless of intervening claims. The model must change to match.
     drops the `resolved ⇒ count = 0` clause. TLC must recheck all
     properties. The model variable then carries history across the lane's
     lifetime; `Claim` keeps `repairCount` `UNCHANGED` as well.
-  - **(B-ii) Keep the model as-is; persist count in the implementation only.**
-    The event log already counts repair entries across claims. The model
-    continues to reset on terminal transitions (its `repairCount` tracks the
-    current task); the implementation derives its FR-18 count from the full
-    event log regardless of intervening claims. The model and implementation
-    use different scoping, documented as a known divergence until a dedicated
-    model variable (e.g., `laneRepairHistory`) is added.
+  - **(B-ii) Add a dedicated lifetime-history variable.** Keep the existing
+    task-scoped `repairCount` and its terminal reset. Add a model variable such
+    as `laneRepairHistory` that persists across terminal transitions and
+    claims. Use that variable for the FR-18 escalation guard, and update the
+    implementation and harness to use the same lifetime scope. TLC must check
+    the resulting cross-claim escalation behavior before this option lands.
 - Safety: a lane that repeatedly breaks escalates even if different tasks
   trigger it. Catches systemic problems faster. Downside: an unrelated new
   task inherits blame for a prior task's failures.
 - Follow-up for B-i: update every terminal action, `Claim`, and
   `RepairBudgetBounded`; rerun TLC and update the harness mirror. Follow-up
-  for B-ii: retain the current model, document the narrower current-task
-  scope, and track a dedicated history variable as the formal-alignment gap.
-  In both cases, keep the implementation count across claims in the event log.
+  for B-ii: add the lifetime-history variable and its invariants, then update
+  every repair-entry and escalation action that reads or writes it. In both
+  cases, update the harness mirror and keep the implementation count across
+  claims in the event log. Persistent-count behavior cannot land while the
+  approved model still resets all escalation state per task.
 
 **Affected rows:** 1 (Claim), 13 (RepairEnter), 14 (RepairClear), 15
 (RepairResolve).
@@ -986,16 +991,23 @@ any active status, with the distinct-from constraint.
   state, locks, and PR linkage. Risk: an agent reassigns ownership to dodge
   review. The distinct-from constraint does not preserve review independence:
   one update can swap the current owner and reviewer while the final identities
-  remain distinct. The original author then becomes reviewer of their own work.
+  remain distinct. A sequence of individually valid updates can produce the
+  same result through an intermediate agent. The lane must therefore retain
+  author and review provenance across role changes.
 - If Option A is selected, the designation must also choose a swap policy:
-  - **(A-i) Reject a simultaneous owner-reviewer swap.** A later role change
-    remains possible, but one update cannot reverse the current pair.
-  - **(A-ii) Require an audited override for the simultaneous swap.** The
-    workflow event records the override and both role changes.
-  - **(A-iii) Allow the simultaneous swap.** The contract explicitly accepts
-    that distinct identities do not guarantee review independence.
+  - **(A-i) Reject role reversal without an override.** Record the task's
+    authors and prior owners. Reject any update that makes one of those agents
+    the reviewer, whether the reversal is simultaneous or occurs through
+    intermediate owner and reviewer assignments.
+  - **(A-ii) Require an audited override for role reversal.** Apply the same
+    provenance check as A-i, but accept the resulting role assignment only
+    with a consumed override. The workflow event records the override, the
+    prior role history, and both final roles.
+  - **(A-iii) Allow role reversal.** The contract explicitly accepts that
+    distinct final identities and sequential updates do not guarantee review
+    independence.
 - Follow-up: designate Option A and its swap policy in spec 005 FR-5; enforce
-  the selected paired-update guard; retire L10.
+  the selected provenance guard for single and paired updates; retire L10.
 
 **Option B: Owner reassignment only through claim.**
 Remove `--owner` from `handoff update`. To change the owner, resolve the lane
@@ -1025,11 +1037,12 @@ their own ownership). The reviewer can still be reassigned by either agent.
   voluntarily transfer.
 - Safety: moderate — the owner consents to the transfer. Still allows
   mid-stream changes but only at the owner's initiative. As in Option A, a
-  simultaneous owner-reviewer swap can make the original author the reviewer.
-  The designation must apply swap policy A-i, A-ii, or A-iii to Option C too.
+  simultaneous or sequential owner-reviewer swap can make an earlier author
+  the reviewer. The designation must apply provenance policy A-i, A-ii, or
+  A-iii to Option C too.
 - Follow-up: split row 20 into two sub-rows (one for `--owner` with actor
   `owner`, one for `--reviewer` with actor `lane-agent`); enforce the selected
-  paired-update guard; designate.
+  provenance guard for single and paired updates; designate.
 
 **Affected rows:** 20, L10.
 **Safety property:** ownership integrity (whether ownership can change without
