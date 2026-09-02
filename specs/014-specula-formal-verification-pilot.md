@@ -601,10 +601,14 @@ data exists.
    shared runner, measured as P95 over the advisory period.
 3. **Exhaustion rate**: `state_space_exhausted` occurs on fewer than 10% of
    formal-check runs during the advisory window.
-4. **Availability**: `tool_unavailable` occurs on fewer than 5% of CI runs
-   during the advisory window.
-5. **Coverage**: the instrumentation mapping and validation harness cover all
-   modeled entry points listed in the pilot scope section.
+4. **Availability**: `tool_unavailable` occurs on fewer than 5% of applicable
+   formal-check runs during the advisory window. Applicable runs are the runs
+   required for PRs that affect modeled behavior or formal artifacts. Unrelated
+   PRs that skip the formal job do not enter the denominator.
+5. **Coverage**: the instrumentation mapping represents every behavior in the
+   Pilot Scope, and the validation harness exercises each behavior. An
+   unexercised scoped behavior, including a crash or failure window, fails this
+   threshold.
 
 If any threshold is not met, the gate remains advisory and the failing metric
 is tracked for the next review cycle.
@@ -620,8 +624,9 @@ they share the same human-review dependency as the activation thresholds (H-6).
   before re-enabling.
 - `state_space_exhausted` exceeds 25% of formal-check runs over any rolling
   7-day window: demote until bounds or decomposition restore the threshold.
-- `tool_unavailable` exceeds 15% of CI runs over any rolling 7-day window:
-  demote until infrastructure reliability is restored.
+- `tool_unavailable` exceeds 15% of applicable formal-check runs over any
+  rolling 7-day window: demote until infrastructure reliability is restored.
+  Unrelated PRs that skip the formal job do not enter the denominator.
 - A model or harness change introduces a regression that causes three or more
   spurious blocks within 48 hours: demote, revert the offending change, and
   re-enter the advisory period.
