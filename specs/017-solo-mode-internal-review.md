@@ -383,7 +383,7 @@ bot-unavailability signals, and never trigger automatic deferral:
 | 403 | Caller token lacks scope or is revoked | `request-path-blocked`; operator must repair credentials |
 | 404 | Repository or PR not found for the caller | `request-path-blocked`; operator must repair reference |
 | 422 | Unprocessable comment request | `request-path-blocked`; operator must repair request format |
-| 5xx | GitHub API infrastructure error | `request-path-retry`; btrain retries with backoff; undelivered after `bot_pending_timeout` → `request-delivery-failed` warning |
+| 5xx | GitHub API infrastructure error | `request-path-retry`; btrain retries with exponential backoff up to `[pr_flow].request_delivery_retries` (default 3) over `[pr_flow].request_delivery_timeout` (default 5 min); undelivered after all retries → `request-delivery-failed` warning; `bot_pending_timeout` does not start until delivery succeeds |
 
 Request-path errors are surfaced in `btrain handoff` and `btrain doctor`
 with repair guidance. They do not enter the bot-unavailability failure
@@ -422,23 +422,26 @@ three things:
      authoritative but may shorten the pending window (skip straight to the
      configured response rather than waiting the full timeout) when
      `bot_agent_map` links the runner to the bot.
-2. **Pending window**: the duration between "review requested" and
-   "classified unavailable." During this window the lane stays in its current
-   PR-flow status with a `bot-pending` annotation visible in `btrain handoff`
-   and `btrain doctor`. The window is `[pr_flow].bot_pending_timeout`
-   (default 30 min), shortened to `[pr_flow].bot_probe_shortcut` (default
-   5 min) when the mapped runner's local probe also fails.
+2. **Pending window**: the duration between "review request successfully
+   delivered" and "classified unavailable." `bot_pending_timeout` starts
+   only after the review-request call (`gh pr comment`) returns a success
+   response; a 5xx retry loop does not start the clock (see Request-path
+   errors). During this window the lane stays in its current PR-flow status
+   with a `bot-pending` annotation visible in `btrain handoff` and `btrain
+   doctor`. The window is `[pr_flow].bot_pending_timeout` (default 30 min),
+   shortened to `[pr_flow].bot_probe_shortcut` (default 5 min) when the
+   mapped runner's local probe also fails.
 3. **Late-review behavior**: if the bot was available but slow, the
    deferral fires and the bot posts its review after the gate already
    evaluated without it. The late review is recorded as a `bot-late-review`
    event. Behavior depends on the review verdict and merge state:
 
-   - **Late approval (before or after merge)**: for Options B and C
+   - **Late approval before merge**: for Options B and C
      (operator-initiated), the late approval is informational — the operator
      chose to exempt. For Options D and E (automatic), the late approval
-     restores the bot requirement for the lane going forward: the deferral
-     is lifted, the bot's approval is recorded, and `btrain doctor` warns
-     the operator to increase `bot_pending_timeout`.
+     restores the bot requirement for the lane: the deferral is lifted, the
+     bot's approval is recorded, and `btrain doctor` warns the operator to
+     increase `bot_pending_timeout`.
    - **Late `CHANGES_REQUESTED` before merge**: the exemption or deferral
      is revoked regardless of option. For B and C the lane returns to
      `pr-review` with the bot's feedback visible. For D and E the automatic
@@ -446,9 +449,10 @@ three things:
      requested changes must be addressed before the gate re-evaluates. A
      `CHANGES_REQUESTED` verdict is never informational while the PR is
      open.
-   - **After merge**: no retroactive mutation. The merge stands, but the
-     late review (approval or `CHANGES_REQUESTED`) is recorded as a
-     `bot-late-review` event with the verdict. `btrain doctor` warns so the
+   - **After merge**: no retroactive mutation. Neither approval nor
+     `CHANGES_REQUESTED` mutates the lane or the bot requirement. The merge
+     stands; the late review is recorded as a `bot-late-review`
+     audit/warning event with the verdict. `btrain doctor` warns so the
      operator can inspect the bot's feedback on the next lane or follow-up
      PR. A post-merge `CHANGES_REQUESTED` does not reopen the lane or
      revert the merge — the event provides an audit trail and the operator
@@ -529,8 +533,10 @@ deferred with the solo-mode expiry. No separate operator command is needed.
   an open review request for the mapped bot. `bot-auto-deferred` when the
   pending window expires (classified `unknown/timeout`) or a bot-originated
   documented signal classifies the bot as unavailable. `bot-auto-restored`
-  on solo-off, expiry, late approval from the bot, or when the GitHub API
-  poll confirms the bot posted a review.
+  on solo-off, expiry, late approval from the bot before merge, or when
+  the GitHub API poll confirms the bot posted a review before merge. After
+  merge, a late review (approval or `CHANGES_REQUESTED`) is recorded as a
+  `bot-late-review` audit event without restoring or revoking the deferral.
 - **Expiry**: Inherits solo mode's `until`. Cannot outlive it.
 - **Safety**: Requires an explicit `[pr_flow].bot_agent_map` entry — the
   mapping is never inferred from bot or agent names. Only fires when the
@@ -538,14 +544,15 @@ deferred with the solo-mode expiry. No separate operator command is needed.
   active.
 - **Detection**: The deferral fires only after the bot is classified
   `unknown/timeout` (pending window expired) or by a bot-originated
-  documented signal, not on runner probe alone and never on review-request
-  HTTP errors (which are request-path failures). When `bot_agent_map`
-  links the runner to the bot and the runner's local probe fails, the pending
-  window shortens per `bot_probe_shortcut`, but the GitHub poll (or a
-  bot-originated signal) is still the authoritative gate. A runner outage
-  with a healthy bot (different infrastructure, different quota) results in
-  a `bot-pending` annotation that expires without deferral when the bot
-  posts its review in time.
+  documented signal, never on a local runner probe and never on
+  review-request HTTP errors (which are request-path failures). When
+  `bot_agent_map` links the runner to the bot and the runner's local probe
+  fails, the pending window shortens per `bot_probe_shortcut`, but the
+  runner probe never classifies bot-unavailable, triggers deferral, or
+  emits `bot-unavailable` — the GitHub poll (or a bot-originated signal)
+  is the authoritative gate. A runner outage with a healthy bot (different
+  infrastructure, different quota) results in a `bot-pending` annotation
+  that expires without deferral when the bot posts its review in time.
 - **PR-flow effects**: Same gate relaxation as B/C, scoped to the solo-mode
   lifetime and the specific bot-agent mapping.
 
@@ -556,23 +563,23 @@ Different failure classes get different default responses, configured in TOML:
 ```toml
 [pr_flow.bot_unavailable]
 unknown   = "defer-lane"    # per-lane deferral, retry after bot_pending_timeout
-outage    = "defer-lane"    # per-lane deferral; requires bot-documented outage signal or local probe
+outage    = "defer-lane"    # per-lane deferral; requires bot-documented outage signal
 quota     = "defer-lane"    # requires bot-documented provider-specific signal; otherwise unknown/timeout
-auth      = "block"         # lane blocked, operator must fix credentials (local runner signal only)
-policy    = "block"         # lane blocked, requires human decision (bot-documented signal or local runner)
+auth      = "block"         # lane blocked; requires bot-documented auth signal (none currently defined ¹)
+policy    = "block"         # lane blocked, requires human decision; requires bot-documented signal
 ```
 
 - **Status**: `defer-lane` acts like Option B. The deferral ends only when
   the GitHub API poll confirms the bot posted a review or a documented
   provider-specific recovery signal fires. `block` halts the lane with a
-  dedicated `bot-blocked` warning. `block` fires only on local runner
-  auth/policy signals or bot-documented signals, never on review-request
+  dedicated `bot-blocked` warning. `block` fires only on bot-documented
+  auth or policy signals, never on local runner signals or review-request
   HTTP errors.
 - **Command**: `btrain pr bot-status --lane <id>` to inspect. The operator
   can override any class with `btrain pr exempt-bot` (Option B's mechanism).
 - **Event**: `bot-unavailable` with the failure class (classified from the
-  response timeout, a bot-originated documented signal, or a local runner
-  signal — never from review-request HTTP errors); `bot-recovered` when
+  response timeout or a bot-originated documented signal — never from a
+  local runner signal or review-request HTTP errors); `bot-recovered` when
   the GitHub API poll confirms the bot posted a review or a documented
   provider-specific recovery signal fires. A runner probe failure may
   shorten the next pending window but does not emit `bot-recovered`.
@@ -587,13 +594,16 @@ policy    = "block"         # lane blocked, requires human decision (bot-documen
   classified `unknown/timeout` unless the bot documents a provider-specific
   quota signal; the `quota` class in the policy table is available for repos
   that configure such a signal. When `bot_agent_map` exists and the runner
-  probe fails, `bot_probe_shortcut` applies. `block` fires on local runner
-  auth or policy signals, or on bot-documented auth/policy signals — never
-  on review-request HTTP errors (403, 422), which are request-path failures
-  requiring operator repair. Late-review behavior follows the detection
-  contract: late approval restores the requirement; late
-  `CHANGES_REQUESTED` before merge reopens the lane; after merge the event
-  is recorded without retroactive mutation.
+  probe fails, `bot_probe_shortcut` applies but the runner signal never
+  classifies bot-unavailable, triggers `defer-lane` or `block`, or emits
+  `bot-unavailable` — it only shortens the pending window. `block` fires
+  only on bot-documented auth or policy signals — never on local runner
+  signals or review-request HTTP errors (403, 422), which are request-path
+  failures requiring operator repair. Late-review behavior follows the
+  detection contract: late approval before merge restores the requirement;
+  late `CHANGES_REQUESTED` before merge reopens the lane; after merge both
+  verdicts are recorded as audit/warning events without lane or requirement
+  mutation.
 - **Safety**: Auth and policy failures default to blocking, so credential
   issues and content-policy refusals never silently waive the gate. Outage
   and quota are deferrable because they resolve externally.
