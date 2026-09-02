@@ -302,8 +302,9 @@ export class LaneLockModel {
   // ready-for-pr and locks are retained. Terminal resolved releases locks.
   resolve({ lane, actor, final }) {
     const s = this.lane(lane)
-    // Implementation mirror: resolveHandoff never checks the acting agent
-    // against the lane and resolves from any status, including idle.
+    // The implementation still resolves from statuses outside the designated
+    // review path, including idle. Reviewer authority at needs-review is
+    // enforced in both modes below.
     if (this.mode === "contract" && s.status === "idle") {
       return this.#reject("resolve-from-idle")
     }
@@ -323,7 +324,7 @@ export class LaneLockModel {
     }
 
     if (this.prFlowEnabled && s.status === "needs-review" && !final) {
-      if (this.mode === "contract" && actor !== s.reviewer) {
+      if (actor !== s.reviewer) {
         return this.#reject("ready-for-pr-entry-requires-reviewer")
       }
       if (this.mode === "implementation" && this.#coverageMismatch(lane)) {

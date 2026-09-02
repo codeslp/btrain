@@ -868,6 +868,28 @@ test(
   },
 )
 
+// Deterministic implementation-mirror witness for reviewer authority. The
+// owner must not approve its own handoff, and the rejected operation must
+// leave the lane in needs-review with its registry locks retained.
+test(
+  "implementation mirror: owner approval from needs-review is rejected with locks retained",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  async () => {
+    const { trace } = await executeSequence("implementation", [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+    ])
+    const rejection = trace.at(-1)
+    assert.equal(rejection.modelOk, false, "the implementation mirror rejects owner approval")
+    assert.equal(rejection.realOk, false, "the runtime rejects owner approval")
+    assert.equal(rejection.expectedState.x.status, "needs-review")
+    assert.deepEqual(rejection.expectedState.x.registry, ["src/a/"])
+    assert.equal(rejection.realState.x.status, "needs-review")
+    assert.deepEqual(rejection.realState.x.registry, ["src/a/"])
+  },
+)
+
 // Regression witness for the repaired unaudited release: releasing an
 // active lane's locks without a consumed force-release override is
 // rejected; after a grant, the release succeeds and is audited.
