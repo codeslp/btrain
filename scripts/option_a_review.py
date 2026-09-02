@@ -19,10 +19,11 @@ Optional environment:
   login rejects models it does not offer, e.g. gpt-5)
 - REVIEW_CLI_TIMEOUT seconds per reviewer run (default 600)
 
-Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST,
-claude runs with tools disabled, and codex runs with its shell tools disabled
-and the user's config ignored, so an injected diff has no route to host files
-or credentials. Regression: python3 scripts/test_option_a_review.py
+Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST;
+claude runs with tools, settings sources, MCP servers, and skills disabled;
+codex runs with its shell tools disabled and the user's config ignored. An
+injected diff therefore has no route to host files or credentials, and no
+user/project hook, plugin, or CLAUDE.md memory enters a reviewer's context. Regression: python3 scripts/test_option_a_review.py
 (set REVIEW_LIVE_TESTS=1 to also run the real-CLI sentinel checks).
 
 No Python dependencies beyond the standard library.
@@ -522,11 +523,18 @@ def _cli_failure(reviewer: Reviewer, label: str, code: int, stdout: str, stderr:
 
 
 async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
+  # Confinement: no tools, no settings from any source (so no user/project/local
+  # hooks, plugins, or CLAUDE.md memory), no MCP servers, no skills. Login still
+  # resolves from the CLI's own config dir. Verified by
+  # scripts/test_option_a_review.py (sentinel + hostile-config tests).
   args = [
     CLAUDE_BIN, "-p",
     "--output-format", "json",
     "--no-session-persistence",
     "--tools", "",
+    "--setting-sources", "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
     "--model", reviewer.model,
   ]
   if reviewer.output_schema is not None:
