@@ -1313,7 +1313,11 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock,
   })
 }
 
-async function releaseLocks(repoRoot, laneId, { auditInsideLock } = {}) {
+async function releaseLocks(
+  repoRoot,
+  laneId,
+  { auditInsideLock, publishInsideLock, isPublished } = {},
+) {
   return withFileLock(getLocksLockfilePath(repoRoot), async () => {
     // Runs inside the registry critical section so the audit cannot be
     // invalidated before the mutation below.
@@ -1322,6 +1326,23 @@ async function releaseLocks(repoRoot, laneId, { auditInsideLock } = {}) {
     const released = registry.locks.filter((lock) => lock.lane === laneId)
     registry.locks = registry.locks.filter((lock) => lock.lane !== laneId)
     await writeLockRegistry(repoRoot, registry)
+    if (publishInsideLock) {
+      try {
+        await publishInsideLock()
+      } catch (publishError) {
+        if (!(isPublished && (await isPublished()))) {
+          try {
+            await writeLockRegistry(repoRoot, {
+              ...registry,
+              locks: [...registry.locks, ...released],
+            })
+          } catch (rollbackError) {
+            publishError.cause = publishError.cause ?? rollbackError
+          }
+        }
+        throw publishError
+      }
+    }
     return released
   })
 }
@@ -5656,6 +5677,8 @@ async function patchHandoff(repoRoot, options) {
     actor: resolvedActor,
     prFlowEnabled: getPrFlowConfig(config).enabled,
     prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+    reasonCode: reasonMetadata.reasonCode,
+    feedbackReason: reasonMetadata.reasonCode,
     structuralCompatibility: options.transitionCompatibility === true,
     filesChanged: options.files === undefined
       ? undefined
@@ -5941,11 +5964,6 @@ async function resolveHandoff(repoRoot, options) {
     existingCurrent = await readCurrentState(repoRoot)
   }
 
-  const previousHandoffEntry =
-    existingCurrent.task || options.summary
-      ? buildPreviousHandoffEntry(existingCurrent, options.summary, actorLabel)
-      : null
-
   const finalResolve = !!options.final || !!options["final"]
   // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
   // bypass. From needs-review the reviewer's plain resolve enters
@@ -6031,16 +6049,66 @@ async function resolveHandoff(repoRoot, options) {
     return resolvedCurrent
   }
 
-  applyTransition(existingCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
-    to: "resolved",
-    actor: resolvedActor,
-    prFlowEnabled: prFlow.enabled,
-    prLinked: !!existingCurrent.prNumber,
-  })
+  const terminalLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
+  let result
+  const publishTerminalResolve = async () => {
+    const latestCurrent = overrideHandoffPath
+      ? parseCurrentSection(await readText(overrideHandoffPath))
+      : await readCurrentState(repoRoot)
+    if (
+      latestCurrent.status !== existingCurrent.status
+      || latestCurrent.owner !== existingCurrent.owner
+      || !samePathList(latestCurrent.lockedFiles, existingCurrent.lockedFiles)
+      || latestCurrent.prNumber !== existingCurrent.prNumber
+    ) {
+      throw new BtrainError({
+        message: `Lane ${laneId || "(single)"} changed while the terminal resolve was waiting to publish.`,
+        reason: "The status, owner, locked files, or linked PR no longer match the state that was resolved.",
+        fix: `Re-read lane ${laneId || "(single)"}, verify its current state, then run the resolve command again.`,
+      })
+    }
+    applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
+      to: "resolved",
+      actor: resolvedActor,
+      prFlowEnabled: prFlow.enabled,
+      prLinked: !!latestCurrent.prNumber,
+    })
+    const terminalPreviousHandoffEntry =
+      latestCurrent.task || options.summary
+        ? buildPreviousHandoffEntry(latestCurrent, options.summary, actorLabel)
+        : null
+    result = await updateHandoff(
+      repoRoot,
+      {
+        status: "resolved",
+        lockedFiles: laneId ? [] : latestCurrent.lockedFiles,
+        nextAction: options.next || options.summary || defaultNextActionForStatus("resolved"),
+        lastUpdated: terminalLastUpdated,
+        reasonCode: "",
+        reasonTags: [],
+      },
+      {
+        actorLabel,
+        previousHandoffEntry: terminalPreviousHandoffEntry,
+        reviewResponseSummary: options.summary,
+        config,
+        eventType: "resolve",
+        laneId,
+        eventDetails: {
+          summary: options.summary || "",
+        },
+        overrideHandoffPath,
+      },
+    )
+  }
 
-  // Release locks for this lane
   if (laneId) {
-    await releaseLocks(repoRoot, laneId)
+    await releaseLocks(repoRoot, laneId, {
+      publishInsideLock: publishTerminalResolve,
+      isPublished: () => handoffPublished(overrideHandoffPath, terminalLastUpdated),
+    })
+  } else {
+    await publishTerminalResolve()
   }
   if (isCgraphEnabled(config)) {
     await reconcileCgraphAdvisories(repoRoot, laneId || "repo", [], {
@@ -6048,30 +6116,6 @@ async function resolveHandoff(repoRoot, options) {
       clearLane: true,
     })
   }
-
-  const result = await updateHandoff(
-    repoRoot,
-    {
-      status: "resolved",
-      lockedFiles: laneId ? [] : existingCurrent.lockedFiles,
-      nextAction: options.next || options.summary || defaultNextActionForStatus("resolved"),
-      lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
-      reasonCode: "",
-      reasonTags: [],
-    },
-    {
-      actorLabel,
-      previousHandoffEntry,
-      reviewResponseSummary: options.summary,
-      config,
-      eventType: "resolve",
-      laneId,
-      eventDetails: {
-        summary: options.summary || "",
-      },
-      overrideHandoffPath,
-    },
-  )
   await compactHandoffHistory(repoRoot, { config, laneId, actorLabel })
   return result
 }

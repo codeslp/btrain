@@ -146,7 +146,7 @@ function rowMatches(candidate, state, event, input) {
   return matchesEvent(candidate.event, event)
     && matchesValue(candidate.from, state.status, state.status)
     && matchesValue(candidate.to, target, state.status)
-    && (input.structuralCompatibility === true && candidate.id === "7"
+    && (input.structuralCompatibility === true && candidate.action === "LinkPr"
       ? true
       : actorMatches(candidate.actor, state, input.actor))
     && guardMatches(candidate.guard, state, input)

@@ -6122,6 +6122,47 @@ describe("lane resolve state source", () => {
       await rmDir(repoRoot)
     }
   })
+
+  it("revalidates terminal resolve before releasing locks", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await configureGitIdentity(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      const claim = await runBtrain([
+        "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+        "--task", "terminal resolve race", "--owner", "Claude", "--reviewer", "Codex",
+        "--files", "src/terminal-race.ts",
+      ], repoRoot)
+      assert.equal(claim.code, 0, claim.stderr)
+
+      const locksPath = path.join(repoRoot, ".btrain", "locks.json")
+      const handoffPath = path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md")
+      let resolvePromise
+      await withFileLock(locksPath + ".lock", async () => {
+        resolvePromise = runBtrain([
+          "handoff", "resolve", "--repo", repoRoot, "--lane", "a",
+          "--summary", "resolve stale terminal snapshot", "--actor", "Claude",
+        ], repoRoot)
+        await new Promise((resolve) => setTimeout(resolve, 800))
+
+        const before = await fs.readFile(handoffPath, "utf8")
+        await fs.writeFile(handoffPath, before.replace(/^Status:.*$/m, "Status: needs-review"))
+      })
+
+      const result = await resolvePromise
+      assert.notEqual(result.code, 0, result.stdout)
+      assert.match(result.stderr, /changed while the terminal resolve|needs-review|cannot transition/i)
+      const after = await fs.readFile(handoffPath, "utf8")
+      assert.match(after, /^Status: needs-review$/m)
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      assert.ok(registry.locks.some((lock) => lock.lane === "a"))
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
 })
 
 // ──────────────────────────────────────────────
