@@ -1,7 +1,7 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.10
+**Version**: 0.1.11
 **Author**: btrain
 **Date**: 2026-08-29
 **Updated**: 2026-09-01
@@ -377,9 +377,9 @@ set.
 
 ## Current Bootstrap Gaps
 
-**Status as of 2026-09-01.** The scaffolding items below are closed. One
-reference-ownership gap remains, and the gate stays advisory until the Phase 3
-activation conditions are met.
+**Status as of 2026-09-01.** The scaffolding items below are closed. Two
+gaps remain — a reference-ownership gap and a skill-parity gap — and the gate
+stays advisory until the Phase 3 activation conditions are met.
 
 Closed:
 
@@ -389,11 +389,12 @@ Closed:
   `--repin`, and `--verify-verdict`.
 - `tla-pin-sync` no longer no-ops. Its existence guard is satisfied and
   `--check` reports against the committed pin (one pin, currently clean).
-- Pre-handoff runs a formal-impact gate. It classifies the lane `none`,
+- Pre-handoff runs a formal-impact gate in the Claude skill
+  (`.claude/skills/pre-handoff/`). It classifies the lane `none`,
   `validation`, or `semantic` and runs `node scripts/formal_advisory.mjs` for
   the latter two, recording the impact class, command, verdict, and duration as
   handoff evidence. Per the Phase 2 policy the advisory verdict does not block
-  handoff yet.
+  handoff yet. The Codex mirror does not yet include this step (see Open).
 - PR CI contains a formal-verification job. `.github/workflows/formal-advisory.yml`
   checks out the exact PR head, selects the affected checks from the diff, and
   runs the pin, TLC, and harness steps in advisory mode.
@@ -542,9 +543,11 @@ Broader models require separate scope decisions based on pilot evidence.
 
 ### Phase 3: Selective gate
 
-Phase 3 readiness depends on closing Spec 015 Phase B steps 3 and 4 (pinned-
-section candidates and open-question legacy rows), plus measured Phase 2
-evidence. The gate must not be activated before those dependencies close.
+Phase 3 readiness depends on completing Spec 015 Phase B step 3
+(pinned-section designations for findings #4, #5, #7, #9, #10 after PR #35
+merges and the `LaneLock.tla` pin reopens) and step 4 (open-question
+legacy-row designations for L10–L15), plus measured Phase 2 evidence. The
+gate must not be activated before those dependencies close.
 
 #### Gate disposition policy
 
