@@ -548,9 +548,10 @@ Phase 3 readiness depends on completing Spec 015 Phase B step 3
 merges and the `LaneLock.tla` pin reopens) and step 4 (open-question
 legacy-row designations for L10–L15), plus measured Phase 2 evidence. It also
 depends on adding `src/brain_train/transitions.mjs` to the formal-impact path
-selector. A regression test must prove that a diff limited to that file selects
-the lane/lock formal checks. The gate must not be activated before these
-dependencies close.
+selector. Spec 015 Phase A PR #42 creates that file; Phase 3 waits for that PR
+to merge before it updates the selector. A regression test must prove that a
+diff limited to that file selects the lane/lock formal checks. The gate must
+not be activated before these dependencies close.
 
 #### Gate disposition policy
 
@@ -564,7 +565,10 @@ action and required response for each outcome.
 > missing tools, setup failures, unavailable measurements, and other check
 > execution failures. Before gate activation, the implementation must map an
 > unavailable tool, provider, setup dependency, or measurement to
-> `tool_unavailable`. It must keep a completed correctness verdict separate
+> `tool_unavailable`. This includes both absent-model paths in `runPinCheck`
+> and `runTlc`, plus their self-test expectations. The `stale_pin` rename must
+> update the emitted verdict, `BLOCKING_VERDICTS`, and the `pinBlocked` check
+> together. It must keep a completed correctness verdict separate
 > from unavailable measurement metadata. Any remaining
 > `infrastructure_failure` outcome must use the `tool_unavailable` retry and
 > H-3 disposition path. Label alignment is required before gate activation.
@@ -590,10 +594,11 @@ allow automatically:
 - `state_space_exhausted`: reviewer records an explicit disposition — accept
   with documented bounds, or block until bounds are raised or the model is
   decomposed.
-- `tool_unavailable`: CI retries once after a backoff; if still unavailable,
-  the run is marked incomplete and routed to reviewer disposition or human
-  override. The warn outcome does not automatically block merge; whether it
-  should is deferred to H-3.
+- `tool_unavailable`: before gate activation, CI must implement one retry
+  after a backoff. If the retry is still unavailable, CI must mark the run
+  incomplete and route it to reviewer disposition or human override. The
+  current advisory workflow does not implement this retry. The warn outcome
+  does not automatically block merge; whether it should is deferred to H-3.
 - `policy_blocked`: route to the approved alternative provider or to a human;
   never relabel as pass or as a correctness failure.
 
