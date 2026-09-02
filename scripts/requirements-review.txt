@@ -1,9 +1,0 @@
-# Dependencies for scripts/option_a_review.py (btrain parallel/hybrid review).
-# Claude-backed reviewers run through the Claude Code CLI (`claude -p`) and need
-# no Python package; only the OpenAI-backed reviewers use an SDK.
-# btrain invokes the script with the `python3` on PATH; install into that
-# interpreter or a venv it resolves to:
-#   uv pip install -r scripts/requirements-review.txt
-# openai is on the 3.x major; the script passes no httpx objects, so it needs
-# nothing above this floor; the cap guards against the next major.
-openai>=3.7,<4

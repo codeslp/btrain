@@ -6,30 +6,26 @@ Supports two modes:
 - hybrid:   parallel track always runs + sequential chain triggers when
             the diff touches sensitive files/patterns (Option D from doc 11)
 
-Claude-backed reviewers run through the Claude Code CLI (`claude -p`) and use
-its login, so no Anthropic API key is involved. OpenAI-backed reviewers use the
-OpenAI SDK and need OPENAI_API_KEY.
+Every reviewer runs through an agent CLI and uses that CLI's own login; no
+provider API keys are involved. Claude-backed reviewers use the Claude Code
+CLI (`claude -p`), GPT-backed reviewers use the Codex CLI (`codex exec`).
 
 Expected environment:
-- `claude` on PATH and logged in (override the binary with CLAUDE_BIN)
+- `claude` and `codex` on PATH and logged in (override with CLAUDE_BIN / CODEX_BIN)
 
 Optional environment:
-- OPENAI_API_KEY (without it the OpenAI-backed reviewers are reported as
-  unavailable instead of aborting the run)
-- CLAUDE_LOGIC_MODEL
-- OPENAI_SECURITY_MODEL
-- CLAUDE_TYPE_MODEL
-- CLAUDE_SYNTHESIS_MODEL
+- CLAUDE_LOGIC_MODEL, CLAUDE_TYPE_MODEL, CLAUDE_SYNTHESIS_MODEL (default claude-opus-5)
+- CODEX_SECURITY_MODEL (default: the Codex CLI's own configured model; a ChatGPT
+  login rejects models it does not offer, e.g. gpt-5)
+- REVIEW_CLI_TIMEOUT seconds per reviewer run (default 600)
 
-Install before running (pins in scripts/requirements-review.txt):
-    uv pip install -r scripts/requirements-review.txt
+No Python dependencies beyond the standard library.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import os
 import re
@@ -41,12 +37,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI
-
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
-# Per-reviewer wall-clock cap for one `claude -p` run; a hung CLI degrades to a
+CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+# Per-reviewer wall-clock cap for one CLI run; a hung CLI degrades to a
 # failed-reviewer finding instead of hanging `btrain review run`.
-CLAUDE_TIMEOUT_SECONDS = float(os.environ.get("CLAUDE_REVIEW_TIMEOUT", "600"))
+CLI_TIMEOUT_SECONDS = float(os.environ.get("REVIEW_CLI_TIMEOUT", "600"))
 
 
 # ──────────────────────────────────────────────
@@ -165,9 +160,9 @@ class Reviewer:
   provider: str
   model: str
   focus: str
-  # JSON schema passed to `claude -p --json-schema` on the claude-code path.
-  # None for providers without structured outputs (the prompt's shape text
-  # plus extract_json() remain the contract there).
+  # JSON schema for the reviewer's final answer: `claude -p --json-schema` or
+  # `codex exec --output-schema`. The prompt's shape text stays as the human-
+  # readable contract; extract_json() handles the returned text.
   output_schema: dict[str, Any] | None = None
 
 
@@ -303,9 +298,10 @@ def build_parallel_reviewers() -> list[Reviewer]:
     ),
     Reviewer(
       name="SecurityReviewer",
-      provider="openai",
-      model=os.environ.get("OPENAI_SECURITY_MODEL", "gpt-5"),
+      provider="codex-cli",
+      model=os.environ.get("CODEX_SECURITY_MODEL", ""),  # "" -> CLI default
       focus="security, auth, input validation, injection, and unsafe defaults",
+      output_schema=PARALLEL_SCHEMA,
     ),
     Reviewer(
       name="TypeReviewer",
@@ -321,9 +317,10 @@ def build_sequential_reviewers() -> list[Reviewer]:
   return [
     Reviewer(
       name="SecurityReviewer-Seq",
-      provider="openai",
-      model=os.environ.get("OPENAI_SECURITY_MODEL", "gpt-5"),
+      provider="codex-cli",
+      model=os.environ.get("CODEX_SECURITY_MODEL", ""),  # "" -> CLI default
       focus="deep security analysis: input validation, auth bypass, injection, OWASP top 10",
+      output_schema=SEQUENTIAL_SCHEMA,
     ),
     Reviewer(
       name="LogicReviewer-Seq",
@@ -472,34 +469,39 @@ def normalize_result(
 # API calls
 # ──────────────────────────────────────────────
 
-async def run_claude_code(args: list[str], stdin_text: str) -> tuple[int, str, str]:
-  """Run `claude -p ...` with the prompt on stdin; returns (exit code, stdout, stderr).
+async def run_cli(args: list[str], stdin_text: str, cwd: str) -> tuple[int, str, str]:
+  """Run an agent CLI with the prompt on stdin; returns (exit code, stdout, stderr).
 
-  Runs in an empty temp directory so the repo's project-level CLAUDE.md and hooks
-  do not load into the reviewer's context (user-level ~/.claude config still
-  applies), and without CLAUDECODE so it can be launched from inside a Claude
-  Code session. Auth is whatever the CLI resolves: its login by default, or
-  ANTHROPIC_API_KEY if the parent shell exports one.
+  `cwd` should be a per-call scratch directory (holding at most the schema and
+  output files the caller writes) so project-level agent config (CLAUDE.md,
+  AGENTS.md, hooks, rules) does not load into the reviewer's context;
+  user-level config still applies. CLAUDECODE is stripped so the run
+  can be launched from inside a Claude Code session. Auth is whatever each CLI
+  resolves on its own (its login by default).
   """
   env = {key: value for key, value in os.environ.items() if key != "CLAUDECODE"}
-  with tempfile.TemporaryDirectory() as workdir:
-    proc = await asyncio.create_subprocess_exec(
-      *args,
-      stdin=asyncio.subprocess.PIPE,
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.PIPE,
-      cwd=workdir,
-      env=env,
+  proc = await asyncio.create_subprocess_exec(
+    *args,
+    stdin=asyncio.subprocess.PIPE,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+    cwd=cwd,
+    env=env,
+  )
+  try:
+    stdout, stderr = await asyncio.wait_for(
+      proc.communicate(stdin_text.encode("utf-8")), timeout=CLI_TIMEOUT_SECONDS
     )
-    try:
-      stdout, stderr = await asyncio.wait_for(
-        proc.communicate(stdin_text.encode("utf-8")), timeout=CLAUDE_TIMEOUT_SECONDS
-      )
-    except asyncio.TimeoutError:
-      proc.kill()
-      await proc.wait()
-      raise TimeoutError(f"claude -p exceeded {CLAUDE_TIMEOUT_SECONDS:g}s") from None
+  except asyncio.TimeoutError:
+    proc.kill()
+    await proc.wait()
+    raise TimeoutError(f"{args[0]} exceeded {CLI_TIMEOUT_SECONDS:g}s") from None
   return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+
+
+def _cli_failure(reviewer: Reviewer, label: str, code: int, stdout: str, stderr: str) -> dict[str, Any]:
+  detail = (stderr or stdout).strip()[-1200:]
+  return normalize_result(reviewer, error=f"{label} exited {code}: {detail}")
 
 
 async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
@@ -513,10 +515,12 @@ async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
   if reviewer.output_schema is not None:
     args.extend(["--json-schema", json.dumps(reviewer.output_schema)])
   try:
-    code, stdout, stderr = await run_claude_code(args, prompt)
+    with tempfile.TemporaryDirectory() as workdir:
+      code, stdout, stderr = await run_cli(args, prompt, workdir)
     if code != 0:
-      detail = (stderr or stdout).strip()[-1200:]
-      return normalize_result(reviewer, error=f"claude -p exited {code}: {detail}")
+      return _cli_failure(reviewer, "claude -p", code, stdout, stderr)
+    # --output-format json envelope: structured_output holds the schema-validated
+    # object; result holds the plain text; is_error flags a failed run.
     envelope = json.loads(stdout)
     if envelope.get("is_error"):
       detail = str(envelope.get("result", "claude -p reported an error"))[:1200]
@@ -529,34 +533,42 @@ async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
     return normalize_result(reviewer, error=str(exc))
 
 
-async def call_openai(
-  client: AsyncOpenAI,
-  reviewer: Reviewer,
-  prompt: str,
-) -> dict[str, Any]:
+async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
   try:
-    response = await client.responses.create(
-      model=reviewer.model,
-      input=prompt,
-    )
-    return normalize_result(reviewer, raw_text=response.output_text)
+    with tempfile.TemporaryDirectory() as workdir:
+      last_message = Path(workdir) / "last-message.json"
+      args = [
+        CODEX_BIN, "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox", "read-only",
+        "--color", "never",
+        "--cd", workdir,
+        "--output-last-message", str(last_message),
+      ]
+      if reviewer.model:
+        args.extend(["--model", reviewer.model])
+      if reviewer.output_schema is not None:
+        schema_path = Path(workdir) / "schema.json"
+        schema_path.write_text(json.dumps(reviewer.output_schema), encoding="utf-8")
+        args.extend(["--output-schema", str(schema_path)])
+      args.append("-")  # prompt on stdin
+      code, stdout, stderr = await run_cli(args, prompt, workdir)
+      if code != 0:
+        return _cli_failure(reviewer, "codex exec", code, stdout, stderr)
+      if not last_message.exists():
+        return normalize_result(reviewer, error="codex exec finished without a final message")
+      # --output-last-message holds the final answer, constrained by --output-schema.
+      return normalize_result(reviewer, raw_text=last_message.read_text(encoding="utf-8"))
   except Exception as exc:
     return normalize_result(reviewer, error=str(exc))
 
 
-async def call_reviewer(
-  openai_client: AsyncOpenAI | None,
-  reviewer: Reviewer,
-  prompt: str,
-) -> dict[str, Any]:
+async def call_reviewer(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
   if reviewer.provider == "claude-code":
     return await call_claude_code(reviewer, prompt)
-  elif reviewer.provider == "openai":
-    if openai_client is None:
-      return normalize_result(
-        reviewer, error="No OpenAI API key in the environment; this reviewer did not run."
-      )
-    return await call_openai(openai_client, reviewer, prompt)
+  elif reviewer.provider == "codex-cli":
+    return await call_codex(reviewer, prompt)
   else:
     raise ValueError(f"Unsupported provider: {reviewer.provider}")
 
@@ -566,7 +578,6 @@ async def call_reviewer(
 # ──────────────────────────────────────────────
 
 async def run_parallel(
-  openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   diff_text: str,
 ) -> list[dict[str, Any]]:
@@ -577,7 +588,7 @@ async def run_parallel(
       focus=reviewer.focus,
       diff_text=diff_text,
     )
-    coroutines.append(call_reviewer(openai_client, reviewer, prompt))
+    coroutines.append(call_reviewer(reviewer, prompt))
 
   if hasattr(asyncio, "TaskGroup"):
     tasks: list[asyncio.Task[dict[str, Any]]] = []
@@ -594,7 +605,6 @@ async def run_parallel(
 # ──────────────────────────────────────────────
 
 async def run_sequential(
-  openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   synthesis_reviewer: Reviewer,
   diff_text: str,
@@ -611,7 +621,7 @@ async def run_sequential(
       chain_position=position,
       diff_text=diff_text,
     )
-    result = await call_reviewer(openai_client, reviewer, prompt)
+    result = await call_reviewer(reviewer, prompt)
     result["chain_position"] = position
     result["track"] = "sequential"
     results.append(result)
@@ -624,7 +634,7 @@ async def run_sequential(
     prior_findings=prior_findings_text,
     diff_text=diff_text,
   )
-  synthesis_result = await call_reviewer(openai_client, synthesis_reviewer, synthesis_prompt)
+  synthesis_result = await call_reviewer(synthesis_reviewer, synthesis_prompt)
   synthesis_result["track"] = "sequential"
   synthesis_result["chain_position"] = len(reviewers) + 1
   results.append(synthesis_result)
@@ -729,48 +739,40 @@ async def main() -> None:
   path_triggers = args.path_triggers.split(",") if args.path_triggers else None
   content_triggers = args.content_triggers.split(",") if args.content_triggers else None
 
-  if shutil.which(CLAUDE_BIN) is None:
+  # A missing CLI degrades its reviewers to "Reviewer request failed" findings
+  # (create_subprocess_exec raises inside call_*); abort only when neither CLI
+  # exists, since then no reviewer could run at all.
+  missing = [name for name in (CLAUDE_BIN, CODEX_BIN) if shutil.which(name) is None]
+  if len(missing) == 2:
     raise SystemExit(
-      f"Claude Code CLI not found ({CLAUDE_BIN!r}). Install it and log in, or set CLAUDE_BIN."
+      f"No agent CLI found ({', '.join(missing)}). Install and log in, or set CLAUDE_BIN / CODEX_BIN."
     )
-  # The OpenAI client raises at construction without credentials, which would
-  # abort the whole run; build it only when a key exists and let call_reviewer
-  # report the OpenAI-backed reviewers as unavailable otherwise.
-  openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-  openai_client = AsyncOpenAI(api_key=openai_key) if openai_key else None
-  if openai_client is None:
-    print(
-      "No OpenAI API key in the environment: OpenAI-backed reviewers will be reported as unavailable.",
-      file=sys.stderr,
-    )
+  for name in missing:
+    print(f"Agent CLI not found: {name}. Its reviewers will be reported as failed.", file=sys.stderr)
 
-  async with contextlib.AsyncExitStack() as stack:
-    if openai_client is not None:
-      await stack.enter_async_context(openai_client)
-    # Parallel track always runs
-    parallel_results = await run_parallel(openai_client, build_parallel_reviewers(), diff_text)
+  # Parallel track always runs
+  parallel_results = await run_parallel(build_parallel_reviewers(), diff_text)
 
-    sequential_results = None
-    classification = None
+  sequential_results = None
+  classification = None
 
-    if args.mode == "hybrid":
-      changed_files = extract_changed_files(diff_text)
-      classification = classify_diff(changed_files, diff_text, path_triggers, content_triggers)
+  if args.mode == "hybrid":
+    changed_files = extract_changed_files(diff_text)
+    classification = classify_diff(changed_files, diff_text, path_triggers, content_triggers)
 
-      if classification.needs_sequential:
-        print(
-          f"Sequential chain triggered: "
-          f"{len(classification.triggered_paths)} path matches, "
-          f"{len(classification.triggered_patterns)} content matches"
-        )
-        sequential_results = await run_sequential(
-          openai_client,
-          build_sequential_reviewers(),
-          build_synthesis_reviewer(),
-          diff_text,
-        )
-      else:
-        print("Hybrid mode: no sequential triggers matched. Parallel-only report.")
+    if classification.needs_sequential:
+      print(
+        f"Sequential chain triggered: "
+        f"{len(classification.triggered_paths)} path matches, "
+        f"{len(classification.triggered_patterns)} content matches"
+      )
+      sequential_results = await run_sequential(
+        build_sequential_reviewers(),
+        build_synthesis_reviewer(),
+        diff_text,
+      )
+    else:
+      print("Hybrid mode: no sequential triggers matched. Parallel-only report.")
 
   output_path = Path(args.output)
   report = render_markdown(parallel_results, sequential_results, classification)
