@@ -16,8 +16,8 @@ Optional environment:
 - CLAUDE_TYPE_MODEL
 - CLAUDE_SYNTHESIS_MODEL
 
-Install before running:
-    pip install anthropic openai
+Install before running (pins in scripts/requirements-review.txt):
+    uv pip install -r scripts/requirements-review.txt
 """
 
 from __future__ import annotations
@@ -152,6 +152,10 @@ class Reviewer:
   provider: str
   model: str
   focus: str
+  # JSON schema enforced via output_config.format on the Anthropic path.
+  # None for providers without structured outputs (the prompt's shape text
+  # plus extract_json() remain the contract there).
+  output_schema: dict[str, Any] | None = None
 
 
 @dataclass
@@ -222,6 +226,56 @@ def extract_changed_files(diff_text: str) -> list[str]:
 
 
 # ──────────────────────────────────────────────
+# Output schemas (mirror the shapes in the prompts above)
+# ──────────────────────────────────────────────
+
+_FINDING_BASE_PROPS: dict[str, Any] = {
+  "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+  "file": {"type": "string"},
+  "title": {"type": "string"},
+  "body": {"type": "string"},
+}
+
+
+def _review_schema(
+  top_extra: dict[str, Any] | None = None,
+  finding_extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  finding_props = {**_FINDING_BASE_PROPS, **(finding_extra or {})}
+  top_props: dict[str, Any] = {
+    "reviewer": {"type": "string"},
+    "focus": {"type": "string"},
+    **(top_extra or {}),
+    "summary": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": finding_props,
+        "required": list(finding_props),
+        "additionalProperties": False,
+      },
+    },
+  }
+  return {
+    "type": "object",
+    "properties": top_props,
+    "required": list(top_props),
+    "additionalProperties": False,
+  }
+
+
+PARALLEL_SCHEMA = _review_schema()
+SEQUENTIAL_SCHEMA = _review_schema(
+  top_extra={"chain_position": {"type": "integer"}},
+  finding_extra={"confirmed_from_prior": {"type": "boolean"}},
+)
+SYNTHESIS_SCHEMA = _review_schema(
+  finding_extra={"sources": {"type": "array", "items": {"type": "string"}}},
+)
+
+
+# ──────────────────────────────────────────────
 # Reviewer setup
 # ──────────────────────────────────────────────
 
@@ -230,8 +284,9 @@ def build_parallel_reviewers() -> list[Reviewer]:
     Reviewer(
       name="LogicReviewer",
       provider="anthropic",
-      model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-4-1"),
+      model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-5"),
       focus="logic correctness, behavioral regressions, product reasoning",
+      output_schema=PARALLEL_SCHEMA,
     ),
     Reviewer(
       name="SecurityReviewer",
@@ -242,8 +297,9 @@ def build_parallel_reviewers() -> list[Reviewer]:
     Reviewer(
       name="TypeReviewer",
       provider="anthropic",
-      model=os.environ.get("CLAUDE_TYPE_MODEL", "claude-sonnet-4-5-20250929"),
+      model=os.environ.get("CLAUDE_TYPE_MODEL", "claude-opus-5"),
       focus="type mismatches, schema drift, and runtime/compile-time inconsistencies",
+      output_schema=PARALLEL_SCHEMA,
     ),
   ]
 
@@ -259,8 +315,9 @@ def build_sequential_reviewers() -> list[Reviewer]:
     Reviewer(
       name="LogicReviewer-Seq",
       provider="anthropic",
-      model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-4-1"),
+      model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-5"),
       focus="business logic correctness, state bugs, reachability of security findings",
+      output_schema=SEQUENTIAL_SCHEMA,
     ),
   ]
 
@@ -269,8 +326,9 @@ def build_synthesis_reviewer() -> Reviewer:
   return Reviewer(
     name="SynthesisAgent",
     provider="anthropic",
-    model=os.environ.get("CLAUDE_SYNTHESIS_MODEL", "claude-opus-4-1"),
+    model=os.environ.get("CLAUDE_SYNTHESIS_MODEL", "claude-opus-5"),
     focus="final verdict: deduplicate, prioritize, and synthesize findings",
+    output_schema=SYNTHESIS_SCHEMA,
   )
 
 
@@ -407,11 +465,19 @@ async def call_anthropic(
   prompt: str,
 ) -> dict[str, Any]:
   try:
-    message = await client.messages.create(
-      model=reviewer.model,
-      max_tokens=2400,
-      messages=[{"role": "user", "content": prompt}],
-    )
+    request: dict[str, Any] = {
+      "model": reviewer.model,
+      # A large diff can yield many findings; 2400 truncated the JSON mid-array
+      # and surfaced as a spurious "could not be parsed" P2. No `thinking`
+      # parameter: the default model (claude-opus-5) thinks adaptively on its own.
+      "max_tokens": 16000,
+      "messages": [{"role": "user", "content": prompt}],
+    }
+    if reviewer.output_schema is not None:
+      request["output_config"] = {
+        "format": {"type": "json_schema", "schema": reviewer.output_schema},
+      }
+    message = await client.messages.create(**request)
     raw_text = "\n".join(
       block.text for block in message.content if getattr(block, "type", None) == "text"
     ).strip()

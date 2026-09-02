@@ -17,7 +17,7 @@ metadata:
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+Consider the user input before proceeding, when it is not empty.
 
 ## Outline
 
@@ -132,7 +132,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - For parallel tasks [P], continue with successful tasks, report failed ones
    - Provide clear error messages with context for debugging
    - Suggest next steps if implementation cannot proceed
-   - **IMPORTANT** For completed tasks, make sure to mark the task off as [X] in the tasks file.
+   - Mark each completed task as [X] in the tasks file.
 
 9. Completion validation:
    - Verify all required tasks are completed

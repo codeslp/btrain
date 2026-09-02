@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Create or revise repo-local skills under `.Codex/skills/`. Use this whenever the user wants to add a skill, turn a repeated workflow into a skill, tighten an existing skill's trigger description, or backfill validation after a skill caused drift or under-triggered.
+description: Create or revise repo-local skills under `.claude/skills/` (mirrored to `.agents/skills/`). Use this whenever the user wants to add a skill, turn a repeated workflow into a skill, tighten an existing skill's trigger description, or backfill validation after a skill caused drift or under-triggered.
 ---
 
 # Skill Creator
