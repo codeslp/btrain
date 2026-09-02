@@ -1359,8 +1359,13 @@ describe("btrain handoff lifecycle", () => {
 })
 
 describe("reviewer rejection diagnostics", () => {
-  for (const [prFlowEnabled, target] of [[false, "resolved"], [true, "ready-for-pr"]]) {
-    it(`names needs-review -> ${target} when the owner tries to approve`, async () => {
+  for (const { prFlowEnabled, target, actor, clearReviewer } of [
+    { prFlowEnabled: false, target: "resolved", actor: "TestBot", clearReviewer: false },
+    { prFlowEnabled: true, target: "ready-for-pr", actor: "TestBot", clearReviewer: false },
+    { prFlowEnabled: true, target: "ready-for-pr", actor: "", clearReviewer: true },
+  ]) {
+    const attemptedBy = clearReviewer ? "an unassigned reviewer" : "the owner"
+    it(`names needs-review -> ${target} when ${attemptedBy} tries to approve`, async () => {
       const repoDir = await makeTmpDir()
       try {
         const { execFile } = await import("node:child_process")
@@ -1387,17 +1392,23 @@ describe("reviewer rejection diagnostics", () => {
           repoDir,
         )
         assert.equal(needsReview.code, 0, needsReview.stderr)
+        if (clearReviewer) {
+          const handoffPath = path.join(repoDir, ".claude", "collab", "HANDOFF_A.md")
+          const handoff = await fs.readFile(handoffPath, "utf8")
+          await fs.writeFile(handoffPath, handoff.replace(/^Peer Reviewer:.*$/m, "Peer Reviewer: "), "utf8")
+        }
 
         const ownerApproval = await runBtrain(
           [
             "handoff", "resolve", "--repo", repoDir, "--lane", "a",
             "--summary", "The owner must not approve their own work.",
-            "--actor", "TestBot",
+            ...(actor ? ["--actor", actor] : []),
           ],
           repoDir,
         )
         assert.notEqual(ownerApproval.code, 0, ownerApproval.stdout)
         assert.ok(ownerApproval.stderr.includes(`needs-review -> ${target}`), ownerApproval.stderr)
+        if (clearReviewer) assert.match(ownerApproval.stderr, /reviewer.*unassigned|no recorded reviewer/i)
       } finally {
         await rmDir(repoDir)
       }

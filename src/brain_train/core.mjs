@@ -5965,15 +5965,18 @@ async function resolveHandoff(repoRoot, options) {
   }
 
   const reviewerResolveTarget = prFlow.enabled ? "ready-for-pr" : "resolved"
+  const normalizedResolveActor = normalizeAgentName(resolvedActor).toLowerCase()
+  const normalizedReviewer = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
   if (
     existingCurrent.status === "needs-review"
-    && normalizeAgentName(resolvedActor).toLowerCase()
-      !== normalizeAgentName(existingCurrent.reviewer).toLowerCase()
+    && (!normalizedResolveActor || !normalizedReviewer || normalizedResolveActor !== normalizedReviewer)
   ) {
     throw new BtrainError({
       message: `Only the recorded reviewer may apply \`needs-review -> ${reviewerResolveTarget}\` to lane ${laneId || "(single)"}.`,
       reason: `The acting agent is \`${resolvedActor || "unknown"}\`, but the lane reviewer is \`${existingCurrent.reviewer || "unassigned"}\`. Non-reviewer approval is not permitted.`,
-      fix: `Run the review as \`${existingCurrent.reviewer || "the recorded reviewer"}\`, then retry \`btrain handoff resolve${laneId ? ` --lane ${laneId}` : ""} --summary "..." --actor "${existingCurrent.reviewer || "<reviewer>"}"\`.`,
+      fix: existingCurrent.reviewer
+        ? `Run the review as \`${existingCurrent.reviewer}\`, then retry \`btrain handoff resolve${laneId ? ` --lane ${laneId}` : ""} --summary "..." --actor "${existingCurrent.reviewer}"\`.`
+        : `Assign a reviewer with \`btrain handoff update${laneId ? ` --lane ${laneId}` : ""} --reviewer "<reviewer>" --actor "${existingCurrent.owner || "<owner>"}"\`, then retry the review.`,
     })
   }
 
