@@ -1358,6 +1358,53 @@ describe("btrain handoff lifecycle", () => {
   })
 })
 
+describe("reviewer rejection diagnostics", () => {
+  for (const [prFlowEnabled, target] of [[false, "resolved"], [true, "ready-for-pr"]]) {
+    it(`names needs-review -> ${target} when the owner tries to approve`, async () => {
+      const repoDir = await makeTmpDir()
+      try {
+        const { execFile } = await import("node:child_process")
+        const { promisify } = await import("node:util")
+        const exec = promisify(execFile)
+        await exec("git", ["init", repoDir])
+        await configureGitIdentity(repoDir)
+        await runBtrain(["init", repoDir], repoDir)
+        if (prFlowEnabled) await enablePrFlow(repoDir)
+        await fs.writeFile(path.join(repoDir, "README.md"), "# test\n", "utf8")
+        await runGit(["add", "."], repoDir)
+        await runGit(["commit", "-m", "initial"], repoDir)
+        await runBtrain(
+          [
+            "handoff", "claim", "--repo", repoDir, "--lane", "a",
+            "--task", "Reviewer diagnostic", "--owner", "TestBot",
+            "--reviewer", "ReviewBot", "--files", "README.md",
+          ],
+          repoDir,
+        )
+        await fs.appendFile(path.join(repoDir, "README.md"), "\nchange\n", "utf8")
+        const needsReview = await runBtrain(
+          buildNeedsReviewArgs(repoDir, { actor: "TestBot", lane: "a" }),
+          repoDir,
+        )
+        assert.equal(needsReview.code, 0, needsReview.stderr)
+
+        const ownerApproval = await runBtrain(
+          [
+            "handoff", "resolve", "--repo", repoDir, "--lane", "a",
+            "--summary", "The owner must not approve their own work.",
+            "--actor", "TestBot",
+          ],
+          repoDir,
+        )
+        assert.notEqual(ownerApproval.code, 0, ownerApproval.stdout)
+        assert.ok(ownerApproval.stderr.includes(`needs-review -> ${target}`), ownerApproval.stderr)
+      } finally {
+        await rmDir(repoDir)
+      }
+    })
+  }
+})
+
 describe("btrain PR flow handoff lifecycle", () => {
   let tmpDir
 
