@@ -623,13 +623,20 @@ stays as-is.
 - Row 12 stays `undesignated` or is removed; the CLI guidance in
   `buildLaneGuidance` is changed to instruct the owner to fix and re-handoff
   locally.
+- Removing row 12 alone does not enforce the rejection: legacy row L4 accepts
+  `handoff update --status <X>` from any status with any actor, so the
+  shortcut still matches L4. L4 must be narrowed to exclude
+  `changes-requested` with a linked PR → `pr-review`, or retired entirely, for
+  the local-review guarantee to hold.
 - No TLA change.
 - Safety: stronger local review coverage; slower turnaround on small PR
   feedback.
 - Follow-up: update `buildLaneGuidance` and `defaultNextActionForStatus` to
-  stop emitting the shortcut instruction.
+  stop emitting the shortcut instruction; narrow or retire L4 for the
+  `ReturnToPr` case (Phase B step 3, alongside the spec 002 designation that
+  replaces L4's blanket acceptance).
 
-**Affected rows:** 12, L5.
+**Affected rows:** 12, L4, L5.
 **Safety property:** review coverage (local peer sees every fix before GitHub).
 **Dependency:** pinned by spec 002 PR-flow states; lands in Phase B step 3.
 
@@ -661,9 +668,14 @@ doctor.
 
 **Option B: Doctor may resync only in `in-progress`, `changes-requested`, and
 `repair-needed`.**
-In `needs-review` and PR-flow statuses the owner or an override is required.
+In `needs-review` and PR-flow statuses, the designation must choose one of two
+authorities: owner only, or owner with an audited override.
 
 - Row 17 splits: one sub-row for doctor-permitted statuses, one for the rest.
+- The restricted-status sub-row uses actor `owner` for owner-only authority.
+  If an audited override is allowed, that sub-row must instead name actor
+  `owner, or override`; the current row-17 actor cannot support an override
+  while it remains `owner` only.
 - `test/watchdog.test.mjs:122` directly invokes `handoff update --files`,
   not `btrain doctor --repair`; it does not verify the real doctor resync
   path. Implementation must route `doctor --repair` through
@@ -673,15 +685,19 @@ In `needs-review` and PR-flow statuses the owner or an override is required.
 - Safety: reviewer's lock view is stable during review.
 - Follow-up: split row 17 or add a status guard to the doctor path; designate.
 
-**Option C: Doctor is never guardian for resync; resync requires the owner or
-override.**
-Row 17 actor is `owner` only. Doctor and watchdog may only release stale locks
-(L16), not restore coverage.
+**Option C: Doctor is never guardian for resync.**
+Doctor and watchdog may only release stale locks (L16), not restore coverage.
+The designation must also select the non-doctor authority:
+
+- **(C-i) Owner only.** Row 17 actor stays `owner`; remove override wording
+  from the requirement and guidance.
+- **(C-ii) Owner or audited override.** Row 17 actor becomes
+  `owner, or override`; tests must consume the override before resync.
 
 - `test/watchdog.test.mjs:122` needs rework to use the owner actor.
 - Safety: tightest; no unattended lock-coverage changes.
-- Follow-up: fix the test; decide whether doctor should prompt the owner
-  to resync instead.
+- Follow-up: fix the test; encode C-i or C-ii in row 17 and its actor tests;
+  decide whether doctor should prompt the owner to resync instead.
 
 **Affected rows:** 17, L6.
 **Safety property:** lock-coverage stability during review.
@@ -719,10 +735,23 @@ terminate.
   second time (re-enter `repair-needed` after `RepairClear`) before it can
   resolve. Alternatively the human uses the override to clear (row 14), works
   around the problem, and resolves normally.
-- Safety: forces the repair to be attempted at least once before terminal
-  exit. Prevents a premature "just kill it" override that skips diagnosis.
+- Caveat: an override can take row 14 (`RepairClear`) from `repair-needed` to
+  `in-progress`, after which either lane agent can use row 6
+  (`AbandonResolve`) to resolve the unlinked lane in two commands, bypassing
+  the repair-attempt enforcement. To close this escape, either (a) constrain
+  row 6 so that a lane whose most recent `RepairClear` was via override cannot
+  be abandoned without a subsequent `needs-review` cycle or a second repair
+  entry, or (b) accept the two-step path as a deliberate human exit (the
+  override is already audited) and do not claim "forces repair attempt" as
+  the safety benefit; the benefit is instead that the override audit trail
+  makes the skip visible.
+- Safety: stronger repair containment than Option A only if the two-step
+  escape is closed (sub-option a); otherwise the safety benefit is audit
+  visibility, not enforcement.
 - Follow-up: spec 006 FR-29 exit-to-resolved paragraph names only the
-  disposition path; no override disjunct. Model stays as-is.
+  disposition path; no override disjunct. If sub-option (a), add a guard to
+  row 6 or a post-override flag on `RepairClear`, then update the formal model
+  and harness for that guard. If sub-option (b), the model stays as-is.
 
 **Affected rows:** 15, L7.
 **Safety property:** repair containment (whether a lane can skip the repair
@@ -758,17 +787,33 @@ implementation needs alignment.
 The event log is the source of truth; all `repair-needed` entries for the lane
 count regardless of intervening claims. The model must change to match.
 
-- `LaneLock.tla` `Claim` keeps `repairCount` unchanged (remove the reset).
-- `AbandonResolve` keeps the existing terminal reset (`repairCount' = 0`);
-  `RepairBudgetBounded` is unaffected. The model change is scoped to
-  `Claim` only: remove the `repairCount' = 0` reset from `Claim` so a
-  re-claimed lane inherits its prior count.
+- Removing only Claim's `repairCount' = 0` is not sufficient: every terminal
+  transition (`AbandonResolve`, `PrTerminal`, `TerminalResolve`,
+  `RepairResolve`) also resets `repairCount` to 0
+  (`LaneLock.tla:383-389` requires `repairCount = 0` for resolved lanes via
+  `RepairBudgetBounded`). A lane therefore passes through `resolved`
+  (count = 0) before it can be re-claimed, making the Claim-only change a
+  no-op. Two sub-options:
+  - **(B-i) Remove the terminal reset and weaken the invariant.** Each
+    terminal action keeps `repairCount` `UNCHANGED`; `RepairBudgetBounded`
+    drops the `resolved ⇒ count = 0` clause. TLC must recheck all
+    properties. The model variable then carries history across the lane's
+    lifetime; `Claim` keeps `repairCount` `UNCHANGED` as well.
+  - **(B-ii) Keep the model as-is; persist count in the implementation only.**
+    The event log already counts repair entries across claims. The model
+    continues to reset on terminal transitions (its `repairCount` tracks the
+    current task); the implementation derives its FR-18 count from the full
+    event log regardless of intervening claims. The model and implementation
+    use different scoping, documented as a known divergence until a dedicated
+    model variable (e.g., `laneRepairHistory`) is added.
 - Safety: a lane that repeatedly breaks escalates even if different tasks
   trigger it. Catches systemic problems faster. Downside: an unrelated new
   task inherits blame for a prior task's failures.
-- Follow-up: update `LaneLock.tla` (`Claim` action only: remove
-  `repairCount' = 0`), rerun TLC, update the harness mirror; scope the
-  implementation to count repair entries across claims in the event log.
+- Follow-up for B-i: update every terminal action, `Claim`, and
+  `RepairBudgetBounded`; rerun TLC and update the harness mirror. Follow-up
+  for B-ii: retain the current model, document the narrower current-task
+  scope, and track a dedicated history variable as the formal-alignment gap.
+  In both cases, keep the implementation count across claims in the event log.
 
 **Affected rows:** 1 (Claim), 13 (RepairEnter), 14 (RepairClear), 15
 (RepairResolve).
