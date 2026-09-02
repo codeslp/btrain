@@ -33,6 +33,8 @@
 - [ ] FR-9 reports every resolved family in `btrain doctor`.
 - [ ] FR-10 enforces loop timeout and round budgets.
 - [ ] FR-10 classifies exhausted same-model timeout or round budgets as `tool_unavailable` with backoff and a visible warning.
+- [ ] FR-10 reassigns the second same-model request-changes to the configured human with `review tier: human` and records the previous and new reviewer in a `solo-reviewer-assigned` event.
+- [ ] FR-10 leaves the lane in `needs-review` with an `escalation required` warning when no human reviewer is configured.
 - [ ] FR-10 blocks a third same-model review without an operator action.
 
 ## Commands, visibility, and recovery

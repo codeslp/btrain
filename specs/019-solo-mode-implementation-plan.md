@@ -267,7 +267,12 @@ Tasks:
 - On human timeout, record `solo-human-timeout`, mark that tier unavailable,
   and rerun the selector so the lane can fall through to the same-model tier.
 - Record solo mode and tier on resolve and request-changes events.
-- Add the second same-model request-changes escalation guard.
+- On the second same-model request-changes, atomically reassign the reviewer
+  to `[solo].human_reviewer` with `review tier: human` when it is configured,
+  and record a `solo-reviewer-assigned` event with the previous and new
+  reviewer, tier, and escalation reason.
+- When no human reviewer is configured, leave the lane in `needs-review` and
+  render the `escalation required` warning.
 - Block a third same-model review without `adopt` or `retry`.
 - Keep PR-flow state changes and lock retention unchanged.
 - Add an end-to-end lifecycle test through `ready-for-pr`.
@@ -276,6 +281,12 @@ Tasks:
 review the revised diff, and approve without acting as the owner.
 An unresponsive human assignment falls through after the configured timeout
 and does not leave the lane assigned to that human indefinitely.
+With a configured human reviewer, a second same-model request-changes
+reassigns the lane to that human, records the reassignment, and does not
+dispatch a third same-model review.
+Without a configured human reviewer, the lane stays in `needs-review`, renders
+the `escalation required` warning, and does not dispatch a third same-model
+review.
 
 ### Workstream 7: Adopt, retry, expiry, and visibility
 
@@ -323,9 +334,12 @@ Tasks:
 6. Implement Workstreams 5 through 7.
 7. Complete Workstream 8.
 
-Workstreams 1 and 2 can share one code lane after PR #42. Workstream 3 should
-remain separate because it changes process environment and runner commands.
-Workstream 4 should land before reviewer selection changes.
+Workstreams 1 and 2 can share one code lane after PR #42. Workstream 1 must
+land before Workstream 3 because runner environment filtering uses the parsed
+solo configuration. Workstream 3 should remain separate because it changes
+process environment and runner commands. Workstream 4 should land before
+reviewer selection changes. Within step 6, Workstream 5 lands before
+Workstream 6, and Workstream 6 lands before Workstream 7.
 
 ## Rollback points
 
