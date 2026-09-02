@@ -5967,18 +5967,11 @@ async function resolveHandoff(repoRoot, options) {
   const reviewerResolveTarget = prFlow.enabled ? "ready-for-pr" : "resolved"
   const normalizedResolveActor = normalizeAgentName(resolvedActor).toLowerCase()
   const normalizedReviewer = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
-  if (
+  const reviewerAuthorityAdvisory =
     existingCurrent.status === "needs-review"
     && (!normalizedResolveActor || !normalizedReviewer || normalizedResolveActor !== normalizedReviewer)
-  ) {
-    throw new BtrainError({
-      message: `Only the recorded reviewer may apply \`needs-review -> ${reviewerResolveTarget}\` to lane ${laneId || "(single)"}.`,
-      reason: `The acting agent is \`${resolvedActor || "unknown"}\`, but the lane reviewer is \`${existingCurrent.reviewer || "unassigned"}\`. Non-reviewer approval is not permitted.`,
-      fix: existingCurrent.reviewer
-        ? `Run the review as \`${existingCurrent.reviewer}\`, then retry \`btrain handoff resolve${laneId ? ` --lane ${laneId}` : ""} --summary "..." --actor "${existingCurrent.reviewer}"\`.`
-        : `Assign a reviewer with \`btrain handoff update${laneId ? ` --lane ${laneId}` : ""} --reviewer "<reviewer>" --actor "${existingCurrent.owner || "<owner>"}"\`, then retry the review.`,
-    })
-  }
+    ? `warning: transition-advisory L8: only the recorded reviewer should apply \`needs-review -> ${reviewerResolveTarget}\`; acting agent is \`${resolvedActor || "unknown"}\` and reviewer is \`${existingCurrent.reviewer || "unassigned"}\`.`
+    : ""
 
   const finalResolve = !!options.final || !!options["final"]
   // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
@@ -6010,15 +6003,16 @@ async function resolveHandoff(repoRoot, options) {
         : await readCurrentState(repoRoot)
       if (
         latestCurrent.owner !== existingCurrent.owner
+        || latestCurrent.reviewer !== existingCurrent.reviewer
         || !samePathList(latestCurrent.lockedFiles, retainedFiles)
       ) {
         throw new BtrainError({
           message: `Lane ${laneId || "(single)"} changed while the review approval was waiting to publish.`,
-          reason: "The lane owner or locked files no longer match the state that was reviewed.",
-          fix: `Re-read lane ${laneId || "(single)"}, verify its current owner and files, then run the resolve command again.`,
+          reason: "The lane owner, reviewer, or locked files no longer match the state that was reviewed.",
+          fix: `Re-read lane ${laneId || "(single)"}, verify its current owner, reviewer, and files, then run the resolve command again.`,
         })
       }
-      applyTransition(latestCurrent, "handoff resolve", {
+      const transition = applyTransition(latestCurrent, "handoff resolve", {
         to: "ready-for-pr",
         actor: resolvedActor,
         prFlowEnabled: true,
@@ -6046,6 +6040,7 @@ async function resolveHandoff(repoRoot, options) {
             summary: options.summary || "",
             localReviewApproved: true,
             nextStatus: "ready-for-pr",
+            ...(transition.row.id === "L8" ? { "transition-advisory": "L8" } : {}),
           },
           overrideHandoffPath,
         },
@@ -6062,6 +6057,7 @@ async function resolveHandoff(repoRoot, options) {
     } else {
       await publishResolve()
     }
+    if (reviewerAuthorityAdvisory) options.onEvent?.(reviewerAuthorityAdvisory)
     return resolvedCurrent
   }
 
@@ -6074,16 +6070,17 @@ async function resolveHandoff(repoRoot, options) {
     if (
       latestCurrent.status !== existingCurrent.status
       || latestCurrent.owner !== existingCurrent.owner
+      || latestCurrent.reviewer !== existingCurrent.reviewer
       || !samePathList(latestCurrent.lockedFiles, existingCurrent.lockedFiles)
       || latestCurrent.prNumber !== existingCurrent.prNumber
     ) {
       throw new BtrainError({
         message: `Lane ${laneId || "(single)"} changed while the terminal resolve was waiting to publish.`,
-        reason: "The status, owner, locked files, or linked PR no longer match the state that was resolved.",
+        reason: "The status, owner, reviewer, locked files, or linked PR no longer match the state that was resolved.",
         fix: `Re-read lane ${laneId || "(single)"}, verify its current state, then run the resolve command again.`,
       })
     }
-    applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
+    const transition = applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
       to: "resolved",
       actor: resolvedActor,
       prFlowEnabled: prFlow.enabled,
@@ -6112,6 +6109,7 @@ async function resolveHandoff(repoRoot, options) {
         laneId,
         eventDetails: {
           summary: options.summary || "",
+          ...(transition.row.id === "L8" ? { "transition-advisory": "L8" } : {}),
         },
         overrideHandoffPath,
       },
@@ -6126,6 +6124,7 @@ async function resolveHandoff(repoRoot, options) {
   } else {
     await publishTerminalResolve()
   }
+  if (reviewerAuthorityAdvisory) options.onEvent?.(reviewerAuthorityAdvisory)
   if (isCgraphEnabled(config)) {
     await reconcileCgraphAdvisories(repoRoot, laneId || "repo", [], {
       adviseOnResolution: false,

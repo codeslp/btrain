@@ -303,8 +303,8 @@ export class LaneLockModel {
   resolve({ lane, actor, final }) {
     const s = this.lane(lane)
     // The implementation still resolves from statuses outside the designated
-    // review path, including idle. Reviewer authority at needs-review is
-    // enforced in both modes below.
+    // review path, including idle. During L8's advisory window, implementation
+    // mode also accepts non-reviewer approval while contract mode rejects it.
     if (this.mode === "contract" && s.status === "idle") {
       return this.#reject("resolve-from-idle")
     }
@@ -316,7 +316,7 @@ export class LaneLockModel {
       return this.#reject("final-from-review-flow")
     }
 
-    if (s.status === "needs-review" && actor !== s.reviewer) {
+    if (this.mode === "contract" && s.status === "needs-review" && actor !== s.reviewer) {
       return this.#reject("ready-for-pr-entry-requires-reviewer")
     }
 

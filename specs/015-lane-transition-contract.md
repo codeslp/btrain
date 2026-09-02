@@ -4,7 +4,7 @@
 **Version**: 0.1.3
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-02 (v0.1.3: retires L8 and restricts L9 to the recorded reviewer)
+**Updated**: 2026-09-02 (v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
 
 ## Decision
 
@@ -183,6 +183,7 @@ uses `explicitPr || linkedPr`, `pr-flow.mjs:394-420`).
 | L5 | legacy | `pr-poll` waiting, feedback, clear | any Active with a linked PR (recorded or `--pr`), or an inactive lane whose registry still holds stale locks (`patchHandoff` falls back to `currentLane.lockPaths`) | per outcome | system | none | retain | forbidden by 002 PR-flow states | legacy (#9 residual) |
 | L6 | legacy | `handoff update --files` | any status | same | any | non-empty when Active | replace when Active; release both records when `idle` (`core.mjs:5292-5295`); in single-handoff mode set `lockedFiles` only | forbidden by 014 rescope designation | legacy (#10) |
 | L7 | legacy | `handoff resolve` | `repair-needed` | `resolved` | any | row 15 guard not met (no recorded human disposition and no consumed override; the escalation flag alone does not satisfy row 15) | release | forbidden by 014 repair designation and 006 FR-29 | legacy (#11) |
+| L8 | legacy | `handoff resolve` | `needs-review` | `ready-for-pr` (PR flow on) or `resolved` (off) | any, actor unchecked | none | as rows 4 and 5 | forbidden by 002 PR-flow states row 1 (reviewer enters ready-for-pr) | advisory (14-day minimum begins when this change merges to `main`) |
 | L9 | legacy | `handoff resolve` (PR flow on) | `needs-review`, lane uncovered by force-release | `ready-for-pr` | reviewer | none | re-acquires the handoff paths (`core.mjs:5711`), which can fail if another lane took them | forbidden by 002 Force-release override (coverage stays suspended until claim or rescope) | legacy (new observation, not yet in the ledger) |
 | L10 | legacy | `handoff update --owner` or `--reviewer` | any status, including `resolved` and `idle` | same | any, actor unchecked | none | registry owner label follows the new owner | undesignated (open question 8) | legacy (row 20 fallback) |
 | L11 | legacy | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | any, actor unchecked (`resolveHandoff` compares no actor) | none | release | row 6 actor undesignated (open question 5) | legacy (row 6 fallback) |
@@ -192,17 +193,17 @@ uses `explicitPr || linkedPr`, `pr-flow.mjs:394-420`).
 | L15 | legacy | `handoff request-changes` | `needs-review` | `changes-requested` | any when the lane records no reviewer or the actor is unverified (`core.mjs:5602` checks only when both are set) | reason code present | retain | 005 FR-8 designates the reviewer; the empty-actor case is undesignated | legacy (row 3 fallback) |
 | L16 | system | `watchdog-repair` stale or TTL-expired lock release | any | same | system | lock is stale (lane not active) or past `lockTtlMs` | release registry entries (`core.mjs:8641-8690`) | 006 FR-2 safe auto-repair catalog ("stale lock cleanup") | designated |
 
-Rows 1 through 20 and L16 are the intended contract. Rows L1 through L7 and
-L9 through L15 exist only so the structural half is behavior-preserving: every request the
+Rows 1 through 20 and L16 are the intended contract. Rows L1 through L15
+exist only so the structural half is behavior-preserving: every request the
 current CLI accepts must match some row in Phase A, and Phase A's acceptance
 test is exactly that property, checked against the full existing suite. L16
 is a contract row for a system event that carries a lock effect; it is listed
 with the legacy rows only because it was found in the same audit. Each legacy row is retired by the
 semantic half once its owning prose lands. L9 records a divergence found while
 drafting this spec; it is added to the ledger by the structural half. Spec 019
-Workstream 0 retired L8 after rows 4 and 5 gained an enforced reviewer guard.
-L9 remains only for the force-release coverage behavior, and it now requires
-the recorded reviewer.
+Workstream 0 has started L8's required advisory period. L8 can be retired only
+after the FR-5 minimum and quiescence checks pass. L9 remains only for the
+force-release coverage behavior, and it now requires the recorded reviewer.
 
 ## Functional Requirements
 
@@ -518,7 +519,7 @@ Order by what is unpinned and can move now:
    #7, #9, #10 prose in spec 002 and the spec 014 designations, including the
    row 12 and `ready-to-merge -> pr-review` decisions and the spec 002 line
    77 reconciliation. Update `LaneLock.tla` and repin. Flip rows to advisory,
-   then enforce; remove L1, L2, L4, L5, L6, and L9 (the force-release
+   then enforce; remove L1, L2, L4, L5, L6, L8, and L9 (the force-release
    re-acquire divergence, which the same spec 002 reconciliation designates).
 4. Open-question rows: L10 (owner reassignment, Q8), L11 (abandonment
    actor, Q5), L12 (metadata-update actor), L13 (single-handoff claim
@@ -552,7 +553,7 @@ advisory mode once every row has been enforced for at least 30 calendar days.
 - A rejected transition names source, target, actor, reason, and a legal
   command, and is never a raw filesystem error.
 - `btrain transitions --format mermaid` renders exactly the rows table above
-  (rows 1-20, 14 legacy rows styled distinctly while they exist, and L16).
+  (rows 1-20, 15 legacy rows styled distinctly while they exist, and L16).
   The partial
   diagrams in specs 005 and 006 are not the reference.
 - Each legacy row is removed only by a change whose review packet cites the

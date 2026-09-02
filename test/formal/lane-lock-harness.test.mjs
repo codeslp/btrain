@@ -320,6 +320,7 @@ function applyModel(model, cmd, actor) {
 const CANDIDATE_REASON_LABELS = new Map([
   ["resolve-from-idle", "resolve-from-idle"],
   ["resolve-requires-lane-actor", "resolve-actor-unchecked"],
+  ["ready-for-pr-entry-requires-reviewer", "resolve-actor-unchecked"],
   ["resolve-from-pr-flow-status", "resolve-from-pr-flow"],
   ["needs-review-requires-owner", "update-actor-unchecked"],
   ["pr-review-requires-owner", "update-actor-unchecked"],
@@ -868,11 +869,10 @@ test(
   },
 )
 
-// Deterministic implementation-mirror witness for reviewer authority. The
-// owner must not approve its own handoff, and the rejected operation must
-// leave the lane in needs-review with its registry locks retained.
+// Deterministic implementation-mirror witness for L8's advisory window. The
+// owner approval remains accepted temporarily and keeps the registry locks.
 test(
-  "implementation mirror: owner approval from needs-review is rejected with locks retained",
+  "implementation mirror: owner approval follows L8 advisory with locks retained",
   { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
   async () => {
     const { trace } = await executeSequence("implementation", [
@@ -880,18 +880,18 @@ test(
       { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
       { t: "resolve", lane: "x", actorSel: "owner", final: false },
     ])
-    const rejection = trace.at(-1)
-    assert.equal(rejection.modelOk, false, "the implementation mirror rejects owner approval")
-    assert.equal(rejection.realOk, false, "the runtime rejects owner approval")
-    assert.equal(rejection.expectedState.x.status, "needs-review")
-    assert.deepEqual(rejection.expectedState.x.registry, ["src/a/"])
-    assert.equal(rejection.realState.x.status, "needs-review")
-    assert.deepEqual(rejection.realState.x.registry, ["src/a/"])
+    const approval = trace.at(-1)
+    assert.equal(approval.modelOk, true, "the implementation mirror accepts L8 during advisory")
+    assert.equal(approval.realOk, true, "the runtime accepts L8 during advisory")
+    assert.equal(approval.expectedState.x.status, "ready-for-pr")
+    assert.deepEqual(approval.expectedState.x.registry, ["src/a/"])
+    assert.equal(approval.realState.x.status, "ready-for-pr")
+    assert.deepEqual(approval.realState.x.registry, ["src/a/"])
   },
 )
 
 test(
-  "implementation mirror: non-PR-flow owner approval is rejected with locks retained",
+  "implementation mirror: non-PR-flow owner approval remains accepted during L8 advisory",
   { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
   () => {
     const model = new LaneLockModel({
@@ -909,11 +909,10 @@ test(
       true,
     )
 
-    const rejection = model.resolve({ lane: "x", actor: "alpha", final: false })
-    assert.equal(rejection.ok, false)
-    assert.equal(rejection.reason, "ready-for-pr-entry-requires-reviewer")
-    assert.equal(model.lane("x").status, "needs-review")
-    assert.deepEqual(model.registryPaths("x"), ["src/a/"])
+    const approval = model.resolve({ lane: "x", actor: "alpha", final: false })
+    assert.equal(approval.ok, true)
+    assert.equal(model.lane("x").status, "resolved")
+    assert.deepEqual(model.registryPaths("x"), [])
   },
 )
 
