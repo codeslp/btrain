@@ -604,12 +604,20 @@ the following. This specification does not set numeric defaults before that
 data exists. H-6 must derive and record each numeric threshold from the Phase 2
 dataset before activation.
 
+The activation dataset must contain at least the H-6 minimum number of
+applicable exact-head runs whose final outcome is `pass`. An incomplete or warn
+outcome does not count toward this successful-run minimum or the latency
+sample. This exclusion includes `tool_unavailable`, `infrastructure_failure`,
+`policy_blocked`, and `state_space_exhausted`. The dataset must still retain
+those outcomes for the availability and exhaustion rates.
+
 1. **Stability**: the pilot model meets the H-6 minimum run count on
-   consecutive PRs affecting modeled behavior without a false-positive block
-   (`stale_model`, counterexample, or validation mismatch that was later judged
-   incorrect).
+   consecutive applicable exact-head runs that finish with `pass`. A
+   false-positive block (`stale_model`, counterexample, or validation mismatch
+   that was later judged incorrect) resets the consecutive-run count.
 2. **Latency**: exact-head CI formal checks meet the H-6 P95 latency budget on
-   the shared runner over the measured advisory period.
+   the shared runner over the successful-run sample in the measured advisory
+   period.
 3. **Exhaustion rate**: `state_space_exhausted` stays below the H-6 maximum
    rate for applicable formal-check runs during the advisory window.
 4. **Availability**: `tool_unavailable` stays below the H-6 maximum rate for
