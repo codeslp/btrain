@@ -1,7 +1,7 @@
-# 018 — Agent Identity Namespaces: Local Actors and GitHub Bots
+# 018 — Agent Identity Namespaces and Execution Origins
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.2.0
 **Author**: btrain
 **Date**: 2026-09-01
 
@@ -33,6 +33,22 @@ From this spec on, the two live in separate namespaces:
 - Wherever btrain renders a bot next to a local agent, it labels them:
   `agent claude`, `bot gh-codex`.
 
+Local-agent identity and execution origin are separate dimensions. The same
+accountable agent can run through more than one launch surface, so btrain also
+records an **execution origin** for each dispatch and mutation:
+
+- `codex-cli`: Codex dispatched the agent through a local CLI runner.
+- `claude-harness`: the Claude harness created or managed the agent session.
+- `direct`: a human started the top-level agent session directly.
+- `unknown`: a legacy record or uninstrumented launcher supplied no origin.
+
+The origin appears as a display-only `@<origin>` designator. For example,
+`agent claude@codex-cli` and `agent claude@claude-harness` are the same local
+agent for ownership, review, actor verification, lane locks, and history. The
+designator answers "where did this execution come from?" It does not create a
+new actor. An `@` suffix is never valid in `[agents].active`,
+`[agents.runners]`, `--owner`, `--reviewer`, `--actor`, or `BTRAIN_AGENT`.
+
 What is not being done: local agent identities are not renamed to
 `local-<name>`. Those strings are stored in every lane's handoff file as owner
 and reviewer and keyed in `[agents.runners]`. Renaming them mid-flight would
@@ -44,6 +60,18 @@ identity churn. If a repository wants `local-` in identifiers, it may use it;
 btrain treats any non-`gh-` id as local.
 
 ## Summary
+
+There are now three independent labels:
+
+1. The local-agent id names the accountable actor (`claude`, `codex`).
+2. The execution-origin designator names the launch surface (`@codex-cli`,
+   `@claude-harness`, `@direct`, or `@unknown`).
+3. The GitHub-bot id names an external PR reviewer (`gh-codex`).
+
+Keeping origin out of the canonical actor id avoids duplicate roster entries,
+actor mismatches, lock churn, and false peer-review diversity. It also lets one
+lane show that two updates came from different launch surfaces without
+pretending that they came from different accountable reviewers.
 
 Bot ids are labels. GitHub logins are matched through `aliases`
 (`src/brain_train/pr-flow.mjs:36`), so the id itself never reaches GitHub
@@ -124,22 +152,75 @@ prefixes them: `agent <name>` and `bot <id>`. Today two sites mix kinds: the
 PR-feedback next-action text written by `applyPrStatusToHandoff`
 (`pr-flow.mjs:669`), and `btrain pr status`, to which this spec adds one
 `owner:` line so a reader sees who acts on the bot's feedback. `btrain
-status`, the dashboard, and PR bodies show local agents only and omit the
-label until they render bot state.
+status`, the dashboard, and PR bodies retain the `agent` label when they render
+execution origin so `agent claude@codex-cli` cannot be mistaken for a bot id
+or a second canonical agent.
 
 ### FR-5: Reason tags and markers use the prefixed id
 
 Reason tags recorded on PR-feedback `changes-requested` transitions and the
 `bot=` attribute of the review-request marker use the prefixed id
 unchanged. A marker written before the rename does not match the new id;
-re-request review after renaming (FR-7).
+re-request review after renaming (FR-10).
 
 ### FR-6: The formal model is unaffected
 
 `LaneLock.tla` and `lane-lock-model.mjs` model local agents only. GitHub bots
 are external events (`PrClear`, `PrFeedback`, `PrTerminal`). No change.
 
-### FR-7: Migration
+### FR-7: Execution origin is provenance, not identity
+
+Every agent-triggered workflow mutation and every runner dispatch carries an
+`executionOrigin` field. Its normalized value must match
+`^[a-z0-9]+(-[a-z0-9]+)*$`. The first supported values are `codex-cli`,
+`claude-harness`, `direct`, and `unknown`; the grammar permits later launch
+surfaces without changing actor identity again.
+
+The field is never part of an authorization comparison. Owner, reviewer,
+actor, peer-diversity, lane-lock, repair-budget, and PR-gate checks use only
+the canonical local-agent id. Two executions of `claude` with different
+origins are still one reviewer for separation-of-duties checks.
+
+### FR-8: Launch boundaries supply the origin explicitly
+
+Launchers set `BTRAIN_EXECUTION_ORIGIN` before the agent process starts:
+
+- A Codex-managed CLI dispatch sets `codex-cli`.
+- The Claude harness sets `claude-harness`.
+- A directly started top-level session may set `direct`.
+
+A btrain loop passes the normalized value to the child runner and copies it
+into the dispatch trace. It must not infer origin from the runner command or
+agent id: both launch surfaces can execute the same `claude -p` command. When
+the variable is absent or invalid, btrain records `unknown` and emits a
+diagnostic; it does not reject otherwise-authorized work.
+
+`BTRAIN_EXECUTION_ORIGIN` is attribution metadata, not a credential. A process
+can spoof the label, so no origin value may grant actor authority, satisfy
+peer review, bypass a gate, expand lane scope, or consume an audited override.
+
+### FR-9: Events, traces, envelopes, and output preserve the designator
+
+The normalized value is stored on:
+
+- canonical workflow events that already store an actor;
+- loop trace-bundle context and each `loop-dispatch` event;
+- task-artifact envelopes next to `actor`; and
+- reviewer-context metadata when an update is handed to a peer.
+
+Human-readable output renders `agent <id>@<origin>` when both the agent and
+origin are known. It renders `agent <id>@unknown` for legacy or
+uninstrumented records. Machine-readable output keeps separate `actor` and
+`executionOrigin` fields; it never makes consumers parse the display string.
+Owner and reviewer fields in the handoff remain canonical ids without the
+designator because they describe responsibility, not one execution.
+
+History is append-only. Existing events are read as `executionOrigin:
+"unknown"`; migration does not rewrite them. A single lane can therefore show
+updates from `agent claude@codex-cli` and `agent claude@claude-harness` while
+remaining owned by `claude` throughout.
+
+### FR-10: Bot-namespace migration
 
 0. The parser fix (`parseProjectToml` accepts `-` in table headers and bare
    keys) with its test, landed in PR #34. Steps 1 through 4 depend on it.
@@ -166,6 +247,8 @@ step 1 ships with the FR-1 code; steps 3 and 4 happen when this lane merges.
 ## Non-Goals
 
 - Renaming local agent identities.
+- Treating execution origins as additional agents, roles, or trust levels.
+- Inferring an origin from a process name, runner command, terminal, or model.
 - Changing how aliases match GitHub logins.
 - Introducing a third namespace for humans. A human reaches btrain through
   the spec 006 FR-2c/2d override, not as an actor id.
@@ -184,6 +267,9 @@ contracts as stated here: local actor predicates are the four above, and
   events. Row 9 (`PrFeedback`) records the prefixed reason tag.
 - **Spec 017**: `#<role>` is the only suffix on local ids; `gh-` is the only
   prefix on bot ids. Neither may combine.
+- **Harness traces**: loop-dispatch traces and task-artifact envelopes add a
+  separate `executionOrigin` field. Their existing `agentName`, `actor`,
+  `owner`, and `reviewer` values remain canonical local ids.
 
 ## Acceptance Criteria
 
@@ -200,9 +286,27 @@ contracts as stated here: local actor predicates are the four above, and
   unprefixed bot id), not FR-3. A local agent named `gh-anything` fails FR-2.
   FR-3 fires only on a case-insensitive match between a local id and a bot
   id.
+- A Codex-managed CLI dispatch of Claude records `actor: "claude"` and
+  `executionOrigin: "codex-cli"`, and human-readable output shows
+  `agent claude@codex-cli`.
+- A Claude-harness execution records the same canonical actor with
+  `executionOrigin: "claude-harness"`, and output shows
+  `agent claude@claude-harness`.
+- A lane updated by both executions still has one accountable agent for owner,
+  reviewer, and peer-diversity checks; the two origins do not satisfy a
+  two-reviewer rule.
+- Missing, invalid, or legacy origin data normalizes to `unknown`, remains
+  visible as `agent <id>@unknown`, and does not block an otherwise-valid
+  transition.
+- Changing only `BTRAIN_EXECUTION_ORIGIN` cannot make an invalid actor valid,
+  widen lane scope, bypass review, or consume an override.
+- Machine-readable events, trace bundles, and task-artifact envelopes expose
+  separate identity and origin fields; no consumer must parse the rendered
+  `@` designator.
 
 ## Open questions
 
-None open. Bot attribution is decided in FR-2 (system events carry
-`bot: <id>`; `--actor gh-<id>` is always rejected), and the single FR-3 rule
-makes the former migration-window question moot.
+None open. Bot attribution is decided in FR-2 (system events carry `bot:
+<id>`; `--actor gh-<id>` is always rejected). Execution provenance is decided
+in FR-7 through FR-9: it is explicit, append-only metadata with no authority,
+and `unknown` is the migration fallback.
