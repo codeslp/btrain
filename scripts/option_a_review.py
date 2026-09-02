@@ -22,8 +22,9 @@ Optional environment:
 Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST;
 claude runs with tools, settings sources, MCP servers, and skills disabled;
 codex runs with its shell tools disabled and the user's config ignored; every
-prompt has `@path` mentions neutralized before it reaches a CLI (Claude Code
-would otherwise inline the file client-side). An injected diff therefore has
+prompt has host-path `@` mentions neutralized before it reaches a CLI (Claude
+Code would otherwise inline the file client-side); ordinary `@` syntax in
+reviewed source is left alone. An injected diff therefore has
 no route to host files or credentials, and no user/project hook, plugin, or
 CLAUDE.md memory enters a reviewer's context. Regression: python3 scripts/test_option_a_review.py
 (set REVIEW_LIVE_TESTS=1 to also run the real-CLI sentinel checks).
@@ -67,15 +68,32 @@ def reviewer_env() -> dict[str, str]:
 
 # Claude Code expands `@path` mentions in the prompt client-side, outside the
 # tool system, so an untrusted diff containing `@/etc/passwd` would inline that
-# file even with --tools "". Every prompt passes through this before reaching a
-# CLI: an `@` that starts a path-like token becomes a fullwidth `＠`, which no
-# CLI treats as a mention. Diff hunk headers (`@@ -1 +1 @@`) are untouched
-# because their `@`s are followed by `@` or a space.
-MENTION_RE = re.compile(r"@(?=[\w./~\\-])")
+# file even with --tools "". Reviewer CLIs run in an empty scratch cwd, so a
+# plain relative mention (`@src/x.ts`, `@scope/pkg`) resolves to nothing and is
+# left alone, as are decorators, annotations, CSS at-rules, and emails. Only
+# forms that can reach a host file are neutralized: absolute or UNC paths,
+# `~`, dot-relative paths, Windows drive paths, and anything with a `..`
+# segment, each optionally quoted. The `@` becomes fullwidth U+FF20, which no
+# CLI treats as a mention. Hunk headers (`@@ -1 +1 @@`) are untouched.
+MENTION_RE = re.compile(r"""@(?=("[^"\n]*"|'[^'\n]*'|[^\s"']+))""")
+_HOST_PATH_PATTERNS = (
+  re.compile(r"^[\\/]"),                    # /abs, \\server\share
+  re.compile(r"^~"),                        # ~ or ~user
+  re.compile(r"^\.{1,2}[\\/]"),               # ./x, ../x, .\x
+  re.compile(r"^[A-Za-z]:[\\/]"),            # C:\x, C:/x
+  re.compile(r"(^|[\\/])\.\.([\\/]|$)"),     # any .. segment (src/../../x)
+)
+
+
+def is_host_path_mention(target: str) -> bool:
+  candidate = target.strip("\"'")
+  return any(pattern.search(candidate) for pattern in _HOST_PATH_PATTERNS)
 
 
 def neutralize_mentions(text: str) -> str:
-  return MENTION_RE.sub("\uff20", text)
+  def replace(match: re.Match[str]) -> str:
+    return "\uff20" if is_host_path_mention(match.group(1)) else "@"
+  return MENTION_RE.sub(replace, text)
 
 
 # ──────────────────────────────────────────────
