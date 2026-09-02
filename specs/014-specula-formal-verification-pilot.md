@@ -407,8 +407,15 @@ Open:
   Spec 002 has no numbered sections; those rules are owned by this
   specification and by the `pre-handoff` skill. Retargeting the citations is
   listed in the Phase 0 rollout items and stays outside the formal lane locks.
+- The Codex skill mirror (`.agents/skills/pre-handoff/SKILL.md`) does not
+  invoke `formal_advisory.mjs`. Agents loading the mirrored skill proceed from
+  the context gate directly to code review, skipping the formal-impact
+  classification. Semantic changes can reach review without the impact class or
+  advisory evidence described in Phase 2. Syncing the formal-impact step into
+  the mirror or removing the mirror in favor of the canonical skill requires a
+  lane that locks `.agents/skills/`.
 
-Until the reference gap closes and Phase 3 activates, btrain has a working
+Until the reference and mirror gaps close and Phase 3 activates, btrain has a working
 advisory formal surface, not a complete formal gate. The distinction is
 load-bearing: advisory verdicts are recorded as evidence and reviewed, but no
 verdict blocks a merge today.
@@ -535,9 +542,9 @@ Broader models require separate scope decisions based on pilot evidence.
 
 ### Phase 3: Selective gate
 
-Phase 3 readiness depends on closing Spec 015 Workstreams 3 and 4, plus
-measured Phase 2 evidence. The gate must not be activated before those
-dependencies close.
+Phase 3 readiness depends on closing Spec 015 Phase B steps 3 and 4 (pinned-
+section candidates and open-question legacy rows), plus measured Phase 2
+evidence. The gate must not be activated before those dependencies close.
 
 #### Gate disposition policy
 
