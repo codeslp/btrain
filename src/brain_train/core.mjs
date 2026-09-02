@@ -46,6 +46,7 @@ import {
   buildClaimReviewContextFields,
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
+import { applyTransition, classifyTransitionEvent } from "./transitions.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -1351,11 +1352,16 @@ async function consumeForceReleaseOverride(repoRoot, laneId, actorLabel) {
 
 // Single home for the active-lane audit. Both audited release paths call
 // this so the trust boundary cannot drift between them.
-async function auditActiveLanesForRelease(repoRoot, config, laneIds, actorLabel) {
+async function auditActiveLanesForRelease(repoRoot, config, laneIds, actorLabel, event = "locks release-lane") {
   for (const laneId of laneIds) {
     const lane = await readLaneState(repoRoot, config, laneId)
     if (isLaneActiveStatus(lane.status)) {
-      await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
+      const override = await consumeForceReleaseOverride(repoRoot, laneId, actorLabel)
+      applyTransition(lane, event, {
+        to: lane.status,
+        actor: actorLabel,
+        override,
+      })
     }
   }
 }
@@ -1368,7 +1374,7 @@ async function releaseLaneLocksAudited(repoRoot, laneId, options = {}) {
   // override. Terminal resolution and stale cleanup are unaffected — they
   // call releaseLocks with no audit hook, and an inactive lane needs none.
   return releaseLocks(repoRoot, laneId, {
-    auditInsideLock: () => auditActiveLanesForRelease(repoRoot, config, [laneId], actorLabel),
+    auditInsideLock: () => auditActiveLanesForRelease(repoRoot, config, [laneId], actorLabel, "locks release-lane"),
   })
 }
 
@@ -1383,7 +1389,7 @@ async function forceReleaseLockAudited(repoRoot, lockPath, options = {}) {
           .filter((lock) => lock.path === lockPath && (!options.lane || lock.lane === options.lane))
           .map((lock) => lock.lane),
       )]
-      return auditActiveLanesForRelease(repoRoot, config, owningLanes, actorLabel)
+      return auditActiveLanesForRelease(repoRoot, config, owningLanes, actorLabel, "locks release")
     },
   })
 }
@@ -5169,6 +5175,11 @@ async function claimHandoff(repoRoot, options) {
         fix: `btrain handoff claim --lane ${laneId} --task "${options.task || '...'}" --owner "${options.owner}" --files "src/,docs/"`,
       })
     }
+    applyTransition(existingLane, "handoff claim", {
+      to: "in-progress",
+      actor: options.owner,
+      changes: { owner: options.owner, reviewer: options.reviewer, lockedFiles: files },
+    })
     // Acquisition is deferred to the publish step below so both land in one
     // registry critical section.
   }
@@ -5263,6 +5274,12 @@ async function claimHandoff(repoRoot, options) {
     return result
   }
 
+  const existingCurrent = await readCurrentState(repoRoot)
+  applyTransition(existingCurrent, "handoff claim", {
+    to: "in-progress",
+    actor: options.owner,
+    changes: updates,
+  })
   const result = await updateHandoff(
     repoRoot,
     updates,
@@ -5351,6 +5368,18 @@ async function patchHandoff(repoRoot, options) {
       const effectiveOwner = updates.owner ?? existingCurrent.owner ?? resolvedActor ?? "btrain"
       const reasonMetadata = resolveReasonMetadata(existingCurrent, nextStatus, options, {
         requireReasonOnTransition: options.status !== undefined,
+      })
+
+      const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
+      applyTransition(existingCurrent, transitionEvent, {
+        to: nextStatus,
+        actor: resolvedActor,
+        prFlowEnabled: getPrFlowConfig(config).enabled,
+        prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+        filesChanged: options.files === undefined
+          ? undefined
+          : JSON.stringify(normalizePathList(updates.lockedFiles)) !== JSON.stringify(normalizePathList(existingCurrent.lockedFiles)),
+        changes: updates,
       })
 
       if (options.status === "needs-review") {
@@ -5600,6 +5629,17 @@ async function patchHandoff(repoRoot, options) {
   })
   updates.reasonCode = reasonMetadata.reasonCode
   updates.reasonTags = reasonMetadata.reasonTags
+  const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
+  applyTransition(existingCurrent, transitionEvent, {
+    to: nextStatus,
+    actor: resolvedActor,
+    prFlowEnabled: getPrFlowConfig(config).enabled,
+    prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+    filesChanged: options.files === undefined
+      ? undefined
+      : JSON.stringify(normalizePathList(updates.lockedFiles)) !== JSON.stringify(normalizePathList(existingCurrent.lockedFiles)),
+    changes: updates,
+  })
   let repairMetadata = {
     repairOwner: existingCurrent.repairOwner || "",
     repairEscalation: existingCurrent.repairEscalation || "",
@@ -5767,6 +5807,10 @@ async function requestChangesHandoff(repoRoot, options) {
   const reasonMetadata = resolveReasonMetadata(existingCurrent, "changes-requested", options, {
     requireReasonOnTransition: true,
   })
+  applyTransition(existingCurrent, "handoff request-changes", {
+    to: "changes-requested",
+    actor: resolvedActor,
+  })
 
   if (laneId) {
     const locks = await listLocks(repoRoot)
@@ -5872,6 +5916,12 @@ async function resolveHandoff(repoRoot, options) {
     })
   }
   if (prFlow.enabled && existingCurrent.status === "needs-review" && !finalResolve) {
+    applyTransition(existingCurrent, "handoff resolve", {
+      to: "ready-for-pr",
+      actor: resolvedActor,
+      prFlowEnabled: true,
+      prLinked: !!existingCurrent.prNumber,
+    })
     const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
     if (laneId && retainedFiles.length > 0) {
       await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, retainedFiles)
@@ -5904,6 +5954,13 @@ async function resolveHandoff(repoRoot, options) {
       },
     )
   }
+
+  applyTransition(existingCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
+    to: "resolved",
+    actor: resolvedActor,
+    prFlowEnabled: prFlow.enabled,
+    prLinked: !!existingCurrent.prNumber,
+  })
 
   // Release locks for this lane
   if (laneId) {
@@ -8814,6 +8871,10 @@ async function applyWatchdogRepairs(repoRoot, {
     // 1. Stale lock release
     if (laneState.lockState === "stale" && laneState.lockPaths.length > 0) {
       const releasedPaths = [...laneState.lockPaths]
+      applyTransition(laneState, "watchdog-lock-release", {
+        to: laneState.status,
+        actor: actorLabel,
+      })
       await releaseLocks(repoRoot, laneState._laneId)
       await appendWorkflowEvent(repoRoot, config, {
         type: "watchdog-repair",
@@ -8846,6 +8907,10 @@ async function applyWatchdogRepairs(repoRoot, {
     const expiredLocks = laneLocks.filter((l) => isLockExpired(l, handoffCfg.lockTtlMs))
     if (expiredLocks.length > 0 && laneState.lockState !== "stale") {
       const expiredPaths = expiredLocks.map((l) => l.path)
+      applyTransition(laneState, "watchdog-lock-release", {
+        to: laneState.status,
+        actor: actorLabel,
+      })
       await releaseLocks(repoRoot, laneState._laneId)
       await appendWorkflowEvent(repoRoot, config, {
         type: "watchdog-repair",
@@ -8881,6 +8946,10 @@ async function applyWatchdogRepairs(repoRoot, {
       })
 
       const laneHandoffPath = getLaneHandoffPath(repoRoot, config, laneState._laneId)
+      applyTransition(laneState, "watchdog-repair", {
+        to: "repair-needed",
+        actor: actorLabel,
+      })
       await updateHandoff(repoRoot, {
         status: "repair-needed",
         ...repairMetadata,

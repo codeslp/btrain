@@ -666,6 +666,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       pr: prNumber,
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
+      transitionEvent: "pr-poll",
       next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actorLabel}"\`.`,
     })
     return "changes-requested"
@@ -677,6 +678,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       actor,
       status: "ready-to-merge",
       pr: prNumber,
+      transitionEvent: "pr-poll",
       next: `Required bot feedback is clear on PR #${prNumber}. Merge the PR, then run \`btrain pr poll --lane ${laneId} --apply\` to resolve the lane.`,
     })
     return "ready-to-merge"
@@ -687,6 +689,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     actor,
     status: "pr-review",
     pr: prNumber,
+    transitionEvent: "pr-poll",
     next: `Waiting on required PR reviewers for PR #${prNumber}. Poll with \`btrain pr poll --lane ${laneId} --apply\`.`,
   })
   return "pr-review"
@@ -936,6 +939,7 @@ export async function runPrCreate(repoRoot, options = {}) {
     actor: options.actor || lane.owner || "btrain",
     status: "pr-review",
     pr: number,
+    transitionEvent: "pr-create",
     base,
     next: `PR #${number} is open. Poll with \`btrain pr poll --lane ${laneId} --apply\`; request re-review with \`btrain pr request-review --lane ${laneId} --bots all\`.`,
   })
