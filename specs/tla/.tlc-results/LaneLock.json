@@ -10,7 +10,7 @@
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "faa0f955a6ca12d2d80197d5651f3dae44f094bc",
+    "source_commit": "9a06bf6b105d01a60dc20087c3b019165ddbc758",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
     "inputs_sha256": "36b72033e5313db4f3934d635c4a5f29b0c3d92ead7ca7f60e1ccecea4d1f2b3",
@@ -24,7 +24,7 @@
     "states_generated": 88436305,
     "distinct_states": 8236969,
     "depth": 25,
-    "wall_clock_seconds": 87,
+    "wall_clock_seconds": 78,
     "workers": 10,
     "invariants": [
       "TypeOK",
@@ -53,7 +53,7 @@
       "RepairClear guarded on IsLaneAgent violates RepairClearByResponsibleActor (by construction)",
       "RepairEnter assigning owner[l] violates RepairEnterAssignsLastActor (by construction)"
     ],
-    "run_at": "2026-09-02T03:07:50Z"
+    "run_at": "2026-09-02T03:46:48Z"
   },
   "validation": {
     "engine": "fast-check model-based (spec 014 FR-6)",
@@ -68,6 +68,6 @@
     "candidate_gate": "fail as designed while ledger candidates 4-11 exist",
     "implementation_mode": "pass (mirror fixed in PR #34, merged into this branch)",
     "trace_validation": "not run; TLC trace validation of harness traces is future work",
-    "run_at": "2026-09-02T03:21:02Z"
+    "run_at": "2026-09-02T03:47:11Z"
   }
 }
