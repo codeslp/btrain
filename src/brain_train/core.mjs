@@ -5360,6 +5360,13 @@ async function patchHandoff(repoRoot, options) {
   if (laneId) {
     const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
     if (handoffPath) {
+      if (!(await pathExists(handoffPath))) {
+        throw new BtrainError({
+          message: `Lane ${laneId} handoff file is missing.`,
+          reason: "Update cannot validate or preserve the lane state without its canonical handoff file.",
+          fix: `Restore the configured lane handoff file, then run btrain doctor --repo ${repoRoot} before updating lane ${laneId}.`,
+        })
+      }
       const existingCurrent = await readLaneState(repoRoot, config, laneId)
       const existingContent = await readText(handoffPath)
       const locks = await listLocks(repoRoot)
@@ -5931,43 +5938,68 @@ async function resolveHandoff(repoRoot, options) {
     })
   }
   if (prFlow.enabled && existingCurrent.status === "needs-review" && !finalResolve) {
-    applyTransition(existingCurrent, "handoff resolve", {
-      to: "ready-for-pr",
-      actor: resolvedActor,
-      prFlowEnabled: true,
-      prLinked: !!existingCurrent.prNumber,
-    })
     const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
-    if (laneId && retainedFiles.length > 0) {
-      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, retainedFiles)
+    const resolveLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
+    let resolvedCurrent
+    const publishResolve = async () => {
+      const latestCurrent = overrideHandoffPath
+        ? parseCurrentSection(await readText(overrideHandoffPath))
+        : await readCurrentState(repoRoot)
+      if (
+        latestCurrent.owner !== existingCurrent.owner
+        || !samePathList(latestCurrent.lockedFiles, retainedFiles)
+      ) {
+        throw new BtrainError({
+          message: `Lane ${laneId || "(single)"} changed while the review approval was waiting to publish.`,
+          reason: "The lane owner or locked files no longer match the state that was reviewed.",
+          fix: `Re-read lane ${laneId || "(single)"}, verify its current owner and files, then run the resolve command again.`,
+        })
+      }
+      applyTransition(latestCurrent, "handoff resolve", {
+        to: "ready-for-pr",
+        actor: resolvedActor,
+        prFlowEnabled: true,
+        prLinked: !!latestCurrent.prNumber,
+      })
+      resolvedCurrent = await updateHandoff(
+        repoRoot,
+        {
+          status: "ready-for-pr",
+          lockedFiles: retainedFiles,
+          nextAction:
+            options.next
+            || `Local review approved. ${latestCurrent.owner || "Owner"}: run \`btrain pr create --lane ${laneId || "<id>"} --base ${prFlow.base} --bots all\`, or link an existing PR with \`btrain handoff update --lane ${laneId || "<id>"} --pr <number> --status pr-review --actor "${latestCurrent.owner || "owner"}"\`.`,
+          lastUpdated: resolveLastUpdated,
+          reasonCode: "",
+          reasonTags: [],
+        },
+        {
+          actorLabel,
+          reviewResponseSummary: options.summary,
+          config,
+          eventType: "resolve",
+          laneId,
+          eventDetails: {
+            summary: options.summary || "",
+            localReviewApproved: true,
+            nextStatus: "ready-for-pr",
+          },
+          overrideHandoffPath,
+        },
+      )
     }
 
-    return updateHandoff(
-      repoRoot,
-      {
-        status: "ready-for-pr",
-        lockedFiles: retainedFiles,
-        nextAction:
-          options.next
-          || `Local review approved. ${existingCurrent.owner || "Owner"}: run \`btrain pr create --lane ${laneId || "<id>"} --base ${prFlow.base} --bots all\`, or link an existing PR with \`btrain handoff update --lane ${laneId || "<id>"} --pr <number> --status pr-review --actor "${existingCurrent.owner || "owner"}"\`.`,
-        lastUpdated: `${actorLabel} ${formatIsoTimestamp()}`,
-        reasonCode: "",
-        reasonTags: [],
-      },
-      {
-        actorLabel,
-        reviewResponseSummary: options.summary,
-        config,
-        eventType: "resolve",
-        laneId,
-        eventDetails: {
-          summary: options.summary || "",
-          localReviewApproved: true,
-          nextStatus: "ready-for-pr",
-        },
-        overrideHandoffPath,
-      },
-    )
+    if (laneId && retainedFiles.length > 0) {
+      await acquireLocks(repoRoot, laneId, existingCurrent.owner || actorLabel, retainedFiles, {
+        publishInsideLock: publishResolve,
+        isPublished: () => handoffPublished(overrideHandoffPath, resolveLastUpdated),
+      })
+    } else if (laneId) {
+      await withFileLock(getLocksLockfilePath(repoRoot), publishResolve)
+    } else {
+      await publishResolve()
+    }
+    return resolvedCurrent
   }
 
   applyTransition(existingCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {

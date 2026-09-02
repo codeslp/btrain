@@ -5903,6 +5903,32 @@ describe("claim publication is atomic with lock acquisition", () => {
 })
 
 describe("lane resolve state source", () => {
+  it("returns a structured error when a lane update targets a missing handoff file", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+
+      await fs.rm(path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md"))
+      const result = await runBtrain([
+        "handoff", "update", "--repo", repoRoot, "--lane", "a",
+        "--task", "must not recreate missing state", "--actor", "Claude",
+      ], repoRoot)
+
+      assert.notEqual(result.code, 0, result.stdout)
+      assert.match(result.stderr, /handoff file.*missing|missing.*handoff file/i)
+      assert.match(result.stderr, /btrain doctor/i)
+      await assert.rejects(
+        fs.access(path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md")),
+        { code: "ENOENT" },
+      )
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
+
   it("rejects a missing lane handoff file without releasing its locks", async () => {
     const repoRoot = await makeTmpDir()
     try {
@@ -5927,6 +5953,56 @@ describe("lane resolve state source", () => {
       assert.match(result.stderr, /handoff file.*missing|missing.*handoff file/i)
       const locks = JSON.parse(await fs.readFile(path.join(repoRoot, ".btrain", "locks.json"), "utf8"))
       assert.ok(locks.locks.some((lock) => lock.lane === "a"))
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
+
+  it("revalidates peer resolve after acquiring the registry lock", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await configureGitIdentity(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enablePrFlow(repoRoot)
+      const claim = await runBtrain([
+        "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+        "--task", "resolve race", "--owner", "Claude", "--reviewer", "Codex",
+        "--files", "src/race.ts",
+      ], repoRoot)
+      assert.equal(claim.code, 0, claim.stderr)
+      const review = await runBtrain([
+        "handoff", "update", "--repo", repoRoot, "--lane", "a",
+        "--status", "needs-review", "--actor", "Claude", "--no-dispatch",
+        "--base", "HEAD", "--preflight", "reviewed",
+        "--changed", "src/race.ts", "--verification", "focused repro",
+        "--gap", "Full suite remains for the final verification pass",
+        "--why", "exercise resolve race", "--review-ask", "check transition",
+      ], repoRoot)
+      assert.equal(review.code, 0, review.stderr)
+
+      const locksPath = path.join(repoRoot, ".btrain", "locks.json")
+      const handoffPath = path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md")
+      let resolvePromise
+      await withFileLock(locksPath + ".lock", async () => {
+        resolvePromise = runBtrain([
+          "handoff", "resolve", "--repo", repoRoot, "--lane", "a",
+          "--summary", "approve stale snapshot", "--actor", "Codex",
+        ], repoRoot)
+        await new Promise((resolve) => setTimeout(resolve, 800))
+
+        const before = await fs.readFile(handoffPath, "utf8")
+        await fs.writeFile(handoffPath, before.replace(/^Status:.*$/m, "Status: changes-requested"))
+      })
+
+      const result = await resolvePromise
+      assert.notEqual(result.code, 0, result.stdout)
+      assert.match(result.stderr, /changes-requested|cannot transition/i)
+      const after = await fs.readFile(handoffPath, "utf8")
+      assert.match(after, /^Status: changes-requested$/m)
+      assert.doesNotMatch(after, /^Status: ready-for-pr$/m)
     } finally {
       await rmDir(repoRoot)
     }
