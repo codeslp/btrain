@@ -233,14 +233,17 @@ Tasks:
 - Add composed dispatch-and-selector tests for quota, authentication, and
   provider-refusal results. Each result must mark the current tier unavailable
   and immediately try the next tier.
+- Add composed probe-and-selector tests for presence and authenticated-probe
+  failures. Each failure must persist the unavailable result and immediately
+  try the next tier.
 - Classify same-model loop timeout or round-budget exhaustion as
   `tool_unavailable`, with retry backoff and a visible lane warning.
 - Keep other non-zero exits as review failures.
 - Persist availability failures with retry timestamps.
 
-**Independent check**: quota, authentication, and provider-refusal dispatch
-results each move selection to the next tier and never change the lane to an
-approved status.
+**Independent check**: presence-probe, authenticated-probe, quota,
+authentication, and provider-refusal failures each move selection to the next
+tier and never change the lane to an approved status.
 
 **Formal impact**: none until the selector changes a recorded reviewer.
 
@@ -256,8 +259,13 @@ Tasks:
 - Use `<runtime>#review` only after the first two tiers are unavailable.
 - Return `pending` when every tier is unavailable.
 - Update `inferPeerReviewer` to use the selector in solo mode.
+- Update `claimHandoff` to persist a claim with pending review metadata when
+  the selector returns `pending`. Do not reject the claim or create a reviewer
+  identity named `pending`.
 - Record the tier on claims and reviewer assignments.
 - Render `review tier` and unavailable reasons in handoff guidance.
+- Add an integration test in which all tiers are unavailable. The claim must
+  persist with its owner and locks intact and with review tier `pending`.
 
 **Independent check**: one-runtime solo claim assigns
 `<runtime>#review` with `review tier: same-model`.
@@ -272,6 +280,12 @@ an active lane. Update Spec 015 row 20 and formal evidence first.
 Tasks:
 
 - Dispatch the derived reviewer runner from `needs-review`.
+- Start `[solo].human_timeout` when the selector assigns a `notify` reviewer.
+  If the reviewer does not respond before the deadline, record
+  `solo-human-timeout`, mark the human tier unavailable, and immediately run
+  the selector so that the same-model tier can receive the review.
+- Add a fake-clock integration test for the default four-hour human timeout
+  and for a configured timeout.
 - Keep existing pre-handoff, diff, code-review, lock, and actor checks.
 - Start the configured `[solo].human_timeout` deadline when the human tier is
   assigned.

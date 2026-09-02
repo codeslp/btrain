@@ -29,6 +29,8 @@
 - [ ] FR-8 classifies quota and authentication failures as `tool_unavailable`.
 - [ ] FR-8 classifies provider refusal as `policy_blocked`.
 - [ ] FR-8 proves that quota, authentication, and provider-refusal dispatch results mark the current tier unavailable and immediately try the next tier.
+- [ ] FR-8 proves that presence and authenticated-probe failures persist the unavailable result and immediately try the next tier.
+- [ ] FR-8 proves that an all-unavailable claim persists with its owner and locks intact, review tier `pending`, and no fake reviewer identity.
 - [ ] FR-8 moves an unresponsive human tier to same-model after `[solo].human_timeout` and records `solo-human-timeout`.
 - [ ] FR-8 never treats a probe or dispatch failure as approval.
 - [ ] FR-9 uses explicit family values for wrappers and unknown executables.
