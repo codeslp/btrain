@@ -5900,6 +5900,121 @@ describe("claim publication is atomic with lock acquisition", () => {
       "the claim reported success, so a concurrent audited release must not have dropped its locks",
     )
   })
+
+  it("allows only one concurrent claim of the same lane to publish", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await configureGitIdentity(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+
+      const locksPath = path.join(repoRoot, ".btrain", "locks.json")
+      let firstClaim
+      let secondClaim
+      await withFileLock(locksPath + ".lock", async () => {
+        firstClaim = runBtrain([
+          "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+          "--task", "first claim", "--owner", "Claude", "--reviewer", "Codex",
+          "--files", "src/first/",
+        ], repoRoot)
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        secondClaim = runBtrain([
+          "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+          "--task", "second claim", "--owner", "Codex", "--reviewer", "Claude",
+          "--files", "src/second/",
+        ], repoRoot)
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      })
+
+      const results = await Promise.all([firstClaim, secondClaim])
+      assert.equal(
+        results.filter((result) => result.code === 0).length,
+        1,
+        `exactly one claim may publish: ${JSON.stringify(results)}`,
+      )
+
+      const handoff = await fs.readFile(
+        path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md"),
+        "utf8",
+      )
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      const laneLocks = registry.locks.filter((lock) => lock.lane === "a")
+      const firstWon = handoff.includes("Task: first claim")
+      assert.equal(firstWon || handoff.includes("Task: second claim"), true)
+      assert.deepEqual(
+        laneLocks.map((lock) => lock.path),
+        [firstWon ? "src/first/" : "src/second/"],
+      )
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
+})
+
+describe("request-changes publication is atomic with transition validation", () => {
+  it("waits for the registry lock and rejects a stale needs-review snapshot", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await configureGitIdentity(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+
+      let result = await runBtrain([
+        "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+        "--task", "review race", "--owner", "Claude", "--reviewer", "Codex",
+        "--files", "src/race/",
+      ], repoRoot)
+      assert.equal(result.code, 0, result.stderr)
+      result = await runBtrain([
+        "handoff", "update", "--repo", repoRoot, "--lane", "a",
+        "--status", "needs-review", "--actor", "Claude", "--no-dispatch",
+        "--base", "HEAD", "--preflight", "reviewed",
+        "--changed", "src/race/", "--verification", "focused repro",
+        "--gap", "Full suite remains for the final verification pass",
+        "--why", "exercise request-changes race", "--review-ask", "check transition",
+      ], repoRoot)
+      assert.equal(result.code, 0, result.stderr)
+
+      const locksPath = path.join(repoRoot, ".btrain", "locks.json")
+      const handoffPath = path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md")
+      let requestChanges
+      let settledBeforeRelease = false
+      let settledWhileLocked
+      await withFileLock(locksPath + ".lock", async () => {
+        requestChanges = runBtrain([
+          "handoff", "request-changes", "--repo", repoRoot, "--lane", "a",
+          "--summary", "stale review", "--reason-code", "spec-mismatch",
+          "--actor", "Codex",
+        ], repoRoot).then((commandResult) => {
+          settledBeforeRelease = true
+          return commandResult
+        })
+        await new Promise((resolve) => setTimeout(resolve, 800))
+        settledWhileLocked = settledBeforeRelease
+
+        const before = await fs.readFile(handoffPath, "utf8")
+        await fs.writeFile(handoffPath, before.replace(/^Status:.*$/m, "Status: ready-for-pr"))
+      })
+
+      result = await requestChanges
+      assert.equal(
+        settledWhileLocked,
+        false,
+        `request-changes must publish under the registry lock: ${JSON.stringify(result)}`,
+      )
+      assert.notEqual(result.code, 0, result.stdout)
+      assert.match(result.stderr, /ready-for-pr|cannot transition/i)
+      const after = await fs.readFile(handoffPath, "utf8")
+      assert.match(after, /^Status: ready-for-pr$/m)
+      assert.doesNotMatch(after, /^Status: changes-requested$/m)
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
 })
 
 describe("lane resolve state source", () => {
