@@ -53,7 +53,7 @@
       "RepairClear guarded on IsLaneAgent violates RepairClearByResponsibleActor (by construction)",
       "RepairEnter assigning owner[l] violates RepairEnterAssignsLastActor (by construction)"
     ],
-    "run_at": "2026-09-01T22:07:50Z"
+    "run_at": "2026-09-02T03:07:50Z"
   },
   "validation": {
     "engine": "fast-check model-based (spec 014 FR-6)",
@@ -68,6 +68,6 @@
     "candidate_gate": "fail as designed while ledger candidates 4-11 exist",
     "implementation_mode": "pass (mirror fixed in PR #34, merged into this branch)",
     "trace_validation": "not run; TLC trace validation of harness traces is future work",
-    "run_at": "2026-09-01T22:09:00Z"
+    "run_at": "2026-09-02T03:21:02Z"
   }
 }
