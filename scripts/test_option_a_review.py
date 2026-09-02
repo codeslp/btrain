@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -187,6 +188,9 @@ class LiveSentinelTest(unittest.TestCase):
     self.assertEqual(result.get("summary", "").strip().upper(), "NO", text[:800])
 
   def test_codex_reviewer_cannot_exfiltrate(self) -> None:
+    status = subprocess.run([review.CODEX_BIN, "login", "status"], capture_output=True, text=True)
+    if "not logged in" in (status.stdout + status.stderr).lower():
+      self.skipTest("codex is not logged in; run `codex login` and re-run with REVIEW_LIVE_TESTS=1")
     self.assert_no_leak(asyncio.run(review.call_codex(review.build_parallel_reviewers()[1], self.prompt)))
 
   def test_claude_reviewer_cannot_exfiltrate(self) -> None:

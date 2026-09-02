@@ -518,8 +518,14 @@ async def run_cli(args: list[str], stdin_text: str, cwd: str) -> tuple[int, str,
 
 
 def _cli_failure(reviewer: Reviewer, label: str, code: int, stdout: str, stderr: str) -> dict[str, Any]:
-  detail = (stderr or stdout).strip()[-1200:]
-  return normalize_result(reviewer, error=f"{label} exited {code}: {detail}")
+  # Prefer explicit error lines: codex echoes the prompt to stdout, so a raw
+  # tail would show the diff instead of the cause.
+  error_lines = [
+    line.strip() for line in (stderr + "\n" + stdout).splitlines()
+    if "ERROR" in line or "error:" in line.lower()
+  ]
+  detail = "\n".join(dict.fromkeys(error_lines)) if error_lines else (stderr or stdout).strip()
+  return normalize_result(reviewer, error=f"{label} exited {code}: {detail[-1200:]}")
 
 
 async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
