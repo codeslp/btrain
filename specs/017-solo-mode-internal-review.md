@@ -40,9 +40,12 @@ distinct from owner, enters `ready-for-pr`) is implemented and L8 retired.
 Until then this spec's guarantee is: separation enforced on request-changes,
 labeled but not enforced on approval.
 
-What is not being done: no new statuses, no new lock semantics, no change to
-the transition rules in spec 015, no change to the formal model's invariants.
-Solo mode is off by default and has an expiry.
+What is not being done: no new statuses, no new lock semantics, and no change
+to the formal model's invariants. This spec designates one transition that
+spec 015 currently leaves undecided: expiry restoration from
+`ready-to-merge` to `pr-review`. The implementation must add that transition
+to the spec 015 ledger and the formal model. Solo mode is off by default and
+has an expiry.
 
 ## Summary
 
@@ -443,12 +446,13 @@ three things:
      bot's approval is recorded, and `btrain doctor` warns the operator to
      increase `bot_pending_timeout`.
    - **Late `CHANGES_REQUESTED` before merge**: the exemption or deferral
-     is revoked regardless of option. For B and C the lane returns to
-     `pr-review` with the bot's feedback visible. For D and E the automatic
-     deferral is revoked, the lane returns to `pr-review`, and the bot's
-     requested changes must be addressed before the gate re-evaluates. A
-     `CHANGES_REQUESTED` verdict is never informational while the PR is
-     open.
+     is revoked regardless of option. For B and C the lane moves to
+     `changes-requested` with reason `pr-review-feedback`. For D and E the
+     automatic deferral is revoked and the lane moves to
+     `changes-requested` with the same reason. The owner must address the
+     bot's requested changes and explicitly return the lane to `pr-review`
+     before the gate re-evaluates. A `CHANGES_REQUESTED` verdict is never
+     informational while the PR is open.
    - **After merge**: no retroactive mutation. Neither approval nor
      `CHANGES_REQUESTED` mutates the lane or the bot requirement. The merge
      stands; the late review is recorded as a `bot-late-review`
@@ -457,6 +461,23 @@ three things:
      PR. A post-merge `CHANGES_REQUESTED` does not reopen the lane or
      revert the merge — the event provides an audit trail and the operator
      decides the response.
+
+4. **Expiry restoration transition**: Options B, C, and D designate
+   `BotRequirementRestore` as a new protocol transition. An exemption or
+   deferral expiry, early revocation, or early restoration raises the internal
+   event. The transition has these fields:
+
+   - **From/to**: `ready-to-merge` to `pr-review`.
+   - **Actor**: `system`.
+   - **Guard**: the lane has an open linked PR, and its merge gate reached
+     `ready-to-merge` while the expiring or revoked exemption or deferral was
+     active.
+   - **Locks**: retain.
+
+   The implementation must add this designated transition to the spec 015
+   ledger and both formal-model representations before it enforces any option
+   that uses expiry restoration. The event restores the bot requirement and
+   re-evaluates the gate. It does not imply that the bot approved the PR.
 
 #### Option A — Manual edit only (status quo)
 
@@ -523,9 +544,11 @@ Same mechanism as B but scoped to the repository rather than a single lane.
 #### Option D — Automatic deferral tied to solo-mode scope
 
 When solo mode is on and the unavailable runtime maps to a required bot (via
-a new `[pr_flow].bot_agent_map`), the bot requirement is automatically
-deferred with the solo-mode expiry. No separate operator command is needed.
-The policy owner must choose one scope:
+a new `[pr_flow].bot_agent_map`), btrain starts the bot's pending and detection
+flow. The mapping and solo mode do not defer the bot. Automatic deferral begins
+only after the selected D-i or D-ii signal below. The deferral inherits the
+solo-mode expiry, and no separate operator command is needed. The policy owner
+must choose one scope:
 
 - **(D-i) Per-lane timeout deferral.** Each lane has its own `bot-pending`
   window. A timeout defers the bot only for that lane. A different lane where
@@ -545,7 +568,8 @@ The policy owner must choose one scope:
   window (per `bot_probe_shortcut`) but never triggers or sustains a deferral
   on its own. HTTP errors from the review-request call are request-path
   failures and never trigger deferral.
-- **Command**: Implicit on `btrain solo on` when the mapping exists.
+- **Command**: `btrain solo on` starts detection when the mapping exists.
+  Deferral is implicit only after the selected D-i or D-ii signal.
   `btrain solo off` or expiry restores the requirement.
 - **Event**: `bot-pending` when solo-on detects the mapping and a lane has
   an open review request for the mapped bot. `bot-auto-deferred` when the
@@ -626,9 +650,9 @@ policy    = "block"         # lane blocked, requires human decision; requires bo
   signals or review-request HTTP errors (403, 422), which are request-path
   failures requiring operator repair. Late-review behavior follows the
   detection contract: late approval before merge restores the requirement;
-  late `CHANGES_REQUESTED` before merge reopens the lane; after merge both
-  verdicts are recorded as audit/warning events without lane or requirement
-  mutation.
+  late `CHANGES_REQUESTED` before merge moves the lane to
+  `changes-requested`; after merge both verdicts are recorded as
+  audit/warning events without lane or requirement mutation.
 - **Safety**: Auth and policy failures default to blocking, so credential
   issues and content-policy refusals never silently waive the gate. Outage
   and quota are deferrable because they resolve externally.
