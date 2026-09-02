@@ -462,7 +462,7 @@ three things:
      revert the merge — the event provides an audit trail and the operator
      decides the response.
 
-4. **Expiry restoration transition**: Options B, C, and D designate
+4. **Expiry restoration transition**: Options B, C, D, and E designate
    `BotRequirementRestore` as a new protocol transition. An exemption or
    deferral expiry, early revocation, or early restoration raises the internal
    event. The transition has these fields:
@@ -504,6 +504,13 @@ A new command temporarily exempts a named bot from one lane's PR gate.
 - **Command**: `btrain pr exempt-bot --lane <id> --bot <name> --reason "..."
   --until <ISO>` to grant.
   `btrain pr unexempt-bot --lane <id> --bot <name>` to revoke early.
+- **Grant guard**: Before it grants an exemption, btrain polls the linked PR
+  for the bot's current-head review. The bot must have no current-head verdict.
+  If the bot has approved, the requirement is already satisfied and the command
+  rejects the unnecessary exemption. If the bot has posted
+  `CHANGES_REQUESTED`, the command rejects the exemption, records the feedback,
+  and moves the open lane to `changes-requested` with reason
+  `pr-review-feedback`. An exemption never suppresses current-head findings.
 - **Event**: `bot-exempted` and `bot-unexempted` events in canonical workflow
   history, recording: actor, bot name, lane, reason, failure class, expiry,
   and whether solo mode was active.
@@ -528,6 +535,11 @@ Same mechanism as B but scoped to the repository rather than a single lane.
   deferred bot.
 - **Command**: `btrain pr defer-bot --bot <name> --reason "..." --until <ISO>`
   to grant. `btrain pr undefer-bot --bot <name>` to revoke.
+- **Grant guard**: Before it grants a repo-wide deferral, btrain applies B's
+  current-head review guard to every affected open lane. If any lane has a
+  current-head bot verdict, btrain processes that verdict and rejects the
+  deferral. A `CHANGES_REQUESTED` verdict moves its lane to
+  `changes-requested` with reason `pr-review-feedback`.
 - **Event**: `bot-deferred` and `bot-undeferred` in workflow history with the
   same fields as B.
 - **Expiry**: Required. On expiry or early revocation, btrain re-evaluates
