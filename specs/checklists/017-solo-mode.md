@@ -6,6 +6,7 @@
 ## Protocol and identity
 
 - [ ] FR-1 has tests for `solo on|off`, required expiry, audit reason, and workflow events.
+- [ ] FR-1 proves both toggle events retain the configured expiry, including `solo-off` after configuration removal.
 - [ ] FR-2 has tests for distinct base and `#review` identities.
 - [ ] FR-2 has lane-scoped actor verification and expiry grandfathering tests.
 - [ ] FR-2 rejects suffixed roster and runner entries.
@@ -26,10 +27,12 @@
 - [ ] FR-8 records the selected tier on the lane and in workflow events.
 - [ ] FR-8 classifies quota and authentication failures as `tool_unavailable`.
 - [ ] FR-8 classifies provider refusal as `policy_blocked`.
+- [ ] FR-8 moves an unresponsive human tier to same-model after `[solo].human_timeout` and records `solo-human-timeout`.
 - [ ] FR-8 never treats a probe or dispatch failure as approval.
 - [ ] FR-9 uses explicit family values for wrappers and unknown executables.
 - [ ] FR-9 reports every resolved family in `btrain doctor`.
 - [ ] FR-10 enforces loop timeout and round budgets.
+- [ ] FR-10 classifies exhausted same-model timeout or round budgets as `tool_unavailable` with backoff and a visible warning.
 - [ ] FR-10 blocks a third same-model review without an operator action.
 
 ## Commands, visibility, and recovery

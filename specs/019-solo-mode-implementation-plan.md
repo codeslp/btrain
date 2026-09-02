@@ -97,7 +97,9 @@ Add these event types:
 - `solo-retry`
 
 Each event records the lane when applicable, the actor, the tier, the reason,
-the previous roles, and the new roles.
+the previous roles, and the new roles. `solo-on` and `solo-off` also record
+the configured expiry. The `solo-off` event keeps that expiry even when the
+command removes or replaces the active configuration.
 
 ## CLI contracts
 
@@ -221,6 +223,8 @@ Tasks:
 - Define runner probe and failure-pattern configuration.
 - Classify quota and authentication signals as `tool_unavailable`.
 - Classify provider refusals as `policy_blocked`.
+- Classify same-model loop timeout or round-budget exhaustion as
+  `tool_unavailable`, with retry backoff and a visible lane warning.
 - Keep other non-zero exits as review failures.
 - Persist availability failures with retry timestamps.
 
@@ -258,6 +262,10 @@ Tasks:
 
 - Dispatch the derived reviewer runner from `needs-review`.
 - Keep existing pre-handoff, diff, code-review, lock, and actor checks.
+- Start the configured `[solo].human_timeout` deadline when the human tier is
+  assigned.
+- On human timeout, record `solo-human-timeout`, mark that tier unavailable,
+  and rerun the selector so the lane can fall through to the same-model tier.
 - Record solo mode and tier on resolve and request-changes events.
 - Add the second same-model request-changes escalation guard.
 - Block a third same-model review without `adopt` or `retry`.
@@ -266,6 +274,8 @@ Tasks:
 
 **Independent check**: a fresh same-runtime reviewer can request changes,
 review the revised diff, and approve without acting as the owner.
+An unresponsive human assignment falls through after the configured timeout
+and does not leave the lane assigned to that human indefinitely.
 
 ### Workstream 7: Adopt, retry, expiry, and visibility
 
@@ -333,4 +343,3 @@ plan keeps the current rule. Solo mode does not edit `required_bots`.
 
 A separate Spec 002 decision can add a bot-unavailable policy later. That
 decision does not block local solo review or Workstreams 1 through 7.
-
