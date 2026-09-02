@@ -776,20 +776,22 @@ starts with a fresh budget, but clearing a repair within the same task does
 not reset the count. This is the current model behavior; only the
 implementation needs alignment.
 
-- The implementation must match: `claimHandoff` clears repair history or the
-  gate ignores pre-claim entries when computing the FR-18 count.
+- The implementation must match: the gate limits the FR-18 count to events
+  after the most recent claim. `claimHandoff` must retain the cold workflow
+  event history for audit, actor attribution, and recovery diagnostics.
 - The current implementation counts from the lane's event log across claims
   (`test/formal/README.md` line 116-120, "Known gaps"). Aligning it requires
-  either clearing the log on claim or scoping the count to the current task.
+  scoping the count to the current task without deleting earlier events.
 - Safety: a lane with a history of fragile tasks gets a fresh chance each
   time. A systemic problem (e.g., bad file locks on lane `a`) can cycle
   indefinitely through claim-repair-claim without escalating.
 - Follow-up: scope the FR-18 count to events after the most recent claim;
   update the Known gaps entry in `test/formal/README.md`.
 
-**Option B: Count persists across claims.**
-The event log is the source of truth; all `repair-needed` entries for the lane
-count regardless of intervening claims. The model must change to match.
+**Option B: Same-failure count persists across claims.**
+The event log is the source of truth. `repair-needed` entries persist across
+claims, but each count is keyed by the same unresolved reason or problem. An
+unrelated repair reason starts its own count. The model must change to match.
 
 - Removing only Claim's `repairCount' = 0` is not sufficient: every terminal
   transition (`AbandonResolve`, `PrTerminal`, `TerminalResolve`,
@@ -798,20 +800,20 @@ count regardless of intervening claims. The model must change to match.
   `RepairBudgetBounded`). A lane therefore passes through `resolved`
   (count = 0) before it can be re-claimed, making the Claim-only change a
   no-op. Two sub-options:
-  - **(B-i) Remove the terminal reset and weaken the invariant.** Each
-    terminal action keeps `repairCount` `UNCHANGED`; `RepairBudgetBounded`
-    drops the `resolved ⇒ count = 0` clause. TLC must recheck all
-    properties. The model variable then carries history across the lane's
-    lifetime; `Claim` keeps `repairCount` `UNCHANGED` as well.
+  - **(B-i) Use a persistent reason-keyed count.** Replace the scalar with a
+    count per repair reason. Each terminal action and `Claim` keeps that map
+    `UNCHANGED`; `RepairBudgetBounded` drops the `resolved ⇒ count = 0` clause
+    and applies the bound per reason. TLC must recheck all properties.
   - **(B-ii) Add a dedicated lifetime-history variable.** Keep the existing
     task-scoped `repairCount` and its terminal reset. Add a model variable such
     as `laneRepairHistory` that persists across terminal transitions and
-    claims. Use that variable for the FR-18 escalation guard, and update the
-    implementation and harness to use the same lifetime scope. TLC must check
-    the resulting cross-claim escalation behavior before this option lands.
-- Safety: a lane that repeatedly breaks escalates even if different tasks
-  trigger it. Catches systemic problems faster. Downside: an unrelated new
-  task inherits blame for a prior task's failures.
+    claims and stores the repair reason with each entry. Use only entries for
+    the current reason in the FR-18 escalation guard. Update the implementation
+    and harness to use the same reason-keyed lifetime scope. TLC must check the
+    resulting cross-claim escalation behavior before this option lands.
+- Safety: a lane that repeatedly hits the same failure escalates even if
+  different tasks trigger it. An unrelated failure does not inherit the prior
+  failure's count.
 - Follow-up for B-i: update every terminal action, `Claim`, and
   `RepairBudgetBounded`; rerun TLC and update the harness mirror. Follow-up
   for B-ii: add the lifetime-history variable and its invariants, then update
@@ -1027,6 +1029,18 @@ and re-claim with the new owner.
   releases locks. The new owner then claims the lane and opens a new PR.
 - Follow-up: remove `--owner` from `patchHandoff`; document the linked-PR
   sequence in spec 002 CLI Commands.
+- This option depends on Q5. If Q5 Option B also makes the owner the only
+  actor that can abandon work, the decision must choose one of these policies:
+  - **(B-i) Disallow the combination.** Q8 Option B cannot be selected with
+    Q5 Option B.
+  - **(B-ii) Add an audited guardian takeover.** When the current owner is
+    unavailable, a verified guardian can consume an override and atomically
+    assign a takeover owner without releasing locks or losing lane metadata.
+    The event records the unavailable-owner evidence, override, prior owner,
+    and takeover owner. The takeover owner can then continue the lane or use
+    the Q5 owner-only abandon path before a fresh claim.
+- The contract, formal model, and harness must represent the selected
+  dependency policy before either dependent option is enforced.
 
 **Option C: Allow reassignment, but only by the current owner (not the
 reviewer).**
