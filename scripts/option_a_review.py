@@ -6,8 +6,12 @@ Supports two modes:
 - hybrid:   parallel track always runs + sequential chain triggers when
             the diff touches sensitive files/patterns (Option D from doc 11)
 
+Claude-backed reviewers run through the Claude Code CLI (`claude -p`) and use
+its login, so no Anthropic API key is involved. OpenAI-backed reviewers use the
+OpenAI SDK and need OPENAI_API_KEY.
+
 Expected environment:
-- ANTHROPIC_API_KEY
+- `claude` on PATH and logged in (override the binary with CLAUDE_BIN)
 
 Optional environment:
 - OPENAI_API_KEY (without it the OpenAI-backed reviewers are reported as
@@ -29,13 +33,20 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
+
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+# Per-reviewer wall-clock cap for one `claude -p` run; a hung CLI degrades to a
+# failed-reviewer finding instead of hanging `btrain review run`.
+CLAUDE_TIMEOUT_SECONDS = float(os.environ.get("CLAUDE_REVIEW_TIMEOUT", "600"))
 
 
 # ──────────────────────────────────────────────
@@ -154,7 +165,7 @@ class Reviewer:
   provider: str
   model: str
   focus: str
-  # JSON schema enforced via output_config.format on the Anthropic path.
+  # JSON schema passed to `claude -p --json-schema` on the claude-code path.
   # None for providers without structured outputs (the prompt's shape text
   # plus extract_json() remain the contract there).
   output_schema: dict[str, Any] | None = None
@@ -285,7 +296,7 @@ def build_parallel_reviewers() -> list[Reviewer]:
   return [
     Reviewer(
       name="LogicReviewer",
-      provider="anthropic",
+      provider="claude-code",
       model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-5"),
       focus="logic correctness, behavioral regressions, product reasoning",
       output_schema=PARALLEL_SCHEMA,
@@ -298,7 +309,7 @@ def build_parallel_reviewers() -> list[Reviewer]:
     ),
     Reviewer(
       name="TypeReviewer",
-      provider="anthropic",
+      provider="claude-code",
       model=os.environ.get("CLAUDE_TYPE_MODEL", "claude-opus-5"),
       focus="type mismatches, schema drift, and runtime/compile-time inconsistencies",
       output_schema=PARALLEL_SCHEMA,
@@ -316,7 +327,7 @@ def build_sequential_reviewers() -> list[Reviewer]:
     ),
     Reviewer(
       name="LogicReviewer-Seq",
-      provider="anthropic",
+      provider="claude-code",
       model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-5"),
       focus="business logic correctness, state bugs, reachability of security findings",
       output_schema=SEQUENTIAL_SCHEMA,
@@ -327,7 +338,7 @@ def build_sequential_reviewers() -> list[Reviewer]:
 def build_synthesis_reviewer() -> Reviewer:
   return Reviewer(
     name="SynthesisAgent",
-    provider="anthropic",
+    provider="claude-code",
     model=os.environ.get("CLAUDE_SYNTHESIS_MODEL", "claude-opus-5"),
     focus="final verdict: deduplicate, prioritize, and synthesize findings",
     output_schema=SYNTHESIS_SCHEMA,
@@ -461,29 +472,59 @@ def normalize_result(
 # API calls
 # ──────────────────────────────────────────────
 
-async def call_anthropic(
-  client: AsyncAnthropic,
-  reviewer: Reviewer,
-  prompt: str,
-) -> dict[str, Any]:
+async def run_claude_code(args: list[str], stdin_text: str) -> tuple[int, str, str]:
+  """Run `claude -p ...` with the prompt on stdin; returns (exit code, stdout, stderr).
+
+  Runs in an empty temp directory so the repo's project-level CLAUDE.md and hooks
+  do not load into the reviewer's context (user-level ~/.claude config still
+  applies), and without CLAUDECODE so it can be launched from inside a Claude
+  Code session. Auth is whatever the CLI resolves: its login by default, or
+  ANTHROPIC_API_KEY if the parent shell exports one.
+  """
+  env = {key: value for key, value in os.environ.items() if key != "CLAUDECODE"}
+  with tempfile.TemporaryDirectory() as workdir:
+    proc = await asyncio.create_subprocess_exec(
+      *args,
+      stdin=asyncio.subprocess.PIPE,
+      stdout=asyncio.subprocess.PIPE,
+      stderr=asyncio.subprocess.PIPE,
+      cwd=workdir,
+      env=env,
+    )
+    try:
+      stdout, stderr = await asyncio.wait_for(
+        proc.communicate(stdin_text.encode("utf-8")), timeout=CLAUDE_TIMEOUT_SECONDS
+      )
+    except asyncio.TimeoutError:
+      proc.kill()
+      await proc.wait()
+      raise TimeoutError(f"claude -p exceeded {CLAUDE_TIMEOUT_SECONDS:g}s") from None
+  return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+
+
+async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
+  args = [
+    CLAUDE_BIN, "-p",
+    "--output-format", "json",
+    "--no-session-persistence",
+    "--tools", "",
+    "--model", reviewer.model,
+  ]
+  if reviewer.output_schema is not None:
+    args.extend(["--json-schema", json.dumps(reviewer.output_schema)])
   try:
-    request: dict[str, Any] = {
-      "model": reviewer.model,
-      # A large diff can yield many findings; 2400 truncated the JSON mid-array
-      # and surfaced as a spurious "could not be parsed" P2. No `thinking`
-      # parameter: the default model (claude-opus-5) thinks adaptively on its own.
-      "max_tokens": 16000,
-      "messages": [{"role": "user", "content": prompt}],
-    }
-    if reviewer.output_schema is not None:
-      request["output_config"] = {
-        "format": {"type": "json_schema", "schema": reviewer.output_schema},
-      }
-    message = await client.messages.create(**request)
-    raw_text = "\n".join(
-      block.text for block in message.content if getattr(block, "type", None) == "text"
-    ).strip()
-    return normalize_result(reviewer, raw_text=raw_text)
+    code, stdout, stderr = await run_claude_code(args, prompt)
+    if code != 0:
+      detail = (stderr or stdout).strip()[-1200:]
+      return normalize_result(reviewer, error=f"claude -p exited {code}: {detail}")
+    envelope = json.loads(stdout)
+    if envelope.get("is_error"):
+      detail = str(envelope.get("result", "claude -p reported an error"))[:1200]
+      return normalize_result(reviewer, error=detail)
+    structured = envelope.get("structured_output")
+    if isinstance(structured, dict):
+      return normalize_result(reviewer, raw_text=json.dumps(structured))
+    return normalize_result(reviewer, raw_text=envelope.get("result"))
   except Exception as exc:
     return normalize_result(reviewer, error=str(exc))
 
@@ -504,13 +545,12 @@ async def call_openai(
 
 
 async def call_reviewer(
-  anthropic_client: AsyncAnthropic,
   openai_client: AsyncOpenAI | None,
   reviewer: Reviewer,
   prompt: str,
 ) -> dict[str, Any]:
-  if reviewer.provider == "anthropic":
-    return await call_anthropic(anthropic_client, reviewer, prompt)
+  if reviewer.provider == "claude-code":
+    return await call_claude_code(reviewer, prompt)
   elif reviewer.provider == "openai":
     if openai_client is None:
       return normalize_result(
@@ -526,7 +566,6 @@ async def call_reviewer(
 # ──────────────────────────────────────────────
 
 async def run_parallel(
-  anthropic_client: AsyncAnthropic,
   openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   diff_text: str,
@@ -538,7 +577,7 @@ async def run_parallel(
       focus=reviewer.focus,
       diff_text=diff_text,
     )
-    coroutines.append(call_reviewer(anthropic_client, openai_client, reviewer, prompt))
+    coroutines.append(call_reviewer(openai_client, reviewer, prompt))
 
   if hasattr(asyncio, "TaskGroup"):
     tasks: list[asyncio.Task[dict[str, Any]]] = []
@@ -555,7 +594,6 @@ async def run_parallel(
 # ──────────────────────────────────────────────
 
 async def run_sequential(
-  anthropic_client: AsyncAnthropic,
   openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   synthesis_reviewer: Reviewer,
@@ -573,7 +611,7 @@ async def run_sequential(
       chain_position=position,
       diff_text=diff_text,
     )
-    result = await call_reviewer(anthropic_client, openai_client, reviewer, prompt)
+    result = await call_reviewer(openai_client, reviewer, prompt)
     result["chain_position"] = position
     result["track"] = "sequential"
     results.append(result)
@@ -586,9 +624,7 @@ async def run_sequential(
     prior_findings=prior_findings_text,
     diff_text=diff_text,
   )
-  synthesis_result = await call_reviewer(
-    anthropic_client, openai_client, synthesis_reviewer, synthesis_prompt
-  )
+  synthesis_result = await call_reviewer(openai_client, synthesis_reviewer, synthesis_prompt)
   synthesis_result["track"] = "sequential"
   synthesis_result["chain_position"] = len(reviewers) + 1
   results.append(synthesis_result)
@@ -693,23 +729,26 @@ async def main() -> None:
   path_triggers = args.path_triggers.split(",") if args.path_triggers else None
   content_triggers = args.content_triggers.split(",") if args.content_triggers else None
 
-  anthropic_client = AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-  # openai>=3 raises at construction without credentials, which would abort the
-  # whole run; build the client only when a key exists and let call_reviewer
+  if shutil.which(CLAUDE_BIN) is None:
+    raise SystemExit(
+      f"Claude Code CLI not found ({CLAUDE_BIN!r}). Install it and log in, or set CLAUDE_BIN."
+    )
+  # The OpenAI client raises at construction without credentials, which would
+  # abort the whole run; build it only when a key exists and let call_reviewer
   # report the OpenAI-backed reviewers as unavailable otherwise.
-  openai_key = os.environ.get("OPENAI_API_KEY")
+  openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
   openai_client = AsyncOpenAI(api_key=openai_key) if openai_key else None
   if openai_client is None:
-    print("No OpenAI API key in the environment: OpenAI-backed reviewers will be reported as unavailable.")
+    print(
+      "No OpenAI API key in the environment: OpenAI-backed reviewers will be reported as unavailable.",
+      file=sys.stderr,
+    )
 
   async with contextlib.AsyncExitStack() as stack:
-    await stack.enter_async_context(anthropic_client)
     if openai_client is not None:
       await stack.enter_async_context(openai_client)
     # Parallel track always runs
-    parallel_results = await run_parallel(
-      anthropic_client, openai_client, build_parallel_reviewers(), diff_text
-    )
+    parallel_results = await run_parallel(openai_client, build_parallel_reviewers(), diff_text)
 
     sequential_results = None
     classification = None
@@ -725,7 +764,6 @@ async def main() -> None:
           f"{len(classification.triggered_patterns)} content matches"
         )
         sequential_results = await run_sequential(
-          anthropic_client,
           openai_client,
           build_sequential_reviewers(),
           build_synthesis_reviewer(),
