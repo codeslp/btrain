@@ -18,6 +18,7 @@
 - [ ] FR-3 has table-driven fresh-session tests for Claude, Codex, and Gemini.
 - [ ] FR-3 rejects resume or session-reuse flags for each supported runner.
 - [ ] FR-3 blocks unknown runners without a fresh-session profile.
+- [ ] FR-3 makes `btrain doctor` report every enabled solo runner that has no fresh-session profile.
 - [ ] FR-3 uses an environment allowlist and applies `env_deny` last.
 - [ ] FR-3 proves that writer session values do not reach the reviewer.
 
@@ -27,6 +28,7 @@
 - [ ] FR-8 records the selected tier on the lane and in workflow events.
 - [ ] FR-8 classifies quota and authentication failures as `tool_unavailable`.
 - [ ] FR-8 classifies provider refusal as `policy_blocked`.
+- [ ] FR-8 proves that quota, authentication, and provider-refusal dispatch results mark the current tier unavailable and immediately try the next tier.
 - [ ] FR-8 moves an unresponsive human tier to same-model after `[solo].human_timeout` and records `solo-human-timeout`.
 - [ ] FR-8 never treats a probe or dispatch failure as approval.
 - [ ] FR-9 uses explicit family values for wrappers and unknown executables.

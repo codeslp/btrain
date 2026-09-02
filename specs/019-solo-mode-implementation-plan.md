@@ -19,13 +19,15 @@ shared `src/brain_train/` and `test/` files until it merges.
 - **Context tier**: deep.
 - **Question**: Which identity, runner, audit, expiry, and failure rules must
   the implementation preserve?
-- **Sources**: Spec 017 and the current `core.mjs`, `cli.mjs`, `pr-flow.mjs`,
-  reviewer-dispatch tests, and workflow event code. Related repositories
-  confirm the externalized-state and fresh-context pattern.
+- **Sources**: [Spec 017](017-solo-mode-internal-review.md), the current
+  `src/brain_train/core.mjs`, `src/brain_train/cli.mjs`,
+  `src/brain_train/pr-flow.mjs`, `test/reviewer-dispatch.test.mjs`, and the
+  workflow-event coverage in `test/core.test.mjs`.
 - **Constraints**: btrain remains the state owner. All mutations use btrain
   commands. A runner failure is never approval. PR locks remain until merge
   or close.
-- **Gap**: Related-repository results are supporting evidence only. The open
+- **Gap**: The deep Unblocked lookup returned no related-repository sources,
+  so this plan makes no cross-repository conclusion. The open
   required-bot-unavailable policy remains outside this plan.
 - **Durable writeback**: this plan and the Spec 017 checklist.
 
@@ -201,6 +203,8 @@ Tasks:
 - Add table-driven tests for Codex fresh and rejected flags.
 - Add table-driven tests for Gemini session IDs and rejected flags.
 - Reject unknown runners without a declared fresh-session profile.
+- Add a doctor diagnostic for each enabled solo runner that has no declared
+  fresh-session profile.
 - Add fresh-session normalization to `normalizeLoopCliRunner`.
 - Add `buildSoloReviewerEnv` with the Spec 017 allowlist and deny list.
 - Add tests that remove session variables and retain required credentials.
@@ -226,13 +230,17 @@ Tasks:
 - Define runner probe and failure-pattern configuration.
 - Classify quota and authentication signals as `tool_unavailable`.
 - Classify provider refusals as `policy_blocked`.
+- Add composed dispatch-and-selector tests for quota, authentication, and
+  provider-refusal results. Each result must mark the current tier unavailable
+  and immediately try the next tier.
 - Classify same-model loop timeout or round-budget exhaustion as
   `tool_unavailable`, with retry backoff and a visible lane warning.
 - Keep other non-zero exits as review failures.
 - Persist availability failures with retry timestamps.
 
-**Independent check**: a quota failure moves selection to the next tier and
-never changes the lane to an approved status.
+**Independent check**: quota, authentication, and provider-refusal dispatch
+results each move selection to the next tier and never change the lane to an
+approved status.
 
 **Formal impact**: none until the selector changes a recorded reviewer.
 
