@@ -19,6 +19,12 @@ Optional environment:
   login rejects models it does not offer, e.g. gpt-5)
 - REVIEW_CLI_TIMEOUT seconds per reviewer run (default 600)
 
+Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST,
+claude runs with tools disabled, and codex runs with its shell tools disabled
+and the user's config ignored, so an injected diff has no route to host files
+or credentials. Regression: python3 scripts/test_option_a_review.py
+(set REVIEW_LIVE_TESTS=1 to also run the real-CLI sentinel checks).
+
 No Python dependencies beyond the standard library.
 """
 
@@ -42,6 +48,18 @@ CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 # Per-reviewer wall-clock cap for one CLI run; a hung CLI degrades to a
 # failed-reviewer finding instead of hanging `btrain review run`.
 CLI_TIMEOUT_SECONDS = float(os.environ.get("REVIEW_CLI_TIMEOUT", "600"))
+# The only parent-environment variables handed to a reviewer CLI. Everything
+# else (provider keys, session tokens, CLAUDECODE, tool credentials) is dropped,
+# so an injected diff cannot read them back. Both CLIs authenticate from their
+# own config under HOME (or CODEX_HOME / CLAUDE_CONFIG_DIR when set).
+CLI_ENV_ALLOWLIST = (
+  "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TERM",
+  "LANG", "LC_ALL", "LC_CTYPE", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+)
+
+
+def reviewer_env() -> dict[str, str]:
+  return {key: os.environ[key] for key in CLI_ENV_ALLOWLIST if key in os.environ}
 
 
 # ──────────────────────────────────────────────
@@ -474,12 +492,11 @@ async def run_cli(args: list[str], stdin_text: str, cwd: str) -> tuple[int, str,
 
   `cwd` should be a per-call scratch directory (holding at most the schema and
   output files the caller writes) so project-level agent config (CLAUDE.md,
-  AGENTS.md, hooks, rules) does not load into the reviewer's context;
-  user-level config still applies. CLAUDECODE is stripped so the run
-  can be launched from inside a Claude Code session. Auth is whatever each CLI
-  resolves on its own (its login by default).
+  AGENTS.md, hooks, rules) does not load into the reviewer's context. The
+  environment is reduced to CLI_ENV_ALLOWLIST. Auth is whatever each CLI
+  resolves from its own config (its login by default).
   """
-  env = {key: value for key, value in os.environ.items() if key != "CLAUDECODE"}
+  env = reviewer_env()
   proc = await asyncio.create_subprocess_exec(
     *args,
     stdin=asyncio.subprocess.PIPE,
@@ -537,11 +554,19 @@ async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
   try:
     with tempfile.TemporaryDirectory() as workdir:
       last_message = Path(workdir) / "last-message.json"
+      # Confinement: the reviewer must have no route from the prompt (an untrusted
+      # diff) to the host. --ignore-user-config drops the user's MCP servers and
+      # sandbox settings; disabling shell_tool and unified_exec removes the shell,
+      # which a read-only sandbox alone does not (it can still read any file).
+      # Verified by scripts/test_option_a_review.py (sentinel exfiltration test).
       args = [
         CODEX_BIN, "exec",
         "--ephemeral",
         "--skip-git-repo-check",
+        "--ignore-user-config",
         "--sandbox", "read-only",
+        "--disable", "shell_tool",
+        "--disable", "unified_exec",
         "--color", "never",
         "--cd", workdir,
         "--output-last-message", str(last_message),
