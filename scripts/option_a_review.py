@@ -21,7 +21,10 @@ Optional environment:
 
 Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST;
 claude runs with tools, settings sources, MCP servers, and skills disabled;
-codex runs with its shell tools disabled and the user's config ignored; every
+codex runs with its shell tools disabled, the user's config ignored, and its
+user-global instruction inputs (AGENTS.md, hooks, memories, skills, plugins)
+hidden by a sandbox-exec read-deny profile (fails closed off macOS unless
+REVIEW_ALLOW_UNCONFINED_CODEX=1); every
 prompt has host-path `@` mentions neutralized before it reaches a CLI (Claude
 Code would otherwise inline the file client-side); ordinary `@` syntax in
 reviewed source is left alone. An injected diff therefore has
@@ -49,6 +52,8 @@ from typing import Any
 
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # Per-reviewer wall-clock cap for one CLI run; a hung CLI degrades to a
 # failed-reviewer finding instead of hanging `btrain review run`.
 CLI_TIMEOUT_SECONDS = float(os.environ.get("REVIEW_CLI_TIMEOUT", "600"))
@@ -83,6 +88,38 @@ _HOST_PATH_PATTERNS = (
   re.compile(r"^[A-Za-z]:[\\/]"),            # C:\x, C:/x
   re.compile(r"(^|[\\/])\.\.([\\/]|$)"),     # any .. segment (src/../../x)
 )
+
+
+def codex_sandbox_profile(codex_home: Path) -> str:
+  """Seatbelt profile that hides Codex's user-global instruction and config
+  inputs from the codex process while leaving auth.json, rules, and everything
+  else readable. --ignore-user-config does not cover these: AGENTS.md (and any
+  file it includes), hooks.json, memories, skills, plugins, and automations are
+  still loaded from CODEX_HOME. Verified live: without this the reviewer quoted
+  the user's global AGENTS.md; with it, it cannot."""
+  # Seatbelt matches canonical paths, so resolve symlinks (e.g. /var -> /private/var).
+  home = os.path.realpath(codex_home)
+  return (
+    '(version 1)(allow default)'
+    f'(deny file-read* (regex #"^{re.escape(home)}/[^/]*\\.md$")'
+    f' (literal "{home}/hooks.json") (literal "{home}/config.toml")'
+    f' (subpath "{home}/memories") (subpath "{home}/skills")'
+    f' (subpath "{home}/plugins") (subpath "{home}/automations"))'
+  )
+
+
+def codex_confinement_prefix() -> list[str]:
+  """argv prefix that wraps codex in the read-deny sandbox. Fails closed: with no
+  sandbox-exec (non-macOS) the codex reviewer does not run unless
+  REVIEW_ALLOW_UNCONFINED_CODEX=1 is set explicitly."""
+  if os.path.exists(SANDBOX_EXEC):
+    return [SANDBOX_EXEC, "-p", codex_sandbox_profile(CODEX_HOME)]
+  if os.environ.get("REVIEW_ALLOW_UNCONFINED_CODEX") == "1":
+    return []
+  raise RuntimeError(
+    "sandbox-exec is unavailable, so Codex's user-global instructions cannot be hidden; "
+    "set REVIEW_ALLOW_UNCONFINED_CODEX=1 to run the Codex reviewer anyway."
+  )
 
 
 def is_host_path_mention(target: str) -> bool:
@@ -602,11 +639,14 @@ async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as workdir:
       last_message = Path(workdir) / "last-message.json"
       # Confinement: the reviewer must have no route from the prompt (an untrusted
-      # diff) to the host. --ignore-user-config drops the user's MCP servers and
-      # sandbox settings; disabling shell_tool and unified_exec removes the shell,
-      # which a read-only sandbox alone does not (it can still read any file).
-      # Verified by scripts/test_option_a_review.py (sentinel exfiltration test).
+      # diff) to the host, and no user-global instructions in its context.
+      # --ignore-user-config drops the user's MCP servers and sandbox settings;
+      # disabling shell_tool and unified_exec removes the shell, which a read-only
+      # sandbox alone does not (it can still read any file); the sandbox-exec
+      # prefix hides AGENTS.md, hooks, memories, skills, plugins, and automations.
+      # Verified by scripts/test_option_a_review.py.
       args = [
+        *codex_confinement_prefix(),
         CODEX_BIN, "exec",
         "--ephemeral",
         "--skip-git-repo-check",
