@@ -8,9 +8,10 @@ Supports two modes:
 
 Expected environment:
 - ANTHROPIC_API_KEY
-- OPENAI_API_KEY
 
 Optional environment:
+- OPENAI_API_KEY (without it the OpenAI-backed reviewers are reported as
+  unavailable instead of aborting the run)
 - CLAUDE_LOGIC_MODEL
 - OPENAI_SECURITY_MODEL
 - CLAUDE_TYPE_MODEL
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -503,13 +505,17 @@ async def call_openai(
 
 async def call_reviewer(
   anthropic_client: AsyncAnthropic,
-  openai_client: AsyncOpenAI,
+  openai_client: AsyncOpenAI | None,
   reviewer: Reviewer,
   prompt: str,
 ) -> dict[str, Any]:
   if reviewer.provider == "anthropic":
     return await call_anthropic(anthropic_client, reviewer, prompt)
   elif reviewer.provider == "openai":
+    if openai_client is None:
+      return normalize_result(
+        reviewer, error="No OpenAI API key in the environment; this reviewer did not run."
+      )
     return await call_openai(openai_client, reviewer, prompt)
   else:
     raise ValueError(f"Unsupported provider: {reviewer.provider}")
@@ -521,7 +527,7 @@ async def call_reviewer(
 
 async def run_parallel(
   anthropic_client: AsyncAnthropic,
-  openai_client: AsyncOpenAI,
+  openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   diff_text: str,
 ) -> list[dict[str, Any]]:
@@ -550,7 +556,7 @@ async def run_parallel(
 
 async def run_sequential(
   anthropic_client: AsyncAnthropic,
-  openai_client: AsyncOpenAI,
+  openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   synthesis_reviewer: Reviewer,
   diff_text: str,
@@ -688,9 +694,18 @@ async def main() -> None:
   content_triggers = args.content_triggers.split(",") if args.content_triggers else None
 
   anthropic_client = AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-  openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+  # openai>=3 raises at construction without credentials, which would abort the
+  # whole run; build the client only when a key exists and let call_reviewer
+  # report the OpenAI-backed reviewers as unavailable otherwise.
+  openai_key = os.environ.get("OPENAI_API_KEY")
+  openai_client = AsyncOpenAI(api_key=openai_key) if openai_key else None
+  if openai_client is None:
+    print("No OpenAI API key in the environment: OpenAI-backed reviewers will be reported as unavailable.")
 
-  async with anthropic_client, openai_client:
+  async with contextlib.AsyncExitStack() as stack:
+    await stack.enter_async_context(anthropic_client)
+    if openai_client is not None:
+      await stack.enter_async_context(openai_client)
     # Parallel track always runs
     parallel_results = await run_parallel(
       anthropic_client, openai_client, build_parallel_reviewers(), diff_text
