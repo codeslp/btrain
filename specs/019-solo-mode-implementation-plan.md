@@ -206,6 +206,9 @@ Tasks:
 - Add a doctor diagnostic for each enabled solo runner that has no declared
   fresh-session profile.
 - Add fresh-session normalization to `normalizeLoopCliRunner`.
+- Add an acceptance-criterion unit test that calls
+  `normalizeLoopCliRunner` with a `#review` identity and verifies the fresh
+  flag is present and no reject flag is present.
 - Add `buildSoloReviewerEnv` with the Spec 017 allowlist and deny list.
 - Add tests that remove session variables and retain required credentials.
 - Pass `BTRAIN_AGENT=<base>#review` to the reviewer process.
@@ -271,7 +274,9 @@ Tasks:
 `<runtime>#review` with `review tier: same-model`.
 
 **Formal impact**: reviewer assignment is semantic when a fallback reassigns
-an active lane. Update Spec 015 row 20 and formal evidence first.
+an active lane. Designate Spec 015 row 20 and its formal evidence in the
+separate dependency-order step 5 PR before this workstream lands. Do not
+bundle the designation with the behavioral selector change.
 
 ### Workstream 6: Review dispatch and protocol integration
 
@@ -328,6 +333,10 @@ Tasks:
 - Record the actor and the previous and new owner and reviewer in the
   `solo-adopt` event.
 - Implement `solo retry` and retry-backoff clearing.
+- Write a `solo-retry` event with the actor, lane, and tiers whose backoff was
+  cleared.
+- Prove that `solo retry` does not increase, reset, or bypass the loop round
+  budget for a later dispatch.
 - Stop new suffixed assignments after expiry.
 - Preserve suffixed reviewers on grandfathered active lanes.
 - Add doctor output for grandfathered lanes and review counts.
