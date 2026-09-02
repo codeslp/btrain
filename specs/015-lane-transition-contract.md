@@ -586,20 +586,377 @@ corrected in this change.
 
 ## Open questions for a human
 
-1. Row 12: may the owner return a PR-flow `changes-requested` lane directly to
-   `pr-review`, as the CLI instructs today, or must PR feedback go back through
-   local review as the model assumes?
-2. Row 17: does `btrain doctor` count as the spec 006 guardian for resync during
-   `repair-needed`, `needs-review`, and PR-flow?
-3. Row 15: accept the audited-override exit from `repair-needed`, or keep the
-   spec 014 designation that only escalation unlocks resolve?
-4. FR-18 budget: does a fresh claim on the same lane reset the repair count?
-5. Row 6: who may abandon an `in-progress` lane, owner only or owner and
-   reviewer? The model says both; no prose says either.
-6. FR-6: in enforcement mode, should an unverified actor be rejected or treated
-   as the lane owner when only one agent is configured?
-7. Row 13: who may declare `repair-needed` manually, any configured agent (as
-   `test/e2e.test.mjs:596` assumes) or only the reviewer, the guardian, and the
-   watchdog?
-8. Row 20: may the owner of a lane be reassigned by a lane agent at all, or
-   only through a fresh claim?
+Each question lists the viable options, which contract rows and legacy rows
+change, what safety property is affected, and what follow-up work each answer
+unlocks. The questions are independent except where noted.
+
+---
+
+### Q1. Row 12 — direct return to `pr-review` from PR-flow `changes-requested`
+
+May the owner return a PR-flow `changes-requested` lane directly to
+`pr-review`, as the CLI instructs today, or must PR feedback go back through
+local review as the model assumes?
+
+**Option A: Allow the shortcut (designate row 12).**
+The owner runs `handoff update --status pr-review` from PR-flow
+`changes-requested` and pushes a fix directly. The reviewer sees the fix only
+through the GitHub review cycle, not through local `needs-review`.
+
+- Row 12 moves from `undesignated` to `designated`; add one sentence to spec
+  002 PR-flow states naming the shortcut.
+- L5 residual narrows: the non-terminal outcome guard still applies but row 12
+  is a legal source for it.
+- `LaneLock.tla` gains a `ReturnToPr` action (`changes-requested` with
+  `prLinked` → `pr-review`, `IsOwner`). TLC must recheck all invariants.
+- Safety: weaker local review coverage — a bad fix could reach GitHub CI
+  without a peer seeing it locally. Acceptable when the PR review is
+  substantive (bot-checked repos); risky when GitHub review is rubber-stamp.
+- Follow-up: add the TLA action, repin spec 002, update the cross-check
+  fixtures; advisory then enforcement for row 12.
+
+**Option B: Require local re-review (reject the shortcut).**
+PR feedback goes `changes-requested` → `needs-review` (row 2, owner
+re-handoffs with reviewer context) → `ready-for-pr` → `pr-review`. The model
+stays as-is.
+
+- Row 12 stays `undesignated` or is removed; the CLI guidance in
+  `buildLaneGuidance` is changed to instruct the owner to fix and re-handoff
+  locally.
+- No TLA change.
+- Safety: stronger local review coverage; slower turnaround on small PR
+  feedback.
+- Follow-up: update `buildLaneGuidance` and `defaultNextActionForStatus` to
+  stop emitting the shortcut instruction.
+
+**Affected rows:** 12, L5.
+**Safety property:** review coverage (local peer sees every fix before GitHub).
+**Dependency:** pinned by spec 002 PR-flow states; lands in Phase B step 3.
+
+---
+
+### Q2. Row 17 — does `btrain doctor` count as the spec 006 guardian for resync?
+
+Does `btrain doctor` count as the spec 006 guardian for resync during
+`repair-needed`, `needs-review`, and PR-flow?
+
+**Option A: Doctor is guardian for resync.**
+`btrain doctor` may run `--files` resync (same set, restore coverage) in any
+active status. Row 17 actor becomes `owner, or system` where system includes
+doctor.
+
+- Row 17 state moves from `undesignated` to `designated`.
+- `test/watchdog.test.mjs:122` (doctor resyncs a `repair-needed` lane) passes
+  without change.
+- Spec 006 FR-2 "lock/status resync" gains a one-line designation: "btrain
+  doctor is a guardian actor for resync operations."
+- Safety: doctor already runs unattended (`btrain doctor` in CI or cron). If
+  it can resync in `needs-review`, a reviewer's lock view could shift
+  mid-review, though only to match the handoff record (no new files).
+- Follow-up: designate in spec 006 FR-2; update row 17 state.
+
+**Option B: Doctor may resync only in `in-progress`, `changes-requested`, and
+`repair-needed`.**
+In `needs-review` and PR-flow statuses the owner or an override is required.
+
+- Row 17 splits: one sub-row for doctor-permitted statuses, one for the rest.
+- `test/watchdog.test.mjs:122` still passes (it tests `repair-needed`).
+- Safety: reviewer's lock view is stable during review.
+- Follow-up: split row 17 or add a status guard to the doctor path; designate.
+
+**Option C: Doctor is never guardian for resync; resync requires the owner or
+override.**
+Row 17 actor is `owner` only. Doctor and watchdog may only release stale locks
+(L16), not restore coverage.
+
+- `test/watchdog.test.mjs:122` needs rework to use the owner actor.
+- Safety: tightest; no unattended lock-coverage changes.
+- Follow-up: fix the test; decide whether doctor should prompt the owner
+  to resync instead.
+
+**Affected rows:** 17, L6.
+**Safety property:** lock-coverage stability during review.
+**Dependency:** spec 006 FR-2 and FR-20 are pinned; the designation text is
+not. The row-17 designation can land in Phase B step 3 when the pins lift.
+
+---
+
+### Q3. Row 15 — override exit from `repair-needed`
+
+Accept the audited-override exit from `repair-needed`, or keep the spec 014
+designation that only escalation unlocks resolve?
+
+**Option A: Both exits — escalation or override.**
+Row 15 guard is: `(recorded human disposition after FR-18 escalation) OR
+(consumed FR-2c/2d override)`. Either path is a human decision.
+
+- Row 15 stays as written; state moves from `provisional, product call` to
+  `designated`.
+- L7 guard is: row-15 guard not met — i.e., neither disposition nor override.
+- The override path gives a stuck lane an exit without waiting for a second
+  failure to trigger escalation.
+- Safety: the override is already audited and human-confirmed (FR-2d), so
+  containment integrity is equivalent to the escalation path.
+- Follow-up: designate in spec 006 FR-29; implement the override check in the
+  gate guard; model: `RepairResolve` gains an `\/ overrideConsumed` disjunct.
+
+**Option B: Escalation only — override cannot resolve `repair-needed`.**
+Row 15 guard requires the FR-18 escalation budget to be exhausted and a
+recorded disposition. An override can clear (`RepairClear`, row 14) but not
+terminate.
+
+- Row 15 guard drops the override disjunct.
+- A lane that enters `repair-needed` once and cannot be cleared must fail a
+  second time (re-enter `repair-needed` after `RepairClear`) before it can
+  resolve. Alternatively the human uses the override to clear (row 14), works
+  around the problem, and resolves normally.
+- Safety: forces the repair to be attempted at least once before terminal
+  exit. Prevents a premature "just kill it" override that skips diagnosis.
+- Follow-up: spec 006 FR-29 exit-to-resolved paragraph names only the
+  disposition path; no override disjunct. Model stays as-is.
+
+**Affected rows:** 15, L7.
+**Safety property:** repair containment (whether a lane can skip the repair
+attempt).
+**Dependency:** spec 006 FR-29 is unpinned and already drafted. This can land
+in Phase B step 2.
+
+---
+
+### Q4. FR-18 budget — does a fresh claim reset the repair count?
+
+Does a fresh claim on the same lane reset the repair count?
+
+**Option A: Claim resets the count; `RepairClear` does not (model behavior).**
+`LaneLock.tla` line 117: `Claim` sets `repairCount' = 0`; line 248:
+`RepairClear` leaves `repairCount` `UNCHANGED`. A new task on the same lane
+starts with a fresh budget, but clearing a repair within the same task does
+not reset the count. This is the current model behavior; only the
+implementation needs alignment.
+
+- The implementation must match: `claimHandoff` clears repair history or the
+  gate ignores pre-claim entries when computing the FR-18 count.
+- The current implementation counts from the lane's event log across claims
+  (`test/formal/README.md` line 116-120, "Known gaps"). Aligning it requires
+  either clearing the log on claim or scoping the count to the current task.
+- Safety: a lane with a history of fragile tasks gets a fresh chance each
+  time. A systemic problem (e.g., bad file locks on lane `a`) can cycle
+  indefinitely through claim-repair-claim without escalating.
+- Follow-up: scope the FR-18 count to events after the most recent claim;
+  update the Known gaps entry in `test/formal/README.md`.
+
+**Option B: Count persists across claims.**
+The event log is the source of truth; all `repair-needed` entries for the lane
+count regardless of intervening claims. The model must change to match.
+
+- `LaneLock.tla` `Claim` keeps `repairCount` unchanged (remove the reset).
+- `RepairBudgetBounded` invariant changes: a terminal lane's count is not
+  necessarily 0 if it resolved via `AbandonResolve` without repairs.
+- Safety: a lane that repeatedly breaks escalates even if different tasks
+  trigger it. Catches systemic problems faster. Downside: an unrelated new
+  task inherits blame for a prior task's failures.
+- Follow-up: update `LaneLock.tla`, rerun TLC, update the harness mirror;
+  decide whether `AbandonResolve` also resets (probably yes, to keep the
+  invariant).
+
+**Affected rows:** 1 (Claim), 13 (RepairEnter), 14 (RepairClear), 15
+(RepairResolve).
+**Safety property:** escalation reachability (how quickly a fragile lane
+reaches human attention).
+**Dependency:** the Known gaps entry in `test/formal/README.md` tracks this.
+Can land as a spec 006 FR-18 clarification (unpinned paragraph) in Phase B
+step 2.
+
+---
+
+### Q5. Row 6 — who may abandon an `in-progress` lane?
+
+Who may abandon an `in-progress` or `changes-requested` lane (without a linked
+PR), owner only or both owner and reviewer?
+
+**Option A: Lane-agent (owner or reviewer), matching the model.**
+`LaneLock.tla` `AbandonResolve` uses `IsLaneAgent` (line 205). Either the
+owner or the reviewer can resolve an unlinked, un-reviewed lane.
+
+- Row 6 actor stays `lane-agent`; state moves from `undesignated (actor)` to
+  `designated`.
+- L11 (the legacy fallback with unchecked actor) becomes redundant once row 6
+  is enforced, and is retired.
+- Safety: a reviewer can unilaterally kill work the owner is mid-flight on.
+  Mitigated by the fact that the lane is not in `needs-review`, so the
+  reviewer is not the active party.
+- Follow-up: add one sentence to spec 002 CLI Commands: "either the owner or
+  the reviewer may resolve an active lane that has not entered review or PR
+  flow and has no linked PR." Retire L11.
+
+**Option B: Owner only.**
+Only the owner can abandon their own in-progress work.
+
+- Row 6 actor changes to `owner`; `LaneLock.tla` `AbandonResolve` changes
+  `IsLaneAgent` to `IsOwner`.
+- L11 stays until the model is updated; then it narrows to the reviewer case
+  only and is retired.
+- Safety: prevents a reviewer from discarding in-flight work. The reviewer
+  must wait for `needs-review` or ask the owner to abandon.
+- Follow-up: update `LaneLock.tla`, rerun TLC (may lose reachable states),
+  update the cross-check fixtures, retire L11.
+
+**Affected rows:** 6, L11.
+**Safety property:** work-in-progress protection (whether a reviewer can
+discard uncommitted owner work).
+**Dependency:** spec 002 CLI Commands is pinned; the designation sentence
+waits for Phase B step 3. The model change (if option B) can land alongside.
+
+---
+
+### Q6. FR-6 — unverified actor in enforcement mode
+
+In enforcement mode, should an unverified actor be rejected or treated as the
+lane owner when only one agent is configured?
+
+**Option A: Reject unverified actors unconditionally.**
+If `resolveVerifiedActor` yields empty, the gate rejects with the fix
+"pass `--actor` or set `BTRAIN_AGENT`". No exception for single-agent repos.
+
+- FR-6 enforcement is uniform: the fix message is always correct.
+- Single-agent repos (e.g., a solo developer) must set `BTRAIN_AGENT` in
+  their shell or `.env`. This is a one-time setup cost.
+- Safety: no implicit authority grants. The actor is always known.
+- Follow-up: update the advisory-mode warning text to mention the single-
+  agent case; add a `btrain init` prompt or `.env` template that sets
+  `BTRAIN_AGENT`.
+
+**Option B: Infer the lone agent when exactly one is configured.**
+If `resolveVerifiedActor` yields empty and `config.agents.active` has exactly
+one entry, treat the actor as that entry. Reject only when there are multiple
+configured agents and none can be resolved.
+
+- Row 2, 3, 6, etc. actor predicates pass for the lone agent without
+  `--actor`.
+- Less friction for solo developers; more implicit behavior to document.
+- Safety: safe only when the one-agent invariant holds. If a second agent is
+  added later, commands that relied on inference silently start failing,
+  which is confusing but not dangerous.
+- Follow-up: implement the inference in `resolveVerifiedActor` behind a
+  count check; document the behavior in spec 002 CLI Commands; advisory
+  warning when inference is used so the user knows it will break if agents
+  are added.
+
+**Option C: Reject, but with a better error message for single-agent repos.**
+Same as option A, but the rejection message for a single-agent repo says
+"set `BTRAIN_AGENT=<the-one-agent>`" with the actual name filled in.
+
+- Uniform rejection, better UX for the common case.
+- Follow-up: minor change to the error formatter; no spec change beyond FR-6.
+
+**Affected rows:** all rows with actor predicates (2, 3, 4, 5, 6, 7, 12, 13,
+14, 15, 16, 17, 18, 19, 20 and their legacy counterparts).
+**Safety property:** actor authority integrity (whether implicit grants exist).
+**Dependency:** FR-6 enforcement is Phase B; the decision shapes the error
+messages and whether `resolveVerifiedActor` changes. Independent of pins.
+
+---
+
+### Q7. Row 13 — who may declare `repair-needed` manually?
+
+Who may declare `repair-needed` manually: any configured agent, or only the
+reviewer, the guardian, and the watchdog?
+
+**Option A: Any configured agent.**
+Row 13 actor stays `any-agent` (plus `system` for the watchdog). Any agent
+that detects a workflow-integrity problem can flag it.
+
+- `test/e2e.test.mjs:596` (reviewer declares repair) passes without change.
+- The owner can self-report a problem on their own lane, which is useful when
+  the owner discovers the issue mid-work.
+- Safety: lower bar for entering `repair-needed`. A misbehaving agent could
+  force lanes into repair, but the reason code is still required and the
+  repair taxonomy constrains what qualifies.
+- Follow-up: designate in spec 006 FR-4 or FR-29 with one sentence; move
+  row 13 from `provisional` to `designated`.
+
+**Option B: Reviewer, guardian (system), and watchdog only — not the owner.**
+The owner's path for a self-discovered problem is to request changes on
+themselves (not currently possible) or ask the reviewer to declare repair.
+
+- Row 13 actor changes to `reviewer, system`.
+- `test/e2e.test.mjs:596` still passes (it uses the reviewer).
+- The owner cannot self-report, which adds friction. In practice the watchdog
+  or doctor catches most problems, so the owner route is rare.
+- Safety: prevents an owner from using `repair-needed` to stall or reset
+  review progress, since `RepairClear` returns to `in-progress`, not
+  `needs-review`.
+- Follow-up: designate; update the row; decide whether the owner should have
+  a "request repair" path that asks the reviewer or watchdog.
+
+**Option C: Any configured agent, but advisory warning when the owner declares
+repair on their own lane.**
+Compromise: the owner can declare, but the transition-advisory field records
+it so the pattern is visible in audit.
+
+- No hard rejection; audit trail flags self-repair declarations.
+- Follow-up: implement the advisory condition in the gate for the
+  owner-declares-own-repair case; designate.
+
+**Affected rows:** 13, L4 (which accepts any status, any actor).
+**Safety property:** repair-needed entry integrity (whether the owner can
+weaponize `repair-needed`).
+**Dependency:** spec 006 FR-4 is pinned; a new sentence in FR-29 (unpinned)
+can carry this. Phase B step 2.
+
+---
+
+### Q8. Row 20 — owner reassignment by a lane agent
+
+May the owner of a lane be reassigned by a lane agent (via `handoff update
+--owner`), or only through a fresh claim (`handoff claim`)?
+
+**Option A: Allow owner reassignment by a lane agent.**
+Row 20 stays as written: `lane-agent` may change `--owner` or `--reviewer` in
+any active status, with the distinct-from constraint.
+
+- L10 (the legacy fallback that also works on `idle` and `resolved`) is
+  retired once row 20 is enforced.
+- A reviewer can reassign the owner mid-work, which could disrupt an
+  in-progress lane.
+- Safety: flexible; enables hand-off of ownership without losing the lane's
+  state, locks, and PR linkage. Risk: an agent reassigns ownership to dodge
+  review (new owner reviews their own prior work). Mitigated by the
+  distinct-from constraint (reviewer ≠ owner).
+- Follow-up: designate in spec 005 FR-5 (one sentence: "a lane agent may
+  reassign the owner of an active lane"); retire L10.
+
+**Option B: Owner reassignment only through claim.**
+Remove `--owner` from `handoff update`. To change the owner, resolve the lane
+and re-claim with the new owner.
+
+- Row 20 loses the `--owner` case; only `--reviewer` reassignment remains.
+- Forces a clean break: new owner starts with a fresh claim, fresh locks,
+  fresh reviewer context.
+- Safety: strongest isolation — no mid-stream ownership transfer. Downside:
+  the lane loses its PR linkage, review history, and lock state on re-claim.
+- Linked-PR consequence: a lane in `pr-review` or `ready-to-merge` cannot be
+  resolved and re-claimed without first closing or merging the PR (row 11
+  `PrTerminal` is the only exit from PR-flow to `resolved`). Closing or
+  merging the linked PR drives `PrTerminal`, which resolves the lane and
+  releases locks. The new owner then claims the lane and opens a new PR.
+- Follow-up: remove `--owner` from `patchHandoff`; document the linked-PR
+  sequence in spec 002 CLI Commands.
+
+**Option C: Allow reassignment, but only by the current owner (not the
+reviewer).**
+Row 20 actor for `--owner` changes to `owner` (only the owner can hand off
+their own ownership). The reviewer can still be reassigned by either agent.
+
+- Prevents a reviewer from seizing ownership but allows the owner to
+  voluntarily transfer.
+- Safety: moderate — the owner consents to the transfer. Still allows
+  mid-stream changes but only at the owner's initiative.
+- Follow-up: split row 20 into two sub-rows (one for `--owner` with actor
+  `owner`, one for `--reviewer` with actor `lane-agent`); designate.
+
+**Affected rows:** 20, L10.
+**Safety property:** ownership integrity (whether ownership can change without
+a clean claim boundary).
+**Dependency:** spec 005 FR-5 is unpinned for the reassignment sentence. Can
+land in Phase B step 4.
