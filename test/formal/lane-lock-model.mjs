@@ -316,6 +316,10 @@ export class LaneLockModel {
       return this.#reject("final-from-review-flow")
     }
 
+    if (s.status === "needs-review" && actor !== s.reviewer) {
+      return this.#reject("ready-for-pr-entry-requires-reviewer")
+    }
+
     // spec 002 v1.1.2 PR-flow retention: a PR-flow lane terminates through
     // merge or closure, not through a direct plain resolve that would
     // release retained locks early.
@@ -324,9 +328,6 @@ export class LaneLockModel {
     }
 
     if (this.prFlowEnabled && s.status === "needs-review" && !final) {
-      if (actor !== s.reviewer) {
-        return this.#reject("ready-for-pr-entry-requires-reviewer")
-      }
       if (this.mode === "implementation" && this.#coverageMismatch(lane)) {
         if (!this.#reacquireFromHandoff(lane)) return this.#reject("reacquire-conflict")
       }

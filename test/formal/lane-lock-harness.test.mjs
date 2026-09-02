@@ -890,6 +890,33 @@ test(
   },
 )
 
+test(
+  "implementation mirror: non-PR-flow owner approval is rejected with locks retained",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  () => {
+    const model = new LaneLockModel({
+      lanes: ["x"],
+      agents: AGENTS,
+      prFlowEnabled: false,
+      mode: "implementation",
+    })
+    assert.equal(
+      model.claim({ lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] }).ok,
+      true,
+    )
+    assert.equal(
+      model.update({ lane: "x", actor: "alpha", status: "needs-review" }).ok,
+      true,
+    )
+
+    const rejection = model.resolve({ lane: "x", actor: "alpha", final: false })
+    assert.equal(rejection.ok, false)
+    assert.equal(rejection.reason, "ready-for-pr-entry-requires-reviewer")
+    assert.equal(model.lane("x").status, "needs-review")
+    assert.deepEqual(model.registryPaths("x"), ["src/a/"])
+  },
+)
+
 // Regression witness for the repaired unaudited release: releasing an
 // active lane's locks without a consumed force-release override is
 // rejected; after a grant, the release succeeds and is audited.
