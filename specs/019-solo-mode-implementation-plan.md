@@ -124,8 +124,11 @@ does not rewrite active lanes.
 
 ### `btrain solo adopt --lane <id>`
 
-The command reassigns unavailable roles. It uses the same tier selector as a
-new claim. It re-registers lock ownership and records the old and new roles.
+The verified command actor must be the available runtime. The command replaces
+an unavailable owner with that actor and uses the same tier selector as a new
+claim to replace an unavailable reviewer. It updates the lane owner, reviewer,
+and registry lock-owner labels in one critical section. The `solo-adopt` event
+records the actor and the previous and new owner and reviewer.
 
 ### `btrain solo retry [--lane <id>]`
 
@@ -294,8 +297,14 @@ review.
 
 Tasks:
 
+- Add red-first adoption tests for an unavailable owner and reviewer.
 - Implement `solo adopt --lane` through the Spec 015 transition gate.
-- Re-register lock owner labels in the registry critical section.
+- Assign the verified available actor as the new owner.
+- Select the replacement reviewer through the FR-8 tier order.
+- Update the owner, reviewer, and registry lock-owner labels in one critical
+  section.
+- Record the actor and the previous and new owner and reviewer in the
+  `solo-adopt` event.
 - Implement `solo retry` and retry-backoff clearing.
 - Stop new suffixed assignments after expiry.
 - Preserve suffixed reviewers on grandfathered active lanes.
@@ -304,8 +313,10 @@ Tasks:
 - Add PR-body fields for solo mode, reviewer identity, and tier.
 - Add integration tests for status, dashboard JSON, event history, and PR body.
 
-**Independent check**: expiry blocks a new suffixed assignment but does not
-orphan an existing lane or release its locks.
+**Independent check**: adoption replaces an unavailable owner with the command
+actor and selects a reviewer. The lane roles and registry lock-owner labels
+change atomically. Expiry blocks a new suffixed assignment but does not orphan
+an existing lane or release its locks.
 
 **Formal impact**: `adopt` and system fallback are semantic changes to Spec
 015 row 20. Run pin, harness, and TLC checks before review.

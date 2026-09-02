@@ -41,8 +41,10 @@
 
 - [ ] FR-5 renders solo mode, reviewer identity, and tier in handoff output.
 - [ ] FR-5 renders the same fields in status, dashboard, and PR bodies.
-- [ ] FR-6 implements `solo adopt --lane` with atomic lock-owner updates.
-- [ ] FR-6 records previous and new roles in the adoption event.
+- [ ] FR-6 verifies that the `solo adopt --lane` actor is the available runtime.
+- [ ] FR-6 replaces an unavailable owner with the verified actor and selects the replacement reviewer through the FR-8 tier order.
+- [ ] FR-6 tests that the owner, reviewer, and registry lock-owner labels change atomically.
+- [ ] FR-6 records the actor and the previous and new owner and reviewer in the `solo-adopt` event.
 - [ ] `solo retry` clears eligible backoff and reruns the selector.
 - [ ] Expiry stops new solo assignments and preserves active assignments.
 - [ ] Doctor lists grandfathered lanes and unavailable-reviewer warnings.
