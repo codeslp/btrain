@@ -1,10 +1,10 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.9
+**Version**: 0.1.10
 **Author**: btrain
 **Date**: 2026-08-29
-**Updated**: 2026-08-31
+**Updated**: 2026-09-01
 
 ## Decision
 
@@ -377,19 +377,41 @@ set.
 
 ## Current Bootstrap Gaps
 
-The bundled formal skills are currently phase-zero scaffolding, not a working
-gate:
+**Status as of 2026-09-01.** The scaffolding items below are closed. One
+reference-ownership gap remains, and the gate stays advisory until the Phase 3
+activation conditions are met.
 
-- `speckit-formal`, `tla-author`, and related skills cite nonexistent sections
-  of spec 002
-- `specs/tla/` does not exist
-- `scripts/tla_pin.py` does not exist
-- `tla-pin-sync` therefore cleanly no-ops
-- pre-handoff does not currently run a TLA pin or focused formal check
-- PR CI does not currently contain a formal-verification job
+Closed:
 
-The pilot must repair these ownership and implementation gaps before claiming
-that btrain already has a complete formal gate.
+- `specs/tla/` exists and holds the pilot model (`LaneLock.tla`), its TLC
+  configuration, cached verdicts under `.tlc-results/`, and setup notes.
+- `scripts/tla_pin.py` exists and implements `--check`, `--show-range`,
+  `--repin`, and `--verify-verdict`.
+- `tla-pin-sync` no longer no-ops. Its existence guard is satisfied and
+  `--check` reports against the committed pin (one pin, currently clean).
+- Pre-handoff runs a formal-impact gate. It classifies the lane `none`,
+  `validation`, or `semantic` and runs `node scripts/formal_advisory.mjs` for
+  the latter two, recording the impact class, command, verdict, and duration as
+  handoff evidence. Per the Phase 2 policy the advisory verdict does not block
+  handoff yet.
+- PR CI contains a formal-verification job. `.github/workflows/formal-advisory.yml`
+  checks out the exact PR head, selects the affected checks from the diff, and
+  runs the pin, TLC, and harness steps in advisory mode.
+
+Open:
+
+- The bundled formal skills cite sections of spec 002 that do not exist.
+  `tla-author` cites `spec 002 §3` for section eligibility, `tla-pin-sync` and
+  `speckit-formal` cite `spec 002 §5.3` for the pre-handoff pin rule, and
+  `tla-run-tlc` and `speckit-formal` cite `spec 002 §5.4` for exit codes.
+  Spec 002 has no numbered sections; those rules are owned by this
+  specification and by the `pre-handoff` skill. Retargeting the citations is
+  listed in the Phase 0 rollout items and stays outside the formal lane locks.
+
+Until the reference gap closes and Phase 3 activates, btrain has a working
+advisory formal surface, not a complete formal gate. The distinction is
+load-bearing: advisory verdicts are recorded as evidence and reviewed, but no
+verdict blocks a merge today.
 
 ## Functional Requirements
 
@@ -513,9 +535,127 @@ Broader models require separate scope decisions based on pilot evidence.
 
 ### Phase 3: Selective gate
 
-- block stale pins, counterexamples, and validation mismatches for the pilot model
-- adopt an explicit policy for exhaustion and unavailable tooling
-- keep broad Specula assessment and confirmation scheduled or explicit
+Phase 3 readiness depends on closing Spec 015 Workstreams 3 and 4, plus
+measured Phase 2 evidence. The gate must not be activated before those
+dependencies close.
+
+#### Gate disposition policy
+
+Gate actions extend the Verification Outcomes table above. The outcome labels
+and meanings defined there are authoritative; this section adds only the gate
+action and required response for each outcome.
+
+> **Label reconciliation.** The canonical table uses `stale_model`; the CI
+> implementation (`formal_advisory.mjs`) currently emits `stale_pin` for the
+> same condition. Label alignment is required before gate activation.
+
+**Allow outcome:**
+
+- `pass`: eligible for merge. Pins are current, TLC completed without a
+  counterexample, and validation matched.
+
+**Blocking outcomes** — unconditional once the gate is enabled:
+
+- `stale_model`: author reconciles pinned prose to model before re-requesting
+  review.
+- `counterexample`: author fixes intended prose, model, or implementation and
+  records the invariant and trace that failed.
+- `validation_mismatch`: author fixes the implementation or updates the
+  approved model with a semantic-impact declaration.
+
+**Warn outcomes** — require reviewer disposition during the pilot and an
+explicit human policy decision (see H-2, H-3 below) before they may block or
+allow automatically:
+
+- `state_space_exhausted`: reviewer records an explicit disposition — accept
+  with documented bounds, or block until bounds are raised or the model is
+  decomposed.
+- `tool_unavailable`: CI retries once after a backoff; if still unavailable,
+  the run is marked incomplete and routed to reviewer disposition or human
+  override. The warn outcome does not automatically block merge; whether it
+  should is deferred to H-3.
+- `policy_blocked`: route to the approved alternative provider or to a human;
+  never relabel as pass or as a correctness failure.
+
+#### Evidence thresholds for gate activation (proposed)
+
+The gate should not be enabled until Phase 2 advisory data demonstrates all of
+the following. The numeric thresholds below are **proposed defaults** without
+measured Phase 2 backing; they are subject to human review (H-6) once advisory
+data exists.
+
+1. **Stability**: the pilot model has run on at least 10 consecutive PRs
+   affecting modeled behavior without a false-positive block (`stale_model`,
+   counterexample, or validation mismatch that was later judged incorrect).
+2. **Latency**: exact-head CI formal checks complete within 5 minutes on the
+   shared runner, measured as P95 over the advisory period.
+3. **Exhaustion rate**: `state_space_exhausted` occurs on fewer than 10% of
+   formal-check runs during the advisory window.
+4. **Availability**: `tool_unavailable` occurs on fewer than 5% of CI runs
+   during the advisory window.
+5. **Coverage**: the instrumentation mapping and validation harness cover all
+   modeled entry points listed in the pilot scope section.
+
+If any threshold is not met, the gate remains advisory and the failing metric
+is tracked for the next review cycle.
+
+#### Rollback conditions (proposed)
+
+The gate must be demoted from blocking to advisory when any of the following
+occurs after activation. The numeric triggers below are **proposed defaults**;
+they share the same human-review dependency as the activation thresholds (H-6).
+
+- A false-positive block is confirmed on a PR that should have merged: demote
+  immediately, file a bug, and require the bug fix plus a new advisory period
+  before re-enabling.
+- `state_space_exhausted` exceeds 25% of formal-check runs over any rolling
+  7-day window: demote until bounds or decomposition restore the threshold.
+- `tool_unavailable` exceeds 15% of CI runs over any rolling 7-day window:
+  demote until infrastructure reliability is restored.
+- A model or harness change introduces a regression that causes three or more
+  spurious blocks within 48 hours: demote, revert the offending change, and
+  re-enter the advisory period.
+
+Rollback is always to advisory mode, never to disabled. The advisory verdicts
+continue to be recorded for diagnosis.
+
+#### Remaining human choices
+
+The following decisions must be made by a human (or explicitly delegated)
+before the gate transitions from advisory to blocking. They are recorded here
+as open items, not as policy.
+
+- **H-1: Blocking scope boundary.** Which of the three blocking outcomes
+  (`stale_model`, `counterexample`, `validation_mismatch`) apply only to the
+  pilot lane/lock model, and which extend to any future model committed under
+  spec 014? The current text assumes pilot-only.
+- **H-2: Exhaustion policy.** Should `state_space_exhausted` eventually become
+  a hard block (requiring bounds increase or model decomposition), remain a
+  reviewer-disposition warn, or adopt a threshold-based automatic escalation?
+  Phase 2 data on frequency and reviewer decisions informs this choice.
+- **H-3: Unavailability policy.** Should `tool_unavailable` block merging
+  after a fixed retry window, allow merging with a recorded gap, or require
+  human override per occurrence? The answer may differ between TLC (local,
+  deterministic) and provider-dependent Specula steps.
+- **H-4: Nightly audit gate interaction.** Should nightly or scheduled Specula
+  runs feed back into the PR gate (e.g., filing issues that block future PRs),
+  or remain purely informational?
+- **H-5: Gate activation authority.** Who activates the blocking gate: the
+  spec 014 owner, a designated human, or an automated trigger when all evidence
+  thresholds are met?
+- **H-6: Numeric threshold calibration.** Are the proposed activation
+  thresholds (10 consecutive PRs, 5 min P95, <10% exhaustion, <5%
+  unavailability) and rollback triggers (25% exhaustion / 15% unavailability
+  over 7 days, 3 spurious blocks in 48 h) appropriate, or should they be
+  adjusted based on Phase 2 advisory data?
+
+#### Continuing constraints
+
+- Broad Specula assessment and confirmation remain scheduled or explicit, not
+  an unconditional every-PR dependency.
+- The gate applies only to PRs affecting the pilot model's modeled behavior or
+  its formal artifacts. Unrelated PRs skip the formal job.
+- Interactive provider credentials must not be required by blocking CI checks.
 
 Expansion beyond the lane/lock pilot requires a new scope decision based on the
 measured Phase 2 and Phase 3 evidence.
