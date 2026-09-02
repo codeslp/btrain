@@ -21,9 +21,22 @@
 \* Pinned to: specs/014-specula-formal-verification-pilot.md § Normative-source prerequisite
 \* Pinned to: specs/002-multi-lane-handoffs.md § Lock Enforcement
 \* Pinned to: specs/002-multi-lane-handoffs.md § PR-flow states and actors
+\* Pinned to: specs/002-multi-lane-handoffs.md § `handoff resolve --final`
 \* Pinned to: specs/002-multi-lane-handoffs.md § Force-release override
 \* Pinned to: specs/002-multi-lane-handoffs.md § CLI Commands
 \* Pinned to: specs/005-review-findings-rework-loop.md § Proposed Status Model
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-1: First-class review-return status
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-2: Reviewer findings keep the lane active
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-3: Explicit next actor after failed review
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-4: Reviewer findings are canonical
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-5: Reviewer identity is preserved
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-6: Same-lane rework loop
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-7: Clean re-handoff path
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-8: CLI support for review return
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-10: Active lock treatment
+\* Pinned to: specs/005-review-findings-rework-loop.md § FR-11: Loop routing compatibility
+\* Spec 005 FR-9 is deliberately NOT pinned: spec 014 excludes it as
+\* conflicting prose (spec 002 v1.1.2 supersedes it in PR-flow repos).
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-2c: Explicit audited override path
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-2d: Human-confirmed override authority
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-4: `repair-needed` state
@@ -32,7 +45,7 @@
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-15: Clearing `repair-needed`
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-18: One retry budget before human escalation
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-20: Lock retention during `repair-needed`
-\* Pinned-hash: 90cb75546bfdf3d0874a2bbc616fdca16624a48fb356e30daf66f6c63fd613ed
+\* Pinned-hash: 56a39c3b1778bdc1840a293c7cfde4dc0186f7d763c468befabee5fb307f5a7c
 EXTENDS Naturals
 
 \* Pilot bounds (tla-author: small by design; widen only after this passes).

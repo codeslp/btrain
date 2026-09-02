@@ -75,6 +75,30 @@ python3 scripts/tla_pin.py --repin specs/tla/LaneLock.tla
 A stale pin blocks handoff (spec 014 FR-5). Re-pin only after classifying
 the prose change; never re-pin to silence the check.
 
+### Pin coverage
+
+The pin list must cover every prose range spec 014 designates as normative,
+not just the sections a reviewer happens to remember. Two ranges were
+designated but unpinned until 2026-09-01, so edits to them passed `--check`
+untouched:
+
+- spec 005 FR-1 through FR-8, FR-10, and FR-11. `§ Proposed Status Model`
+  was pinned, but the pin range stops at the next `##` heading, and the FRs
+  live under `## Functional Requirements`. Spec 015 finding #6 disclosed this
+  by hand when it edited FR-7.
+- spec 002 `§ handoff resolve --final`. The pinned `§ CLI Commands` section
+  cross-references it, so pinned prose depended on unpinned prose. Spec 016
+  WS1 relied on the section being "outside every pinned section" to ship
+  edits without a re-pin.
+
+Spec 005 FR-9 stays deliberately unpinned: spec 014 excludes it as
+conflicting prose, since spec 002 v1.1.2 supersedes it in PR-flow
+repositories. The `.tla` header records that exclusion inline so a future
+reader does not "fix" the omission.
+
+"Outside every pinned section" is only evidence of low formal impact when the
+pin list is complete. Treat a gap in coverage as a defect, not a shortcut.
+
 ## LaneLock.tla
 
 Models the designated lane/lock contract. The model encodes INTENDED
