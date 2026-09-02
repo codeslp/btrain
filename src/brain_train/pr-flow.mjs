@@ -629,6 +629,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
+      pr: prNumber,
       final: true,
       viaPrOutcome: true,
       summary: `PR #${prNumber} merged${status.pr.mergedAt ? ` at ${status.pr.mergedAt}` : ""}.`,
@@ -651,6 +652,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     await resolveHandoff(repoRoot, {
       lane: laneId,
       actor,
+      pr: prNumber,
       final: true,
       viaPrOutcome: true,
       summary: `PR #${prNumber} closed without a merge; lane resolved and locks released per spec 002 v1.1.2. Reopen with a fresh claim if the work should continue.`,

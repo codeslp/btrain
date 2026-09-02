@@ -6071,7 +6071,7 @@ async function resolveHandoff(repoRoot, options) {
       to: "resolved",
       actor: resolvedActor,
       prFlowEnabled: prFlow.enabled,
-      prLinked: !!latestCurrent.prNumber,
+      prLinked: !!(latestCurrent.prNumber || normalizePrNumber(options.pr)),
     })
     const terminalPreviousHandoffEntry =
       latestCurrent.task || options.summary

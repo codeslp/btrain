@@ -708,6 +708,45 @@ test(
   },
 )
 
+// Compatibility witness: terminal PR outcomes accept an explicit --pr even
+// when a legacy status update reached a PR-flow state without persisting the
+// PR number on the lane. resolveHandoff must receive that supplied linkage.
+test(
+  "explicit PR permits a terminal outcome for legacy unlinked PR-flow state",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  async () => {
+    const { root, repo } = await makeRepo()
+    try {
+      const config = await readProjectConfig(repo)
+      await asAgent("alpha", () =>
+        claimHandoff(repo, { lane: "x", task: "legacy PR witness", owner: "alpha", reviewer: "beta", files: "src/a/" }),
+      )
+      await asAgent("alpha", () =>
+        patchHandoff(repo, {
+          lane: "x",
+          actor: "alpha",
+          status: "ready-to-merge",
+          "no-dispatch": true,
+        }),
+      )
+
+      await asAgent("alpha", () =>
+        applyPrStatusToHandoff(
+          repo,
+          { lane: "x", pr: PR_NUMBER, actor: "alpha" },
+          { overall: "merged", pr: { mergedAt: "2026-01-01T00:00:00Z" }, bots: [] },
+        ),
+      )
+
+      const { lanes } = await realSnapshot(repo, config)
+      assert.equal(lanes.x.status, "resolved")
+      assert.deepEqual(lanes.x.registry, [])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
 // Positive FR-4 witness (spec 005): reviewer findings persist canonically —
 // the summary lands in the handoff record and the reason code in lane state.
 test(
