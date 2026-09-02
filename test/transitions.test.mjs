@@ -176,6 +176,21 @@ describe("lane transition contract", () => {
     )
   })
 
+  it("preserves legacy request-changes when actor detection is unavailable", () => {
+    const result = applyTransition(
+      { status: "needs-review", owner: "codex", reviewer: "claude" },
+      "handoff request-changes",
+      {
+        to: "changes-requested",
+        actor: "",
+        reasonCode: "spec-mismatch",
+      },
+    )
+
+    assert.equal(result.row.id, "L15")
+    assert.equal(result.next.status, "changes-requested")
+  })
+
   it("revalidates lane transitions inside the registry publication lock", async () => {
     const core = await fs.readFile(path.resolve("src/brain_train/core.mjs"), "utf8")
     assert.match(

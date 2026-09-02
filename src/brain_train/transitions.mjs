@@ -131,7 +131,8 @@ function guardMatches(rowValue, state, input) {
     "lane uncovered": () => input.laneCovered !== true,
     "single-handoff overwrite": () => true,
     "repeat resolve": () => state.status === "resolved",
-    "reviewer absent or unverified": () => !state.reviewer || input.reviewerVerified === false,
+    "reviewer absent or unverified": () =>
+      !state.reviewer || !input.actor || input.reviewerVerified === false,
     "stale or expired lock": () =>
       input.staleLocks === true
       || input.expiredLocks === true
