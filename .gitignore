@@ -21,3 +21,7 @@ agentchattr/data/
 agentchattr/.venv/
 agentchattr/uploads/
 data/
+
+# Python bytecode caches (scripts/tla_pin.py and friends)
+__pycache__/
+*.pyc
