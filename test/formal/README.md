@@ -68,10 +68,11 @@ Candidate findings surfaced by harness runs (need designation decisions in
 spec 002/005/006 before the model treats them as normative). Each is tallied
 by contract mode and keeps the candidate todo test red:
 
-4. `resolveHandoff` never checks the acting agent against the lane, and a
-   plain resolve from a PR-flow status terminally releases retained locks.
-   The designated contract assigns `ready-for-pr` entry to the reviewer and
-   terminates PR-flow lanes through merge or closure.
+4. `resolveHandoff` still permits non-reviewer approval from `needs-review`
+   while legacy row L8 is in its required advisory window. It also permits a
+   lane agent to resolve from PR-flow statuses and terminally release retained
+   locks. The designated contract assigns `ready-for-pr` entry to the reviewer
+   and terminates PR-flow lanes through merge or closure.
 5. `resolveHandoff` resolves an idle, never-claimed lane. When the lane's
    handoff file is absent it also falls back to repo-level state and writes a
    `Previous Handoffs` entry into a newly created lane file using another

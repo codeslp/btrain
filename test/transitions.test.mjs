@@ -54,6 +54,17 @@ describe("lane transition contract", () => {
     assert.equal(result.next.status, "ready-for-pr")
   })
 
+  it("keeps owner approval on legacy row L8 during its advisory window", () => {
+    const result = applyTransition(
+      { status: "needs-review", owner: "codex", reviewer: "claude" },
+      "handoff resolve",
+      { to: "ready-for-pr", actor: "codex", prFlowEnabled: true },
+    )
+
+    assert.equal(result.row.id, "L8")
+    assert.equal(result.next.status, "ready-for-pr")
+  })
+
   it("cross-checks every modeled action against the hand-authored table", async () => {
     const tla = await fs.readFile(path.resolve("specs/tla/LaneLock.tla"), "utf8")
     const modeledActions = [...tla.matchAll(/^([A-Z][A-Za-z]+)\([^)]*\) ==/gm)]

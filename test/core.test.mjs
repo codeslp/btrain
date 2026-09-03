@@ -1358,6 +1358,109 @@ describe("btrain handoff lifecycle", () => {
   })
 })
 
+describe("reviewer authority advisory diagnostics", () => {
+  for (const { prFlowEnabled, target, actor, clearReviewer } of [
+    { prFlowEnabled: false, target: "resolved", actor: "TestBot", clearReviewer: false },
+    { prFlowEnabled: true, target: "ready-for-pr", actor: "TestBot", clearReviewer: false },
+    { prFlowEnabled: true, target: "ready-for-pr", actor: "", clearReviewer: true },
+  ]) {
+    const attemptedBy = clearReviewer ? "an unassigned reviewer" : "the owner"
+    it(`warns and records L8 when ${attemptedBy} approves needs-review -> ${target}`, async () => {
+      const repoDir = await makeTmpDir()
+      try {
+        const { execFile } = await import("node:child_process")
+        const { promisify } = await import("node:util")
+        const exec = promisify(execFile)
+        await exec("git", ["init", repoDir])
+        await configureGitIdentity(repoDir)
+        await runBtrain(["init", repoDir], repoDir)
+        if (prFlowEnabled) await enablePrFlow(repoDir)
+        await fs.writeFile(path.join(repoDir, "README.md"), "# test\n", "utf8")
+        await runGit(["add", "."], repoDir)
+        await runGit(["commit", "-m", "initial"], repoDir)
+        await runBtrain(
+          [
+            "handoff", "claim", "--repo", repoDir, "--lane", "a",
+            "--task", "Reviewer diagnostic", "--owner", "TestBot",
+            "--reviewer", "ReviewBot", "--files", "README.md",
+          ],
+          repoDir,
+        )
+        await fs.appendFile(path.join(repoDir, "README.md"), "\nchange\n", "utf8")
+        const needsReview = await runBtrain(
+          buildNeedsReviewArgs(repoDir, { actor: "TestBot", lane: "a" }),
+          repoDir,
+        )
+        assert.equal(needsReview.code, 0, needsReview.stderr)
+        if (clearReviewer) {
+          const handoffPath = path.join(repoDir, ".claude", "collab", "HANDOFF_A.md")
+          const handoff = await fs.readFile(handoffPath, "utf8")
+          await fs.writeFile(handoffPath, handoff.replace(/^Peer Reviewer:.*$/m, "Peer Reviewer: "), "utf8")
+        }
+
+        const ownerApproval = await runBtrain(
+          [
+            "handoff", "resolve", "--repo", repoDir, "--lane", "a",
+            "--summary", "The owner must not approve their own work.",
+            ...(actor ? ["--actor", actor] : []),
+          ],
+          repoDir,
+        )
+        assert.equal(ownerApproval.code, 0, ownerApproval.stderr)
+        assert.match(ownerApproval.stdout, /warning.*L8.*recorded reviewer/i)
+        const events = await readJsonLines(path.join(repoDir, ".btrain", "events", "lane-a.jsonl"))
+        assert.equal(events.at(-1)?.details?.["transition-advisory"], "L8")
+        assert.equal(events.at(-1)?.after?.status, target)
+      } finally {
+        await rmDir(repoDir)
+      }
+    })
+  }
+
+  it("warns and records L8 when an unconfigured actor matches the recorded reviewer", async () => {
+    const repoDir = await makeTmpDir()
+    try {
+      await runGit(["init"], repoDir)
+      await configureGitIdentity(repoDir)
+      await runBtrain(["init", repoDir, "--agent", "WriterBot", "--agent", "ReviewBot"], repoDir)
+      await enablePrFlow(repoDir)
+      await fs.writeFile(path.join(repoDir, "README.md"), "# test\n", "utf8")
+      await runGit(["add", "."], repoDir)
+      await runGit(["commit", "-m", "initial"], repoDir)
+      const claim = await runBtrain(
+        [
+          "handoff", "claim", "--repo", repoDir, "--lane", "a",
+          "--task", "Unconfigured reviewer advisory", "--owner", "WriterBot",
+          "--reviewer", "Intruder", "--files", "README.md",
+        ],
+        repoDir,
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+      await fs.appendFile(path.join(repoDir, "README.md"), "\nchange\n", "utf8")
+      const needsReview = await runBtrain(
+        buildNeedsReviewArgs(repoDir, { actor: "WriterBot", lane: "a", reviewer: "Intruder" }),
+        repoDir,
+      )
+      assert.equal(needsReview.code, 0, needsReview.stderr)
+
+      const approval = await runBtrain(
+        [
+          "handoff", "resolve", "--repo", repoDir, "--lane", "a",
+          "--summary", "Unconfigured reviewer must remain advisory.", "--actor", "Intruder",
+        ],
+        repoDir,
+      )
+
+      assert.equal(approval.code, 0, approval.stderr)
+      assert.match(approval.stdout, /warning.*L8.*recorded reviewer/i)
+      const events = await readJsonLines(path.join(repoDir, ".btrain", "events", "lane-a.jsonl"))
+      assert.equal(events.at(-1)?.details?.["transition-advisory"], "L8")
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+})
+
 describe("btrain PR flow handoff lifecycle", () => {
   let tmpDir
 
@@ -6118,6 +6221,57 @@ describe("lane resolve state source", () => {
       const after = await fs.readFile(handoffPath, "utf8")
       assert.match(after, /^Status: changes-requested$/m)
       assert.doesNotMatch(after, /^Status: ready-for-pr$/m)
+    } finally {
+      await rmDir(repoRoot)
+    }
+  })
+
+  it("rejects a reviewer reassignment that occurs while peer resolve waits for the registry lock", async () => {
+    const repoRoot = await makeTmpDir()
+    try {
+      await runGit(["init"], repoRoot)
+      await configureGitIdentity(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enableLanes(repoRoot)
+      await runBtrain(["init", repoRoot], repoRoot)
+      await enablePrFlow(repoRoot)
+      const claim = await runBtrain([
+        "handoff", "claim", "--repo", repoRoot, "--lane", "a",
+        "--task", "reviewer race", "--owner", "Claude", "--reviewer", "Codex",
+        "--files", "src/reviewer-race.ts",
+      ], repoRoot)
+      assert.equal(claim.code, 0, claim.stderr)
+      const review = await runBtrain([
+        "handoff", "update", "--repo", repoRoot, "--lane", "a",
+        "--status", "needs-review", "--actor", "Claude", "--no-dispatch",
+        "--base", "HEAD", "--preflight", "reviewed",
+        "--changed", "src/reviewer-race.ts", "--verification", "focused repro",
+        "--gap", "Full suite remains for the final verification pass",
+        "--why", "exercise reviewer reassignment race", "--review-ask", "check authority",
+      ], repoRoot)
+      assert.equal(review.code, 0, review.stderr)
+
+      const locksPath = path.join(repoRoot, ".btrain", "locks.json")
+      const handoffPath = path.join(repoRoot, ".claude", "collab", "HANDOFF_A.md")
+      let resolvePromise
+      await withFileLock(locksPath + ".lock", async () => {
+        resolvePromise = runBtrain([
+          "handoff", "resolve", "--repo", repoRoot, "--lane", "a",
+          "--summary", "approve stale reviewer snapshot", "--actor", "Codex",
+        ], repoRoot)
+        await new Promise((resolve) => setTimeout(resolve, 800))
+
+        const before = await fs.readFile(handoffPath, "utf8")
+        await fs.writeFile(handoffPath, before.replace(/^Peer Reviewer:.*$/m, "Peer Reviewer: Gemini"))
+      })
+
+      const result = await resolvePromise
+      assert.notEqual(result.code, 0, result.stdout)
+      assert.match(result.stderr, /reviewer[\s\S]*changed|changed[\s\S]*reviewer/i)
+      assert.doesNotMatch(result.stderr, /No transition row matches/)
+      const after = await fs.readFile(handoffPath, "utf8")
+      assert.match(after, /^Status: needs-review$/m)
+      assert.match(after, /^Peer Reviewer: Gemini$/m)
     } finally {
       await rmDir(repoRoot)
     }

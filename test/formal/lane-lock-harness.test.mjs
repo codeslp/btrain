@@ -869,6 +869,53 @@ test(
   },
 )
 
+// Deterministic implementation-mirror witness for L8's advisory window. The
+// owner approval remains accepted temporarily and keeps the registry locks.
+test(
+  "implementation mirror: owner approval follows L8 advisory with locks retained",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  async () => {
+    const { trace } = await executeSequence("implementation", [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+    ])
+    const approval = trace.at(-1)
+    assert.equal(approval.modelOk, true, "the implementation mirror accepts L8 during advisory")
+    assert.equal(approval.realOk, true, "the runtime accepts L8 during advisory")
+    assert.equal(approval.expectedState.x.status, "ready-for-pr")
+    assert.deepEqual(approval.expectedState.x.registry, ["src/a/"])
+    assert.equal(approval.realState.x.status, "ready-for-pr")
+    assert.deepEqual(approval.realState.x.registry, ["src/a/"])
+  },
+)
+
+test(
+  "implementation mirror: non-PR-flow owner approval remains accepted during L8 advisory",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  () => {
+    const model = new LaneLockModel({
+      lanes: ["x"],
+      agents: AGENTS,
+      prFlowEnabled: false,
+      mode: "implementation",
+    })
+    assert.equal(
+      model.claim({ lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] }).ok,
+      true,
+    )
+    assert.equal(
+      model.update({ lane: "x", actor: "alpha", status: "needs-review" }).ok,
+      true,
+    )
+
+    const approval = model.resolve({ lane: "x", actor: "alpha", final: false })
+    assert.equal(approval.ok, true)
+    assert.equal(model.lane("x").status, "resolved")
+    assert.deepEqual(model.registryPaths("x"), [])
+  },
+)
+
 // Regression witness for the repaired unaudited release: releasing an
 // active lane's locks without a consumed force-release override is
 // rejected; after a grant, the release succeeds and is audited.
