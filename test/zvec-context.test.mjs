@@ -64,6 +64,23 @@ describe("optional zvec-grep context helper", () => {
     assert.match(result.stderr, /^Usage: zvec-context\.sh/m)
   })
 
+  it("rejects an inaccessible root before checking zg", async () => {
+    const missingRoot = path.join(os.tmpdir(), "btrain-zvec-context-missing-root")
+
+    for (const args of [
+      ["search", "query", "--root", missingRoot],
+      ["status", "--root", missingRoot],
+    ]) {
+      const result = await runHelper(args, {
+        env: { ...process.env, PATH: "/usr/bin:/bin" },
+      })
+
+      assert.equal(result.code, 64, result.stdout)
+      assert.match(result.stderr, /--root must name an accessible directory/)
+      assert.doesNotMatch(result.stdout, /zvec-context: skipped/)
+    }
+  })
+
   it("soft-skips when the zg CLI is unavailable", async () => {
     const tmpDir = await makeTmpDir()
     try {

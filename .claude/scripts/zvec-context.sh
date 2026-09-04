@@ -127,7 +127,7 @@ case "$subcommand" in
       *) die_usage "--freshness must be eventual or strict" ;;
     esac
 
-    root=$(resolve_root "$root")
+    root=$(resolve_root "$root") || exit $?
     require_zg || exit 0
     require_ready_index "$root" || exit 0
 
@@ -169,7 +169,7 @@ case "$subcommand" in
         *) die_usage "status: unknown argument: $1" ;;
       esac
     done
-    root=$(resolve_root "$root")
+    root=$(resolve_root "$root") || exit $?
     require_zg || exit 0
     if ! zg status "$root" --mode direct --check-ready; then
       emit_skip "a ready index was not found; create or refresh it explicitly with zg index"
