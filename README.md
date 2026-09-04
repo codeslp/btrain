@@ -466,6 +466,39 @@ btrain scaffolds a `.claude/collab/FEEDBACK_LOG.md` during init and monitors it 
 | `frontend-tokens` | Validate CSS custom property usage |
 | `speckit-*` | Spec-driven development workflow (specify, clarify, plan, tasks, analyze, checklist, implement, taskstoissues) |
 
+### Optional semantic workspace search
+
+`context-scout` can use an existing [zvec-grep](https://github.com/zvec-ai/zvec-grep) index for one focused semantic discovery query. This route helps when an agent does not know the exact wording or file location. Native `rg` remains the required route for identifiers, paths, regular expressions, and exhaustive results.
+
+btrain does not install zvec-grep, build an index, start its daemon, change global agent configuration, or authorize a remote Embedding provider. A user who wants the optional route must install and index the workspace explicitly. zvec-grep `0.2.x` requires Node.js 22 or later.
+
+```bash
+npm install -g @zvec/zvec-grep
+zg index --embedding local/potion-code-16m-v2 --hidden -g '!.agents/skills/**'
+```
+
+`btrain init` adds `.zvec-grep/` to `.gitignore` and scaffolds a read-only helper. The helper soft-skips when `zg` or a ready index is unavailable.
+
+```bash
+.claude/scripts/zvec-context.sh status --root "$PWD"
+
+# Low-risk orientation; may use the current index without refreshing it.
+.claude/scripts/zvec-context.sh search \
+  "where lane transition authority is enforced" \
+  --root "$PWD" \
+  --limit 5
+
+# Review, security, migration, and formal work must wait for a fresh index.
+.claude/scripts/zvec-context.sh search \
+  "what validates a cached formal verdict against the current implementation" \
+  --root "$PWD" \
+  --freshness strict \
+  --glob 'specs/**' \
+  --glob 'scripts/**'
+```
+
+The helper executes one hybrid query in direct mode. It never exposes index-management commands. Treat every ranked result as a lead and verify important claims with exact source reads.
+
 ---
 
 ## Git Guards
