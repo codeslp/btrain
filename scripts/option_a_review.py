@@ -6,36 +6,131 @@ Supports two modes:
 - hybrid:   parallel track always runs + sequential chain triggers when
             the diff touches sensitive files/patterns (Option D from doc 11)
 
+Every reviewer runs through an agent CLI and uses that CLI's own login; no
+provider API keys are involved. Claude-backed reviewers use the Claude Code
+CLI (`claude -p`), GPT-backed reviewers use the Codex CLI (`codex exec`).
+
 Expected environment:
-- ANTHROPIC_API_KEY
+- `claude` and `codex` on PATH and logged in (override with CLAUDE_BIN / CODEX_BIN)
 
 Optional environment:
-- OPENAI_API_KEY (without it the OpenAI-backed reviewers are reported as
-  unavailable instead of aborting the run)
-- CLAUDE_LOGIC_MODEL
-- OPENAI_SECURITY_MODEL
-- CLAUDE_TYPE_MODEL
-- CLAUDE_SYNTHESIS_MODEL
+- CLAUDE_LOGIC_MODEL, CLAUDE_TYPE_MODEL, CLAUDE_SYNTHESIS_MODEL (default claude-opus-5)
+- CODEX_SECURITY_MODEL (default: the Codex CLI's own configured model; a ChatGPT
+  login rejects models it does not offer, e.g. gpt-5)
+- REVIEW_CLI_TIMEOUT seconds per reviewer run (default 600)
 
-Install before running (pins in scripts/requirements-review.txt):
-    uv pip install -r scripts/requirements-review.txt
+Confinement: reviewer CLIs receive only the variables in CLI_ENV_ALLOWLIST;
+claude runs with tools, settings sources, MCP servers, and skills disabled;
+codex runs with its shell tools disabled, the user's config ignored, and its
+user-global instruction inputs (AGENTS.md, hooks, memories, skills, plugins)
+hidden by a sandbox-exec read-deny profile (fails closed off macOS unless
+REVIEW_ALLOW_UNCONFINED_CODEX=1); every
+prompt has host-path `@` mentions neutralized before it reaches a CLI (Claude
+Code would otherwise inline the file client-side); ordinary `@` syntax in
+reviewed source is left alone. An injected diff therefore has
+no route to host files or credentials, and no user/project hook, plugin, or
+CLAUDE.md memory enters a reviewer's context. Regression: python3 scripts/test_option_a_review.py
+(set REVIEW_LIVE_TESTS=1 to also run the real-CLI sentinel checks).
+
+No Python dependencies beyond the standard library.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
-from openai import AsyncOpenAI
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Per-reviewer wall-clock cap for one CLI run; a hung CLI degrades to a
+# failed-reviewer finding instead of hanging `btrain review run`.
+CLI_TIMEOUT_SECONDS = float(os.environ.get("REVIEW_CLI_TIMEOUT", "600"))
+# The only parent-environment variables handed to a reviewer CLI. Everything
+# else (provider keys, session tokens, CLAUDECODE, tool credentials) is dropped,
+# so an injected diff cannot read them back. Both CLIs authenticate from their
+# own config under HOME (or CODEX_HOME / CLAUDE_CONFIG_DIR when set).
+CLI_ENV_ALLOWLIST = (
+  "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TERM",
+  "LANG", "LC_ALL", "LC_CTYPE", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+)
+
+
+def reviewer_env() -> dict[str, str]:
+  return {key: os.environ[key] for key in CLI_ENV_ALLOWLIST if key in os.environ}
+
+
+# Claude Code expands `@path` mentions in the prompt client-side, outside the
+# tool system, so an untrusted diff containing `@/etc/passwd` would inline that
+# file even with --tools "". Reviewer CLIs run in an empty scratch cwd, so a
+# plain relative mention (`@src/x.ts`, `@scope/pkg`) resolves to nothing and is
+# left alone, as are decorators, annotations, CSS at-rules, and emails. Only
+# forms that can reach a host file are neutralized: absolute or UNC paths,
+# `~`, dot-relative paths, Windows drive paths, and anything with a `..`
+# segment, each optionally quoted. The `@` becomes fullwidth U+FF20, which no
+# CLI treats as a mention. Hunk headers (`@@ -1 +1 @@`) are untouched.
+MENTION_RE = re.compile(r"""@(?=("[^"\n]*"|'[^'\n]*'|[^\s"']+))""")
+_HOST_PATH_PATTERNS = (
+  re.compile(r"^[\\/]"),                    # /abs, \\server\share
+  re.compile(r"^~"),                        # ~ or ~user
+  re.compile(r"^\.{1,2}[\\/]"),               # ./x, ../x, .\x
+  re.compile(r"^[A-Za-z]:[\\/]"),            # C:\x, C:/x
+  re.compile(r"(^|[\\/])\.\.([\\/]|$)"),     # any .. segment (src/../../x)
+)
+
+
+def codex_sandbox_profile(codex_home: Path) -> str:
+  """Seatbelt profile that hides Codex's user-global instruction and config
+  inputs from the codex process while leaving auth.json, rules, and everything
+  else readable. --ignore-user-config does not cover these: AGENTS.md (and any
+  file it includes), hooks.json, memories, skills, plugins, and automations are
+  still loaded from CODEX_HOME. Verified live: without this the reviewer quoted
+  the user's global AGENTS.md; with it, it cannot."""
+  # Seatbelt matches canonical paths, so resolve symlinks (e.g. /var -> /private/var).
+  home = os.path.realpath(codex_home)
+  return (
+    '(version 1)(allow default)'
+    f'(deny file-read* (regex #"^{re.escape(home)}/[^/]*\\.md$")'
+    f' (literal "{home}/hooks.json") (literal "{home}/config.toml")'
+    f' (subpath "{home}/memories") (subpath "{home}/skills")'
+    f' (subpath "{home}/plugins") (subpath "{home}/automations"))'
+  )
+
+
+def codex_confinement_prefix() -> list[str]:
+  """argv prefix that wraps codex in the read-deny sandbox. Fails closed: with no
+  sandbox-exec (non-macOS) the codex reviewer does not run unless
+  REVIEW_ALLOW_UNCONFINED_CODEX=1 is set explicitly."""
+  if os.path.exists(SANDBOX_EXEC):
+    return [SANDBOX_EXEC, "-p", codex_sandbox_profile(CODEX_HOME)]
+  if os.environ.get("REVIEW_ALLOW_UNCONFINED_CODEX") == "1":
+    return []
+  raise RuntimeError(
+    "sandbox-exec is unavailable, so Codex's user-global instructions cannot be hidden; "
+    "set REVIEW_ALLOW_UNCONFINED_CODEX=1 to run the Codex reviewer anyway."
+  )
+
+
+def is_host_path_mention(target: str) -> bool:
+  candidate = target.strip("\"'")
+  return any(pattern.search(candidate) for pattern in _HOST_PATH_PATTERNS)
+
+
+def neutralize_mentions(text: str) -> str:
+  def replace(match: re.Match[str]) -> str:
+    return "\uff20" if is_host_path_mention(match.group(1)) else "@"
+  return MENTION_RE.sub(replace, text)
 
 
 # ──────────────────────────────────────────────
@@ -154,9 +249,9 @@ class Reviewer:
   provider: str
   model: str
   focus: str
-  # JSON schema enforced via output_config.format on the Anthropic path.
-  # None for providers without structured outputs (the prompt's shape text
-  # plus extract_json() remain the contract there).
+  # JSON schema for the reviewer's final answer: `claude -p --json-schema` or
+  # `codex exec --output-schema`. The prompt's shape text stays as the human-
+  # readable contract; extract_json() handles the returned text.
   output_schema: dict[str, Any] | None = None
 
 
@@ -285,20 +380,21 @@ def build_parallel_reviewers() -> list[Reviewer]:
   return [
     Reviewer(
       name="LogicReviewer",
-      provider="anthropic",
+      provider="claude-code",
       model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-5"),
       focus="logic correctness, behavioral regressions, product reasoning",
       output_schema=PARALLEL_SCHEMA,
     ),
     Reviewer(
       name="SecurityReviewer",
-      provider="openai",
-      model=os.environ.get("OPENAI_SECURITY_MODEL", "gpt-5"),
+      provider="codex-cli",
+      model=os.environ.get("CODEX_SECURITY_MODEL", ""),  # "" -> CLI default
       focus="security, auth, input validation, injection, and unsafe defaults",
+      output_schema=PARALLEL_SCHEMA,
     ),
     Reviewer(
       name="TypeReviewer",
-      provider="anthropic",
+      provider="claude-code",
       model=os.environ.get("CLAUDE_TYPE_MODEL", "claude-opus-5"),
       focus="type mismatches, schema drift, and runtime/compile-time inconsistencies",
       output_schema=PARALLEL_SCHEMA,
@@ -310,13 +406,14 @@ def build_sequential_reviewers() -> list[Reviewer]:
   return [
     Reviewer(
       name="SecurityReviewer-Seq",
-      provider="openai",
-      model=os.environ.get("OPENAI_SECURITY_MODEL", "gpt-5"),
+      provider="codex-cli",
+      model=os.environ.get("CODEX_SECURITY_MODEL", ""),  # "" -> CLI default
       focus="deep security analysis: input validation, auth bypass, injection, OWASP top 10",
+      output_schema=SEQUENTIAL_SCHEMA,
     ),
     Reviewer(
       name="LogicReviewer-Seq",
-      provider="anthropic",
+      provider="claude-code",
       model=os.environ.get("CLAUDE_LOGIC_MODEL", "claude-opus-5"),
       focus="business logic correctness, state bugs, reachability of security findings",
       output_schema=SEQUENTIAL_SCHEMA,
@@ -327,7 +424,7 @@ def build_sequential_reviewers() -> list[Reviewer]:
 def build_synthesis_reviewer() -> Reviewer:
   return Reviewer(
     name="SynthesisAgent",
-    provider="anthropic",
+    provider="claude-code",
     model=os.environ.get("CLAUDE_SYNTHESIS_MODEL", "claude-opus-5"),
     focus="final verdict: deduplicate, prioritize, and synthesize findings",
     output_schema=SYNTHESIS_SCHEMA,
@@ -461,62 +558,130 @@ def normalize_result(
 # API calls
 # ──────────────────────────────────────────────
 
-async def call_anthropic(
-  client: AsyncAnthropic,
-  reviewer: Reviewer,
-  prompt: str,
-) -> dict[str, Any]:
-  try:
-    request: dict[str, Any] = {
-      "model": reviewer.model,
-      # A large diff can yield many findings; 2400 truncated the JSON mid-array
-      # and surfaced as a spurious "could not be parsed" P2. No `thinking`
-      # parameter: the default model (claude-opus-5) thinks adaptively on its own.
-      "max_tokens": 16000,
-      "messages": [{"role": "user", "content": prompt}],
-    }
-    if reviewer.output_schema is not None:
-      request["output_config"] = {
-        "format": {"type": "json_schema", "schema": reviewer.output_schema},
-      }
-    message = await client.messages.create(**request)
-    raw_text = "\n".join(
-      block.text for block in message.content if getattr(block, "type", None) == "text"
-    ).strip()
-    return normalize_result(reviewer, raw_text=raw_text)
-  except Exception as exc:
-    return normalize_result(reviewer, error=str(exc))
+async def run_cli(args: list[str], stdin_text: str, cwd: str) -> tuple[int, str, str]:
+  """Run an agent CLI with the prompt on stdin; returns (exit code, stdout, stderr).
 
-
-async def call_openai(
-  client: AsyncOpenAI,
-  reviewer: Reviewer,
-  prompt: str,
-) -> dict[str, Any]:
+  `cwd` should be a per-call scratch directory (holding at most the schema and
+  output files the caller writes) so project-level agent config (CLAUDE.md,
+  AGENTS.md, hooks, rules) does not load into the reviewer's context. The
+  environment is reduced to CLI_ENV_ALLOWLIST. Auth is whatever each CLI
+  resolves from its own config (its login by default).
+  """
+  env = reviewer_env()
+  proc = await asyncio.create_subprocess_exec(
+    *args,
+    stdin=asyncio.subprocess.PIPE,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+    cwd=cwd,
+    env=env,
+  )
   try:
-    response = await client.responses.create(
-      model=reviewer.model,
-      input=prompt,
+    stdout, stderr = await asyncio.wait_for(
+      proc.communicate(stdin_text.encode("utf-8")), timeout=CLI_TIMEOUT_SECONDS
     )
-    return normalize_result(reviewer, raw_text=response.output_text)
+  except asyncio.TimeoutError:
+    proc.kill()
+    await proc.wait()
+    raise TimeoutError(f"{args[0]} exceeded {CLI_TIMEOUT_SECONDS:g}s") from None
+  return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+
+
+def _cli_failure(reviewer: Reviewer, label: str, code: int, stdout: str, stderr: str) -> dict[str, Any]:
+  # Prefer explicit error lines: codex echoes the prompt to stdout, so a raw
+  # tail would show the diff instead of the cause.
+  error_lines = [
+    line.strip() for line in (stderr + "\n" + stdout).splitlines()
+    if "ERROR" in line or "error:" in line.lower()
+  ]
+  detail = "\n".join(dict.fromkeys(error_lines)) if error_lines else (stderr or stdout).strip()
+  return normalize_result(reviewer, error=f"{label} exited {code}: {detail[-1200:]}")
+
+
+async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
+  # Confinement: no tools, no settings from any source (so no user/project/local
+  # hooks, plugins, or CLAUDE.md memory), no MCP servers, no skills. Login still
+  # resolves from the CLI's own config dir. Verified by
+  # scripts/test_option_a_review.py (sentinel + hostile-config tests).
+  args = [
+    CLAUDE_BIN, "-p",
+    "--output-format", "json",
+    "--no-session-persistence",
+    "--tools", "",
+    "--setting-sources", "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--model", reviewer.model,
+  ]
+  if reviewer.output_schema is not None:
+    args.extend(["--json-schema", json.dumps(reviewer.output_schema)])
+  try:
+    with tempfile.TemporaryDirectory() as workdir:
+      code, stdout, stderr = await run_cli(args, prompt, workdir)
+    if code != 0:
+      return _cli_failure(reviewer, "claude -p", code, stdout, stderr)
+    # --output-format json envelope: structured_output holds the schema-validated
+    # object; result holds the plain text; is_error flags a failed run.
+    envelope = json.loads(stdout)
+    if envelope.get("is_error"):
+      detail = str(envelope.get("result", "claude -p reported an error"))[:1200]
+      return normalize_result(reviewer, error=detail)
+    structured = envelope.get("structured_output")
+    if isinstance(structured, dict):
+      return normalize_result(reviewer, raw_text=json.dumps(structured))
+    return normalize_result(reviewer, raw_text=envelope.get("result"))
   except Exception as exc:
     return normalize_result(reviewer, error=str(exc))
 
 
-async def call_reviewer(
-  anthropic_client: AsyncAnthropic,
-  openai_client: AsyncOpenAI | None,
-  reviewer: Reviewer,
-  prompt: str,
-) -> dict[str, Any]:
-  if reviewer.provider == "anthropic":
-    return await call_anthropic(anthropic_client, reviewer, prompt)
-  elif reviewer.provider == "openai":
-    if openai_client is None:
-      return normalize_result(
-        reviewer, error="No OpenAI API key in the environment; this reviewer did not run."
-      )
-    return await call_openai(openai_client, reviewer, prompt)
+async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
+  try:
+    with tempfile.TemporaryDirectory() as workdir:
+      last_message = Path(workdir) / "last-message.json"
+      # Confinement: the reviewer must have no route from the prompt (an untrusted
+      # diff) to the host, and no user-global instructions in its context.
+      # --ignore-user-config drops the user's MCP servers and sandbox settings;
+      # disabling shell_tool and unified_exec removes the shell, which a read-only
+      # sandbox alone does not (it can still read any file); the sandbox-exec
+      # prefix hides AGENTS.md, hooks, memories, skills, plugins, and automations.
+      # Verified by scripts/test_option_a_review.py.
+      args = [
+        *codex_confinement_prefix(),
+        CODEX_BIN, "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--sandbox", "read-only",
+        "--disable", "shell_tool",
+        "--disable", "unified_exec",
+        "--color", "never",
+        "--cd", workdir,
+        "--output-last-message", str(last_message),
+      ]
+      if reviewer.model:
+        args.extend(["--model", reviewer.model])
+      if reviewer.output_schema is not None:
+        schema_path = Path(workdir) / "schema.json"
+        schema_path.write_text(json.dumps(reviewer.output_schema), encoding="utf-8")
+        args.extend(["--output-schema", str(schema_path)])
+      args.append("-")  # prompt on stdin
+      code, stdout, stderr = await run_cli(args, prompt, workdir)
+      if code != 0:
+        return _cli_failure(reviewer, "codex exec", code, stdout, stderr)
+      if not last_message.exists():
+        return normalize_result(reviewer, error="codex exec finished without a final message")
+      # --output-last-message holds the final answer, constrained by --output-schema.
+      return normalize_result(reviewer, raw_text=last_message.read_text(encoding="utf-8"))
+  except Exception as exc:
+    return normalize_result(reviewer, error=str(exc))
+
+
+async def call_reviewer(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
+  prompt = neutralize_mentions(prompt)
+  if reviewer.provider == "claude-code":
+    return await call_claude_code(reviewer, prompt)
+  elif reviewer.provider == "codex-cli":
+    return await call_codex(reviewer, prompt)
   else:
     raise ValueError(f"Unsupported provider: {reviewer.provider}")
 
@@ -526,8 +691,6 @@ async def call_reviewer(
 # ──────────────────────────────────────────────
 
 async def run_parallel(
-  anthropic_client: AsyncAnthropic,
-  openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   diff_text: str,
 ) -> list[dict[str, Any]]:
@@ -538,7 +701,7 @@ async def run_parallel(
       focus=reviewer.focus,
       diff_text=diff_text,
     )
-    coroutines.append(call_reviewer(anthropic_client, openai_client, reviewer, prompt))
+    coroutines.append(call_reviewer(reviewer, prompt))
 
   if hasattr(asyncio, "TaskGroup"):
     tasks: list[asyncio.Task[dict[str, Any]]] = []
@@ -555,8 +718,6 @@ async def run_parallel(
 # ──────────────────────────────────────────────
 
 async def run_sequential(
-  anthropic_client: AsyncAnthropic,
-  openai_client: AsyncOpenAI | None,
   reviewers: list[Reviewer],
   synthesis_reviewer: Reviewer,
   diff_text: str,
@@ -573,7 +734,7 @@ async def run_sequential(
       chain_position=position,
       diff_text=diff_text,
     )
-    result = await call_reviewer(anthropic_client, openai_client, reviewer, prompt)
+    result = await call_reviewer(reviewer, prompt)
     result["chain_position"] = position
     result["track"] = "sequential"
     results.append(result)
@@ -586,9 +747,7 @@ async def run_sequential(
     prior_findings=prior_findings_text,
     diff_text=diff_text,
   )
-  synthesis_result = await call_reviewer(
-    anthropic_client, openai_client, synthesis_reviewer, synthesis_prompt
-  )
+  synthesis_result = await call_reviewer(synthesis_reviewer, synthesis_prompt)
   synthesis_result["track"] = "sequential"
   synthesis_result["chain_position"] = len(reviewers) + 1
   results.append(synthesis_result)
@@ -693,46 +852,40 @@ async def main() -> None:
   path_triggers = args.path_triggers.split(",") if args.path_triggers else None
   content_triggers = args.content_triggers.split(",") if args.content_triggers else None
 
-  anthropic_client = AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-  # openai>=3 raises at construction without credentials, which would abort the
-  # whole run; build the client only when a key exists and let call_reviewer
-  # report the OpenAI-backed reviewers as unavailable otherwise.
-  openai_key = os.environ.get("OPENAI_API_KEY")
-  openai_client = AsyncOpenAI(api_key=openai_key) if openai_key else None
-  if openai_client is None:
-    print("No OpenAI API key in the environment: OpenAI-backed reviewers will be reported as unavailable.")
-
-  async with contextlib.AsyncExitStack() as stack:
-    await stack.enter_async_context(anthropic_client)
-    if openai_client is not None:
-      await stack.enter_async_context(openai_client)
-    # Parallel track always runs
-    parallel_results = await run_parallel(
-      anthropic_client, openai_client, build_parallel_reviewers(), diff_text
+  # A missing CLI degrades its reviewers to "Reviewer request failed" findings
+  # (create_subprocess_exec raises inside call_*); abort only when neither CLI
+  # exists, since then no reviewer could run at all.
+  missing = [name for name in (CLAUDE_BIN, CODEX_BIN) if shutil.which(name) is None]
+  if len(missing) == 2:
+    raise SystemExit(
+      f"No agent CLI found ({', '.join(missing)}). Install and log in, or set CLAUDE_BIN / CODEX_BIN."
     )
+  for name in missing:
+    print(f"Agent CLI not found: {name}. Its reviewers will be reported as failed.", file=sys.stderr)
 
-    sequential_results = None
-    classification = None
+  # Parallel track always runs
+  parallel_results = await run_parallel(build_parallel_reviewers(), diff_text)
 
-    if args.mode == "hybrid":
-      changed_files = extract_changed_files(diff_text)
-      classification = classify_diff(changed_files, diff_text, path_triggers, content_triggers)
+  sequential_results = None
+  classification = None
 
-      if classification.needs_sequential:
-        print(
-          f"Sequential chain triggered: "
-          f"{len(classification.triggered_paths)} path matches, "
-          f"{len(classification.triggered_patterns)} content matches"
-        )
-        sequential_results = await run_sequential(
-          anthropic_client,
-          openai_client,
-          build_sequential_reviewers(),
-          build_synthesis_reviewer(),
-          diff_text,
-        )
-      else:
-        print("Hybrid mode: no sequential triggers matched. Parallel-only report.")
+  if args.mode == "hybrid":
+    changed_files = extract_changed_files(diff_text)
+    classification = classify_diff(changed_files, diff_text, path_triggers, content_triggers)
+
+    if classification.needs_sequential:
+      print(
+        f"Sequential chain triggered: "
+        f"{len(classification.triggered_paths)} path matches, "
+        f"{len(classification.triggered_patterns)} content matches"
+      )
+      sequential_results = await run_sequential(
+        build_sequential_reviewers(),
+        build_synthesis_reviewer(),
+        diff_text,
+      )
+    else:
+      print("Hybrid mode: no sequential triggers matched. Parallel-only report.")
 
   output_path = Path(args.output)
   report = render_markdown(parallel_results, sequential_results, classification)

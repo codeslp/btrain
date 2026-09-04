@@ -1,9 +1,0 @@
-# Dependencies for scripts/option_a_review.py (btrain parallel/hybrid review).
-# btrain invokes the script with the `python3` on PATH; install into that
-# interpreter or a venv it resolves to:
-#   uv pip install -r scripts/requirements-review.txt
-# Both SDKs are on a new major line (anthropic 1.x, openai 3.x). The script
-# passes no httpx objects and no removed parameters, so it needs nothing below
-# these floors; the caps guard against the next major.
-anthropic>=1.3,<2
-openai>=3.7,<4
