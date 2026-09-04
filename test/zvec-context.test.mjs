@@ -55,6 +55,15 @@ printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 }
 
 describe("optional zvec-grep context helper", () => {
+  it("returns success for an explicit help request", async () => {
+    const result = await runHelper(["--help"], {
+      env: { ...process.env, PATH: "/usr/bin:/bin" },
+    })
+
+    assert.equal(result.code, 0, result.stderr)
+    assert.match(result.stderr, /^Usage: zvec-context\.sh/m)
+  })
+
   it("soft-skips when the zg CLI is unavailable", async () => {
     const tmpDir = await makeTmpDir()
     try {

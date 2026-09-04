@@ -10,6 +10,7 @@ set -uo pipefail
 DEFAULT_LIMIT=5
 
 usage() {
+  local exit_code="${1:-64}"
   cat <<'EOF' >&2
 Usage: zvec-context.sh search <query> [options]
        zvec-context.sh status [--root <path>]
@@ -23,7 +24,7 @@ Search options:
 The helper performs at most one semantic query. Use native rg for exact or
 exhaustive lookup. Create indexes explicitly with zg; this helper never does it.
 EOF
-  exit 64
+  exit "$exit_code"
 }
 
 die_usage() {
@@ -177,7 +178,7 @@ case "$subcommand" in
     ;;
 
   -h|--help|help)
-    usage
+    usage 0
     ;;
 
   *)
