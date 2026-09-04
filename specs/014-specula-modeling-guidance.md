@@ -64,8 +64,9 @@
 ## BYOM Audit Result
 
 The isolated run `btrain-lanelock-byom-medium-20260903-r3` completed on
-2026-09-04 against source commit `69b96b1`. It used GPT-5.6 Sol at medium effort,
-one target, `--keep-original`, a 1024 MiB TLC limit, and two TLC workers.
+2026-09-04 against source commit `69b96b1` and Specula commit
+`b40b296142e4c1136bba16af38c3134a31ee8e9c`. It used GPT-5.6 Sol at medium
+effort, one target, `--keep-original`, a 1024 MiB TLC limit, and two TLC workers.
 
 - Specula reused the supplied TLA+ model, configuration, JavaScript model,
   formal harness, pin tool, and advisory tool without changes.
@@ -80,11 +81,33 @@ one target, `--keep-original`, a 1024 MiB TLC limit, and two TLC workers.
 - The run did not change the source checkout. Its final modification report
   states that all supplied assets remained byte-identical to their inputs.
 
+The run retains its evidence under
+`$SPECULA_ROOT/runs/btrain-lanelock-byom-medium-20260903-r3/`. The
+`pipeline-summary.md`, `confirmed-bugs.md`, and `byom-modification-report.md`
+SHA-256 values are `5989357d8f0edf8f22e02f074eb6f9ef0fa55ac2720dbf308318fce7b856cdb7`,
+`987394bb837c4d69c794b80a2c4df2206adefd5cca318a7c912a29731c949256`, and
+`44c5ad9ff789bd5cf1f1531c539f47bde5288b716547d7ea74f8a8f723d2903c`.
+Run these minimal public-operation reproductions from the btrain source copy
+inside that run:
+
+```sh
+rtk node ../.specula-output/repro/test_bugCR-4_same_lane_rework.mjs
+rtk node ../.specula-output/repro/test_bugCR-5_one_cycle_repair_escalation.mjs
+```
+
+Both commands exit zero when they reproduce the defect. The first reports that
+a reviewer changed local and PR rework states. The second reports that a
+non-repair-owner cleared repair and caused attempt 2 to escalate. The script
+SHA-256 values are `8309f3577b2625b5e78afe89d739ef62b78870ae50e393d24a10c0f4a5b98d79`
+and `ffb9bd1c157c67fa011da6042ed7ab24082bfcf6f68f479a6f181f683c1d296f`,
+respectively.
+
 Adopt BYOM for explicit and scheduled audits of the LaneLock surface. Do not use
 generated wrappers or harness files as authoritative btrain artifacts until an
 independent review accepts them. Keep the existing deterministic pin, TLC, and
-formal-harness gates as the required checks. Fix `CR-4` and `CR-5` in separate
-test-first implementation work before considering a blocking Specula gate.
+formal-harness checks as required advisory evidence. No formal verdict blocks a
+merge until the Phase 3 activation conditions in spec 014 are met. Fix `CR-4`
+and `CR-5` in separate test-first work before enabling a blocking Specula gate.
 
 ## Suggested Starting Points
 
