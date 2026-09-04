@@ -169,6 +169,7 @@ const BUNDLED_SKILLS_DIR = path.join(PACKAGE_ROOT, ".claude", "skills")
 const BUNDLED_AGENT_SKILLS_DIR = path.join(PACKAGE_ROOT, ".agents", "skills")
 const BUNDLED_AGENTCHATTR_DIR = path.join(PACKAGE_ROOT, "agentchattr")
 const UNBLOCKED_CONTEXT_HELPER_LABEL = "unblocked-context-helper"
+const ZVEC_CONTEXT_HELPER_LABEL = "zvec-context-helper"
 const BUNDLED_DEV_TOOLS = [
   {
     label: "dashboard",
@@ -194,6 +195,11 @@ const BUNDLED_DEV_TOOLS = [
     label: UNBLOCKED_CONTEXT_HELPER_LABEL,
     sourcePath: path.join(PACKAGE_ROOT, ".claude", "scripts", "unblocked-context.sh"),
     targetParts: [".claude", "scripts", "unblocked-context.sh"],
+  },
+  {
+    label: ZVEC_CONTEXT_HELPER_LABEL,
+    sourcePath: path.join(PACKAGE_ROOT, ".claude", "scripts", "zvec-context.sh"),
+    targetParts: [".claude", "scripts", "zvec-context.sh"],
   },
   {
     label: "agentchattr",
@@ -405,6 +411,9 @@ const DEV_TOOL_GITIGNORE_ENTRIES = [
   "agentchattr/data/",
   "agentchattr/.venv/",
   "agentchattr/uploads/",
+  "",
+  "# optional zvec-grep workspace index",
+  ".zvec-grep/",
 ]
 
 function buildBtrainGitignoreEntries({ includeDevToolIgnores = true } = {}) {
@@ -9343,20 +9352,30 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
     // A single-skill --force must not clobber a locally customized helper
     // unless the selected skill itself uses it; dependency-only syncs and
     // unrelated skills get install-if-missing, full syncs keep overwrite.
-    const helperOverwrite = overwrite
+    const unblockedHelperOverwrite = overwrite
       && (!skillName
         || (await bundledSkillReferences(skillName, "unblocked-context.sh")))
-    const supportTools = await syncBundledDevTools(absoluteRepoRoot, {
-      overwrite: helperOverwrite,
-      labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
-    })
+    const zvecHelperOverwrite = overwrite
+      && (!skillName
+        || (await bundledSkillReferences(skillName, "zvec-context.sh")))
+    const supportToolResults = await Promise.all([
+      syncBundledDevTools(absoluteRepoRoot, {
+        overwrite: unblockedHelperOverwrite,
+        labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
+      }),
+      syncBundledDevTools(absoluteRepoRoot, {
+        overwrite: zvecHelperOverwrite,
+        labels: new Set([ZVEC_CONTEXT_HELPER_LABEL]),
+      }),
+    ])
+    const copiedTools = supportToolResults.flatMap((result) => result.copiedTools)
 
     results.push({
       name: repo.name,
       path: absoluteRepoRoot,
       copiedSkills,
-      copiedTools: supportTools.copiedTools,
-      status: copiedSkills.length > 0 || supportTools.copiedTools.length > 0 ? "updated" : "unchanged",
+      copiedTools,
+      status: copiedSkills.length > 0 || copiedTools.length > 0 ? "updated" : "unchanged",
     })
   }
 
