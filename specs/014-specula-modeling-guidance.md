@@ -61,6 +61,31 @@
 - The bundled formal skills currently cite nonexistent spec 002 sections and the
   pin workflow no-ops because no formal artifacts exist.
 
+## BYOM Audit Result
+
+The isolated run `btrain-lanelock-byom-medium-20260903-r3` completed on
+2026-09-04 against source commit `69b96b1`. It used GPT-5.6 Sol at medium effort,
+one target, `--keep-original`, a 1024 MiB TLC limit, and two TLC workers.
+
+- Specula reused the supplied TLA+ model, configuration, JavaScript model,
+  formal harness, pin tool, and advisory tool without changes.
+- Five generated traces passed replay validation. The exhaustive model check
+  and five focused breadth-first and simulation hunts found no model violation.
+- Confirmation dismissed four known or repaired candidates. It reproduced two
+  new high-severity authority defects through normal exported operations.
+- `CR-4` shows that legacy transition rows can let a reviewer perform owner-only
+  local and PR rework. The local path can also replace the assigned reviewer.
+- `CR-5` shows that an unrelated configured actor can clear a repair assignment,
+  become the next repair owner, and cause premature human escalation.
+- The run did not change the source checkout. Its final modification report
+  states that all supplied assets remained byte-identical to their inputs.
+
+Adopt BYOM for explicit and scheduled audits of the LaneLock surface. Do not use
+generated wrappers or harness files as authoritative btrain artifacts until an
+independent review accepts them. Keep the existing deterministic pin, TLC, and
+formal-harness gates as the required checks. Fix `CR-4` and `CR-5` in separate
+test-first implementation work before considering a blocking Specula gate.
+
 ## Suggested Starting Points
 
 - `src/brain_train/core.mjs:claimHandoff`: lane claim and lock acquisition.
