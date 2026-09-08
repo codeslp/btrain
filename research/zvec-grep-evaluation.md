@@ -56,7 +56,7 @@ The `rg` baseline in the table used short, hand-authored regular expressions and
 
 Across these five questions, zvec-grep produced two strong results, two orientation-only results, and one miss. It consistently favored explanatory prose over production code. That behavior helps when an agent must understand intent, but it can mislead an agent that asks where behavior is implemented.
 
-The five direct-mode semantic queries, run with `--refresh off` as in the reproduction command, took 0.85 to 0.94 seconds each, with a mean of about 0.89 seconds. The scoped `rg` searches took 0.00 to 0.01 seconds each. The semantic latency is acceptable for a focused probe, but it is too expensive and unnecessary for known identifiers.
+The five direct-mode semantic queries, run with `--refresh off` as in the reproduction command, took 0.85 to 0.94 seconds each, with a mean of about 0.89 seconds. The scoped `rg` searches took 0.00 to 0.01 seconds each on the trial machine. The semantic latency is acceptable for a focused probe, but it is too expensive and unnecessary for known identifiers.
 
 ## Exact-search control
 
