@@ -60,10 +60,18 @@ CLI_TIMEOUT_SECONDS = float(os.environ.get("REVIEW_CLI_TIMEOUT", "600"))
 # The only parent-environment variables handed to a reviewer CLI. Everything
 # else (provider keys, session tokens, CLAUDECODE, tool credentials) is dropped,
 # so an injected diff cannot read them back. Both CLIs authenticate from their
-# own config under HOME (or CODEX_HOME / CLAUDE_CONFIG_DIR when set).
+# own config under HOME (or CODEX_HOME / CLAUDE_CONFIG_DIR when set). The
+# network group carries the proxy and CA settings the CLIs need to reach their
+# providers behind an enterprise proxy or private certificate authority; they
+# hold no provider credentials, and without them both reviewers fail TLS setup
+# on hosts where the same CLI works interactively.
 CLI_ENV_ALLOWLIST = (
   "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TERM",
   "LANG", "LC_ALL", "LC_CTYPE", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+  # network configuration (claude is Node; codex is Rust/reqwest)
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 )
 
 

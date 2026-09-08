@@ -31,6 +31,12 @@ def write_fake_cli(directory: Path, name: str, body: str) -> Path:
   return path
 
 
+def write_passthrough_sandbox_exec(directory: Path) -> Path:
+  """Stand-in for /usr/bin/sandbox-exec on hosts without it: drops `-p <profile>`
+  and execs the wrapped command, so the fake codex binary still runs."""
+  return write_fake_cli(directory, "sandbox-exec", 'shift 2\nexec "$@"\n')
+
+
 class EnvironmentAllowlistTest(unittest.TestCase):
   def setUp(self) -> None:
     os.environ[SENTINEL_ENV] = SENTINEL_VALUE
@@ -44,6 +50,19 @@ class EnvironmentAllowlistTest(unittest.TestCase):
     self.assertNotIn("CLAUDECODE", env)
     self.assertIn("PATH", env)
     self.assertTrue(set(env) <= set(review.CLI_ENV_ALLOWLIST))
+
+  def test_reviewer_env_keeps_network_configuration(self) -> None:
+    network = {
+      "HTTPS_PROXY": "http://proxy.corp.example:3128", "NO_PROXY": "localhost,.corp.example",
+      "SSL_CERT_FILE": "/etc/ssl/corp-ca.pem", "NODE_EXTRA_CA_CERTS": "/etc/ssl/corp-ca.pem",
+    }
+    for key, value in network.items():
+      os.environ[key] = value
+      self.addCleanup(os.environ.pop, key, None)
+    env = review.reviewer_env()
+    for key, value in network.items():
+      self.assertEqual(env.get(key), value, key)
+    self.assertNotIn(SENTINEL_ENV, env)
 
   def test_claude_subprocess_cannot_see_parent_secrets(self) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -70,12 +89,13 @@ class EnvironmentAllowlistTest(unittest.TestCase):
         'while [ $# -gt 0 ]; do if [ "$1" = "--output-last-message" ]; then out="$2"; fi; shift; done\n'
         'printf \'{"reviewer": "S", "focus": "f", "summary": "%s", "findings": []}\' "$(env | tr \'\\n\' \' \')" > "$out"\n'
       ))
-      original = review.CODEX_BIN
+      original_bin, original_sb = review.CODEX_BIN, review.SANDBOX_EXEC
       review.CODEX_BIN = str(fake)
+      review.SANDBOX_EXEC = str(write_passthrough_sandbox_exec(Path(tmp)))
       try:
         result = asyncio.run(review.call_codex(review.build_parallel_reviewers()[1], "prompt"))
       finally:
-        review.CODEX_BIN = original
+        review.CODEX_BIN, review.SANDBOX_EXEC = original_bin, original_sb
     self.assertNotIn(SENTINEL_VALUE, json.dumps(result))
     self.assertIn("PATH=", result["summary"])
 
@@ -247,12 +267,13 @@ class CodexInvocationTest(unittest.TestCase):
       )
       return 0, "", ""
 
-    original = review.run_cli
+    original_run, original_sb = review.run_cli, review.SANDBOX_EXEC
     review.run_cli = fake_run
+    review.SANDBOX_EXEC = "/bin/echo"   # exists on every host; stands in for sandbox-exec
     try:
       asyncio.run(review.call_codex(review.build_parallel_reviewers()[1], "prompt"))
     finally:
-      review.run_cli = original
+      review.run_cli, review.SANDBOX_EXEC = original_run, original_sb
     args = captured["args"]
     self.assertIn("--ignore-user-config", args)
     self.assertEqual(args.count("--disable"), 2)
