@@ -424,6 +424,15 @@ describe("btrain init", () => {
       "Unblocked context helper should exist",
     )
     await assert.doesNotReject(
+      fs.access(path.join(tmpDir, ".claude", "scripts", "zvec-context.sh")),
+      "optional zvec-grep context helper should exist",
+    )
+    assert.notEqual(
+      (await fs.stat(path.join(tmpDir, ".claude", "scripts", "zvec-context.sh"))).mode & 0o111,
+      0,
+      "optional zvec-grep context helper should be executable",
+    )
+    await assert.doesNotReject(
       fs.access(path.join(tmpDir, "agentchattr", "run.py")),
       "agentchattr runner should exist",
     )
@@ -438,6 +447,54 @@ describe("btrain init", () => {
     assert.ok(gitignore.includes("agentchattr/data/"), gitignore)
     assert.ok(gitignore.includes("agentchattr/.venv/"), gitignore)
     assert.ok(gitignore.includes("agentchattr/uploads/"), gitignore)
+    assert.ok(gitignore.includes(".zvec-grep/"), gitignore)
+    assert.ok(!gitignore.startsWith("\n"), "a fresh .gitignore must not start with blank lines")
+  })
+
+  it("appends only the missing .gitignore entries when the managed list grows", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      // A repo initialized before .zvec-grep/ joined the managed list.
+      const legacy = [
+        "node_modules/",
+        "",
+        "# btrain operational state (not source code — do not track)",
+        ".btrain/*",
+        "!.btrain/project.toml",
+        ".claude/collab/",
+        "",
+        "# agentchattr runtime data (chat logs, uploads, tokens — not source)",
+        "agentchattr/data/",
+        "agentchattr/.venv/",
+        "agentchattr/uploads/",
+        "",
+      ].join("\n")
+      await fs.writeFile(path.join(localTmpDir, ".gitignore"), legacy, "utf8")
+
+      const { code, stderr } = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(code, 0, stderr)
+
+      const gitignore = await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8")
+      const count = (needle) => gitignore.split("\n").filter((line) => line === needle).length
+      for (const line of [".btrain/*", "!.btrain/project.toml", ".claude/collab/", "agentchattr/data/",
+                          "agentchattr/.venv/", "agentchattr/uploads/", ".zvec-grep/",
+                          "# optional zvec-grep workspace index"]) {
+        assert.equal(count(line), 1, `${line} should appear exactly once:\n${gitignore}`)
+      }
+      assert.equal(count("# agentchattr runtime data (chat logs, uploads, tokens — not source)"), 1, gitignore)
+      assert.ok(gitignore.startsWith("node_modules/"), "existing content must be preserved")
+
+      // Running init again must be a no-op for .gitignore.
+      await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8"), gitignore)
+    } finally {
+      await rmDir(localTmpDir)
+    }
   })
 
   it("AGENTS.md contains the managed block with CLI-first rule", async () => {
@@ -490,6 +547,10 @@ describe("btrain init", () => {
         "Unblocked context helper should be skipped in core-only mode",
       )
       await assert.rejects(
+        fs.access(path.join(localTmpDir, ".claude", "scripts", "zvec-context.sh")),
+        "zvec-grep context helper should be skipped in core-only mode",
+      )
+      await assert.rejects(
         fs.access(path.join(localTmpDir, "scripts", "serve-dashboard.js")),
         "dashboard scaffold should be skipped in core-only mode",
       )
@@ -501,6 +562,7 @@ describe("btrain init", () => {
       assert.ok(!gitignore.includes("agentchattr/data/"), gitignore)
       assert.ok(!gitignore.includes("agentchattr/.venv/"), gitignore)
       assert.ok(!gitignore.includes("agentchattr/uploads/"), gitignore)
+      assert.ok(!gitignore.includes(".zvec-grep/"), gitignore)
     } finally {
       await rmDir(localTmpDir)
     }
@@ -551,11 +613,13 @@ describe("btrain init", () => {
       const restoredDashboardPath = path.join(localTmpDir, "scripts", "serve-dashboard.js")
       const restoredAgentAssetPath = path.join(localTmpDir, "agentchattr", "open_chat.html")
       const restoredUnblockedHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      const restoredZvecHelperPath = path.join(localTmpDir, ".claude", "scripts", "zvec-context.sh")
 
       await fs.writeFile(preservedConfigPath, "custom agentchattr config\n", "utf8")
       await fs.rm(restoredDashboardPath)
       await fs.rm(restoredAgentAssetPath)
       await fs.rm(restoredUnblockedHelperPath)
+      await fs.rm(restoredZvecHelperPath)
 
       result = await runBtrain(["init", localTmpDir], localTmpDir)
       assert.equal(result.code, 0, result.stderr)
@@ -567,14 +631,19 @@ describe("btrain init", () => {
         fs.access(restoredUnblockedHelperPath),
         "missing Unblocked helper should be restored",
       )
+      await assert.doesNotReject(
+        fs.access(restoredZvecHelperPath),
+        "missing zvec-grep helper should be restored",
+      )
     } finally {
       await rmDir(localTmpDir)
     }
   })
 
-  it("forced context-scout sync refreshes the skill and its Unblocked helper dependency", async () => {
+  it("forced context-scout sync refreshes the skill and both context helper dependencies", async () => {
     const localTmpDir = await makeTmpDir()
     const sourceHelperPath = path.resolve(".claude/scripts/unblocked-context.sh")
+    const sourceZvecHelperPath = path.resolve(".claude/scripts/zvec-context.sh")
     const sourceClaudeSkillPath = path.resolve(".claude/skills/context-scout/SKILL.md")
     const sourceAgentSkillPath = path.resolve(".agents/skills/context-scout/SKILL.md")
 
@@ -584,9 +653,11 @@ describe("btrain init", () => {
       assert.equal(result.code, 0, result.stderr)
 
       const targetHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      const targetZvecHelperPath = path.join(localTmpDir, ".claude", "scripts", "zvec-context.sh")
       const targetClaudeSkillPath = path.join(localTmpDir, ".claude", "skills", "context-scout", "SKILL.md")
       const targetAgentSkillPath = path.join(localTmpDir, ".agents", "skills", "context-scout", "SKILL.md")
       await fs.writeFile(targetHelperPath, "stale helper\n", "utf8")
+      await fs.writeFile(targetZvecHelperPath, "stale zvec helper\n", "utf8")
       await fs.writeFile(targetClaudeSkillPath, "stale Claude skill\n", "utf8")
       await fs.writeFile(targetAgentSkillPath, "stale Codex skill\n", "utf8")
 
@@ -599,8 +670,13 @@ describe("btrain init", () => {
         "--force",
       ], localTmpDir)
       assert.equal(result.code, 0, result.stderr)
-      assert.match(result.stdout, /tools: unblocked-context-helper/)
+      assert.match(result.stdout, /unblocked-context-helper/)
+      assert.match(result.stdout, /zvec-context-helper/)
       assert.equal(await fs.readFile(targetHelperPath, "utf8"), await fs.readFile(sourceHelperPath, "utf8"))
+      assert.equal(
+        await fs.readFile(targetZvecHelperPath, "utf8"),
+        await fs.readFile(sourceZvecHelperPath, "utf8"),
+      )
       assert.equal(
         await fs.readFile(targetClaudeSkillPath, "utf8"),
         await fs.readFile(sourceClaudeSkillPath, "utf8"),
@@ -731,7 +807,9 @@ describe("btrain init", () => {
       assert.equal(result.code, 0, result.stderr)
 
       const targetHelperPath = path.join(localTmpDir, ".claude", "scripts", "unblocked-context.sh")
+      const targetZvecHelperPath = path.join(localTmpDir, ".claude", "scripts", "zvec-context.sh")
       await fs.writeFile(targetHelperPath, "# locally customized helper\n", "utf8")
+      await fs.writeFile(targetZvecHelperPath, "# locally customized zvec helper\n", "utf8")
 
       result = await runBtrain([
         "sync-skills",
@@ -746,6 +824,11 @@ describe("btrain init", () => {
         await fs.readFile(targetHelperPath, "utf8"),
         "# locally customized helper\n",
         "bug-fix does not depend on the helper, so --force must not replace it",
+      )
+      assert.equal(
+        await fs.readFile(targetZvecHelperPath, "utf8"),
+        "# locally customized zvec helper\n",
+        "bug-fix does not depend on the zvec helper, so --force must not replace it",
       )
     } finally {
       await rmDir(localTmpDir)

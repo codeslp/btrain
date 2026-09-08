@@ -22,6 +22,9 @@ agentchattr/.venv/
 agentchattr/uploads/
 data/
 
+# optional zvec-grep workspace index
+.zvec-grep/
+
 # Python bytecode caches (scripts/tla_pin.py and friends)
 __pycache__/
 *.pyc
