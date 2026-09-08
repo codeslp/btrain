@@ -477,7 +477,7 @@ npm install -g @zvec/zvec-grep
 zg index --embedding local/potion-code-16m-v2 --hidden -g '!.agents/skills/**'
 ```
 
-`btrain init` adds `.zvec-grep/` to `.gitignore` and scaffolds a read-only helper. The helper soft-skips when `zg` or a ready index is unavailable.
+`btrain init` adds `.zvec-grep/` to `.gitignore` and scaffolds a read-only helper. The helper soft-skips (exit 0) when `zg` or a ready index is unavailable, or when one `zg` call exceeds `ZVEC_CONTEXT_TIMEOUT` seconds (default 120), so a stale index under `--freshness strict` cannot block a task.
 
 ```bash
 .claude/scripts/zvec-context.sh status --root "$PWD"

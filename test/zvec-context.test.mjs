@@ -37,6 +37,9 @@ set -u
 printf 'CALL\\n' >> "$ZVEC_TEST_LOG"
 printf '%s\\n' "$@" >> "$ZVEC_TEST_LOG"
 if [ "\${1:-}" = "status" ]; then
+  if [ -n "\${ZVEC_TEST_STATUS_SLEEP:-}" ]; then
+    exec sleep "$ZVEC_TEST_STATUS_SLEEP"
+  fi
   if [ "\${ZVEC_TEST_STATUS_RC:-0}" -ne 0 ]; then
     printf 'index unavailable\\n' >&2
     exit "$ZVEC_TEST_STATUS_RC"
@@ -49,7 +52,12 @@ if [ "\${ZVEC_TEST_QUERY_RC:-0}" -ne 0 ]; then
   exit "$ZVEC_TEST_QUERY_RC"
 fi
 if [ -n "\${ZVEC_TEST_QUERY_SLEEP:-}" ]; then
-  exec sleep "$ZVEC_TEST_QUERY_SLEEP"
+  # A background child keeps the inherited stdout open past the parent's death,
+  # the shape that defeats a pipe-based capture.
+  sleep "$ZVEC_TEST_QUERY_SLEEP" &
+  sleep "$ZVEC_TEST_QUERY_SLEEP"
+  wait
+  exit 0
 fi
 printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 `, "utf8")
@@ -335,7 +343,81 @@ describe("optional zvec-grep context helper", () => {
       assert.equal(result.code, 0, result.stderr)
       assert.match(result.stdout, /^zvec-context: skipped/m)
       assert.match(result.stdout, /did not finish within 1s/)
-      assert.ok(Date.now() - started < 10_000, "the bound must cut the call short")
+      assert.ok(Date.now() - started < 10_000, "the bound must hold even when a zg descendant keeps stdout open")
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("bounds the readiness probe too and validates the timeout for status", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      const env = { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath }
+      const started = Date.now()
+      const slowStatus = await runHelper(["status", "--root", tmpDir], {
+        cwd: tmpDir, env: { ...env, ZVEC_TEST_STATUS_SLEEP: "20", ZVEC_CONTEXT_TIMEOUT: "1" },
+      })
+      assert.equal(slowStatus.code, 0, slowStatus.stderr)
+      assert.match(slowStatus.stdout, /^zvec-context: skipped/m)
+      assert.match(slowStatus.stdout, /zg status did not finish within 1s/)
+
+      const slowProbe = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, env: { ...env, ZVEC_TEST_STATUS_SLEEP: "20", ZVEC_CONTEXT_TIMEOUT: "1" },
+      })
+      assert.equal(slowProbe.code, 0, slowProbe.stderr)
+      assert.match(slowProbe.stdout, /zg status did not finish within 1s/)
+      assert.doesNotMatch(await fs.readFile(logPath, "utf8"), /query/)
+      assert.ok(Date.now() - started < 15_000, "both probes must be cut short")
+
+      for (const args of [["status", "--root", tmpDir], ["search", "query", "--root", tmpDir]]) {
+        const bad = await runHelper(args, { cwd: tmpDir, env: { ...env, ZVEC_CONTEXT_TIMEOUT: "abc" } })
+        assert.equal(bad.code, 64, `${args[0]}: ${bad.stdout}`)
+        assert.match(bad.stderr, /ZVEC_CONTEXT_TIMEOUT must be an integer/)
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("does not mistake a real exit 143 from zg for a timeout", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      const result = await runHelper(["search", "failing query", "--root", tmpDir], {
+        cwd: tmpDir,
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath, ZVEC_TEST_QUERY_RC: "143" },
+      })
+      assert.equal(result.code, 143)
+      assert.match(result.stderr, /^zvec-context: error/m)
+      assert.match(result.stderr, /query failed safely/)
+      assert.doesNotMatch(result.stdout, /skipped/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("leaves no watchdog sleep behind after a fast call", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      const marker = "7351"
+      const result = await runHelper(["search", "fast query", "--root", tmpDir], {
+        cwd: tmpDir,
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath, ZVEC_CONTEXT_TIMEOUT: marker },
+      })
+      assert.equal(result.code, 0, result.stderr)
+      const ps = await execFileAsync("/bin/ps", ["-axo", "command"])
+      assert.doesNotMatch(ps.stdout, new RegExp(`^sleep ${marker}$`, "m"), "watchdog sleep must be reaped")
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true })
     }

@@ -448,6 +448,7 @@ describe("btrain init", () => {
     assert.ok(gitignore.includes("agentchattr/.venv/"), gitignore)
     assert.ok(gitignore.includes("agentchattr/uploads/"), gitignore)
     assert.ok(gitignore.includes(".zvec-grep/"), gitignore)
+    assert.ok(!gitignore.startsWith("\n"), "a fresh .gitignore must not start with blank lines")
   })
 
   it("appends only the missing .gitignore entries when the managed list grows", async () => {

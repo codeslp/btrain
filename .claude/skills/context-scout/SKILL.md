@@ -39,8 +39,9 @@ research project.
      query when a narrower one can answer the question.
    - Add `--freshness strict` for review, security, migration, and formal-verification work.
      The default `eventual` policy is only for low-risk orientation.
-   - A missing CLI or index is a soft skip. Continue with `rg` and local reads. Never install
-     zvec-grep, create or rebuild an index, start its daemon, or grant remote access for the user.
+   - A missing CLI or index is a soft skip, and so is one `zg` call exceeding `ZVEC_CONTEXT_TIMEOUT`
+     seconds (default 120). Continue with `rg` and local reads. Never install zvec-grep, create or
+     rebuild an index, start its daemon, or grant remote access for the user.
    - Treat ranked passages as discovery leads. Verify decisive claims against exact source.
 3. Write one complete organizational question per unknown. Include task IDs, paths, routes, dates, or
    component names. Do not submit keyword-only searches.

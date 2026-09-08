@@ -25,8 +25,14 @@ Search options:
   --limit <1-20>                   Maximum ranked passages (default: 5)
   --glob <pattern>                 Repeatable indexed path scope
 
+Environment:
+  ZVEC_CONTEXT_TIMEOUT             Wall-clock bound in seconds for each zg call
+                                   (default 120). An expired call is a soft skip.
+
 The helper performs at most one semantic query. Use native rg for exact or
 exhaustive lookup. Create indexes explicitly with zg; this helper never does it.
+Soft skips (exit 0, "zvec-context: skipped"): zg is not installed, no ready
+index, or the time bound expired. Usage errors exit 64.
 EOF
   exit "$exit_code"
 }
@@ -46,17 +52,42 @@ require_value() {
   fi
 }
 
-# Run one command with a wall-clock bound. Returns 143 when the bound expires.
+validate_timeout() {
+  if ! [[ "$ZVEC_CONTEXT_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
+    die_usage "ZVEC_CONTEXT_TIMEOUT must be an integer number of seconds from 1 to 9999"
+  fi
+}
+
+# Run one command with a wall-clock bound. The command's stdout and stderr go to
+# a temp file, not to our stdout: a descendant that keeps an inherited pipe open
+# would otherwise hold a $(...) capture past the bound. Prints the captured
+# output and returns the command's own status, or 124 when the bound expired
+# (a sentinel file, not the exit code, marks the timeout, so a command that
+# really exits 143 is reported as its own failure).
 run_bounded() {
   local secs="$1"
   shift
-  "$@" &
-  local pid=$!
-  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
-  local watchdog=$!
+  local out sentinel pid watchdog rc
+  out=$(mktemp "${TMPDIR:-/tmp}/zvec-context.XXXXXX") || return 1
+  sentinel="$out.timeout"
+  "$@" >"$out" 2>&1 </dev/null &
+  pid=$!
+  (
+    sleep "$secs" &
+    sleeper=$!
+    trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+    wait "$sleeper"
+    : >"$sentinel"
+    kill -TERM "$pid" 2>/dev/null
+  ) >/dev/null 2>&1 </dev/null &
+  watchdog=$!
   wait "$pid"
-  local rc=$?
-  kill "$watchdog" 2>/dev/null
+  rc=$?
+  kill -TERM "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  cat "$out"
+  [ -e "$sentinel" ] && rc=124
+  rm -f "$out" "$sentinel"
   return "$rc"
 }
 
@@ -83,11 +114,12 @@ require_zg() {
 
 require_ready_index() {
   local root="$1"
-  if ! zg status "$root" --mode direct --check-ready >/dev/null 2>&1; then
-    emit_skip "a ready index was not found; create or refresh it explicitly with zg index"
-    return 1
-  fi
-  return 0
+  run_bounded "$ZVEC_CONTEXT_TIMEOUT" zg status "$root" --mode direct --check-ready >/dev/null
+  case $? in
+    0) return 0 ;;
+    124) emit_skip "zg status did not finish within ${ZVEC_CONTEXT_TIMEOUT}s (ZVEC_CONTEXT_TIMEOUT)"; return 1 ;;
+    *) emit_skip "a ready index was not found; create or refresh it explicitly with zg index"; return 1 ;;
+  esac
 }
 
 [ $# -lt 1 ] && usage
@@ -141,9 +173,7 @@ case "$subcommand" in
     if ! [[ "$limit" =~ ^([1-9]|1[0-9]|20)$ ]]; then
       die_usage "--limit must be an integer from 1 to 20"
     fi
-    if ! [[ "$ZVEC_CONTEXT_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
-      die_usage "ZVEC_CONTEXT_TIMEOUT must be an integer number of seconds from 1 to 9999"
-    fi
+    validate_timeout
 
     case "$freshness" in
       eventual) refresh="off" ;;
@@ -169,9 +199,9 @@ case "$subcommand" in
       fi
     done
 
-    output=$(cd "$root" && run_bounded "$ZVEC_CONTEXT_TIMEOUT" zg "${args[@]}" 2>&1)
+    output=$(cd "$root" && run_bounded "$ZVEC_CONTEXT_TIMEOUT" zg "${args[@]}")
     rc=$?
-    if [ "$rc" -eq 143 ]; then
+    if [ "$rc" -eq 124 ]; then
       emit_skip "zg did not finish within ${ZVEC_CONTEXT_TIMEOUT}s (ZVEC_CONTEXT_TIMEOUT); refresh the index explicitly or use --freshness eventual"
       exit 0
     fi
@@ -197,9 +227,16 @@ case "$subcommand" in
         *) die_usage "status: unknown argument: $1" ;;
       esac
     done
+    validate_timeout
     root=$(resolve_root "$root") || exit $?
     require_zg || exit 0
-    if ! output=$(zg status "$root" --mode direct --check-ready 2>&1); then
+    output=$(run_bounded "$ZVEC_CONTEXT_TIMEOUT" zg status "$root" --mode direct --check-ready)
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      emit_skip "zg status did not finish within ${ZVEC_CONTEXT_TIMEOUT}s (ZVEC_CONTEXT_TIMEOUT)"
+      exit 0
+    fi
+    if [ "$rc" -ne 0 ]; then
       emit_skip "a ready index was not found; create or refresh it explicitly with zg index"
       exit 0
     fi

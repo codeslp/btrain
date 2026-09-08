@@ -465,8 +465,10 @@ async function ensureBtrainGitignore(repoRoot, { includeDevToolIgnores = true } 
   }
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
 
-  const block = "\n" + lines.join("\n") + "\n"
-  await writeText(gitignorePath, content.trimEnd() + "\n" + block)
+  // One blank line separates the appended entries from existing content; a
+  // fresh file starts at its first entry with no leading blank lines.
+  const prefix = content.trim() ? content.trimEnd() + "\n\n" : ""
+  await writeText(gitignorePath, prefix + lines.join("\n") + "\n")
 }
 
 async function readText(targetPath) {
