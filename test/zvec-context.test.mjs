@@ -59,6 +59,12 @@ if [ -n "\${ZVEC_TEST_QUERY_SLEEP:-}" ]; then
   wait
   exit 0
 fi
+if [ -n "\${ZVEC_TEST_IGNORE_TERM:-}" ]; then
+  trap '' TERM
+  sleep "$ZVEC_TEST_IGNORE_TERM"
+  printf 'survived\\n'
+  exit 0
+fi
 printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 `, "utf8")
   await fs.chmod(fakePath, 0o755)
@@ -349,6 +355,27 @@ describe("optional zvec-grep context helper", () => {
     }
   })
 
+  it("escalates to KILL when zg ignores TERM", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      const started = Date.now()
+      const result = await runHelper(["search", "stubborn query", "--root", tmpDir], {
+        cwd: tmpDir,
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath, ZVEC_TEST_IGNORE_TERM: "20", ZVEC_CONTEXT_TIMEOUT: "1" },
+      })
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /did not finish within 1s/)
+      assert.doesNotMatch(result.stdout, /survived/)
+      assert.ok(Date.now() - started < 10_000, "KILL must follow TERM within the grace period")
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("bounds the readiness probe too and validates the timeout for status", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
@@ -451,10 +478,11 @@ describe("optional zvec-grep context helper", () => {
       })
       await new Promise((resolve) => setTimeout(resolve, 1000))
       assert.ok((await fs.readdir(scratch)).some((name) => name.startsWith("zvec-context.")), "temp file should exist while zg runs")
-      child.kill("SIGTERM")
-      await new Promise((resolve) => child.on("exit", resolve))
+      child.kill("SIGINT")
+      const code = await new Promise((resolve) => child.on("exit", resolve))
+      assert.equal(code, 130, "SIGINT must exit 128+2")
       await new Promise((resolve) => setTimeout(resolve, 200))
-      assert.deepEqual(await fs.readdir(scratch), [], "temp files must be removed on SIGTERM")
+      assert.deepEqual(await fs.readdir(scratch), [], "temp files must be removed on a signal")
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true })
     }

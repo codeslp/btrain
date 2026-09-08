@@ -34,7 +34,8 @@ Environment:
 The helper performs at most one semantic query. Use native rg for exact or
 exhaustive lookup. Create indexes explicitly with zg; this helper never does it.
 Soft skips (exit 0, "zvec-context: skipped"): zg is not installed, no ready
-index, or the time bound expired. Usage errors exit 64.
+index, the time bound expired, or no temp file could be created under TMPDIR.
+Usage errors exit 64.
 EOF
   exit "$exit_code"
 }
@@ -67,6 +68,7 @@ cleanup_tmp() {
   fi
   return 0
 }
+# $1 is the signal number, so the exit status follows the 128+n convention.
 on_signal() {
   if [ -n "$ZVEC_TMP_PID" ]; then
     kill -TERM "$ZVEC_TMP_PID" 2>/dev/null
@@ -75,7 +77,7 @@ on_signal() {
     kill -TERM "$ZVEC_TMP_WATCHDOG" 2>/dev/null
   fi
   cleanup_tmp
-  exit 143
+  exit $((128 + $1))
 }
 
 # Change directory, then become the command (used as the bounded child so the
@@ -104,11 +106,16 @@ run_bounded() {
   local secs="$1"
   shift
   local out sentinel pid watchdog rc
+  ZVEC_BOUNDED_OUTPUT=""
+  # Traps first, so no window exists between creating the temp file and
+  # owning its cleanup. The handlers no-op while ZVEC_TMP_OUT is empty.
+  trap cleanup_tmp EXIT
+  trap 'on_signal 15' TERM
+  trap 'on_signal 2' INT
+  trap 'on_signal 1' HUP
   out=$(mktemp "${TMPDIR:-/tmp}/zvec-context.XXXXXX" 2>/dev/null) || return 125
   sentinel="$out.timeout"
   ZVEC_TMP_OUT="$out"
-  trap cleanup_tmp EXIT
-  trap on_signal TERM INT HUP
   "$@" >"$out" 2>&1 </dev/null &
   pid=$!
   ZVEC_TMP_PID="$pid"
@@ -119,6 +126,9 @@ run_bounded() {
     wait "$sleeper"
     : >"$sentinel"
     kill -TERM "$pid" 2>/dev/null
+    # A child that ignores TERM must not outlive the bound.
+    sleep 2
+    kill -KILL "$pid" 2>/dev/null
   ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   ZVEC_TMP_WATCHDOG="$watchdog"
