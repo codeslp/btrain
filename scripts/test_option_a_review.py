@@ -182,15 +182,18 @@ class MentionNeutralizationTest(unittest.TestCase):
         json.dumps({"reviewer": "S", "focus": "f", "summary": "ok", "findings": []}))
       return 0, "", ""
 
-    original = review.run_cli
+    original_run, original_sb = review.run_cli, review.SANDBOX_EXEC
     review.run_cli = fake_run
+    review.SANDBOX_EXEC = sys.executable   # exists on every host; stands in for sandbox-exec
     try:
       for reviewer in review.build_parallel_reviewers()[:2]:
+        captured.clear()   # a dispatch failure must fail this leg, not reuse the prior stdin
         asyncio.run(review.call_reviewer(reviewer, "diff mentions @/tmp/host-secret.txt here"))
+        self.assertIn("stdin", captured, f"{reviewer.provider} was never dispatched")
         self.assertNotIn("@/tmp/host-secret.txt", captured["stdin"], reviewer.provider)
         self.assertIn("\uff20/tmp/host-secret.txt", captured["stdin"], reviewer.provider)
     finally:
-      review.run_cli = original
+      review.run_cli, review.SANDBOX_EXEC = original_run, original_sb
 
 
 class CodexConfinementProfileTest(unittest.TestCase):
@@ -206,8 +209,10 @@ class CodexConfinementProfileTest(unittest.TestCase):
 
   def test_prefix_fails_closed_without_sandbox_exec(self) -> None:
     original = review.SANDBOX_EXEC
+    prior_override = os.environ.pop("REVIEW_ALLOW_UNCONFINED_CODEX", None)
+    if prior_override is not None:
+      self.addCleanup(os.environ.__setitem__, "REVIEW_ALLOW_UNCONFINED_CODEX", prior_override)
     review.SANDBOX_EXEC = "/nonexistent/sandbox-exec"
-    os.environ.pop("REVIEW_ALLOW_UNCONFINED_CODEX", None)
     try:
       with self.assertRaises(RuntimeError):
         review.codex_confinement_prefix()
@@ -246,13 +251,13 @@ class CodexInvocationTest(unittest.TestCase):
 
     original_run, original_sb = review.run_cli, review.SANDBOX_EXEC
     review.run_cli = fake_run
-    review.SANDBOX_EXEC = "/bin/echo"   # exists on every host; stands in for sandbox-exec
+    review.SANDBOX_EXEC = sys.executable   # exists on every host; stands in for sandbox-exec
     try:
       asyncio.run(review.call_codex(review.build_parallel_reviewers()[1], "prompt"))
     finally:
       review.run_cli, review.SANDBOX_EXEC = original_run, original_sb
     args = captured["args"]
-    self.assertEqual(args[0], "/bin/echo")
+    self.assertEqual(args[0], sys.executable)
     self.assertEqual(args[1], "-p")
     self.assertIn("(deny file-read*", args[2])
     self.assertEqual(args[3:5], [review.CODEX_BIN, "exec"])
@@ -269,18 +274,47 @@ class CodexInvocationTest(unittest.TestCase):
 
     original_run, original_sb = review.run_cli, review.SANDBOX_EXEC
     review.run_cli = fake_run
-    review.SANDBOX_EXEC = "/bin/echo"   # exists on every host; stands in for sandbox-exec
+    review.SANDBOX_EXEC = sys.executable   # exists on every host; stands in for sandbox-exec
     try:
       asyncio.run(review.call_codex(review.build_parallel_reviewers()[1], "prompt"))
     finally:
       review.run_cli, review.SANDBOX_EXEC = original_run, original_sb
     args = captured["args"]
     self.assertIn("--ignore-user-config", args)
-    self.assertEqual(args.count("--disable"), 2)
-    self.assertIn("shell_tool", args)
-    self.assertIn("unified_exec", args)
+    disabled = [args[i + 1] for i, flag in enumerate(args) if flag == "--disable"]
+    self.assertEqual(disabled, list(review.CODEX_DISABLED_FEATURES))
+    for feature in ("shell_tool", "unified_exec", "view_image", "browser_use", "computer_use",
+                    "apps", "image_generation", "web_search", "multi_agent"):
+      self.assertIn(feature, disabled)
     self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
     self.assertEqual(args[-1], "-")
+
+  def test_module_alias_is_a_documented_false_positive(self) -> None:
+    # `@/components/Foo` is shape-identical to `@/etc/passwd`; the cost is accepted.
+    out = review.neutralize_mentions('import Foo from "@/components/Foo"')
+    self.assertEqual(out, 'import Foo from "\uff20/components/Foo"')
+
+
+class CliFailureReportTest(unittest.TestCase):
+  def test_stderr_errors_win_over_error_like_diff_lines_on_stdout(self) -> None:
+    reviewer = review.build_parallel_reviewers()[1]
+    stdout = "echoed prompt\n+  throw new Error: boom\nerror: from the diff\n"
+    result = review._cli_failure(reviewer, "codex exec", 1, stdout, "ERROR: stream disconnected\n")
+    text = json.dumps(result)
+    self.assertIn("stream disconnected", text)
+    self.assertNotIn("from the diff", text)
+    self.assertNotIn("boom", text)
+    # only when stderr names no error does the stdout scan apply
+    result = review._cli_failure(reviewer, "codex exec", 1, stdout, "")
+    self.assertIn("from the diff", json.dumps(result))
+
+  def test_proxy_credentials_are_redacted_from_the_report(self) -> None:
+    reviewer = review.build_parallel_reviewers()[0]
+    stderr = "error: proxy http://alice:s3cret-pw@proxy.corp:3128 auth failed\n"
+    text = json.dumps(review._cli_failure(reviewer, "claude -p", 1, "", stderr))
+    self.assertNotIn("s3cret-pw", text)
+    self.assertNotIn("alice:", text)
+    self.assertIn("://***:***@proxy.corp:3128", text)
 
 
 INJECTED_PROMPT = (

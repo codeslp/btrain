@@ -54,6 +54,18 @@ CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Codex features that give the model a route to the host or the network and are
+# on by default in `codex exec`. `--sandbox read-only` confines shell commands
+# only; view_image reads any file directly, browser_use / computer_use drive the
+# desktop, apps and web_search reach the network, image_generation uploads
+# images, and multi_agent spawns children with their own tool sets. Audited
+# against `codex features list` (codex-cli 0.153.4); codex rejects an unknown
+# name with "Unknown feature flag", so a rename fails loudly instead of
+# silently re-enabling a tool.
+CODEX_DISABLED_FEATURES = (
+  "shell_tool", "unified_exec", "view_image", "browser_use", "computer_use",
+  "apps", "image_generation", "web_search", "multi_agent",
+)
 # Per-reviewer wall-clock cap for one CLI run; a hung CLI degrades to a
 # failed-reviewer finding instead of hanging `btrain review run`.
 CLI_TIMEOUT_SECONDS = float(os.environ.get("REVIEW_CLI_TIMEOUT", "600"))
@@ -88,6 +100,11 @@ def reviewer_env() -> dict[str, str]:
 # `~`, dot-relative paths, Windows drive paths, and anything with a `..`
 # segment, each optionally quoted. The `@` becomes fullwidth U+FF20, which no
 # CLI treats as a mention. Hunk headers (`@@ -1 +1 @@`) are untouched.
+# Known cost: the `@/` module alias used by Vite, Next, Nuxt, and tsconfig
+# `paths` (`import x from "@/components/Foo"`) is shape-identical to
+# `@/etc/passwd` and is neutralized too, so frontend diffs reach the reviewer
+# with `＠/components/Foo`. The form is not exempted, because an exemption
+# would reopen the hole; the cost is recorded here and in the test suite.
 MENTION_RE = re.compile(r"""@(?=("[^"\n]*"|'[^'\n]*'|[^\s"']+))""")
 _HOST_PATH_PATTERNS = (
   re.compile(r"^[\\/]"),                    # /abs, \\server\share
@@ -595,14 +612,24 @@ async def run_cli(args: list[str], stdin_text: str, cwd: str) -> tuple[int, str,
   return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
 
+_URL_CREDENTIALS_RE = re.compile(r"://[^/\s:@]+:[^@\s]+@")
+
+
+def _error_lines(text: str) -> list[str]:
+  return [line.strip() for line in text.splitlines() if "ERROR" in line or "error:" in line.lower()]
+
+
 def _cli_failure(reviewer: Reviewer, label: str, code: int, stdout: str, stderr: str) -> dict[str, Any]:
-  # Prefer explicit error lines: codex echoes the prompt to stdout, so a raw
-  # tail would show the diff instead of the cause.
-  error_lines = [
-    line.strip() for line in (stderr + "\n" + stdout).splitlines()
-    if "ERROR" in line or "error:" in line.lower()
-  ]
+  # Prefer explicit error lines, and prefer stderr: codex echoes the prompt (the
+  # diff) to stdout, so scanning stdout first would report a diff line that
+  # happens to contain "error:" as the cause. Fall back to stdout only when
+  # stderr names no error.
+  error_lines = _error_lines(stderr) or _error_lines(stdout)
   detail = "\n".join(dict.fromkeys(error_lines)) if error_lines else (stderr or stdout).strip()
+  # A CLI may echo its proxy URL in a connection error; the operator's
+  # HTTPS_PROXY=http://user:secret@proxy is now forwarded, so keep the
+  # credentials out of the report.
+  detail = _URL_CREDENTIALS_RE.sub("://***:***@", detail)
   return normalize_result(reviewer, error=f"{label} exited {code}: {detail[-1200:]}")
 
 
@@ -649,9 +676,11 @@ async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
       # Confinement: the reviewer must have no route from the prompt (an untrusted
       # diff) to the host, and no user-global instructions in its context.
       # --ignore-user-config drops the user's MCP servers and sandbox settings;
-      # disabling shell_tool and unified_exec removes the shell, which a read-only
-      # sandbox alone does not (it can still read any file); the sandbox-exec
-      # prefix hides AGENTS.md, hooks, memories, skills, plugins, and automations.
+      # CODEX_DISABLED_FEATURES removes every default-on tool that reaches the
+      # host or the network (the shell, direct file reads via view_image, browser,
+      # desktop, apps, web search, image generation, subagents), which a read-only
+      # sandbox alone does not; the sandbox-exec prefix hides AGENTS.md, hooks,
+      # memories, skills, plugins, and automations.
       # Verified by scripts/test_option_a_review.py.
       args = [
         *codex_confinement_prefix(),
@@ -660,8 +689,7 @@ async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
         "--skip-git-repo-check",
         "--ignore-user-config",
         "--sandbox", "read-only",
-        "--disable", "shell_tool",
-        "--disable", "unified_exec",
+        *(flag for feature in CODEX_DISABLED_FEATURES for flag in ("--disable", feature)),
         "--color", "never",
         "--cd", workdir,
         "--output-last-message", str(last_message),
