@@ -11,7 +11,7 @@ Would [zvec-grep](https://github.com/zvec-ai/zvec-grep) improve repository disco
 
 ## Summary
 
-The trial found a useful but narrow role. zvec-grep gave strong, compact results for two architecture and policy questions. Measured as precision at the configured `--limit 5`: two questions returned five relevant passages, two returned relevant policy passages but missed the production implementation, and one followed the wrong retry concept entirely. The scoped `rg` baseline for the same questions averaged 19.4 candidate files in the trial run and 30.6 files in the reproducible baseline recorded below. Exact-symbol lookup was faster and more precise with `rg`.
+The trial found a useful but narrow role. zvec-grep gave strong, compact results for two architecture and policy questions. Measured as precision at the configured `--limit 5`: one question returned five relevant passages, one returned four relevant results plus one unrelated (two of the four were duplicate mirrors), two returned relevant policy passages but missed the production implementation, and one followed the wrong retry concept entirely. The scoped `rg` baseline for the same questions averaged 19.4 candidate files in the trial run and 30.6 files in the reproducible baseline recorded below. Exact-symbol lookup was faster and more precise with `rg`.
 
 The measured result supports an optional semantic scout for questions whose terminology or location is unknown. It does not support a core dependency, automatic use on every task, or replacement of exact search.
 
@@ -63,7 +63,7 @@ The five direct-mode semantic queries, run with `--refresh off` as in the reprod
 The exact query `collectNeedsReviewContextIssues` demonstrated the correct routing boundary:
 
 - `rg` returned the definition and call site immediately.
-- zvec-grep also returned the correct definition and call site, with useful structural context, but took 0.81 seconds.
+- zvec-grep, with `--refresh off`, also returned the correct definition and call site, with useful structural context, but took 0.81 seconds.
 
 Agents should continue to use native `rg` for identifiers, paths, quotations, configuration keys, regular expressions, and exhaustive searches.
 
@@ -120,7 +120,7 @@ npx --yes --package @zvec/zvec-grep@0.2.1 zg query \
 
 ## Reproducible `rg` baseline
 
-Added at review because the trial run did not record its `rg` regular expressions. These commands were run on 2026-09-08 against a detached checkout of `06f931c` with ripgrep 15.1.0. The patterns are independent of the trial's and are deliberately broad recall-oriented regexes, so the counts are higher than the table above; the ordering of questions by candidate volume differs too (question 3 is the largest miss for both tools).
+Added at review because the trial run did not record its `rg` regular expressions. These commands were run on 2026-09-08 against a detached checkout of `06f931c` with ripgrep 15.1.0. The patterns are independent of the trial's and are deliberately broad recall-oriented regexes, so the counts are higher than the table above for four of the five questions; question 3 diverges most between the two pattern sets (9 files in the trial, 30 here). These counts calibrate what a broad exact-search sweep costs at this revision; they neither support nor undercut the zvec-grep results above.
 
 Shared flags for every command: `--hidden --glob '!.git/**' --glob '!node_modules/**' --glob '!agentchattr/.venv/**' --glob '!agentchattr/data/**' --glob '!.zvec-grep/**'`, invoked as `rg -l -i <shared flags> -e '<pattern>' .`
 
@@ -132,7 +132,7 @@ Shared flags for every command: `--hidden --glob '!.git/**' --glob '!node_module
 | 4. Prior decisions gathered without blocking on an unavailable provider | `unblocked.*(unavailable\|fail\|soft)\|soft gap\|provider (failure\|unavailable)\|context receipt` | 17 |
 | 5. Incomplete or placeholder review context rejected | `placeholder\|fill this in\|none yet\|needs-review.*context\|reviewer context` | 43 |
 
-Mean: 30.6 files. Exact control: `rg -n <shared flags> 'collectNeedsReviewContextIssues' .` returns exactly `src/brain_train/core.mjs:3336` (definition) and `src/brain_train/core.mjs:3491` (call site). Five timed runs of the question 3 command took 0.023 to 0.024 seconds each.
+Mean: 30.6 files. Exact control: `rg -n <shared flags> 'collectNeedsReviewContextIssues' .` returns exactly `src/brain_train/core.mjs:3336` (definition) and `src/brain_train/core.mjs:3491` (call site). Five timed runs of the question 3 command each took under 0.03 seconds on the review machine (an independent re-run on the same checkout measured 0.009 to 0.012 seconds; the figure is machine-dependent).
 
 ## Context receipt
 
