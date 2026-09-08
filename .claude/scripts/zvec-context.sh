@@ -8,6 +8,10 @@
 set -uo pipefail
 
 DEFAULT_LIMIT=5
+# Upper bound on one zg call. --freshness strict maps to --refresh wait, which
+# blocks until the index is fresh; optional retrieval must never block a task,
+# so an expired call is reported as a soft skip.
+ZVEC_CONTEXT_TIMEOUT="${ZVEC_CONTEXT_TIMEOUT:-120}"
 
 usage() {
   local exit_code="${1:-64}"
@@ -35,9 +39,25 @@ die_usage() {
 require_value() {
   local option="$1"
   local value="${2:-}"
-  if [ -z "$value" ] || [[ "$value" == --* ]]; then
-    die_usage "$option requires a value"
+  # A value that starts with "-" would be re-parsed by zg as an option, so it is
+  # never forwarded (argv safety), even when it was clearly meant as a value.
+  if [ -z "$value" ] || [[ "$value" == -* ]]; then
+    die_usage "$option requires a value that does not start with -"
   fi
+}
+
+# Run one command with a wall-clock bound. Returns 143 when the bound expires.
+run_bounded() {
+  local secs="$1"
+  shift
+  "$@" &
+  local pid=$!
+  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  local watchdog=$!
+  wait "$pid"
+  local rc=$?
+  kill "$watchdog" 2>/dev/null
+  return "$rc"
 }
 
 emit_skip() {
@@ -80,6 +100,7 @@ case "$subcommand" in
     query="$1"
     shift
     [ -z "$query" ] && die_usage "search query must not be empty"
+    [[ "$query" == -* ]] && die_usage "search query must not start with -; zg would read it as an option"
 
     root="$PWD"
     freshness="eventual"
@@ -114,11 +135,14 @@ case "$subcommand" in
       esac
     done
 
-    case "$limit" in
-      ''|*[!0-9]*) die_usage "--limit must be an integer from 1 to 20" ;;
-    esac
-    if [ "$limit" -lt 1 ] || [ "$limit" -gt 20 ]; then
+    # Validate by pattern, not arithmetic: a digit string outside Bash's integer
+    # range makes [ -lt ] print "integer expression expected" and evaluate false,
+    # which would let the raw value through to zg.
+    if ! [[ "$limit" =~ ^([1-9]|1[0-9]|20)$ ]]; then
       die_usage "--limit must be an integer from 1 to 20"
+    fi
+    if ! [[ "$ZVEC_CONTEXT_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
+      die_usage "ZVEC_CONTEXT_TIMEOUT must be an integer number of seconds from 1 to 9999"
     fi
 
     case "$freshness" in
@@ -145,8 +169,12 @@ case "$subcommand" in
       fi
     done
 
-    output=$(cd "$root" && zg "${args[@]}" 2>&1)
+    output=$(cd "$root" && run_bounded "$ZVEC_CONTEXT_TIMEOUT" zg "${args[@]}" 2>&1)
     rc=$?
+    if [ "$rc" -eq 143 ]; then
+      emit_skip "zg did not finish within ${ZVEC_CONTEXT_TIMEOUT}s (ZVEC_CONTEXT_TIMEOUT); refresh the index explicitly or use --freshness eventual"
+      exit 0
+    fi
     if [ "$rc" -ne 0 ]; then
       printf 'zvec-context: error\nroot: %s\nfreshness-policy: %s\n%s\n' \
         "$root" "$freshness" "$output" >&2
@@ -171,10 +199,11 @@ case "$subcommand" in
     done
     root=$(resolve_root "$root") || exit $?
     require_zg || exit 0
-    if ! zg status "$root" --mode direct --check-ready; then
+    if ! output=$(zg status "$root" --mode direct --check-ready 2>&1); then
       emit_skip "a ready index was not found; create or refresh it explicitly with zg index"
       exit 0
     fi
+    printf 'zvec-context: ok\nroot: %s\n%s\n' "$root" "$output"
     ;;
 
   -h|--help|help)

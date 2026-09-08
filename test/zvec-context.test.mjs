@@ -48,6 +48,9 @@ if [ "\${ZVEC_TEST_QUERY_RC:-0}" -ne 0 ]; then
   printf 'query failed safely\\n' >&2
   exit "$ZVEC_TEST_QUERY_RC"
 fi
+if [ -n "\${ZVEC_TEST_QUERY_SLEEP:-}" ]; then
+  exec sleep "$ZVEC_TEST_QUERY_SLEEP"
+fi
 printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 `, "utf8")
   await fs.chmod(fakePath, 0o755)
@@ -236,13 +239,22 @@ describe("optional zvec-grep context helper", () => {
 
   it("rejects invalid limits and freshness policies before invoking zg", async () => {
     const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
     try {
-      const badLimit = await runHelper(["search", "query", "--limit", "0"], {
-        cwd: tmpDir,
-        env: { ...process.env, PATH: "/usr/bin:/bin" },
-      })
-      assert.equal(badLimit.code, 64)
-      assert.match(badLimit.stderr, /--limit must be an integer from 1 to 20/)
+      for (const limit of ["0", "21", "007", "5x", "999999999999999999999999999999"]) {
+        const badLimit = await runHelper(["search", "query", "--root", tmpDir, "--limit", limit], {
+          cwd: tmpDir,
+          env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath },
+        })
+        assert.equal(badLimit.code, 64, `limit ${limit}: ${badLimit.stdout}`)
+        assert.match(badLimit.stderr, /--limit must be an integer from 1 to 20/)
+        assert.doesNotMatch(badLimit.stderr, /integer expression expected/)
+        assert.doesNotMatch(badLimit.stdout, /zvec-context: (ok|skipped)/)
+      }
+      await assert.rejects(fs.access(logPath), "zg must not be invoked for an invalid --limit")
 
       const badFreshness = await runHelper(["search", "query", "--freshness", "latest"], {
         cwd: tmpDir,
@@ -250,6 +262,80 @@ describe("optional zvec-grep context helper", () => {
       })
       assert.equal(badFreshness.code, 64)
       assert.match(badFreshness.stderr, /--freshness must be eventual or strict/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects hyphen-leading query and option values instead of forwarding them to zg", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      for (const args of [
+        ["search", "--refresh wait vs off", "--root", tmpDir],
+        ["search", "-x", "--root", tmpDir],
+        ["search", "query", "--root", tmpDir, "--glob", "-x"],
+        ["search", "query", "--root", tmpDir, "--glob", "--allow-remote"],
+        ["search", "query", "--root", tmpDir, "--limit", "-1"],
+      ]) {
+        const result = await runHelper(args, {
+          cwd: tmpDir,
+          env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath },
+        })
+        assert.equal(result.code, 64, `${args.join(" ")}: ${result.stdout}`)
+        assert.match(result.stderr, /must not start with -|requires a value that does not start with -/)
+      }
+      await assert.rejects(fs.access(logPath), "zg must not be invoked for hyphen-leading values")
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("reports a ready index under the zvec-context contract header", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      const result = await runHelper(["status", "--root", tmpDir], {
+        cwd: tmpDir,
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath },
+      })
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /^zvec-context: ok/m)
+      assert.match(result.stdout, /^root: /m)
+      assert.match(result.stdout, /Workspace index is ready/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("soft-skips instead of blocking when zg exceeds the time bound", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      const started = Date.now()
+      const result = await runHelper(["search", "slow query", "--root", tmpDir, "--freshness", "strict"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          PATH: `${binDir}:/usr/bin:/bin`,
+          ZVEC_TEST_LOG: logPath,
+          ZVEC_TEST_QUERY_SLEEP: "20",
+          ZVEC_CONTEXT_TIMEOUT: "1",
+        },
+      })
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /^zvec-context: skipped/m)
+      assert.match(result.stdout, /did not finish within 1s/)
+      assert.ok(Date.now() - started < 10_000, "the bound must cut the call short")
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true })
     }

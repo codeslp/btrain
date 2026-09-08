@@ -450,6 +450,52 @@ describe("btrain init", () => {
     assert.ok(gitignore.includes(".zvec-grep/"), gitignore)
   })
 
+  it("appends only the missing .gitignore entries when the managed list grows", async () => {
+    const localTmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+
+    try {
+      await exec("git", ["init", localTmpDir])
+      // A repo initialized before .zvec-grep/ joined the managed list.
+      const legacy = [
+        "node_modules/",
+        "",
+        "# btrain operational state (not source code — do not track)",
+        ".btrain/*",
+        "!.btrain/project.toml",
+        ".claude/collab/",
+        "",
+        "# agentchattr runtime data (chat logs, uploads, tokens — not source)",
+        "agentchattr/data/",
+        "agentchattr/.venv/",
+        "agentchattr/uploads/",
+        "",
+      ].join("\n")
+      await fs.writeFile(path.join(localTmpDir, ".gitignore"), legacy, "utf8")
+
+      const { code, stderr } = await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(code, 0, stderr)
+
+      const gitignore = await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8")
+      const count = (needle) => gitignore.split("\n").filter((line) => line === needle).length
+      for (const line of [".btrain/*", "!.btrain/project.toml", ".claude/collab/", "agentchattr/data/",
+                          "agentchattr/.venv/", "agentchattr/uploads/", ".zvec-grep/",
+                          "# optional zvec-grep workspace index"]) {
+        assert.equal(count(line), 1, `${line} should appear exactly once:\n${gitignore}`)
+      }
+      assert.equal(count("# agentchattr runtime data (chat logs, uploads, tokens — not source)"), 1, gitignore)
+      assert.ok(gitignore.startsWith("node_modules/"), "existing content must be preserved")
+
+      // Running init again must be a no-op for .gitignore.
+      await runBtrain(["init", localTmpDir], localTmpDir)
+      assert.equal(await fs.readFile(path.join(localTmpDir, ".gitignore"), "utf8"), gitignore)
+    } finally {
+      await rmDir(localTmpDir)
+    }
+  })
+
   it("AGENTS.md contains the managed block with CLI-first rule", async () => {
     const content = await fs.readFile(path.join(tmpDir, "AGENTS.md"), "utf8")
     assert.ok(content.includes("<!-- btrain:managed:start -->"), "Missing managed start fence")

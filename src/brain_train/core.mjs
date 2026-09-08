@@ -438,12 +438,34 @@ async function ensureBtrainGitignore(repoRoot, { includeDevToolIgnores = true } 
   }
 
   const entries = buildBtrainGitignoreEntries({ includeDevToolIgnores })
-  const missing = entries.filter(
-    (entry) => entry && !entry.startsWith("#") && !content.includes(entry),
+  const missing = new Set(
+    entries.filter((entry) => entry && !entry.startsWith("#") && !content.includes(entry)),
   )
-  if (missing.length === 0) return
+  if (missing.size === 0) return
 
-  const block = "\n" + entries.join("\n") + "\n"
+  // Append only the missing entries (with the comment that introduces each
+  // section, when that comment is not already present). Re-appending the whole
+  // block would duplicate every existing line each time the list grows.
+  const lines = []
+  let pendingComment = ""
+  for (const entry of entries) {
+    if (entry === "") {
+      pendingComment = ""
+      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("")
+      continue
+    }
+    if (entry.startsWith("#")) {
+      pendingComment = entry
+      continue
+    }
+    if (!missing.has(entry)) continue
+    if (pendingComment && !content.includes(pendingComment)) lines.push(pendingComment)
+    pendingComment = ""
+    lines.push(entry)
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+
+  const block = "\n" + lines.join("\n") + "\n"
   await writeText(gitignorePath, content.trimEnd() + "\n" + block)
 }
 
