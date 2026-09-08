@@ -283,8 +283,9 @@ class CodexInvocationTest(unittest.TestCase):
     self.assertIn("--ignore-user-config", args)
     disabled = [args[i + 1] for i, flag in enumerate(args) if flag == "--disable"]
     self.assertEqual(disabled, list(review.CODEX_DISABLED_FEATURES))
-    for feature in ("shell_tool", "unified_exec", "view_image", "browser_use", "computer_use",
-                    "apps", "image_generation", "web_search", "multi_agent"):
+    for feature in ("shell_tool", "unified_exec", "view_image", "browser_use", "browser_use_external",
+                    "browser_use_full_cdp_access", "computer_use", "apps", "image_generation",
+                    "web_search", "multi_agent"):
       self.assertIn(feature, disabled)
     self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
     self.assertEqual(args[-1], "-")
@@ -315,6 +316,37 @@ class CliFailureReportTest(unittest.TestCase):
     self.assertNotIn("s3cret-pw", text)
     self.assertNotIn("alice:", text)
     self.assertIn("://***:***@proxy.corp:3128", text)
+
+  def test_redaction_covers_proxy_value_shapes_and_leaves_plain_urls_alone(self) -> None:
+    for raw, expected in (
+      ("HTTPS_PROXY=alice:s3cret@proxy.corp:3128 refused", "HTTPS_PROXY=***:***@proxy.corp:3128 refused"),
+      ("http://:justpass@host/ refused", "http://***:***@host/ refused"),
+      ("tunnel http://user:p@ss@proxy failed", "tunnel http://***:***@proxy failed"),
+      ("git@github.com:org/repo.git", "git@github.com:org/repo.git"),
+      ("ssh://git@github.com/org/repo", "ssh://git@github.com/org/repo"),
+      ("http://host:8080/path at 14:16:50 mail bob@corp.io", "http://host:8080/path at 14:16:50 mail bob@corp.io"),
+    ):
+      with self.subTest(raw=raw):
+        self.assertEqual(review._redact(raw), expected)
+
+  def test_claude_is_error_and_exception_paths_are_redacted(self) -> None:
+    reviewer = review.build_parallel_reviewers()[0]
+
+    async def error_envelope(args, stdin_text, cwd):
+      return 0, json.dumps({"is_error": True, "result":
+        "fetch failed: tunnel to http://alice:s3cret-pw@proxy.corp:3128 refused"}), ""
+
+    async def raiser(args, stdin_text, cwd):
+      raise RuntimeError("connect http://alice:s3cret-pw@proxy.corp:3128 timed out")
+
+    original = review.run_cli
+    try:
+      review.run_cli = error_envelope
+      self.assertNotIn("s3cret-pw", json.dumps(asyncio.run(review.call_claude_code(reviewer, "p"))))
+      review.run_cli = raiser
+      self.assertNotIn("s3cret-pw", json.dumps(asyncio.run(review.call_claude_code(reviewer, "p"))))
+    finally:
+      review.run_cli = original
 
 
 INJECTED_PROMPT = (

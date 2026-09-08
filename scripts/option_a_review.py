@@ -56,14 +56,17 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # Codex features that give the model a route to the host or the network and are
 # on by default in `codex exec`. `--sandbox read-only` confines shell commands
-# only; view_image reads any file directly, browser_use / computer_use drive the
-# desktop, apps and web_search reach the network, image_generation uploads
-# images, and multi_agent spawns children with their own tool sets. Audited
-# against `codex features list` (codex-cli 0.153.4); codex rejects an unknown
-# name with "Unknown feature flag", so a rename fails loudly instead of
-# silently re-enabling a tool.
+# only; view_image reads any file directly, the three browser_use features and
+# computer_use drive a browser or the desktop, apps reach the network,
+# image_generation uploads images, and multi_agent spawns children with their
+# own tool sets. Audited against `codex features list` (codex-cli 0.153.4).
+# web_search is not listed there (exec has no web search unless --search is
+# passed) but the name still validates; it is kept as belt-and-braces. Codex
+# rejects an unknown name with "Unknown feature flag", so a rename fails loudly
+# instead of silently re-enabling a tool.
 CODEX_DISABLED_FEATURES = (
-  "shell_tool", "unified_exec", "view_image", "browser_use", "computer_use",
+  "shell_tool", "unified_exec", "view_image",
+  "browser_use", "browser_use_external", "browser_use_full_cdp_access", "computer_use",
   "apps", "image_generation", "web_search", "multi_agent",
 )
 # Per-reviewer wall-clock cap for one CLI run; a hung CLI degrades to a
@@ -612,7 +615,15 @@ async def run_cli(args: list[str], stdin_text: str, cwd: str) -> tuple[int, str,
   return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
 
-_URL_CREDENTIALS_RE = re.compile(r"://[^/\s:@]+:[^@\s]+@")
+# userinfo in a URL or a scheme-less proxy value (`user:pass@host`, as curl,
+# reqwest, and Node accept). The password run is greedy to the last `@` before
+# a `/` or whitespace so an unencoded `p@ss` is fully covered; `git@host:org/repo`,
+# `host:8080/path`, and timestamps have no `user:pass@` shape and are left alone.
+_URL_CREDENTIALS_RE = re.compile(r"(://|(?<![\w./:@-]))[^\s/:@=]*:[^\s/]*@(?=[^\s/@]+)")
+
+
+def _redact(text: str) -> str:
+  return _URL_CREDENTIALS_RE.sub(r"\1***:***@", text)
 
 
 def _error_lines(text: str) -> list[str]:
@@ -628,9 +639,8 @@ def _cli_failure(reviewer: Reviewer, label: str, code: int, stdout: str, stderr:
   detail = "\n".join(dict.fromkeys(error_lines)) if error_lines else (stderr or stdout).strip()
   # A CLI may echo its proxy URL in a connection error; the operator's
   # HTTPS_PROXY=http://user:secret@proxy is now forwarded, so keep the
-  # credentials out of the report.
-  detail = _URL_CREDENTIALS_RE.sub("://***:***@", detail)
-  return normalize_result(reviewer, error=f"{label} exited {code}: {detail[-1200:]}")
+  # credentials out of the report (every error path goes through _redact).
+  return normalize_result(reviewer, error=f"{label} exited {code}: {_redact(detail)[-1200:]}")
 
 
 async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
@@ -659,14 +669,14 @@ async def call_claude_code(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
     # object; result holds the plain text; is_error flags a failed run.
     envelope = json.loads(stdout)
     if envelope.get("is_error"):
-      detail = str(envelope.get("result", "claude -p reported an error"))[:1200]
+      detail = _redact(str(envelope.get("result", "claude -p reported an error")))[:1200]
       return normalize_result(reviewer, error=detail)
     structured = envelope.get("structured_output")
     if isinstance(structured, dict):
       return normalize_result(reviewer, raw_text=json.dumps(structured))
     return normalize_result(reviewer, raw_text=envelope.get("result"))
   except Exception as exc:
-    return normalize_result(reviewer, error=str(exc))
+    return normalize_result(reviewer, error=_redact(str(exc)))
 
 
 async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
@@ -709,7 +719,7 @@ async def call_codex(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
       # --output-last-message holds the final answer, constrained by --output-schema.
       return normalize_result(reviewer, raw_text=last_message.read_text(encoding="utf-8"))
   except Exception as exc:
-    return normalize_result(reviewer, error=str(exc))
+    return normalize_result(reviewer, error=_redact(str(exc)))
 
 
 async def call_reviewer(reviewer: Reviewer, prompt: str) -> dict[str, Any]:
