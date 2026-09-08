@@ -11,7 +11,7 @@ Would [zvec-grep](https://github.com/zvec-ai/zvec-grep) improve repository disco
 
 ## Summary
 
-The trial found a useful but narrow role. zvec-grep gave strong, compact results for two architecture and policy questions. It reduced a manually scoped `rg` candidate set from an average of 19.4 files to five ranked passages. However, two searches found relevant policy documents but missed the production implementation, and one search followed the wrong retry concept entirely. Exact-symbol lookup was faster and more precise with `rg`.
+The trial found a useful but narrow role. zvec-grep gave strong, compact results for two architecture and policy questions. Measured as precision at the configured `--limit 5`: two questions returned five relevant passages, two returned relevant policy passages but missed the production implementation, and one followed the wrong retry concept entirely. The scoped `rg` baseline for the same questions averaged 19.4 candidate files in the trial run and 30.6 files in the reproducible baseline recorded below. Exact-symbol lookup was faster and more precise with `rg`.
 
 The measured result supports an optional semantic scout for questions whose terminology or location is unknown. It does not support a core dependency, automatic use on every task, or replacement of exact search.
 
@@ -40,11 +40,11 @@ The measured result supports an optional semantic scout for questions whose term
 | Truncated fragments | 0 |
 | Incremental update after one changed file | 1.766 seconds of index work, 4.36 seconds wall time |
 
-The local model cache occupied 33 MiB after the trial. The trial did not establish how much of that cache existed before the run.
+The local model cache occupied 33 MiB after the trial. The trial did not establish how much of that cache existed before the run, so the 33 MiB is an upper bound on what this trial added.
 
 ## Search comparison
 
-The `rg` baseline used short, hand-authored regular expressions and excluded `.zvec-grep`, `agentchattr/.venv`, and runtime log data. Its file counts therefore represent a reasonably scoped exact-search attempt, not an intentionally noisy baseline.
+The `rg` baseline in the table used short, hand-authored regular expressions and excluded `.zvec-grep`, `agentchattr/.venv`, and runtime log data. Its file counts therefore represent a reasonably scoped exact-search attempt, not an intentionally noisy baseline. The trial run did not preserve those regular expressions; the [Reproducible `rg` baseline](#reproducible-rg-baseline) section below records a second, fully reproducible set of commands and counts at the same revision.
 
 | Question | zvec-grep result | Scoped `rg` candidates | Assessment |
 | --- | --- | ---: | --- |
@@ -56,7 +56,7 @@ The `rg` baseline used short, hand-authored regular expressions and excluded `.z
 
 Across these five questions, zvec-grep produced two strong results, two orientation-only results, and one miss. It consistently favored explanatory prose over production code. That behavior helps when an agent must understand intent, but it can mislead an agent that asks where behavior is implemented.
 
-The five direct-mode semantic queries took 0.85 to 0.94 seconds each, with a mean of about 0.89 seconds. The scoped `rg` searches took 0.00 to 0.01 seconds each. The semantic latency is acceptable for a focused probe, but it is too expensive and unnecessary for known identifiers.
+The five direct-mode semantic queries, run with `--refresh off` as in the reproduction command, took 0.85 to 0.94 seconds each, with a mean of about 0.89 seconds. The scoped `rg` searches took 0.00 to 0.01 seconds each. The semantic latency is acceptable for a focused probe, but it is too expensive and unnecessary for known identifiers.
 
 ## Exact-search control
 
@@ -82,7 +82,7 @@ This behavior was correct and visible. An integration would still need an explic
 1. `zg query` derives the workspace from the current directory. An appended root path becomes another query rather than a workspace argument. The first batch exposed this mistake through an unexpected second query group.
 2. Mirrored content such as `AGENTS.md` and `CLAUDE.md`, or `.claude/skills` and `.agents/skills`, can consume several top-ranked slots.
 3. Default file discovery successfully excluded the copied Python virtual environment and other common noise that required explicit `rg` exclusions.
-4. A repository index and local model add about 58 MiB in this trial: 25 MiB for the index and 33 MiB for the observed model cache. Model caches can be shared across workspaces.
+4. A repository index and local model occupied about 58 MiB after this trial: 25 MiB for the index and 33 MiB for the observed model cache, of which the pre-existing share is unknown. Model caches can be shared across workspaces.
 5. Direct mode avoided a daemon and global agent configuration. Repeated searches still paid about 0.9 seconds of process and model startup per query.
 
 ## Recommendation
@@ -94,8 +94,8 @@ If btrain runs a larger evaluation, test this restricted policy:
 1. Use native `rg` first when the agent knows an identifier or exact term.
 2. Allow one focused zvec-grep query when terminology or location is unknown, or when the task requires cross-file policy and architecture synthesis.
 3. Follow semantic results with exact source inspection before making a code claim.
-4. Index one copy of mirrored guidance, or deduplicate results by content hash.
-5. Require `wait_for_fresh` for review, security, migration, and formal-verification tasks. Permit eventual freshness only for low-risk orientation.
+4. Future work: index one copy of mirrored guidance, or deduplicate results by content hash. The current helper offers only repeatable `--glob` scoping and performs no deduplication.
+5. Require strict freshness (`--refresh wait`) for review, security, migration, and formal-verification tasks. Permit eventual freshness (`--refresh off`) only for low-risk orientation.
 6. Keep installation, indexing, and remote embedding explicit and optional.
 
 The next evidence threshold should be a paired btrain harness benchmark with 10 to 20 held-out tasks. It should compare task correctness, files opened, input tokens, tool calls, wall time, false-subsystem selections, and index-preparation cost. Product integration is justified only if the semantic route improves end-to-end task outcomes, not merely retrieval compactness.
@@ -118,6 +118,22 @@ npx --yes --package @zvec/zvec-grep@0.2.1 zg query \
   --limit 5
 ```
 
+## Reproducible `rg` baseline
+
+Added at review because the trial run did not record its `rg` regular expressions. These commands were run on 2026-09-08 against a detached checkout of `06f931c` with ripgrep 15.1.0. The patterns are independent of the trial's and are deliberately broad recall-oriented regexes, so the counts are higher than the table above; the ordering of questions by candidate volume differs too (question 3 is the largest miss for both tools).
+
+Shared flags for every command: `--hidden --glob '!.git/**' --glob '!node_modules/**' --glob '!agentchattr/.venv/**' --glob '!agentchattr/data/**' --glob '!.zvec-grep/**'`, invoked as `rg -l -i <shared flags> -e '<pattern>' .`
+
+| Question | Pattern | Files |
+| --- | --- | ---: |
+| 1. Simultaneous edits to overlapping files across lanes | `lock(ed)? files?\|file locks?\|overlapping (files\|locks)\|cross-lane` | 39 |
+| 2. Formal-verification result valid for the current implementation | `exact.head\|pin(ned)? hash\|stale pin\|counterexample\|state.space exhaust` | 24 |
+| 3. Failed delegated wake-up detected and retried | `wake.?up\|retry\|retries\|backoff` | 30 |
+| 4. Prior decisions gathered without blocking on an unavailable provider | `unblocked.*(unavailable\|fail\|soft)\|soft gap\|provider (failure\|unavailable)\|context receipt` | 17 |
+| 5. Incomplete or placeholder review context rejected | `placeholder\|fill this in\|none yet\|needs-review.*context\|reviewer context` | 43 |
+
+Mean: 30.6 files. Exact control: `rg -n <shared flags> 'collectNeedsReviewContextIssues' .` returns exactly `src/brain_train/core.mjs:3336` (definition) and `src/brain_train/core.mjs:3491` (call site). Five timed runs of the question 3 command took 0.023 to 0.024 seconds each.
+
 ## Context receipt
 
 **Context tier:** targeted
@@ -132,6 +148,6 @@ npx --yes --package @zvec/zvec-grep@0.2.1 zg query \
 
 **Constraints discovered:** btrain keeps autonomous search optional, evaluates end-to-end outcomes before efficiency, prefers local-first artifacts, and keeps exact search available.
 
-**Context gaps:** The repo-local Unblocked helper returned no organizational sources. This trial did not run paired agents, test the MCP server, measure memory use, or test another operating system or embedding model.
+**Context gaps:** The repo-local Unblocked helper returned no organizational sources. This trial did not run paired agents, test the MCP server, measure memory use, or test another operating system or embedding model. All measurements used plain semantic `zg query`; the helper on `codex/zvec-grep-context` invokes `zg query --hybrid`, so hybrid-mode relevance and latency are untested. The trial's own `rg` regular expressions were not preserved; the reproducible baseline above was added at review.
 
 **Durable writeback:** This evaluation document.
