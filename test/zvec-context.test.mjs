@@ -336,7 +336,7 @@ describe("optional zvec-grep context helper", () => {
           ...process.env,
           PATH: `${binDir}:/usr/bin:/bin`,
           ZVEC_TEST_LOG: logPath,
-          ZVEC_TEST_QUERY_SLEEP: "20",
+          ZVEC_TEST_QUERY_SLEEP: "4",
           ZVEC_CONTEXT_TIMEOUT: "1",
         },
       })
@@ -359,17 +359,19 @@ describe("optional zvec-grep context helper", () => {
       const env = { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath }
       const started = Date.now()
       const slowStatus = await runHelper(["status", "--root", tmpDir], {
-        cwd: tmpDir, env: { ...env, ZVEC_TEST_STATUS_SLEEP: "20", ZVEC_CONTEXT_TIMEOUT: "1" },
+        cwd: tmpDir, env: { ...env, ZVEC_TEST_STATUS_SLEEP: "4", ZVEC_CONTEXT_TIMEOUT: "1" },
       })
       assert.equal(slowStatus.code, 0, slowStatus.stderr)
       assert.match(slowStatus.stdout, /^zvec-context: skipped/m)
       assert.match(slowStatus.stdout, /zg status did not finish within 1s/)
+      assert.equal(slowStatus.stderr, "", "a soft skip must leave stderr clean")
 
       const slowProbe = await runHelper(["search", "query", "--root", tmpDir], {
-        cwd: tmpDir, env: { ...env, ZVEC_TEST_STATUS_SLEEP: "20", ZVEC_CONTEXT_TIMEOUT: "1" },
+        cwd: tmpDir, env: { ...env, ZVEC_TEST_STATUS_SLEEP: "4", ZVEC_CONTEXT_TIMEOUT: "1" },
       })
       assert.equal(slowProbe.code, 0, slowProbe.stderr)
       assert.match(slowProbe.stdout, /zg status did not finish within 1s/)
+      assert.equal(slowProbe.stderr, "", "no bash job diagnostic may leak onto stderr")
       assert.doesNotMatch(await fs.readFile(logPath, "utf8"), /query/)
       assert.ok(Date.now() - started < 15_000, "both probes must be cut short")
 
@@ -398,6 +400,61 @@ describe("optional zvec-grep context helper", () => {
       assert.match(result.stderr, /^zvec-context: error/m)
       assert.match(result.stderr, /query failed safely/)
       assert.doesNotMatch(result.stdout, /skipped/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("soft-skips with a clear reason when no temp file can be created", async (t) => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      t.skip("root ignores directory modes")
+      return
+    }
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const readOnly = path.join(tmpDir, "ro")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await fs.mkdir(readOnly, { mode: 0o500 })
+    await writeFakeZg(binDir)
+    try {
+      for (const args of [["search", "query", "--root", tmpDir], ["status", "--root", tmpDir]]) {
+        const result = await runHelper(args, {
+          cwd: tmpDir,
+          env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath, TMPDIR: readOnly },
+        })
+        assert.equal(result.code, 0, `${args[0]}: ${result.stderr}`)
+        assert.match(result.stdout, /^zvec-context: skipped/m)
+        assert.match(result.stdout, /could not create a temp file/)
+        assert.doesNotMatch(result.stderr, /mktemp/)
+      }
+    } finally {
+      await fs.chmod(readOnly, 0o700)
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("removes its temp files when the helper itself is killed mid-call", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    try {
+      const { spawn } = await import("node:child_process")
+      const child = spawn("/bin/bash", [HELPER_PATH, "status", "--root", tmpDir], {
+        cwd: tmpDir,
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_TEST_LOG: logPath, ZVEC_TEST_STATUS_SLEEP: "30", ZVEC_CONTEXT_TIMEOUT: "60", TMPDIR: scratch },
+        stdio: "ignore",
+      })
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      assert.ok((await fs.readdir(scratch)).some((name) => name.startsWith("zvec-context.")), "temp file should exist while zg runs")
+      child.kill("SIGTERM")
+      await new Promise((resolve) => child.on("exit", resolve))
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      assert.deepEqual(await fs.readdir(scratch), [], "temp files must be removed on SIGTERM")
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
