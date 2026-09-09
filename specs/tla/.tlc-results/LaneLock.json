@@ -5,15 +5,15 @@
     "tla_content_sha256": "1262dfd510f7daff4a6c473455572736e72d12162e52cfdccd9daefff4fb2cd7",
     "cfg_sha256": "d4cbd155114f1e0aaece3fe21becf7d58eb08aadbbcab9a0b0e8180aa8dcbf3e",
     "pinned_prose_sha256": "96d1a78efe52f4168781f759a4d8fbc428a6dee4dc9bbf4c75d4e63c0db04c4b",
-    "harness_sha256": "3bd02da6764b63d26883cf5e54a671d36a5c0600e87a59135110e3593ef899b1",
+    "harness_sha256": "d891baa945eb799eb7039bc1e34e3cf03f6777f2970e887414b73f0e7afc4fcf",
     "harness_files": [
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "1de45510d02c11d4ee8debf6f3fe2fbacc0775dc",
+    "source_commit": "f6cae6c609368e46da9d6a355c8aa73dc0dca45c",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
-    "inputs_sha256": "f2190e4edf581c55863ccdb4dcd59dbea85c08f5c70b840d73782995661b6b75",
+    "inputs_sha256": "0e9974e9752d6b0b22d9bca70fc0fab511aa309deeea297b9bedff0739f8eb86",
     "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, every git-tracked file under src/brain_train/, test/formal/README.md, package.json, and package-lock.json; the reuse key, valid across squash merges"
   },
   "tlc": {
@@ -71,12 +71,15 @@
     "runs": 15,
     "contract_mode": "pass (ledger gated)",
     "candidate_tally": {
-      "rescope-authorization": 10,
-      "resolve-from-idle": 11
+      "resolve-from-idle": 5,
+      "rescope-authorization": 8,
+      "reassign-authorization": 5,
+      "update-actor-unchecked": 1,
+      "update-source-status": 1
     },
     "candidate_gate": "fail as designed while ledger candidates 4-11 sit in their spec 015 FR-5 advisory windows",
-    "implementation_mode": "pass (mirror includes the FR-29 dispose op, the row 12 shortcut, the resync split, and the per-task FR-18 memory; spec 016 WS3 and WS4)",
+    "implementation_mode": "pass (mirror includes the FR-29 dispose op, the row 12 shortcut with event provenance, the resync split, the per-task FR-18 memory, generated reassignments, and the doctor resync witness; spec 016 WS3 and WS4)",
     "trace_validation": "not run; TLC trace validation of harness traces is future work",
-    "run_at": "2026-09-09T06:10:00Z"
+    "run_at": "2026-09-09T08:20:00Z"
   }
 }

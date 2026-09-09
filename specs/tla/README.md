@@ -246,8 +246,11 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   designated 2026-09-09); the registry owner label is not modeled. `Resync` fires only from the force-release
   `uncovered` state; btrain's doctor also repairs a registry that was emptied
   outside btrain, which the model treats as the same event. The harness
-  generator emits no reassignments and no doctor resync;
-  `test/core.test.mjs` and `test/watchdog.test.mjs` cover them.
+  generates reassignments (mirror `reassign`, label
+  `reassign-authorization` during the FR-5 window) and runs the real
+  `btrain doctor --repair` in a deterministic resync witness (mirror
+  `dropRegistry` + `doctorRepair`); status updates on an uncovered lane stay
+  out of the generator because their contract is undesignated.
 - Crash windows between the handoff write and the registry write are not
   modeled; the writes are atomic in the model.
 - TLC trace validation against harness-emitted traces is future work

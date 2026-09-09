@@ -76,6 +76,12 @@ function emptyLane() {
     // implementation reads the originating workflow event). A local
     // request-changes or any other status change clears it.
     prFeedbackEntered: false,
+    // spec 005 FR-5 author history (spec 015 Q8): every agent that has owned
+    // the current task. A fresh claim starts a new history.
+    authors: [],
+    // spec 002 Force-release override: TRUE while registry coverage for an
+    // active lane is suspended (registry emptied outside a claim or rescope).
+    uncovered: false,
   }
 }
 
@@ -197,8 +203,84 @@ export class LaneLockModel {
       repairOwner: "",
       lastActor: owner,
       disposition: false,
+      prFeedbackEntered: false,
+      authors: [owner],
+      uncovered: false,
     })
     this.#setRegistry(lane, normalized)
+    return this.#accept()
+  }
+
+  // spec 005 FR-5 reassignment (spec 015 row 20; Q8 Option C with swap policy
+  // A-i, designated 2026-09-09). Contract: only in in-progress, needs-review,
+  // or changes-requested without a linked PR; the owner reassigns the owner;
+  // either lane agent reassigns the reviewer; roles stay distinct; no author
+  // of the task becomes its reviewer. Ownership transfer makes the new owner
+  // the responsible actor. Implementation mirror: during the spec 015 FR-5
+  // window every case is accepted with an L10 advisory record, so the
+  // mirror applies the same effects without the guards.
+  reassign({ lane, actor, owner, reviewer }) {
+    const s = this.lane(lane)
+    if (this.mode === "implementation" && !s.fileExists) return this.#reject("no-handoff-file")
+    if (s.status === "resolved") return this.#reject("resolved-via-update-forbidden")
+    const newOwner = owner ?? s.owner
+    const newReviewer = reviewer ?? s.reviewer
+    const ownerChanged = newOwner !== s.owner
+    const reviewerChanged = newReviewer !== s.reviewer
+    if (this.mode === "contract") {
+      if (!["in-progress", "needs-review", "changes-requested"].includes(s.status) || s.prNumber) {
+        return this.#reject("reassign-from-invalid-status")
+      }
+      if (ownerChanged && actor !== s.owner) return this.#reject("reassign-owner-requires-owner")
+      if (!ownerChanged && ![s.owner, s.reviewer].includes(actor)) return this.#reject("reassign-requires-lane-agent")
+      if (reviewerChanged && ![s.owner, s.reviewer].includes(actor)) return this.#reject("reassign-requires-lane-agent")
+      if (newOwner === newReviewer) return this.#reject("reassign-roles-not-distinct")
+      if (reviewerChanged && [...s.authors, newOwner].includes(newReviewer)) return this.#reject("reassign-reviewer-is-author")
+    }
+    s.owner = newOwner
+    s.reviewer = newReviewer
+    if (ownerChanged && !s.authors.includes(newOwner)) s.authors = [...s.authors, newOwner]
+    s.lastActor = ownerChanged ? newOwner : [newOwner, newReviewer].includes(actor) ? actor : newOwner
+    s.fileExists = true
+    return this.#accept()
+  }
+
+  // Registry loss outside btrain (or an audited force-release): the handoff
+  // keeps its paths, the registry entry disappears, coverage is suspended.
+  dropRegistry({ lane }) {
+    const s = this.lane(lane)
+    this.#releaseRegistry(lane)
+    if (ACTIVE_STATUSES.has(s.status) && s.lockedFiles.length > 0) s.uncovered = true
+    return this.#accept()
+  }
+
+  // spec 006 FR-2 lock/status resync with the spec 014 rescope/resync split
+  // (spec 015 row 17; Q2 Option B): `btrain doctor --repair` restores
+  // coverage for the handoff's recorded set only while the lane is
+  // in-progress, changes-requested, or repair-needed. In needs-review and
+  // the PR flow it leaves coverage to the owner; the lane then fails the
+  // active-without-locks integrity check and enters repair-needed (spec 015
+  // row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
+  // lock-mismatch).
+  doctorRepair() {
+    for (const [lane, s] of this.lanes) {
+      if (!s.uncovered) continue
+      if (["in-progress", "changes-requested", "repair-needed"].includes(s.status)) {
+        if (this.#conflicts(lane, s.lockedFiles)) continue
+        this.#setRegistry(lane, s.lockedFiles)
+        s.uncovered = false
+        continue
+      }
+      if (ACTIVE_STATUSES.has(s.status)) {
+        const reason = "lock-mismatch"
+        if (s.repairReasonsSeen.includes(reason)) s.escalationExpected = true
+        else s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
+        s.status = "repair-needed"
+        s.reasonCode = reason
+        s.repairOwner = s.lastActor || s.owner
+        s.prFeedbackEntered = false
+      }
+    }
     return this.#accept()
   }
 
@@ -526,6 +608,7 @@ export class LaneLockModel {
       if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
       s.lockedFiles = [...normalized].sort()
       this.#setRegistry(lane, normalized)
+      s.uncovered = false
       return this.#accept()
     }
     // spec 014 rescope/resync split (spec 015 row 17; Q2 Option B, designated
@@ -537,6 +620,7 @@ export class LaneLockModel {
       if (actor !== s.owner) return this.#reject("resync-requires-owner")
       if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
       this.#setRegistry(lane, normalized)
+      s.uncovered = false
       s.lastActor = actor
       return this.#accept()
     }
@@ -577,6 +661,8 @@ export class LaneLockModel {
     s.reviewer = real.reviewer
     s.lockedFiles = [...real.lockedFiles]
     s.fileExists = true
+    s.uncovered = false
+    if (!s.authors.includes(real.owner) && real.owner) s.authors = [...s.authors, real.owner]
     this.#setRegistry(laneId, real.registry)
   }
 
@@ -597,7 +683,7 @@ export class LaneLockModel {
     for (const [id, s] of this.lanes) {
       if (skip.has(id)) continue
       const registryPaths = this.registryPaths(id)
-      if (ACTIVE_STATUSES.has(s.status) && this.mode === "contract") {
+      if (ACTIVE_STATUSES.has(s.status) && this.mode === "contract" && !s.uncovered) {
         const expected = JSON.stringify([...s.lockedFiles].sort())
         if (expected !== JSON.stringify(registryPaths)) {
           violations.push(`coverage: lane ${id} ${s.status} lockedFiles != registry`)
