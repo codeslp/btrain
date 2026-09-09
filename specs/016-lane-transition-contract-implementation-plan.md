@@ -110,6 +110,7 @@ flowchart TD
     WS2 --> WS4
     WS0["WS0 human decisions (8 questions)"] --> WS3
     WS0 --> WS4
+    WS3 -->|shared file locks| WS4
     WS3 --> WS5["WS5 spec 014 Phase 3 gate on"]
     WS4 --> WS5
 ```
@@ -379,9 +380,9 @@ pilot model in CI.
 | Step | Work | Owner | Blocked by | Status (updated 2026-09-08) |
 | --- | --- | --- | --- | --- |
 | 1 | WS0 decisions | human | none | decided 2026-09-08 (spec 015 v0.1.4) |
-| 2 | WS1 unpinned prose | claude, lane `k` | none | merged 2026-09-02 (#37) |
+| 2 | WS1 unpinned prose | claude, lane `k` | none | merged 2026-09-01 (#37) |
 | 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
-| 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-02 (#35) |
+| 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-01 (#35) |
 | 5 | WS2 structural gate | any agent | none | merged 2026-09-02 (#42) |
 | 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | ready |
 | 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | blocked on step 6 (shared file locks) |
