@@ -1,19 +1,19 @@
 {
   "status": "validation_mismatch",
-  "status_note": "spec 014 verdict for the whole chain: TLC passed and implementation mode passes (the mirror fix from PR #34 is in this tree), but the FR-6 candidate gate tallies ledgered candidate findings (test/formal/README.md) and TLC trace validation has not run. A `pass` requires every validation outcome to pass.",
+  "status_note": "spec 014 verdict for the whole chain: TLC passed and implementation mode passes, but the FR-6 candidate gate tallies ledgered candidate findings (test/formal/README.md; findings 4, 5, 7, 9, 10 undesignated, 6 and 11 in their spec 015 FR-5 advisory window) and TLC trace validation has not run. A `pass` requires every validation outcome to pass.",
   "keys": {
-    "tla_content_sha256": "e1acf8954528519270b66a4d5c671a71ba12520f468fd4732386b030361f5fce",
-    "cfg_sha256": "3657b03c548b4d10b4d1e0d2b932daf8cfab159716b60822a176c03366409136",
-    "pinned_prose_sha256": "56a39c3b1778bdc1840a293c7cfde4dc0186f7d763c468befabee5fb307f5a7c",
-    "harness_sha256": "9df5bd61931b0b684c0840d71fb91bd238c93f8940c04516641fcf894f62d950",
+    "tla_content_sha256": "571003f9d613252d57941ed075832854a9d2d9a562c3299c3628d6863fd6e303",
+    "cfg_sha256": "e7ece7e264ab3ddb7a81b08ef5f8dce8448caaf4a57d7b7e0cb650784c767c78",
+    "pinned_prose_sha256": "fc3117f1bfac449ec6e2b649dfd02abd8542b11d9c07f8ca8d4cf2896481b86e",
+    "harness_sha256": "c38f8f1162c893a4950b471a2b63cfbf17c55a6baf0aa6883dc3e4b41010609f",
     "harness_files": [
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "9a06bf6b105d01a60dc20087c3b019165ddbc758",
+    "source_commit": "5341965eb2019523ff2c1a3e2b1d138bbbb02537",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
-    "inputs_sha256": "36b72033e5313db4f3934d635c4a5f29b0c3d92ead7ca7f60e1ccecea4d1f2b3",
+    "inputs_sha256": "f259cc4440c8153afdfcc7260a54a918caee48be53193b9505857cb84bd9e69f",
     "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, every git-tracked file under src/brain_train/, test/formal/README.md, package.json, and package-lock.json; the reuse key, valid across squash merges"
   },
   "tlc": {
@@ -21,10 +21,10 @@
     "tlc_version": "2.19 (tla2tools v1.7.4)",
     "config": "LaneLock.cfg",
     "command": "java -cp $TLC_JAR tlc2.TLC -config LaneLock.cfg -workers auto -deadlock LaneLock.tla",
-    "states_generated": 88436305,
-    "distinct_states": 8236969,
+    "states_generated": 159482257,
+    "distinct_states": 14990809,
     "depth": 25,
-    "wall_clock_seconds": 78,
+    "wall_clock_seconds": 237,
     "workers": 10,
     "invariants": [
       "TypeOK",
@@ -38,36 +38,40 @@
       "PrFlowNeedsPeerApproval",
       "RepairOwnerAssigned",
       "LastActorIsLaneAgent",
-      "LinkedLaneStaysActive"
+      "LinkedLaneStaysActive",
+      "DecisionOnlyDuringRepair",
+      "DispositionAfterEscalation"
     ],
     "properties": [
-      "RepairResolveNeedsEscalation",
+      "RepairResolveNeedsDecision",
       "RepairClearByResponsibleActor",
       "RepairEnterAssignsLastActor",
       "PrFlowEntryByReviewer"
     ],
     "mutation_checks": [
       "Claim without NoConflictWithOthers violates Exclusivity",
-      "RepairResolve without `repairCount[l] >= MaxRepair` violates action property RepairResolveNeedsEscalation (verified 2026-09-01T23:31Z)",
+      "RepairResolve with plain IsLaneAgent instead of the decision disjunction violates action property RepairResolveNeedsDecision (verified 2026-09-09T02:14Z, spec 016 WS3)",
       "PeerResolve guarded on IsOwner violates PrFlowNeedsPeerApproval and PrFlowEntryByReviewer (by construction: approver' = a # reviewer)",
       "RepairClear guarded on IsLaneAgent violates RepairClearByResponsibleActor (by construction)",
       "RepairEnter assigning owner[l] violates RepairEnterAssignsLastActor (by construction)"
     ],
-    "run_at": "2026-09-02T03:46:48Z"
+    "run_at": "2026-09-09T02:11:13Z"
   },
   "validation": {
     "engine": "fast-check model-based (spec 014 FR-6)",
-    "command": "BTRAIN_FORMAL=1 BTRAIN_FORMAL_RUNS=15 BTRAIN_FORMAL_SEED=20260901 node --test test/formal/lane-lock-harness.test.mjs",
-    "seed": 20260901,
+    "command": "BTRAIN_FORMAL=1 BTRAIN_FORMAL_RUNS=15 BTRAIN_FORMAL_SEED=20260908 node --test test/formal/lane-lock-harness.test.mjs",
+    "seed": 20260908,
     "runs": 15,
     "contract_mode": "pass (ledger gated)",
     "candidate_tally": {
-      "resolve-from-idle": 10,
-      "update-actor-unchecked": 1
+      "resolve-from-idle": 7,
+      "rescope-authorization": 2,
+      "resolve-actor-unchecked": 1,
+      "pr-outcome-source-status": 1
     },
-    "candidate_gate": "fail as designed while ledger candidates 4-11 exist",
-    "implementation_mode": "pass (mirror fixed in PR #34, merged into this branch)",
+    "candidate_gate": "fail as designed while ledger candidates 4, 5, 7, 9, 10 exist and 6, 11 are in advisory",
+    "implementation_mode": "pass (mirror includes the FR-29 dispose op, spec 016 WS3)",
     "trace_validation": "not run; TLC trace validation of harness traces is future work",
-    "run_at": "2026-09-02T03:47:11Z"
+    "run_at": "2026-09-09T02:15:00Z"
   }
 }

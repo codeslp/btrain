@@ -8,6 +8,7 @@ import path from "node:path"
 import { LaneLockModel } from "./formal/lane-lock-model.mjs"
 import {
   TRANSITION_ROWS,
+  advisoryRowId,
   applyTransition,
   classifyTransitionEvent,
   formatTransitionsMermaid,
@@ -69,7 +70,13 @@ describe("lane transition contract", () => {
     const tla = await fs.readFile(path.resolve("specs/tla/LaneLock.tla"), "utf8")
     const modeledActions = [...tla.matchAll(/^([A-Z][A-Za-z]+)\([^)]*\) ==/gm)]
       .map((match) => match[1])
-      .filter((name) => !["Conflicts", "IsOwner", "IsReviewer", "IsLaneAgent", "IsRepairOwner", "NoConflictWithOthers"].includes(name))
+      // Predicates are not actions. RepairDispose and RepairOverrideGrant are
+      // spec 006 FR-29 human records: they change no status, lock, owner, or
+      // reviewer, so spec 015 FR-1 gives them no transition row.
+      .filter((name) => ![
+        "Conflicts", "IsOwner", "IsReviewer", "IsLaneAgent", "IsRepairOwner", "NoConflictWithOthers",
+        "RepairDispose", "RepairOverrideGrant",
+      ].includes(name))
     const tableActions = new Set(TRANSITION_ROWS.map((entry) => entry.action))
 
     assert.deepEqual(modeledActions.filter((name) => !tableActions.has(name)), [])
@@ -110,6 +117,34 @@ describe("lane transition contract", () => {
           pr: prLinked ? "42" : "",
         }),
       })),
+      {
+        name: "owner hands off to needs-review (row 2)",
+        state: { status: "in-progress", actor: "codex" },
+        event: "handoff update --status",
+        input: { to: "needs-review" },
+        runModel: (model) => model.update({ lane: "a", actor: "codex", status: "needs-review" }),
+      },
+      {
+        name: "reviewer cannot hand off to needs-review (L3 is not designated)",
+        state: { status: "in-progress", actor: "claude" },
+        event: "handoff update --status",
+        input: { to: "needs-review" },
+        runModel: (model) => model.update({ lane: "a", actor: "claude", status: "needs-review" }),
+      },
+      {
+        name: "reviewer declares repair-needed (row 13)",
+        state: { status: "in-progress", actor: "claude" },
+        event: "handoff update --status",
+        input: { to: "repair-needed", reasonCode: "invalid-handoff" },
+        runModel: (model) => model.update({ lane: "a", actor: "claude", status: "repair-needed", reason: "invalid-handoff" }),
+      },
+      ...[false, true].map((disposed) => ({
+        name: `lane agent resolves repair-needed with disposition=${disposed} (row 15 / L7)`,
+        state: { status: "repair-needed", actor: "codex", disposed },
+        event: "handoff resolve",
+        input: { to: "resolved", prFlowEnabled: true, humanDisposition: disposed },
+        runModel: (model) => model.resolve({ lane: "a", actor: "codex", final: false }),
+      })),
       ...[false, true].map((prLinked) => ({
         name: `system clears bots with prLinked=${prLinked}`,
         state: { status: "pr-review", actor: "system", prLinked },
@@ -139,6 +174,10 @@ describe("lane transition contract", () => {
         prNumber: fixture.state.prLinked ? "42" : "",
       })
       if (fixture.state.prLinked) model.lane("a").prNumber = "42"
+      if (fixture.state.disposed) {
+        model.lane("a").escalationExpected = true
+        model.lane("a").disposition = true
+      }
       const modeled = fixture.runModel(model)
       let productionAccepted = false
       try {
@@ -219,6 +258,58 @@ describe("lane transition contract", () => {
 
     assert.equal(result.row.id, "L4")
     assert.equal(result.next.status, "ready-to-merge")
+  })
+
+  it("marks rows 2, 13, 15 designated and L3, L7 advisory after spec 016 WS3", () => {
+    const byId = new Map(TRANSITION_ROWS.map((row) => [row.id, row]))
+    for (const id of ["2", "13", "15"]) assert.equal(byId.get(id).state, "designated", `row ${id}`)
+    for (const id of ["L3", "L7"]) assert.equal(byId.get(id).state, "advisory", `row ${id}`)
+    assert.equal(byId.get("L4").state, "legacy")
+  })
+
+  it("classifies advisory legacy matches, including the FR-29 repair cases on L4", () => {
+    const lane = { status: "in-progress", owner: "codex", reviewer: "claude" }
+    const reviewerHandoff = applyTransition(lane, "handoff update --status", { to: "needs-review", actor: "claude" })
+    assert.equal(reviewerHandoff.row.id, "L3")
+    assert.equal(advisoryRowId(reviewerHandoff.row, lane, { to: "needs-review" }), "L3")
+
+    const repairExit = applyTransition(
+      { status: "repair-needed", owner: "codex", reviewer: "claude" },
+      "handoff update --status",
+      { to: "needs-review", actor: "codex" },
+    )
+    assert.equal(repairExit.row.kind, "legacy")
+    assert.equal(advisoryRowId(repairExit.row, { status: "repair-needed" }, { to: "needs-review" }), "L4")
+
+    const repairEntryFromResolved = applyTransition(
+      { status: "resolved", owner: "codex", reviewer: "claude" },
+      "handoff update --status",
+      { to: "repair-needed", actor: "codex", reasonCode: "invalid-handoff" },
+    )
+    assert.equal(repairEntryFromResolved.row.id, "L4")
+    assert.equal(advisoryRowId(repairEntryFromResolved.row, { status: "resolved" }, { to: "repair-needed" }), "L4")
+
+    const undesignatedShortcut = applyTransition(lane, "handoff update --status", { to: "ready-to-merge", actor: "codex" })
+    assert.equal(undesignatedShortcut.row.id, "L4")
+    assert.equal(advisoryRowId(undesignatedShortcut.row, lane, { to: "ready-to-merge" }), "")
+
+    const plainRepairResolve = applyTransition(
+      { status: "repair-needed", owner: "codex", reviewer: "claude" },
+      "handoff resolve",
+      { to: "resolved", actor: "codex", prFlowEnabled: true },
+    )
+    assert.equal(plainRepairResolve.row.id, "L7")
+    assert.equal(advisoryRowId(plainRepairResolve.row, { status: "repair-needed" }, { to: "resolved" }), "L4")
+  })
+
+  it("accepts the FR-29 exits on row 15 with a disposition or an override", () => {
+    const repair = { status: "repair-needed", owner: "codex", reviewer: "claude" }
+    const disposed = applyTransition(repair, "handoff resolve", { to: "resolved", actor: "claude", humanDisposition: true })
+    assert.equal(disposed.row.id, "15")
+    const overridden = applyTransition(repair, "handoff resolve", { to: "resolved", actor: "gemini", override: true })
+    assert.equal(overridden.row.id, "15")
+    const thirdPartyWithoutOverride = applyTransition(repair, "handoff resolve", { to: "resolved", actor: "gemini", humanDisposition: true })
+    assert.equal(thirdPartyWithoutOverride.row.id, "L7")
   })
 
   it("classifies combined updates by the mutation that changes workflow state", () => {

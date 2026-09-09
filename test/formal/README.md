@@ -11,9 +11,10 @@ contract, using fast-check model-based command sequences per spec 014 FR-6.
   inline. It is btrain-owned prose-derived work: change it only with a
   formal-impact declaration.
 - `lane-lock-harness.test.mjs` — the harness. It drives `claimHandoff`,
-  `patchHandoff`, `requestChangesHandoff`, `resolveHandoff`, `releaseLocks`,
-  and `applyPrStatusToHandoff` against throwaway repos and compares every
-  step with the model.
+  `patchHandoff`, `requestChangesHandoff`, `resolveHandoff`, `disposeRepair`
+  (spec 006 FR-29 `btrain repair dispose`), `releaseLocks`, and
+  `applyPrStatusToHandoff` against throwaway repos and compares every step
+  with the model.
 
 ## Run
 
@@ -38,7 +39,7 @@ agent or provider credentials.
 | Test | Meaning | Expected today |
 | --- | --- | --- |
 | contract mode (ledger gated) | Real behavior vs the designated contract; candidate findings are tallied, each divergent lane is adopted so the rest of the sequence stays checked | Must pass; a divergence outside the candidate ledger fails as `validation_mismatch`. No designated drift remains — a reappearance fails |
-| candidate findings absent | Asserts the candidate tally is empty | FAILS while ledger candidates 4–11 exist: the formal verdict is `validation_mismatch` and the suite exits non-zero (spec 014 blocks on it); flips green as candidates are fixed or designated |
+| candidate findings absent | Asserts the candidate tally is empty | FAILS while ledger candidates 4, 5, 7, 9, 10 exist and while 6 and 11 sit in their spec 015 FR-5 advisory window: the formal verdict is `validation_mismatch` and the suite exits non-zero (spec 014 blocks on it); flips green as candidates are fixed, designated, or enforced |
 | implementation mode | Real behavior vs the implementation mirror | Must pass; a failure means a new, unknown divergence |
 | closed-chain check | Deterministic close-without-merge chain | Must pass with zero tallies: the chain conforms end to end |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
@@ -66,7 +67,12 @@ an unknown divergence):
 
 Candidate findings surfaced by harness runs (need designation decisions in
 spec 002/005/006 before the model treats them as normative). Each is tallied
-by contract mode and keeps the candidate todo test red:
+by contract mode and keeps the candidate todo test red. Findings 6, 8, and
+11 were designated and staged by spec 016 WS3 on 2026-09-08 (see the notes
+under each); the labels `update-actor-unchecked` (needs-review case) and
+`repair-resolve-before-escalation` keep tallying during the spec 015 FR-5
+advisory window and become regressions when the enforcement lane retires L3
+and L7.
 
 4. `resolveHandoff` still permits non-reviewer approval from `needs-review`
    while legacy row L8 is in its required advisory window. It also permits a
@@ -80,12 +86,19 @@ by contract mode and keeps the candidate todo test red:
 6. When the reviewer (not the owner) moves a lane to `needs-review`,
    `inferPeerReviewer` reassigns the reviewer to the owner. The lane then
    waits for review with reviewer == owner, which breaks owner/reviewer
-   separation.
+   separation. **WS3 (2026-09-08):** the reassignment is repaired
+   (`inferPeerReviewer` now excludes the owner, not the actor; spec 015
+   FR-9) and the non-owner handoff itself is accepted with
+   `transition-advisory: L3` until enforcement. Contract mode still rejects
+   it (`needs-review-requires-owner`), so the tally persists by design.
 7. `patchHandoff` validates the target status name but not the source
    status: `needs-review` from `resolved`, `pr-review` from `in-progress`,
    and direct `ready-to-merge` updates are all accepted.
 8. `patchHandoff` crashes with a raw `ENOENT` (not a `BtrainError`) when the
-   lane has never been claimed.
+   lane has never been claimed. **Closed (WS2/WS3):** a missing lane handoff
+   file is a `BtrainError` naming the restore step in `patchHandoff`,
+   `resolveHandoff`, and `disposeRepair`; `test/core.test.mjs` carries the
+   regression test. The harness's `ENOENT` tolerance stays as a guard.
 9. `applyPrStatusToHandoff` with an explicit `--pr` applies the non-terminal
    outcomes (`waiting`, `feedback`, `ready-to-merge`) from any lane status,
    so an `in-progress` lane can enter `pr-review` without peer approval.
@@ -98,6 +111,15 @@ by contract mode and keeps the candidate todo test red:
 11. `resolveHandoff` resolves a `repair-needed` lane before the FR-18
     escalation, releasing contained locks early. Spec 014 designates repair
     exit-to-resolved only as a terminal disposition after escalation.
+    **WS3 (2026-09-08):** spec 006 FR-29 now owns the rule and both exits
+    exist in code: `btrain repair dispose --lane <id> --confirmed-by <human>
+    --reason "..."` writes the `repair-disposition` event (only after the
+    escalation), and `btrain override grant --action repair-resolve` is
+    consumed by the resolve. A plain resolve that meets neither condition is
+    accepted with `transition-advisory: L7` until enforcement; contract mode
+    rejects it (`repair-resolve-before-escalation`, now meaning "before a
+    recorded human decision"), so the tally persists by design. The model's
+    `dispose` op and the harness's `dispose` command exercise the legal path.
 
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a
@@ -114,11 +136,15 @@ that only carry another lane's reviewed work.
 
 ## Known gaps
 
-- Designation question: the implementation's FR-18 budget counts repair
-  history from the lane's event log, which spans re-claims of the same lane.
-  The model mirrors this. Whether a new task inherits the previous task's
-  repair budget needs a spec 006 designation; edge cases surface as
-  `repair-escalation-missing` tallies.
+- Designation question, answered 2026-09-08 (spec 015 Q4, Option A): a
+  fresh claim resets the FR-18 repair count and `RepairClear` does not. The
+  implementation still counts repair history across re-claims from the event
+  log and the model mirrors that; aligning both lands in spec 016 WS4 with a
+  production-level reclaim regression. Edge cases surface as
+  `repair-escalation-missing` tallies until then.
+- The override exit from `repair-needed` (spec 006 FR-29, `repair-resolve`
+  override) is not generated by the harness: throwaway repos grant no
+  overrides. `test/core.test.mjs` covers it end to end.
 
 - Crash-window injection (partial failure between the lock-registry write
   and the handoff write) is not exercised yet.

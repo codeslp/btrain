@@ -1,10 +1,10 @@
 # Plan: Implement the Lane Transition Contract (spec 015)
 
 **Status**: Draft
-**Version**: 0.1.1
+**Version**: 0.1.2
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-08 (v0.1.1: WS0 decisions recorded in spec 015 v0.1.4)
+**Updated**: 2026-09-08 (v0.1.2: WS3 advisory stage delivered, enforcement step pending; v0.1.1: WS0 decisions recorded in spec 015 v0.1.4)
 
 ## Summary
 
@@ -292,6 +292,24 @@ files or `locks.json` in this phase.
 **Blocked by**: nothing as of 2026-09-08. WS1 (#37), WS2 (#42), and PR #35
 are merged and lane `j` released `specs/tla/`.
 
+**Status (2026-09-08)**: advisory stage delivered in lane `c`. Landed:
+`btrain repair dispose` and the `repair-disposition` event; the
+`repair-resolve` override action consumed by `handoff resolve`; the FR-29
+disposition-or-override guard in `LaneLock.tla` (`decision` variable,
+`RepairDispose` and `RepairOverrideGrant` records, `RepairResolveNeedsDecision`
+property, `DecisionOnlyDuringRepair` and `DispositionAfterEscalation`
+invariants, FR-29 pinned) and in the harness mirror (`dispose` op); rows 2,
+13, 15 designated; L3 and L7 in advisory with `transition-advisory` records
+and warnings; the L4 repair-entry and repair-exit cases in advisory;
+`self-repair-audit` on owner self-declarations (Q7); the Q6 fix text; the
+spec 015 FR-9 `inferPeerReviewer` fix (finding 6); finding 8 closed with a
+regression test. Remaining for the enforcement step, no earlier than 14 days
+after this merge and with no L3/L7/L4-repair advisory event in the last 7
+days: reject on L3, L7, and the L4 repair cases; remove L3 and L7; flip the
+harness labels `update-actor-unchecked` (needs-review case) and
+`repair-resolve-before-escalation` to regressions; rewrite the
+`repair-needed -> needs-review` test from advisory to rejection.
+
 ### Workstream 4: Phase B pinned designations
 
 **Goal**: retire L1, L2, L4, L5, L6 (findings 4, 5, 7, 9, 10).
@@ -384,8 +402,8 @@ pilot model in CI.
 | 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
 | 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-01 (#35) |
 | 5 | WS2 structural gate | any agent | none | merged 2026-09-02 (#42) |
-| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | ready |
-| 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | blocked on step 6 (shared file locks) |
+| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | advisory stage in review 2026-09-08 (lane c); enforcement step after the FR-5 window |
+| 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | ready once the WS3 advisory PR merges (the WS3 enforcement step is a separate later lane and does not block WS4) |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
 
 As of 2026-09-08 steps 1 through 5 are complete. Step 6 is ready to claim.

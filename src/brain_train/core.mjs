@@ -46,7 +46,7 @@ import {
   buildClaimReviewContextFields,
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
-import { applyTransition, classifyTransitionEvent, getPrimaryTransition } from "./transitions.mjs"
+import { advisoryRowId, applyTransition, classifyTransitionEvent, getPrimaryTransition } from "./transitions.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -222,7 +222,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -5437,8 +5437,9 @@ async function patchHandoff(repoRoot, options) {
       })
 
       const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
-      const validateStructuralTransition = (source) =>
-        applyTransition(source, transitionEvent, {
+      let matchedRow = null
+      const validateStructuralTransition = (source) => {
+        const transition = applyTransition(source, transitionEvent, {
           to: nextStatus,
           actor: resolvedActor,
           prFlowEnabled: getPrFlowConfig(config).enabled,
@@ -5453,7 +5454,24 @@ async function patchHandoff(repoRoot, options) {
                 JSON.stringify(normalizePathList(source.lockedFiles)),
           changes: updates,
         })
+        matchedRow = transition.row
+        return transition
+      }
       validateStructuralTransition(existingCurrent)
+
+      const statusChanging = options.status !== undefined && nextStatus !== existingCurrent.status
+      const {
+        advisory: transitionAdvisory,
+        selfRepairAudit,
+        warnings: advisoryWarnings,
+      } = stageStatusUpdateAdvisory({
+        row: matchedRow,
+        existingCurrent,
+        nextStatus,
+        statusChanging,
+        resolvedActor,
+        configuredAgents,
+      })
 
       if (options.status === "needs-review") {
         const inferredReviewer = inferPeerReviewer({
@@ -5467,7 +5485,7 @@ async function patchHandoff(repoRoot, options) {
 
         if (!inferredReviewer) {
           throw new BtrainError({
-            message: `Could not infer a reviewer different from "${resolvedActor || "the actor"}".`,
+            message: `Could not infer a reviewer different from "${updates.owner || existingCurrent.owner || resolvedActor || "the owner"}".`,
             reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
             fix: `Pass --reviewer <other-agent> explicitly, or add more agents with \`btrain agents add --repo . --agent <name>\`.`,
           })
@@ -5635,9 +5653,12 @@ async function patchHandoff(repoRoot, options) {
           repairOwner: updates.repairOwner || "",
           repairEscalation: updates.repairEscalation || "",
           repairAttempts: updates.repairAttempts || 0,
+          ...(transitionAdvisory ? { "transition-advisory": transitionAdvisory } : {}),
+          ...(selfRepairAudit ? { "self-repair-audit": true } : {}),
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
       }]
+      for (const line of advisoryWarnings) options.onEvent?.(line)
 
       // Publish the active-status handoff inside the lock mutex so that
       // a concurrent release-lane audit cannot observe stale (inactive)
@@ -5683,7 +5704,7 @@ async function patchHandoff(repoRoot, options) {
 
     if (!inferredReviewer) {
       throw new BtrainError({
-        message: `Could not infer a reviewer different from "${resolvedActor || "the actor"}".`,
+        message: `Could not infer a reviewer different from "${updates.owner || existingCurrent.owner || resolvedActor || "the owner"}".`,
         reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
         fix: `Pass --reviewer <other-agent> explicitly, or add more agents with \`btrain agents add --repo . --agent <name>\`.`,
       })
@@ -5705,7 +5726,7 @@ async function patchHandoff(repoRoot, options) {
   updates.reasonCode = reasonMetadata.reasonCode
   updates.reasonTags = reasonMetadata.reasonTags
   const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
-  applyTransition(existingCurrent, transitionEvent, {
+  const singleTransition = applyTransition(existingCurrent, transitionEvent, {
     to: nextStatus,
     actor: resolvedActor,
     prFlowEnabled: getPrFlowConfig(config).enabled,
@@ -5718,6 +5739,19 @@ async function patchHandoff(repoRoot, options) {
       : JSON.stringify(normalizePathList(updates.lockedFiles)) !== JSON.stringify(normalizePathList(existingCurrent.lockedFiles)),
     changes: updates,
   })
+  const {
+    advisory: singleAdvisory,
+    selfRepairAudit: singleSelfRepairAudit,
+    warnings: singleWarnings,
+  } = stageStatusUpdateAdvisory({
+    row: singleTransition.row,
+    existingCurrent,
+    nextStatus,
+    statusChanging: options.status !== undefined && nextStatus !== existingCurrent.status,
+    resolvedActor,
+    configuredAgents,
+  })
+  for (const line of singleWarnings) options.onEvent?.(line)
   let repairMetadata = {
     repairOwner: existingCurrent.repairOwner || "",
     repairEscalation: existingCurrent.repairEscalation || "",
@@ -5822,6 +5856,8 @@ async function patchHandoff(repoRoot, options) {
       repairOwner: updates.repairOwner || "",
       repairEscalation: updates.repairEscalation || "",
       repairAttempts: updates.repairAttempts || 0,
+      ...(singleAdvisory ? { "transition-advisory": singleAdvisory } : {}),
+      ...(singleSelfRepairAudit ? { "self-repair-audit": true } : {}),
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
   })
@@ -5959,6 +5995,124 @@ async function requestChangesHandoff(repoRoot, options) {
   return updatedCurrent
 }
 
+// spec 006 FR-29: true when a `repair-disposition` event for the current
+// repair exists, recorded after the most recent repair-needed entry and after
+// the FR-18 escalation fired.
+function hasRepairDisposition(events, current) {
+  if (String(current?.repairEscalation || "") !== "human") return false
+  let lastEntryIndex = -1
+  for (const [index, event] of (events || []).entries()) {
+    if (
+      ["update", "watchdog-repair"].includes(event.type)
+      && event.after?.status === "repair-needed"
+      && event.before?.status !== "repair-needed"
+    ) {
+      lastEntryIndex = index
+    }
+  }
+  return (events || []).some(
+    (event, index) =>
+      index > lastEntryIndex
+      && event.type === "repair-disposition"
+      && event.details?.disposition === "terminate",
+  )
+}
+
+// spec 006 FR-29: `btrain repair dispose` records the human disposition of an
+// escalated repair. It changes no status, lock, owner, or reviewer, so it is
+// not a spec 015 transition row; it is the record row 15 reads.
+async function disposeRepair(repoRoot, options = {}) {
+  const config = await readProjectConfig(repoRoot)
+  const laneConfigs = getLaneConfigs(config)
+  const laneId = typeof options.lane === "string" ? options.lane.trim() : ""
+  const confirmedBy = normalizeAgentName(options.confirmedBy || options["confirmed-by"])
+  const reason = typeof options.reason === "string" ? options.reason.trim() : ""
+  const { actor: resolvedActor } = resolveVerifiedActor(config, options.actor)
+  const actorLabel = resolvedActor || "btrain"
+
+  if (laneConfigs && !laneId) {
+    throw new BtrainError({
+      message: "`btrain repair dispose` requires --lane when [lanes] is enabled.",
+      reason: "The disposition must name the repair-needed lane it terminates.",
+      fix: `btrain repair dispose --lane <id> --confirmed-by <human> --reason "..."`,
+    })
+  }
+  if (!confirmedBy) {
+    throw new BtrainError({
+      message: "`btrain repair dispose` requires --confirmed-by.",
+      reason: "Spec 006 FR-29: the terminal disposition of a repair is a human decision and must name the human.",
+      fix: `btrain repair dispose${laneId ? ` --lane ${laneId}` : ""} --confirmed-by <human> --reason "..."`,
+    })
+  }
+  if (!reason) {
+    throw new BtrainError({
+      message: "`btrain repair dispose` requires --reason.",
+      reason: "The disposition is an audit record and needs a documented reason.",
+      fix: `btrain repair dispose${laneId ? ` --lane ${laneId}` : ""} --confirmed-by ${confirmedBy} --reason "..."`,
+    })
+  }
+
+  let current
+  if (laneId) {
+    const handoffPath = getLaneHandoffPath(repoRoot, config, laneId)
+    if (!(await pathExists(handoffPath))) {
+      throw new BtrainError({
+        message: `Lane ${laneId} handoff file is missing.`,
+        reason: "The disposition cannot be recorded against a lane without its canonical handoff file.",
+        fix: `Restore the configured lane handoff file, then run btrain doctor --repo ${repoRoot}.`,
+      })
+    }
+    current = await readLaneState(repoRoot, config, laneId)
+  } else {
+    current = await readCurrentState(repoRoot)
+  }
+
+  if (current.status !== "repair-needed") {
+    throw new BtrainError({
+      message: `Lane ${laneId || "(single)"} is \`${current.status || "idle"}\`, not \`repair-needed\`.`,
+      reason: "Spec 006 FR-29: a disposition terminates a repair; there is no repair to dispose of.",
+      fix: "Nothing to record. Resolve or continue the lane through its normal path.",
+    })
+  }
+  if (String(current.repairEscalation || "") !== "human") {
+    throw new BtrainError({
+      message: `Lane ${laneId || "(single)"} has not reached the FR-18 escalation.`,
+      reason: "Spec 006 FR-29: a disposition is recorded only after the one-attempt budget is exhausted and the lane escalated to a human. The escalation flag is the request for this decision.",
+      fix: `Let the responsible repair actor clear the repair (btrain handoff update${laneId ? ` --lane ${laneId}` : ""} --status in-progress), or grant an audited override: btrain override grant --action repair-resolve${laneId ? ` --lane ${laneId}` : ""} --requested-by <agent> --confirmed-by <human> --reason "...".`,
+    })
+  }
+  const events = await readWorkflowEvents(repoRoot, config, laneId)
+  if (hasRepairDisposition(events, current)) {
+    throw new BtrainError({
+      message: `Lane ${laneId || "(single)"} already carries a disposition for this repair.`,
+      reason: "One human decision per repair; the record is already in the workflow event log.",
+      fix: `btrain handoff resolve${laneId ? ` --lane ${laneId}` : ""} --summary "..." --actor "${current.owner || current.reviewer || "<lane agent>"}"`,
+    })
+  }
+
+  await appendWorkflowEvent(repoRoot, config, {
+    type: "repair-disposition",
+    actor: actorLabel,
+    laneId,
+    details: {
+      laneId,
+      reason,
+      confirmedBy,
+      disposition: "terminate",
+      reasonCode: current.reasonCode || "",
+      repairAttempts: Number(current.repairAttempts) || 0,
+    },
+  })
+
+  return {
+    laneId,
+    confirmedBy,
+    reason,
+    disposition: "terminate",
+    next: `btrain handoff resolve${laneId ? ` --lane ${laneId}` : ""} --summary "..." --actor "${current.owner || current.reviewer || "<lane agent>"}"`,
+  }
+}
+
 async function resolveHandoff(repoRoot, options) {
   const config = await readProjectConfig(repoRoot)
   const prFlow = getPrFlowConfig(config)
@@ -6013,6 +6167,36 @@ async function resolveHandoff(repoRoot, options) {
     )
     ? `warning: transition-advisory L8: only the recorded reviewer should apply \`needs-review -> ${reviewerResolveTarget}\`; acting agent is \`${resolvedActor || "unknown"}\` and reviewer is \`${existingCurrent.reviewer || "unassigned"}\`.`
     : ""
+
+  // spec 006 FR-29 (spec 015 row 15): a repair-needed lane resolves only with
+  // a recorded human decision: a `repair-disposition` event written after the
+  // FR-18 escalation for the current repair, or a consumed audited
+  // `repair-resolve` override. Both inputs are gathered here (FR-12: the gate
+  // itself reads no files) and the L7 advisory is recorded when neither holds.
+  let humanDisposition = false
+  let repairOverrideRecord = null
+  if (existingCurrent.status === "repair-needed") {
+    const events = await readWorkflowEvents(repoRoot, config, laneId || "")
+    humanDisposition = hasRepairDisposition(events, existingCurrent)
+    const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
+    const pendingOverride = overrideId
+      || (await listActiveOverrides(repoRoot)).some(
+        (record) => record.action === "repair-resolve" && (record.laneId || "") === (laneId || ""),
+      )
+    if (pendingOverride) {
+      repairOverrideRecord = await consumeOverride(repoRoot, {
+        config,
+        action: "repair-resolve",
+        laneId: laneId || "",
+        overrideId,
+        actorLabel,
+      })
+    }
+  }
+  const repairResolveAdvisory =
+    existingCurrent.status === "repair-needed" && !humanDisposition && !repairOverrideRecord
+      ? `warning: transition-advisory L7: resolving \`repair-needed\` without a recorded human decision (spec 006 FR-29). Record one with \`btrain repair dispose --lane ${laneId || "<id>"} --confirmed-by <human> --reason "..."\` after the FR-18 escalation, or grant \`btrain override grant --action repair-resolve --lane ${laneId || "<id>"} ...\`. Enforcement lands after the spec 015 FR-5 advisory window.`
+      : ""
 
   const finalResolve = !!options.final || !!options["final"]
   // spec 002 v1.1.2: `--final` is the merge/closure path, not a review
@@ -6126,6 +6310,8 @@ async function resolveHandoff(repoRoot, options) {
       actor: resolvedActor,
       prFlowEnabled: prFlow.enabled,
       prLinked: !!(latestCurrent.prNumber || normalizePrNumber(options.pr)),
+      humanDisposition,
+      override: !!repairOverrideRecord,
     })
     const terminalPreviousHandoffEntry =
       latestCurrent.task || options.summary
@@ -6151,6 +6337,9 @@ async function resolveHandoff(repoRoot, options) {
         eventDetails: {
           summary: options.summary || "",
           ...(reviewerAuthorityAdvisory ? { "transition-advisory": "L8" } : {}),
+          ...(repairResolveAdvisory ? { "transition-advisory": "L7" } : {}),
+          ...(humanDisposition ? { repairDisposition: true } : {}),
+          ...(repairOverrideRecord ? { overrideId: repairOverrideRecord.id } : {}),
         },
         overrideHandoffPath,
       },
@@ -6166,6 +6355,7 @@ async function resolveHandoff(repoRoot, options) {
     await publishTerminalResolve()
   }
   if (reviewerAuthorityAdvisory) options.onEvent?.(reviewerAuthorityAdvisory)
+  if (repairResolveAdvisory) options.onEvent?.(repairResolveAdvisory)
   if (isCgraphEnabled(config)) {
     await reconcileCgraphAdvisories(repoRoot, laneId || "repo", [], {
       adviseOnResolution: false,
@@ -7054,6 +7244,57 @@ function detectCurrentAgent(config, env = process.env) {
   }
 }
 
+// spec 015 FR-6 with open question Q6 (Option C, 2026-09-08): the fix text
+// names the lone configured agent instead of inferring it.
+function formatActorFix(configuredAgents = []) {
+  const names = (configuredAgents || []).filter(Boolean)
+  if (names.length === 1) return `export BTRAIN_AGENT=${names[0]}`
+  return "pass --actor <agent> or export BTRAIN_AGENT=<agent>"
+}
+
+function isConfiguredActor(configuredAgents, actor) {
+  const key = normalizeAgentName(actor).toLowerCase()
+  return !!key && (configuredAgents || []).some((name) => normalizeAgentName(name).toLowerCase() === key)
+}
+
+// spec 015 FR-5 advisory stage for `handoff update --status` (spec 016 WS3).
+// L3: a non-owner moved the lane to needs-review. L4 (repair cases only): a
+// repair-needed entry from a status row 13 forbids, a repair-needed exit spec
+// 006 FR-29 forbids, or a repair-needed entry by an actor that is not a
+// configured agent (row 13 enforcement will reject it per FR-6). Also flags
+// the spec 006 FR-29 self-repair audit when the owner declares repair on their
+// own lane. Returns the event fields and the warning lines to print.
+function stageStatusUpdateAdvisory({ row, existingCurrent, nextStatus, statusChanging, resolvedActor, configuredAgents }) {
+  if (!statusChanging) return { advisory: "", selfRepairAudit: false, warnings: [] }
+  let advisory = advisoryRowId(row, existingCurrent, { to: nextStatus })
+  const actorConfigured = isConfiguredActor(configuredAgents, resolvedActor)
+  if (!advisory && nextStatus === "repair-needed" && row?.id === "13" && !actorConfigured) {
+    advisory = "L4"
+  }
+  const ownerKey = normalizeAgentName(existingCurrent.owner).toLowerCase()
+  const selfRepairAudit =
+    nextStatus === "repair-needed"
+    && !!ownerKey
+    && normalizeAgentName(resolvedActor).toLowerCase() === ownerKey
+  const tail = "Enforcement lands after the spec 015 FR-5 advisory window."
+  const warnings = []
+  if (advisory === "L3") {
+    warnings.push(
+      `warning: transition-advisory L3: only the lane owner should move \`${existingCurrent.status} -> needs-review\` (spec 005 FR-7); acting agent is \`${resolvedActor || "unknown"}\` and owner is \`${existingCurrent.owner || "unassigned"}\`. ${tail}`,
+    )
+  } else if (advisory === "L4" && nextStatus === "repair-needed") {
+    const fix = actorConfigured ? "" : `Fix: ${formatActorFix(configuredAgents)}. `
+    warnings.push(
+      `warning: transition-advisory L4: \`repair-needed\` entry from \`${existingCurrent.status}\` by \`${resolvedActor || "unknown"}\` is outside spec 006 FR-29 (active source status and a configured agent). ${fix}${tail}`,
+    )
+  } else if (advisory === "L4") {
+    warnings.push(
+      `warning: transition-advisory L4: \`repair-needed -> ${nextStatus}\` is not a legal exit (spec 006 FR-29: clear to \`in-progress\` first, or resolve with a recorded human decision). ${tail}`,
+    )
+  }
+  return { advisory, selfRepairAudit, warnings }
+}
+
 function resolveVerifiedActor(config, actor, env = process.env) {
   const configuredAgents = getConfiguredAgentNames(config)
   const requestedActor = canonicalizeAgentName(configuredAgents, actor)
@@ -7080,8 +7321,18 @@ function resolveVerifiedActor(config, actor, env = process.env) {
   }
 }
 
+// spec 015 FR-9 (spec 016 WS3): the reviewer must differ from the lane OWNER,
+// not from whoever happens to act. Excluding the actor reassigned the reviewer
+// to the owner whenever the reviewer moved a lane to needs-review (ledger
+// finding 6). The owner is the explicit --owner, else the current owner, else
+// the actor (a fresh claim, where the actor is the owner).
 function inferPeerReviewer({ actor, reviewer, currentReviewer, owner, currentOwner, configuredAgents }) {
-  const actorKey = normalizeAgentName(actor).toLowerCase()
+  const ownerKey = normalizeAgentName(
+    canonicalizeAgentName(configuredAgents, owner)
+      || canonicalizeAgentName(configuredAgents, currentOwner)
+      || actor,
+  ).toLowerCase()
+  const actorKey = ownerKey
   const candidates = []
   const seen = new Set()
   const prefersAnyOther = isAnyOtherReviewerValue(reviewer)
@@ -10116,6 +10367,7 @@ export {
   compactHandoffHistory,
   consumeOverride,
   createEmptyTaskArtifactEnvelope,
+  disposeRepair,
   doctor,
   findAvailableLane,
   findRepoRoot,
