@@ -1,10 +1,10 @@
 # 015 — Lane Transition Contract as a Guarded-Action List
 
 **Status**: Draft
-**Version**: 0.1.6
+**Version**: 0.1.7
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-09 (v0.1.6: spec 016 WS4 designates rows 6, 8-10, 12, 14, 16, 17, 19, 20 and stages every remaining legacy row in advisory; v0.1.5: spec 016 WS3 designates rows 2, 13, 15 and stages L3, L7, and the L4 repair cases in advisory; v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
+**Updated**: 2026-09-09 (v0.1.7: records Brian's confirmation of the five WS4 readings; v0.1.6: spec 016 WS4 designates rows 6, 8-10, 12, 14, 16, 17, 19, 20 and stages every remaining legacy row in advisory; v0.1.5: spec 016 WS3 designates rows 2, 13, 15 and stages L3, L7, and the L4 repair cases in advisory; v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
 
 ## Decision
 
@@ -642,7 +642,8 @@ Consequences worth restating:
 - Q6 changes only the error formatter and the FR-6 text. No new implicit
   authority is introduced.
 - WS4 readings (2026-09-09), added while implementing the decisions and
-  awaiting Brian's one-line confirmation: (i) Q1's "PR-flow
+  confirmed by Brian Faris on 2026-09-09 (all five, as written; they now carry
+  the same standing as the eight decisions above): (i) Q1's "PR-flow
   `changes-requested`" is the `changes-requested` entered through `pr poll`
   feedback (reason `pr-review-feedback`) while local approval still stands; a
   local `request-changes` withdraws that approval and the lane re-enters the
