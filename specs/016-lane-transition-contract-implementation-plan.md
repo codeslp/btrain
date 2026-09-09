@@ -1,9 +1,10 @@
 # Plan: Implement the Lane Transition Contract (spec 015)
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.1.1
 **Author**: btrain
 **Date**: 2026-09-01
+**Updated**: 2026-09-08 (v0.1.1: WS0 decisions recorded in spec 015 v0.1.4)
 
 ## Summary
 
@@ -107,7 +108,9 @@ flowchart TD
     WS1["WS1 unpinned prose (this lane k)"] --> WS3["WS3 Phase B unpinned designations (#6 #8 #11)"]
     WS2 --> WS3
     WS2 --> WS4
-    WS0["WS0 human decisions (8 questions)"] --> WS4
+    WS0["WS0 human decisions (8 questions)"] --> WS3
+    WS0 --> WS4
+    WS3 -->|shared file locks| WS4
     WS3 --> WS5["WS5 spec 014 Phase 3 gate on"]
     WS4 --> WS5
 ```
@@ -131,6 +134,10 @@ rules to encode.
 **Owner**: a human. No agent may decide these.
 
 **Blocked by**: nothing. Can start today.
+
+**Status**: done. Brian Faris answered all eight on 2026-09-08; the decision
+record is spec 015 v0.1.4, section `Decisions (2026-09-08)`. WS4 and Phase B
+step 4 are no longer blocked on this workstream.
 
 ### Workstream 1: Unpinned prose (this lane)
 
@@ -243,6 +250,21 @@ files or `locks.json` in this phase.
 - ledger: mark 6, 8, 11 closed; harness candidate labels
   `update-actor-unchecked` (needs-review case) and
   `repair-resolve-before-escalation` become regressions
+- WS0 Q6 (Option C): keep unconditional rejection of an unverified actor in
+  enforcement mode; when exactly one agent is configured, the rejection
+  message names it (`export BTRAIN_AGENT=<the-one-agent>`). Error-formatter
+  change plus the spec 015 FR-6 text; no pin involved
+- WS0 Q7 (Option C): any configured agent plus `system` may declare
+  `repair-needed`; when the owner declares on their own lane, record a
+  `self-repair-audit` field in the canonical lane-event log (one sentence in
+  spec 006 FR-29, unpinned). The field is not a `transition-advisory` and is
+  excluded from the FR-5 retirement gate. Row 13 moves from `provisional` to
+  `designated`. Before L4 retires for repair entry, stage a
+  `transition-advisory` for every repair-entry declaration L4 accepts today
+  that row 13 will reject (unconfigured or unverified actor, invalid source
+  status), and enforce only after the spec 015 FR-5 advisory minimum and
+  quiescence windows pass. `self-repair-audit` is not that advisory and does
+  not shorten the window
 
 **Likely files**
 
@@ -256,11 +278,19 @@ files or `locks.json` in this phase.
   rejected, `repair-needed -> in-progress -> needs-review` is the legal path
 - TLC passes with the modified `RepairResolve`
 - advisory events appear in the workflow log for one exercised legacy path
+- Q7 `self-repair-audit`: positive check that an owner declaring
+  `repair-needed` on their own lane emits the field in the lane-event log;
+  negative checks that a reviewer or `system` declaration does not emit it;
+  and a check that the field is not counted by the FR-5 advisory-retirement
+  tally
+- Q6 error message: with exactly one configured agent and no verified actor,
+  enforcement rejects and the message names that agent; with two or more
+  agents the generic `--actor` / `BTRAIN_AGENT` fix is shown
 
 **Formal impact**: semantic. Prose (WS1) first, model, then code.
 
-**Blocked by**: WS1 merged, WS2 merged, and lane `j` released so `specs/tla/`
-can be locked (PR #35 merge).
+**Blocked by**: nothing as of 2026-09-08. WS1 (#37), WS2 (#42), and PR #35
+are merged and lane `j` released `specs/tla/`.
 
 ### Workstream 4: Phase B pinned designations
 
@@ -276,14 +306,24 @@ can be locked (PR #35 merge).
 - spec 014 `Normative-source prerequisite`: point repair exits at spec 006
   FR-29; split rescope from resync (WS0 Q2)
 - spec 005 `Proposed Status Model`: no change expected; confirm
-- repin `LaneLock.tla`; add `ReturnToPr`, `Resync`, and `Reassign` actions if
-  designated; TLC
+- spec 006 FR-18 (pinned): WS0 Q4 clarification that a fresh claim resets the
+  repair count and `RepairClear` does not; scope the implementation count to
+  events after the most recent claim without deleting history; update the
+  `test/formal/README.md` Known gaps entry
+- spec 006 FR-2 designation text and the spec 014 rescope/resync split (WS0
+  Q2, Option B): doctor resyncs only in `in-progress`, `changes-requested`,
+  `repair-needed`; owner only elsewhere; decide whether `Resync` is a system
+  action in the model or an abstract external event
+- repin `LaneLock.tla`; add `ReturnToPr` (Q1) and `Reassign` (Q8); add
+  `Resync` if WS4 models doctor resync as a system action; TLC
 - production rows 6, 12, 17, 20 move from `undesignated` to `designated`
   or are removed
 - advisory then enforce; remove L1, L2, L4, L5, L6, L8, L9
 - spec 015 Phase B step 4 in the same lane: one-line designations for L10
-  (spec 005 FR-5), L11-L15 (spec 002 CLI Commands); then advisory, then
-  enforce; remove them
+  (spec 005 FR-5, pinned; WS0 Q8 Option C with swap policy A-i, row 20 split
+  into `--owner` and `--reviewer` sub-rows, `authorHistory` and
+  `AuthorSeparation` in the model), L11-L15 (spec 002 CLI Commands); then
+  advisory, then enforce; remove them
 - rewrite `test/core.test.mjs:1495-1503`, `test/core.test.mjs:1539`,
   `test/watchdog.test.mjs:122` to the designated paths
 
@@ -300,11 +340,28 @@ can be locked (PR #35 merge).
   `specs/tla/README.md` still reports a violation when a guard is removed
 - candidate tally reaches zero; the `candidate findings absent` gate test
   passes and is then retired
+- Q4 reclaim regression against the real CLI and event log: a lane enters
+  `repair-needed`, is cleared, resolves, is reclaimed, and enters
+  `repair-needed` for the same reason; the new task starts at attempt one and
+  the earlier repair events remain in the log. The FR-6 harness does not
+  compare attempt-counting internals (`test/formal/README.md` Known gaps), so
+  this is a production-level test, not a harness fixture
+- Q8 provenance against the real CLI and event storage: a direct
+  owner/reviewer swap is rejected; a sequence of individually valid
+  reassignments that would make a prior owner or author the reviewer is
+  rejected; `authorHistory` survives across the sequence. The formal command
+  generator (`test/formal/lane-lock-harness.test.mjs`) does not emit
+  reassignments, so these must be production-level tests
 
 **Formal impact**: semantic. Independent model-family review required (spec
 014 FR-9).
 
-**Blocked by**: PR #35 merged, WS0 answered, WS2 merged.
+**Blocked by**: WS3 merged. PR #35 and WS2 (#42) are merged and WS0 is
+answered (spec 015 v0.1.4), but WS3 and WS4 both edit
+`src/brain_train/transitions.mjs`, `specs/tla/LaneLock.tla`, `test/formal/*`,
+and `test/core.test.mjs`, so under lane file locks only one can hold them at a
+time. WS3 goes first because it is smaller and repins nothing beyond
+`RepairResolve`.
 
 ### Workstream 5: Spec 014 Phase 3
 
@@ -320,19 +377,20 @@ pilot model in CI.
 
 ## Sequencing
 
-| Step | Work | Owner | Blocked by | Status 2026-09-01 |
+| Step | Work | Owner | Blocked by | Status (updated 2026-09-08) |
 | --- | --- | --- | --- | --- |
-| 1 | WS0 decisions | human | none | open |
-| 2 | WS1 unpinned prose | claude, lane `k` | none | in progress |
+| 1 | WS0 decisions | human | none | decided 2026-09-08 (spec 015 v0.1.4) |
+| 2 | WS1 unpinned prose | claude, lane `k` | none | merged 2026-09-01 (#37) |
 | 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
-| 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | changes-requested |
-| 5 | WS2 structural gate | any agent | none | ready |
-| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | blocked |
-| 7 | WS4 pinned designations | any agent | steps 1, 4, 5 | blocked |
+| 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-01 (#35) |
+| 5 | WS2 structural gate | any agent | none | merged 2026-09-02 (#42) |
+| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | ready |
+| 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | blocked on step 6 (shared file locks) |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
 
-Steps 1 and 2 run now. Steps 3 and 4 belong to codex's lanes and are not
-touched by this lane. Steps 5 through 8 follow.
+As of 2026-09-08 steps 1 through 5 are complete. Step 6 is ready to claim.
+Step 7 follows step 6 because both workstreams lock the same runtime, model,
+and test files; they are serialized, not parallel. Step 8 waits on both.
 
 ## Rollback Points
 
