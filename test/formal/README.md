@@ -151,12 +151,11 @@ that only carry another lane's reviewed work.
   overrides. `test/core.test.mjs` covers it end to end.
 - PR-flow `changes-requested` provenance: the implementation reads the
   workflow event that entered `changes-requested` (`details.transitionEvent
-  === "pr-poll"`); the mirror uses the lane's reason code
-  (`pr-review-feedback`) as a stand-in. They agree in the harness because its
-  only path into `changes-requested` with that reason is `prOutcome`
-  (`applyPrStatusToHandoff`) and its `requestChanges` always writes
-  `spec-mismatch`. A forged reason code from the CLI is covered by
-  `test/core.test.mjs` (the shortcut then records L4).
+  === "pr-poll"`); the mirror tracks the same fact as `prFeedbackEntered`,
+  set by `prOutcome` feedback and cleared by any other status change,
+  including a local `requestChanges`. A forged `pr-review-feedback` reason
+  code from the CLI is covered by `test/core.test.mjs` (the shortcut then
+  records L4); the harness never forges it.
 
 - Crash-window injection (partial failure between the lock-registry write
   and the handoff write) is not exercised yet.

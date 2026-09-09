@@ -5,15 +5,15 @@
     "tla_content_sha256": "1262dfd510f7daff4a6c473455572736e72d12162e52cfdccd9daefff4fb2cd7",
     "cfg_sha256": "d4cbd155114f1e0aaece3fe21becf7d58eb08aadbbcab9a0b0e8180aa8dcbf3e",
     "pinned_prose_sha256": "96d1a78efe52f4168781f759a4d8fbc428a6dee4dc9bbf4c75d4e63c0db04c4b",
-    "harness_sha256": "61ee31f49a33d08f07e4597938ca4934cd5355e4586c201c71e4cbf7c033f21c",
+    "harness_sha256": "3bd02da6764b63d26883cf5e54a671d36a5c0600e87a59135110e3593ef899b1",
     "harness_files": [
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "59de5fa672591e1be481cf31399b494eddc42263",
+    "source_commit": "1de45510d02c11d4ee8debf6f3fe2fbacc0775dc",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
-    "inputs_sha256": "d1a10371fd3b1fdf23a026b325410f0a50a7d650b1a9cf4a40b9beba8c22ada9",
+    "inputs_sha256": "f2190e4edf581c55863ccdb4dcd59dbea85c08f5c70b840d73782995661b6b75",
     "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, every git-tracked file under src/brain_train/, test/formal/README.md, package.json, and package-lock.json; the reuse key, valid across squash merges"
   },
   "tlc": {

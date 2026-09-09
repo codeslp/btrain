@@ -71,6 +71,11 @@ function emptyLane() {
     // for the current repair after the FR-18 escalation fired. The harness
     // never grants overrides, so the override exit is not modeled here.
     disposition: false,
+    // spec 002 PR-flow states: TRUE while the lane sits in the
+    // changes-requested that `pr poll --apply` feedback entered (the
+    // implementation reads the originating workflow event). A local
+    // request-changes or any other status change clears it.
+    prFeedbackEntered: false,
   }
 }
 
@@ -149,6 +154,7 @@ export class LaneLockModel {
       // A pending FR-29 disposition is void once the repair is cleared.
       s.disposition = false
     }
+    s.prFeedbackEntered = false
     s.lastActor = actor
   }
 
@@ -257,8 +263,7 @@ export class LaneLockModel {
       // PR-flow changes-requested: entered by pr-poll feedback (reason
       // pr-review-feedback) while local approval stands. A local
       // request-changes (any other reason) withdraws it.
-      const returnToPr =
-        s.status === "changes-requested" && Boolean(s.prNumber || pr) && s.reasonCode === "pr-review-feedback"
+      const returnToPr = s.status === "changes-requested" && Boolean(s.prNumber || pr) && s.prFeedbackEntered
       if (s.status !== "ready-for-pr" && !returnToPr) return this.#reject("pr-review-from-invalid-status")
       if (actor !== s.owner) return this.#reject("pr-review-requires-owner")
       if (!pr && !s.prNumber) return this.#reject("pr-review-requires-linked-pr")
@@ -325,6 +330,7 @@ export class LaneLockModel {
     // spec 005 FR-4/FR-15: the reviewer's findings and reason code persist
     // in the canonical record. The harness submits a fixed reason.
     s.reasonCode = "spec-mismatch"
+    s.prFeedbackEntered = false
     s.lastActor = actor
     return this.#accept()
   }
@@ -394,6 +400,7 @@ export class LaneLockModel {
     s.fileExists = true
     s.escalationExpected = false
     s.disposition = false
+    s.prFeedbackEntered = false
     s.reasonCode = ""
     s.repairOwner = ""
     s.lastActor = actor
@@ -419,7 +426,7 @@ export class LaneLockModel {
       // ready-to-merge, or PR-flow changes-requested: entered by pr-poll
       // feedback while local approval stands. ready-for-pr has no linked PR
       // yet in the contract, so it takes no outcome.
-      const prFlowChangesRequested = s.status === "changes-requested" && s.reasonCode === "pr-review-feedback"
+      const prFlowChangesRequested = s.status === "changes-requested" && s.prFeedbackEntered
       if (terminal) {
         if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
           return this.#reject("pr-outcome-from-invalid-status")
@@ -449,6 +456,7 @@ export class LaneLockModel {
       s.reasonCode = ""
       s.repairOwner = ""
       s.disposition = false
+      s.prFeedbackEntered = false
       s.lastActor = s.owner || s.lastActor
       this.#releaseRegistry(lane)
       return this.#accept()
@@ -468,6 +476,7 @@ export class LaneLockModel {
 
     if (outcome === "feedback") {
       s.status = "changes-requested"
+      s.prFeedbackEntered = true
       s.reasonCode = "pr-review-feedback"
       s.lastActor = s.owner || s.lastActor
       if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
@@ -475,6 +484,7 @@ export class LaneLockModel {
     }
     if (outcome === "clear") {
       s.status = "ready-to-merge"
+      s.prFeedbackEntered = false
       s.reasonCode = ""
       s.lastActor = s.owner || s.lastActor
       if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
@@ -482,6 +492,7 @@ export class LaneLockModel {
     }
     // waiting
     s.status = "pr-review"
+    s.prFeedbackEntered = false
     s.reasonCode = ""
     s.lastActor = s.owner || s.lastActor
     if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr

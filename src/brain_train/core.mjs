@@ -1308,7 +1308,13 @@ async function acquireLocks(repoRoot, laneId, owner, files, { publishInsideLock,
 
     if (publishInsideLock) {
       try {
-        await publishInsideLock()
+        // The publisher sees the coverage this lane held BEFORE the
+        // re-acquisition above, read inside the same critical section, so a
+        // force-release that landed just before the mutex is not mistaken for
+        // intact coverage (spec 002 Force-release override; spec 015 L9).
+        await publishInsideLock({
+          priorLanePaths: priorLocks.filter((lock) => lock.lane === laneId).map((lock) => lock.path),
+        })
       } catch (publishError) {
         // Publication writes the handoff file and then appends the workflow
         // event. If the handoff already carries the update, the failure came
@@ -6349,10 +6355,13 @@ async function resolveHandoff(repoRoot, options) {
   // spec 002 Force-release override (spec 015 L9): local approval does not
   // re-acquire coverage suspended by an audited force-release. The gate sees
   // laneCovered; an uncovered lane lands on L9 (advisory) until enforcement.
+  // Coverage is classified inside the registry critical section that
+  // publishes the approval (see acquireLocks' publishInsideLock context); this
+  // pre-read only serves the no-lock paths.
   const laneCoverage = laneId
     ? decorateLaneState(existingCurrent, getLaneLocks(await listLocks(repoRoot), laneId)).lockState
     : "active"
-  const laneCovered = laneCoverage !== "missing" && laneCoverage !== "mismatch"
+  const preReadLaneCovered = laneCoverage !== "missing" && laneCoverage !== "mismatch"
   let peerResolveAdvisory = ""
   const normalizedResolveActor = normalizeAgentName(resolvedActor).toLowerCase()
   const normalizedReviewer = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
@@ -6424,10 +6433,13 @@ async function resolveHandoff(repoRoot, options) {
     const retainedFiles = normalizePathList(existingCurrent.lockedFiles)
     const resolveLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
     let resolvedCurrent
-    const publishResolve = async () => {
+    const publishResolve = async (lockContext) => {
       const latestCurrent = overrideHandoffPath
         ? parseCurrentSection(await readText(overrideHandoffPath))
         : await readCurrentState(repoRoot)
+      const laneCovered = lockContext?.priorLanePaths
+        ? samePathList(lockContext.priorLanePaths, retainedFiles)
+        : preReadLaneCovered
       if (
         latestCurrent.owner !== existingCurrent.owner
         || latestCurrent.reviewer !== existingCurrent.reviewer

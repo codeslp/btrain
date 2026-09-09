@@ -2823,6 +2823,7 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     await configureGitIdentity(tmpDir)
     await runBtrain(["init", tmpDir], tmpDir)
     await enableLanes(tmpDir)
+    await enablePrFlow(tmpDir)
     await setActiveAgents(tmpDir, ["writer", "reviewer", "third"])
   })
 
@@ -3014,6 +3015,39 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     // Leave lane b free for the next test (the accepted advisory update made third the owner).
     const release = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "authority probe done", "--actor", "third"], tmpDir)
     assert.equal(release.code, 0, release.stderr)
+  })
+
+  it("records L9 when the reviewer approves a lane whose coverage was force-released (spec 002 Force-release override)", async () => {
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "WS4 L9", "--owner", "writer", "--reviewer", "reviewer", "--files", "docs/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+    const review = await runBtrain(laneNeedsReviewArgs(tmpDir, "b", "writer"), tmpDir)
+    assert.equal(review.code, 0, review.stderr)
+    const grant = await runBtrain(
+      ["override", "grant", "--repo", tmpDir, "--action", "force-release", "--lane", "b", "--requested-by", "reviewer", "--confirmed-by", "brian", "--reason", "hotfix elsewhere"],
+      tmpDir,
+    )
+    assert.equal(grant.code, 0, grant.stderr)
+    const release = await runBtrain(["locks", "release-lane", "--repo", tmpDir, "--lane", "b", "--actor", "reviewer"], tmpDir)
+    assert.equal(release.code, 0, release.stderr)
+    const locks = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.doesNotMatch(locks.stdout, /b: docs\//)
+
+    const approve = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "approved anyway", "--actor", "reviewer"], tmpDir)
+    assert.equal(approve.code, 0, approve.stderr)
+    assert.match(approve.stdout, /warning: transition-advisory L9/)
+    assert.match(approve.stdout, /status: ready-for-pr/)
+    const events = await readLaneEvents(tmpDir, "b")
+    assert.equal(lastEventOfType(events, "resolve").details["transition-advisory"], "L9")
+
+    // Leave lane b free for the next test: link a PR and let a closed outcome terminate it.
+    const link = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "b", "--status", "pr-review", "--pr", "9", "--actor", "writer", "--no-dispatch"], tmpDir)
+    assert.equal(link.code, 0, link.stderr)
+    const done = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "abandon", "--actor", "writer"], tmpDir)
+    assert.equal(done.code, 0, done.stderr)
+    assert.match(done.stdout, /transition-advisory L1/)
   })
 
   it("records L15 when request-changes runs without a verifiable reviewer actor", async () => {
