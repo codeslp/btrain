@@ -600,8 +600,8 @@ Brian Faris answered all eight questions on 2026-09-08. The answers below are
 the human decisions spec 016 Workstream 0 required. They do not by themselves
 designate any row: each row still moves to `designated` only when the owning
 prose change named in its follow-up lands. The `Lands in` column names the
-spec 016 workstream that carries each one; spec 016 v0.1.1 adds Q4 and Q6 to
-its workstreams. The option text under each question remains the
+spec 016 workstream that carries each one; spec 016 v0.1.1 adds Q4, Q6, and
+Q7 to its workstreams. The option text under each question remains the
 authoritative description of what the chosen answer requires.
 
 | Q | Decision | Chosen option | Owning prose | Lands in |

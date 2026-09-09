@@ -108,7 +108,8 @@ flowchart TD
     WS1["WS1 unpinned prose (this lane k)"] --> WS3["WS3 Phase B unpinned designations (#6 #8 #11)"]
     WS2 --> WS3
     WS2 --> WS4
-    WS0["WS0 human decisions (8 questions)"] --> WS4
+    WS0["WS0 human decisions (8 questions)"] --> WS3
+    WS0 --> WS4
     WS3 --> WS5["WS5 spec 014 Phase 3 gate on"]
     WS4 --> WS5
 ```
@@ -252,6 +253,12 @@ files or `locks.json` in this phase.
   enforcement mode; when exactly one agent is configured, the rejection
   message names it (`export BTRAIN_AGENT=<the-one-agent>`). Error-formatter
   change plus the spec 015 FR-6 text; no pin involved
+- WS0 Q7 (Option C): any configured agent plus `system` may declare
+  `repair-needed`; when the owner declares on their own lane, record a
+  `self-repair-audit` field in the canonical lane-event log (one sentence in
+  spec 006 FR-29, unpinned). The field is not a `transition-advisory` and is
+  excluded from the FR-5 retirement gate. Row 13 moves from `provisional` to
+  `designated`; L4 retires for this case on enforcement
 
 **Likely files**
 
@@ -293,8 +300,8 @@ can be locked (PR #35 merge).
   Q2, Option B): doctor resyncs only in `in-progress`, `changes-requested`,
   `repair-needed`; owner only elsewhere; decide whether `Resync` is a system
   action in the model or an abstract external event
-- repin `LaneLock.tla`; add `ReturnToPr`, `Resync`, and `Reassign` actions if
-  designated; TLC
+- repin `LaneLock.tla`; add `ReturnToPr` (Q1) and `Reassign` (Q8); add
+  `Resync` if WS4 models doctor resync as a system action; TLC
 - production rows 6, 12, 17, 20 move from `undesignated` to `designated`
   or are removed
 - advisory then enforce; remove L1, L2, L4, L5, L6, L8, L9
