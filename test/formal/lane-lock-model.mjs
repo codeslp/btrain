@@ -182,10 +182,10 @@ export class LaneLockModel {
       lockedFiles: [...normalized].sort(),
       prNumber: "",
       fileExists: true,
-      // repairReasonsSeen deliberately NOT reset: the implementation counts
-      // repair history from the lane's event log, which spans re-claims.
-      // Whether the FR-18 budget should span tasks is a designation question
-      // recorded in the README ledger.
+      // spec 006 FR-18 (spec 015 Q4, Option A, designated 2026-09-09): the
+      // budget belongs to the task, so a fresh claim starts a new reason
+      // memory; the implementation counts entries after the last claim.
+      repairReasonsSeen: [],
       escalationExpected: false,
       reasonCode: "",
       repairOwner: "",
@@ -250,10 +250,18 @@ export class LaneLockModel {
     }
 
     if (status === "pr-review") {
-      // Owner links or creates the PR after local approval (spec 002).
-      if (s.status !== "ready-for-pr") return this.#reject("pr-review-from-invalid-status")
+      // Owner links or creates the PR after local approval (spec 002), or
+      // returns a linked changes-requested lane to pr-review after pushing
+      // the fix (spec 002 PR-flow changes-requested row; spec 015 row 12, Q1
+      // Option A, designated 2026-09-09).
+      // PR-flow changes-requested: entered by pr-poll feedback (reason
+      // pr-review-feedback) while local approval stands. A local
+      // request-changes (any other reason) withdraws it.
+      const returnToPr =
+        s.status === "changes-requested" && Boolean(s.prNumber || pr) && s.reasonCode === "pr-review-feedback"
+      if (s.status !== "ready-for-pr" && !returnToPr) return this.#reject("pr-review-from-invalid-status")
       if (actor !== s.owner) return this.#reject("pr-review-requires-owner")
-      if (!pr) return this.#reject("pr-review-requires-linked-pr")
+      if (!pr && !s.prNumber) return this.#reject("pr-review-requires-linked-pr")
       s.status = "pr-review"
       this.#applyUpdateEffects(s, status, actor, reason)
       if (pr) s.prNumber = String(pr)
@@ -347,7 +355,13 @@ export class LaneLockModel {
     // spec 002 v1.1.2 PR-flow retention: a PR-flow lane terminates through
     // merge or closure, not through a direct plain resolve that would
     // release retained locks early.
-    if (this.mode === "contract" && PR_FLOW_STATUSES.has(s.status)) {
+    if (
+      this.mode === "contract"
+      && (PR_FLOW_STATUSES.has(s.status) || (s.status === "changes-requested" && s.prNumber))
+    ) {
+      // spec 002 CLI Commands resolve authority (designated 2026-09-09, the
+      // line 77 reconciliation): a linked lane, including PR-flow
+      // changes-requested, terminates only through its PR outcome.
       return this.#reject("resolve-from-pr-flow-status")
     }
 
@@ -398,7 +412,8 @@ export class LaneLockModel {
     const suppliedPr = pr ? String(pr) : ""
     if (this.mode === "contract") {
       if (!s.prNumber && !suppliedPr) return this.#reject("no-linked-pr")
-      if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
+      const prFlowChangesRequested = s.status === "changes-requested" && s.reasonCode === "pr-review-feedback"
+      if (!PR_FLOW_STATUSES.has(s.status) && !prFlowChangesRequested) {
         return this.#reject("pr-outcome-from-invalid-status")
       }
     }
@@ -489,6 +504,18 @@ export class LaneLockModel {
       if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
       s.lockedFiles = [...normalized].sort()
       this.#setRegistry(lane, normalized)
+      return this.#accept()
+    }
+    // spec 014 rescope/resync split (spec 015 row 17; Q2 Option B, designated
+    // 2026-09-09): the same set is a resync, which restores registry coverage
+    // without changing scope. The owner may resync in any active status.
+    const sameSet =
+      JSON.stringify([...normalized].sort()) === JSON.stringify([...s.lockedFiles].sort())
+    if (sameSet && ACTIVE_STATUSES.has(s.status)) {
+      if (actor !== s.owner) return this.#reject("resync-requires-owner")
+      if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
+      this.#setRegistry(lane, normalized)
+      s.lastActor = actor
       return this.#accept()
     }
     if (s.status === "repair-needed") return this.#reject("repair-rescope-requires-guardian")

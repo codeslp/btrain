@@ -46,7 +46,7 @@ import {
   buildClaimReviewContextFields,
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
-import { advisoryRowId, applyTransition, classifyTransitionEvent, getPrimaryTransition } from "./transitions.mjs"
+import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -4667,13 +4667,47 @@ function getCanonicalWorkflowActor(events) {
   return normalizeAgentName(lastEvent?.actor)
 }
 
+// spec 006 FR-18 (spec 015 Q4, Option A, designated 2026-09-09): the budget
+// belongs to the task. Only entries recorded after the most recent claim
+// count; earlier events stay in the log for audit.
+function eventsSinceLastClaim(events) {
+  const list = events || []
+  let lastClaim = -1
+  for (const [index, event] of list.entries()) {
+    if (event.type === "claim") lastClaim = index
+  }
+  return list.slice(lastClaim + 1)
+}
+
 function countRepairEntries(events, reasonCode) {
-  return (events || []).filter((event) => {
-    if (event.type !== "update") {
+  return eventsSinceLastClaim(events).filter((event) => {
+    if (event.type !== "update" && event.type !== "watchdog-repair") {
       return false
     }
-    return event.after?.status === "repair-needed" && event.after?.reasonCode === reasonCode
+    return event.after?.status === "repair-needed"
+      && event.before?.status !== "repair-needed"
+      && event.after?.reasonCode === reasonCode
   }).length
+}
+
+// spec 005 FR-5 author history (spec 015 Q8, swap policy A-i): every agent
+// that has owned the current task, from the claim and later owner
+// reassignments recorded since it.
+function authorHistorySinceClaim(events, current) {
+  const authors = new Set()
+  const add = (name) => {
+    const key = normalizeAgentName(name).toLowerCase()
+    if (key) authors.add(key)
+  }
+  for (const event of eventsSinceLastClaim(events)) {
+    if (event.type === "claim") add(event.after?.owner)
+    if (event.type === "update" && event.after?.owner) add(event.after.owner)
+  }
+  const list = events || []
+  const lastClaim = [...list].reverse().find((event) => event.type === "claim")
+  if (lastClaim) add(lastClaim.after?.owner)
+  add(current?.owner)
+  return authors
 }
 
 async function resolveRepairAssignment(repoRoot, config, {
@@ -5334,11 +5368,14 @@ async function claimHandoff(repoRoot, options) {
   }
 
   const existingCurrent = await readCurrentState(repoRoot)
-  applyTransition(existingCurrent, "handoff claim", {
+  const claimTransition = applyTransition(existingCurrent, "handoff claim", {
     to: "in-progress",
     actor: options.owner,
     changes: updates,
   })
+  // spec 015 FR-5 advisory stage (spec 016 WS4): L13, a single-handoff claim
+  // over an active handoff, is accepted with a record until enforcement.
+  const claimAdvisory = advisoryRowId(claimTransition.row, existingCurrent, { to: "in-progress" })
   const result = await updateHandoff(
     repoRoot,
     updates,
@@ -5354,10 +5391,20 @@ async function claimHandoff(repoRoot, options) {
       eventDetails: {
         task: options.task,
         lockedFiles: files,
+        ...(claimAdvisory ? { "transition-advisory": claimAdvisory } : {}),
         ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
       },
     },
   )
+  if (claimAdvisory) {
+    options.onEvent?.(formatAdvisoryWarning(claimAdvisory, {
+      event: "handoff claim",
+      from: existingCurrent.status || "idle",
+      to: "in-progress",
+      actor: options.owner,
+      detail: "spec 002 CLI Commands, claim authority: claim requires an idle or resolved handoff",
+    }))
+  }
   await compactHandoffHistory(repoRoot, { config, actorLabel: options.owner })
   return result
 }
@@ -5437,6 +5484,22 @@ async function patchHandoff(repoRoot, options) {
       })
 
       const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
+      // spec 005 FR-5 reassignment (Q8, swap policy A-i): who may change which
+      // role, and whether the resulting reviewer was ever an author of this
+      // task. The history is read once here (FR-12: the gate reads no files).
+      const laneEvents = transitionEvent === "handoff update --reassign"
+        ? await readWorkflowEvents(repoRoot, config, laneId)
+        : []
+      const authorHistory = transitionEvent === "handoff update --reassign"
+        ? authorHistorySinceClaim(laneEvents, existingCurrent)
+        : new Set()
+      const nextOwnerKey = normalizeAgentName(updates.owner ?? existingCurrent.owner).toLowerCase()
+      const nextReviewerKey = normalizeAgentName(updates.reviewer ?? existingCurrent.reviewer).toLowerCase()
+      const ownerChanged = updates.owner !== undefined
+        && nextOwnerKey !== normalizeAgentName(existingCurrent.owner).toLowerCase()
+      const reviewerIsPriorAuthor = transitionEvent === "handoff update --reassign"
+        && !!nextReviewerKey
+        && (authorHistory.has(nextReviewerKey) || nextReviewerKey === nextOwnerKey)
       let matchedRow = null
       const validateStructuralTransition = (source) => {
         const transition = applyTransition(source, transitionEvent, {
@@ -5444,8 +5507,13 @@ async function patchHandoff(repoRoot, options) {
           actor: resolvedActor,
           prFlowEnabled: getPrFlowConfig(config).enabled,
           prLinked: !!(updates.prNumber || source.prNumber),
+          prFlowChangesRequested:
+            source.status === "changes-requested" && source.reasonCode === "pr-review-feedback",
           reasonCode: reasonMetadata.reasonCode,
           feedbackReason: reasonMetadata.reasonCode,
+          ownerChanged,
+          reviewerIsPriorAuthor,
+          distinctReviewer: !nextReviewerKey || !nextOwnerKey || nextReviewerKey !== nextOwnerKey,
           structuralCompatibility: options.transitionCompatibility === true,
           filesChanged:
             options.files === undefined
@@ -5466,6 +5534,7 @@ async function patchHandoff(repoRoot, options) {
         warnings: advisoryWarnings,
       } = stageStatusUpdateAdvisory({
         row: matchedRow,
+        event: transitionEvent,
         existingCurrent,
         nextStatus,
         statusChanging,
@@ -5655,6 +5724,9 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(transitionAdvisory ? { "transition-advisory": transitionAdvisory } : {}),
           ...(selfRepairAudit ? { "self-repair-audit": true } : {}),
+          ...(transitionEvent === "handoff update --reassign"
+            ? { authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(), ownerChanged }
+            : {}),
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
       }]
@@ -5745,6 +5817,7 @@ async function patchHandoff(repoRoot, options) {
     warnings: singleWarnings,
   } = stageStatusUpdateAdvisory({
     row: singleTransition.row,
+    event: transitionEvent,
     existingCurrent,
     nextStatus,
     statusChanging: options.status !== undefined && nextStatus !== existingCurrent.status,
@@ -5922,14 +5995,27 @@ async function requestChangesHandoff(repoRoot, options) {
     const reasonMetadata = resolveReasonMetadata(source, "changes-requested", options, {
       requireReasonOnTransition: true,
     })
-    applyTransition(source, "handoff request-changes", {
+    const transition = applyTransition(source, "handoff request-changes", {
       to: "changes-requested",
       actor: resolvedActor,
       reasonCode: reasonMetadata.reasonCode,
     })
+    // spec 015 FR-5 advisory stage (spec 016 WS4): L15, request-changes with
+    // no recorded reviewer or an unverified actor, is accepted with a record.
+    requestChangesAdvisory = advisoryRowId(transition.row, source, { to: "changes-requested" })
     return reasonMetadata
   }
+  let requestChangesAdvisory = ""
   validateRequestChanges(existingCurrent)
+  if (requestChangesAdvisory) {
+    options.onEvent?.(formatAdvisoryWarning(requestChangesAdvisory, {
+      event: "handoff request-changes",
+      from: existingCurrent.status,
+      to: "changes-requested",
+      actor: resolvedActor,
+      detail: `spec 002 CLI Commands and spec 005 FR-8: the recorded reviewer (${existingCurrent.reviewer || "none recorded"}) must be the verified actor`,
+    }))
+  }
 
   const requestChangesLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
   let updatedCurrent
@@ -5960,6 +6046,7 @@ async function requestChangesHandoff(repoRoot, options) {
         laneId,
         eventDetails: {
           summary: options.summary,
+          ...(requestChangesAdvisory ? { "transition-advisory": requestChangesAdvisory } : {}),
         },
         overrideHandoffPath,
       },
@@ -6288,6 +6375,8 @@ async function resolveHandoff(repoRoot, options) {
 
   const terminalLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
   let result
+  let terminalAdvisory = ""
+  let terminalAdvisoryWarning = ""
   const publishTerminalResolve = async () => {
     const latestCurrent = overrideHandoffPath
       ? parseCurrentSection(await readText(overrideHandoffPath))
@@ -6305,7 +6394,8 @@ async function resolveHandoff(repoRoot, options) {
         fix: `Re-read lane ${laneId || "(single)"}, verify its current state, then run the resolve command again.`,
       })
     }
-    applyTransition(latestCurrent, options.viaPrOutcome === true ? "pr-poll" : "handoff resolve", {
+    const terminalEvent = options.viaPrOutcome === true ? "pr-poll" : "handoff resolve"
+    const terminalTransition = applyTransition(latestCurrent, terminalEvent, {
       to: "resolved",
       actor: resolvedActor,
       prFlowEnabled: prFlow.enabled,
@@ -6313,6 +6403,24 @@ async function resolveHandoff(repoRoot, options) {
       humanDisposition,
       override: !!repairOverrideRecord,
     })
+    // spec 015 FR-5 advisory stage (spec 016 WS4): L1 (plain resolve from the
+    // PR flow), L2 (idle lane), L11 (non-lane-agent abandon), L14 (repeat
+    // resolve) are accepted with a record until enforcement. L7 and L8 keep
+    // their bespoke messages above.
+    const genericAdvisory = advisoryRowId(terminalTransition.row, latestCurrent, { to: "resolved" })
+    terminalAdvisory =
+      repairResolveAdvisory ? "L7"
+      : reviewerAuthorityAdvisory ? "L8"
+      : genericAdvisory
+    if (genericAdvisory && !repairResolveAdvisory && !reviewerAuthorityAdvisory) {
+      terminalAdvisoryWarning = formatAdvisoryWarning(genericAdvisory, {
+        event: terminalEvent,
+        from: latestCurrent.status || "idle",
+        to: "resolved",
+        actor: resolvedActor,
+        detail: `${terminalTransition.row.owner}; see spec 002 CLI Commands, resolve authority`,
+      })
+    }
     const terminalPreviousHandoffEntry =
       latestCurrent.task || options.summary
         ? buildPreviousHandoffEntry(latestCurrent, options.summary, actorLabel)
@@ -6336,8 +6444,7 @@ async function resolveHandoff(repoRoot, options) {
         laneId,
         eventDetails: {
           summary: options.summary || "",
-          ...(reviewerAuthorityAdvisory ? { "transition-advisory": "L8" } : {}),
-          ...(repairResolveAdvisory ? { "transition-advisory": "L7" } : {}),
+          ...(terminalAdvisory ? { "transition-advisory": terminalAdvisory } : {}),
           ...(humanDisposition ? { repairDisposition: true } : {}),
           ...(repairOverrideRecord ? { overrideId: repairOverrideRecord.id } : {}),
         },
@@ -6356,6 +6463,7 @@ async function resolveHandoff(repoRoot, options) {
   }
   if (reviewerAuthorityAdvisory) options.onEvent?.(reviewerAuthorityAdvisory)
   if (repairResolveAdvisory) options.onEvent?.(repairResolveAdvisory)
+  if (terminalAdvisoryWarning) options.onEvent?.(terminalAdvisoryWarning)
   if (isCgraphEnabled(config)) {
     await reconcileCgraphAdvisories(repoRoot, laneId || "repo", [], {
       adviseOnResolution: false,
@@ -7264,8 +7372,25 @@ function isConfiguredActor(configuredAgents, actor) {
 // configured agent (row 13 enforcement will reject it per FR-6). Also flags
 // the spec 006 FR-29 self-repair audit when the owner declares repair on their
 // own lane. Returns the event fields and the warning lines to print.
-function stageStatusUpdateAdvisory({ row, existingCurrent, nextStatus, statusChanging, resolvedActor, configuredAgents }) {
-  if (!statusChanging) return { advisory: "", selfRepairAudit: false, warnings: [] }
+function stageStatusUpdateAdvisory({ row, event, existingCurrent, nextStatus, statusChanging, resolvedActor, configuredAgents }) {
+  if (!statusChanging) {
+    // spec 016 WS4: non-status updates (rescope/resync L6, reassignment L10,
+    // metadata L12) and pr-poll outcomes from an undesignated source (L5) are
+    // accepted with a record and a generic warning until enforcement.
+    const advisory = advisoryRowId(row, existingCurrent, { to: nextStatus })
+    if (!advisory) return { advisory: "", selfRepairAudit: false, warnings: [] }
+    return {
+      advisory,
+      selfRepairAudit: false,
+      warnings: [formatAdvisoryWarning(advisory, {
+        event: event || "handoff update",
+        from: existingCurrent.status || "idle",
+        to: nextStatus,
+        actor: resolvedActor,
+        detail: row?.owner || "",
+      })],
+    }
+  }
   let advisory = advisoryRowId(row, existingCurrent, { to: nextStatus })
   const actorConfigured = isConfiguredActor(configuredAgents, resolvedActor)
   if (!advisory && nextStatus === "repair-needed" && row?.id === "13" && !actorConfigured) {
@@ -7278,7 +7403,15 @@ function stageStatusUpdateAdvisory({ row, existingCurrent, nextStatus, statusCha
     && normalizeAgentName(resolvedActor).toLowerCase() === ownerKey
   const tail = "Enforcement lands after the spec 015 FR-5 advisory window."
   const warnings = []
-  if (advisory === "L3") {
+  if (advisory && !["L3", "L4"].includes(advisory)) {
+    warnings.push(formatAdvisoryWarning(advisory, {
+      event: event || "handoff update --status",
+      from: existingCurrent.status || "idle",
+      to: nextStatus,
+      actor: resolvedActor,
+      detail: row?.owner || "",
+    }))
+  } else if (advisory === "L3") {
     warnings.push(
       `warning: transition-advisory L3: only the lane owner should move \`${existingCurrent.status} -> needs-review\` (spec 005 FR-7); acting agent is \`${resolvedActor || "unknown"}\` and owner is \`${existingCurrent.owner || "unassigned"}\`. ${tail}`,
     )
@@ -9360,6 +9493,62 @@ async function applyWatchdogRepairs(repoRoot, {
         releasedPaths: expiredPaths,
         summary: `lane ${laneState._laneId}: released ${expiredLocks.length} expired lock${expiredLocks.length === 1 ? "" : "s"} (TTL ${Math.round(handoffCfg.lockTtlMs / 3600000)}h)`,
       })
+    }
+
+    // 2b. spec 006 FR-2 lock/status resync with the spec 014 rescope/resync
+    // split (spec 015 row 17; Q2 Option B, designated 2026-09-09): when an
+    // active lane's handoff record names files the registry does not cover,
+    // btrain doctor restores coverage for exactly that set, but only while the
+    // lane is in-progress, changes-requested, or repair-needed. In
+    // needs-review and the PR flow the gate falls to legacy row L6, and the
+    // doctor leaves coverage to the owner. Integrity checks still run after a
+    // resync so an actor mismatch is not hidden by restored coverage.
+    if (
+      isLaneActiveStatus(laneState.status)
+      && ["missing", "mismatch"].includes(laneState.lockState)
+      && laneState.handoffPaths.length > 0
+    ) {
+      let resyncRow = null
+      try {
+        resyncRow = applyTransition(laneState, "doctor repair", {
+          to: laneState.status,
+          actor: actorLabel,
+          systemEvent: true,
+          filesChanged: false,
+        }).row
+      } catch {
+        resyncRow = null
+      }
+      if (resyncRow?.id === "17") {
+        const resyncPaths = normalizePathList(laneState.handoffPaths)
+        try {
+          await acquireLocks(repoRoot, laneState._laneId, laneState.owner || actorLabel, resyncPaths)
+          await appendWorkflowEvent(repoRoot, config, {
+            type: "watchdog-repair",
+            actor: actorLabel,
+            laneId: laneState._laneId,
+            details: {
+              repairType: "lock-resync",
+              paths: resyncPaths,
+              previousLockState: laneState.lockState,
+              status: laneState.status,
+            },
+          })
+          repairs.push({
+            type: "lock-resync",
+            laneId: laneState._laneId,
+            paths: resyncPaths,
+            summary: `lane ${laneState._laneId}: lock-resync repair (restored registry coverage for ${resyncPaths.length} path${resyncPaths.length === 1 ? "" : "s"} in \`${laneState.status}\`)`,
+          })
+          laneState.lockState = "active"
+          laneState.lockCount = resyncPaths.length
+          laneState.lockPaths = resyncPaths
+        } catch (error) {
+          if (!(error instanceof BtrainError)) throw error
+          // A cross-lane conflict is a real integrity problem; leave it to
+          // the integrity check below.
+        }
+      }
     }
 
     // 3. Integrity checks (WS4)

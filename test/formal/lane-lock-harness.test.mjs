@@ -347,6 +347,7 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["rescope-requires-owner", "rescope-authorization"],
   ["rescope-from-invalid-status", "rescope-authorization"],
   ["repair-rescope-requires-guardian", "rescope-authorization"],
+  ["resync-requires-owner", "rescope-authorization"],
   ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],
   ["repair-clear-requires-repair-owner", "update-actor-unchecked"],
 ])

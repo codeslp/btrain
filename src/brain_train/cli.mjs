@@ -1685,7 +1685,10 @@ async function run() {
     }
 
     if (subcommand === "claim") {
-      await claimHandoff(repoRoot, options)
+      await claimHandoff(repoRoot, {
+        ...options,
+        onEvent: (line) => console.log(line),
+      })
       await maybeAutoStartDashboard(repoRoot)
       const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
@@ -1724,7 +1727,10 @@ async function run() {
     }
 
     if (subcommand === "request-changes") {
-      await requestChangesHandoff(repoRoot, options)
+      await requestChangesHandoff(repoRoot, {
+        ...options,
+        onEvent: (line) => console.log(line),
+      })
       const result = await checkHandoff(repoRoot, { laneId: options.lane })
       printHandoffState(result)
       return

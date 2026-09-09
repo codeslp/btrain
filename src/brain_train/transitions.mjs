@@ -31,37 +31,37 @@ export const TRANSITION_ROWS = Object.freeze([
   row("3", "RequestChanges", "handoff request-changes", ["needs-review"], "changes-requested", "reviewer", "reason code", "retain", "005 FR-8 and FR-15", "designated"),
   row("4", "PeerResolve", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "PR flow enabled", "retain", "002 Lock Enforcement and PR-flow row 1", "designated"),
   row("5", "TerminalResolve", "handoff resolve", ["needs-review"], "resolved", "reviewer", "PR flow disabled", "release", "002 Lock Enforcement item 2", "designated"),
-  row("6", "AbandonResolve", "handoff resolve", ["in-progress", "changes-requested"], "resolved", "lane-agent", "no linked PR", "release", "LaneLock.tla and 002 Lock Enforcement", "undesignated"),
+  row("6", "AbandonResolve", "handoff resolve", ["in-progress", "changes-requested"], "resolved", "lane-agent", "no linked PR", "release", "002 CLI Commands, resolve authority (Q5)", "designated"),
   row("7", "LinkPr", ["pr-create", "handoff update --status"], ["ready-for-pr"], "pr-review", "owner", "PR number", "retain", "002 PR-flow row 2", "designated"),
-  row("8", "PrRepoll", "pr-poll", ["pr-review"], "pr-review", "system", "linked PR", "retain", "002 PR-flow states", "designated"),
+  row("8", "PrRepoll", "pr-poll", ["pr-review", "ready-to-merge", "changes-requested"], "pr-review", "system", "linked PR; PR-flow changes-requested", "retain", "002 PR-flow states (non-terminal outcomes)", "designated"),
   row("9", "PrFeedback", "pr-poll", ["pr-review", "ready-to-merge"], "changes-requested", "system", "linked PR and feedback reason", "retain", "002 PR-flow row 4", "designated"),
-  row("10", "PrClear", "pr-poll", ["pr-review"], "ready-to-merge", "system", "linked PR", "retain", "002 PR-flow row 3", "designated"),
+  row("10", "PrClear", "pr-poll", ["pr-review", "changes-requested"], "ready-to-merge", "system", "linked PR; PR-flow changes-requested", "retain", "002 PR-flow row 3 (non-terminal outcomes)", "designated"),
   row("11", "PrTerminal", "pr-poll", [...PR_FLOW_STATUSES, "changes-requested"], "resolved", "system", "linked PR", "release", "002 PR-flow rows 5 and 6", "designated"),
-  row("12", "ReturnToPr", "handoff update --status", ["changes-requested"], "pr-review", "owner", "linked PR and feedback reason", "retain", "none", "undesignated"),
+  row("12", "ReturnToPr", "handoff update --status", ["changes-requested"], "pr-review", "owner", "linked PR; PR-flow changes-requested", "retain", "002 PR-flow changes-requested row (Q1)", "designated"),
   row("13", "RepairEnter", ["handoff update --status", "watchdog-repair"], ACTIVE_STATUSES, "repair-needed", "any-agent or system", "reason and repair accounting", "retain", "006 FR-4, FR-20, and FR-29 entry authority (Q7)", "designated"),
-  row("14", "RepairClear", "handoff update --status", ["repair-needed"], "in-progress", "repair-owner, system, or override", "none", "retain", "006 FR-15; 014 designation", "provisional"),
+  row("14", "RepairClear", "handoff update --status", ["repair-needed"], "in-progress", "repair-owner, system, or override", "none", "retain", "006 FR-15 and FR-29 exit to in-progress", "designated"),
   row("15", "RepairResolve", "handoff resolve", ["repair-needed"], "resolved", "lane-agent or override", "human disposition or override", "release", "006 FR-29 (Q3)", "designated"),
-  row("16", "Rescope", "handoff update --files", ["in-progress", "changes-requested", "repair-needed"], "$same", "owner, system, or override", "non-empty and no conflict", "replace", "014 rescope; 006 FR-20", "provisional"),
-  row("17", "Resync", ["handoff update --files", "doctor repair"], ACTIVE_STATUSES, "$same", "owner or system", "no conflict", "restore", "006 FR-2", "undesignated"),
+  row("16", "Rescope", "handoff update --files", ["in-progress", "changes-requested", "repair-needed"], "$same", "owner, system, or override", "non-empty and no conflict", "replace", "014 rescope designation; 006 FR-20", "designated"),
+  row("17", "Resync", ["handoff update --files", "doctor repair"], ACTIVE_STATUSES, "$same", "owner or system", "no conflict", "restore", "006 FR-2 resync authority; 014 rescope/resync split (Q2)", "designated"),
   row("18", "ForceRelease", ["locks release", "locks release-lane"], ACTIVE_STATUSES, "$same", "override", "consumed override", "suspend", "002 Force-release override", "designated"),
-  row("19", "MetadataUpdate", "handoff update --metadata", "$any", "$same", "lane-agent", "none", "unchanged", "none", "undesignated"),
-  row("20", "Reassign", "handoff update --reassign", ACTIVE_STATUSES, "$same", "lane-agent", "distinct owner and reviewer", "unchanged", "005 FR-5", "undesignated"),
+  row("19", "MetadataUpdate", "handoff update --metadata", "$any", "$same", "lane-agent", "none", "unchanged", "002 CLI Commands, update authority", "designated"),
+  row("20", "Reassign", "handoff update --reassign", ["in-progress", "needs-review", "changes-requested"], "$same", "reassign authority", "distinct owner and reviewer; no prior author as reviewer; no linked PR", "unchanged", "005 FR-5 reassignment (Q8, swap policy A-i)", "designated"),
 
-  row("L1", "legacy", "handoff resolve", [...PR_FLOW_STATUSES, "changes-requested"], "resolved", "any", "none", "release", "forbidden by 002 Lock Enforcement", "legacy", "legacy"),
-  row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "legacy", "legacy"),
+  row("L1", "legacy", "handoff resolve", [...PR_FLOW_STATUSES, "changes-requested"], "resolved", "any", "none", "release", "forbidden by 002 Lock Enforcement", "advisory", "legacy"),
+  row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "advisory", "legacy"),
   row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy"),
-  row("L4", "legacy", "handoff update --status", "$any", "$any", "any", "valid status", "per target", "forbidden by 002 and 014", "legacy", "legacy"),
-  row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "legacy", "legacy"),
-  row("L6", "legacy", "handoff update --files", "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope", "legacy", "legacy"),
+  row("L4", "legacy", "handoff update --status", "$any", "$any", "any", "valid status", "per target", "forbidden by 002 and 014", "advisory", "legacy"),
+  row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "advisory", "legacy"),
+  row("L6", "legacy", ["handoff update --files", "doctor repair"], "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope and resync designations (Q2)", "advisory", "legacy"),
   row("L7", "legacy", "handoff resolve", ["repair-needed"], "resolved", "any", "row 15 guard unmet", "release", "forbidden by 006 FR-29", "advisory", "legacy"),
   row("L8", "legacy", "handoff resolve", ["needs-review"], ["ready-for-pr", "resolved"], "any", "actor unchecked", "retain or release", "forbidden by 002 PR-flow row 1", "advisory", "legacy"),
-  row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "legacy", "legacy"),
-  row("L10", "legacy", "handoff update --reassign", "$any", "$same", "any", "actor unchecked", "unchanged", "open question 8", "legacy", "legacy"),
-  row("L11", "legacy", "handoff resolve", ["in-progress", "changes-requested"], "resolved", "any", "actor unchecked", "release", "open question 5", "legacy", "legacy"),
-  row("L12", "legacy", "handoff update --metadata", "$any", "$same", "any", "actor unchecked", "unchanged", "row 19 fallback", "legacy", "legacy"),
-  row("L13", "legacy", "handoff claim", "$any", "in-progress", "any-agent", "single-handoff overwrite", "none", "undesignated", "legacy", "legacy"),
-  row("L14", "legacy", "handoff resolve", ["resolved"], "resolved", "any", "repeat resolve", "none", "undesignated", "legacy", "legacy"),
-  row("L15", "legacy", "handoff request-changes", ["needs-review"], "changes-requested", "any", "reviewer absent or unverified", "retain", "005 FR-8 fallback", "legacy", "legacy"),
+  row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "advisory", "legacy"),
+  row("L10", "legacy", "handoff update --reassign", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 005 FR-5 reassignment (Q8)", "advisory", "legacy"),
+  row("L11", "legacy", "handoff resolve", ["in-progress", "changes-requested"], "resolved", "any", "actor unchecked", "release", "forbidden by 002 CLI Commands resolve authority (Q5)", "advisory", "legacy"),
+  row("L12", "legacy", "handoff update --metadata", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 002 CLI Commands update authority", "advisory", "legacy"),
+  row("L13", "legacy", "handoff claim", "$any", "in-progress", "any-agent", "single-handoff overwrite", "none", "forbidden by 002 CLI Commands claim authority", "advisory", "legacy"),
+  row("L14", "legacy", "handoff resolve", ["resolved"], "resolved", "any", "repeat resolve", "none", "forbidden by 002 CLI Commands resolve authority", "advisory", "legacy"),
+  row("L15", "legacy", "handoff request-changes", ["needs-review"], "changes-requested", "any", "reviewer absent or unverified", "retain", "forbidden by 002 CLI Commands and 005 FR-8", "advisory", "legacy"),
   row("L16", "WatchdogLockRelease", "watchdog-lock-release", "$any", "$same", "system", "stale or expired lock", "release", "006 FR-2 safe repair", "designated", "system"),
 ])
 
@@ -89,6 +89,23 @@ function actorMatches(rowValue, state, actor, input = {}) {
   if (rowValue === "lane-agent or override") {
     return (!!normalized && [owner, reviewer].includes(normalized)) || input.override === true
   }
+  if (rowValue === "reassign authority") {
+    // spec 005 FR-5 (Q8 Option C): the owner reassigns the owner; either lane
+    // agent reassigns the reviewer.
+    const isOwner = !!normalized && normalized === owner
+    const isLaneAgent = !!normalized && [owner, reviewer].includes(normalized)
+    if (input.ownerChanged === true) return isOwner
+    return isLaneAgent
+  }
+  if (rowValue === "owner or system") {
+    // spec 006 FR-2 / spec 014 resync split (Q2 Option B): the owner in any
+    // active status; the doctor (an internal system event) only outside
+    // review and the PR flow.
+    if (input.systemEvent === true) {
+      return ["in-progress", "changes-requested", "repair-needed"].includes(state.status)
+    }
+    return !!normalized && normalized === owner
+  }
   return true
 }
 
@@ -111,6 +128,14 @@ function guardMatches(rowValue, state, input) {
     "no linked PR": () => !input.prLinked,
     "PR number": () => input.prLinked === true,
     "linked PR": () => input.prLinked === true,
+    // spec 002 PR-flow states: "PR-flow changes-requested" is the
+    // changes-requested entered by pr-poll feedback (reason
+    // `pr-review-feedback`) while local approval still stands. Callers pass
+    // prFlowChangesRequested from the source lane's reason code; a local
+    // request-changes withdraws it.
+    "linked PR; PR-flow changes-requested": () =>
+      input.prLinked === true
+      && (state.status !== "changes-requested" || input.prFlowChangesRequested === true),
     "linked PR and feedback reason": () =>
       input.prLinked === true && (input.feedbackReason === undefined || !!input.feedbackReason),
     "reason and repair accounting": () =>
@@ -123,6 +148,10 @@ function guardMatches(rowValue, state, input) {
     "no conflict": () => optionalFlag(input, "noConflict"),
     "consumed override": () => !!input.override,
     "distinct owner and reviewer": () => optionalFlag(input, "distinctReviewer"),
+    "distinct owner and reviewer; no prior author as reviewer; no linked PR": () =>
+      optionalFlag(input, "distinctReviewer")
+      && input.reviewerIsPriorAuthor !== true
+      && !input.prLinked,
     "actor unchecked": () => true,
     "valid status": () => ALL_STATUSES.includes(input.to ?? state.status),
     "linked PR or stale locks": () =>
@@ -178,19 +207,25 @@ export function applyTransition(state, event, input = {}) {
 
 // spec 015 FR-5: a legacy row in advisory mode is still accepted, but the
 // caller records `transition-advisory: <row id>` on the workflow event and
-// warns. Row L4 is advisory only for the FR-29 repair-entry and repair-exit
-// cases (spec 016 WS3); its other matches stay silent until WS4 designates
-// them.
+// warns. Since spec 016 WS4 every remaining legacy row is in advisory (L8 was
+// first, WS3 added L3 and L7).
 export function advisoryRowId(row, state = {}, input = {}) {
   if (!row || row.kind !== "legacy") return ""
   const target = input.to ?? state.status
   // spec 006 FR-29: the only exits from repair-needed are RepairClear (row
-  // 14) and RepairResolve (row 15). Any legacy match leaving repair-needed is
-  // the L4 exit case, even when an earlier legacy row (L3) matched first.
-  if (state.status === "repair-needed" && target !== "repair-needed") return "L4"
+  // 14) and RepairResolve (row 15). Any legacy status change leaving
+  // repair-needed is the L4 exit case, even when an earlier legacy row (L3)
+  // matched first.
+  if (state.status === "repair-needed" && target !== state.status && row.event === "handoff update --status") return "L4"
   if (row.state === "advisory") return row.id
-  if (row.id === "L4" && target === "repair-needed") return "L4"
   return ""
+}
+
+// spec 015 FR-5: one warning shape for every advisory legacy row without a
+// bespoke message. `detail` names the designated rule the request missed.
+export function formatAdvisoryWarning(rowId, { event, from, to, actor, detail }) {
+  const move = to && to !== from ? `\`${from} -> ${to}\`` : `\`${from}\``
+  return `warning: transition-advisory ${rowId}: ${event} ${move} by \`${actor || "unknown"}\` is outside the designated contract${detail ? ` (${detail})` : ""}. Enforcement lands after the spec 015 FR-5 advisory window.`
 }
 
 export function getPrimaryTransition(status) {

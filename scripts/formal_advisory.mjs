@@ -19,9 +19,12 @@ const MODELED_RUNTIME_FILES = new Set([
 // model: 4 workers (ubuntu-latest has 4 vCPUs), 2 GB heap, 15 minutes. The
 // workflow's 25-minute job timeout still leaves room for the harness and the
 // CLI contract. TLC metadata goes to a temp dir, not specs/tla/states/.
+// Spec 016 WS4 added reassignment, resync, and the PR-flow shortcut and moved
+// Lanes/Agents to symmetric constants: ~10.8M distinct states, 5 min at 10
+// workers locally, so the cap is 20 minutes at 4 workers.
 const TLC_MAX_HEAP_MB = 2048
 const TLC_WORKERS = 4
-const TLC_TIMEOUT_MS = 900_000
+const TLC_TIMEOUT_MS = 1_200_000
 const MAX_TLA_FILES = 1
 const FORMAL_HARNESS_TIMEOUT_MS = 300_000
 const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000

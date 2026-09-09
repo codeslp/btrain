@@ -123,6 +123,8 @@ The reviewer's findings must be written into the canonical handoff record in a w
 
 The lane must keep the same reviewer identity after `changes-requested` unless the handoff is explicitly reassigned. Rework should return to the same reviewer by default.
 
+Reassignment (spec 015 open question Q8, Option C with swap policy A-i, decided 2026-09-08; designated 2026-09-09): only the current owner may reassign `--owner`; either lane agent may reassign `--reviewer`. The new owner and reviewer must differ. Reassignment is available while the lane is `in-progress`, `needs-review`, or `changes-requested` without a linked PR; during the PR flow and `repair-needed` the roles are fixed, because the recorded PR approver (spec 002) and the repair owner (spec 006 FR-7) are identities the lane depends on. The lane keeps the set of agents that have owned the current task (its author history); an update that would make one of those agents the reviewer is rejected, whether in one step or through a sequence of individually valid assignments. When ownership transfers, the new owner becomes the responsible actor. A fresh claim starts a new history.
+
 ### FR-6: Same-lane rework loop
 
 The writer must address findings in the same lane rather than resolving the lane and opening a brand-new lane for the same slice of work.

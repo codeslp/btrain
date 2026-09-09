@@ -74,7 +74,7 @@ describe("lane transition contract", () => {
       // spec 006 FR-29 human records: they change no status, lock, owner, or
       // reviewer, so spec 015 FR-1 gives them no transition row.
       .filter((name) => ![
-        "Conflicts", "IsOwner", "IsReviewer", "IsLaneAgent", "IsRepairOwner", "NoConflictWithOthers",
+        "Conflicts", "IsOwner", "IsReviewer", "IsLaneAgent", "IsRepairOwner", "NoConflictWithOthers", "Authors",
         "RepairDispose", "RepairOverrideGrant",
       ].includes(name))
     const tableActions = new Set(TRANSITION_ROWS.map((entry) => entry.action))
@@ -260,11 +260,17 @@ describe("lane transition contract", () => {
     assert.equal(result.next.status, "ready-to-merge")
   })
 
-  it("marks rows 2, 13, 15 designated and L3, L7 advisory after spec 016 WS3", () => {
+  it("marks every contract row designated and every legacy row advisory after spec 016 WS3 and WS4", () => {
     const byId = new Map(TRANSITION_ROWS.map((row) => [row.id, row]))
-    for (const id of ["2", "13", "15"]) assert.equal(byId.get(id).state, "designated", `row ${id}`)
-    for (const id of ["L3", "L7"]) assert.equal(byId.get(id).state, "advisory", `row ${id}`)
-    assert.equal(byId.get("L4").state, "legacy")
+    for (const row of TRANSITION_ROWS) {
+      if (row.kind === "contract" || row.kind === "system") {
+        assert.equal(row.state, "designated", `row ${row.id}`)
+      } else {
+        assert.equal(row.state, "advisory", `row ${row.id}`)
+      }
+    }
+    assert.equal(byId.get("20").actor, "reassign authority")
+    assert.deepEqual(byId.get("8").from, ["pr-review", "ready-to-merge", "changes-requested"])
   })
 
   it("classifies advisory legacy matches, including the FR-29 repair cases on L4", () => {
@@ -289,9 +295,9 @@ describe("lane transition contract", () => {
     assert.equal(repairEntryFromResolved.row.id, "L4")
     assert.equal(advisoryRowId(repairEntryFromResolved.row, { status: "resolved" }, { to: "repair-needed" }), "L4")
 
-    const undesignatedShortcut = applyTransition(lane, "handoff update --status", { to: "ready-to-merge", actor: "codex" })
-    assert.equal(undesignatedShortcut.row.id, "L4")
-    assert.equal(advisoryRowId(undesignatedShortcut.row, lane, { to: "ready-to-merge" }), "")
+    const manualReadyToMerge = applyTransition(lane, "handoff update --status", { to: "ready-to-merge", actor: "codex" })
+    assert.equal(manualReadyToMerge.row.id, "L4")
+    assert.equal(advisoryRowId(manualReadyToMerge.row, lane, { to: "ready-to-merge" }), "L4")
 
     const plainRepairResolve = applyTransition(
       { status: "repair-needed", owner: "codex", reviewer: "claude" },
@@ -299,7 +305,7 @@ describe("lane transition contract", () => {
       { to: "resolved", actor: "codex", prFlowEnabled: true },
     )
     assert.equal(plainRepairResolve.row.id, "L7")
-    assert.equal(advisoryRowId(plainRepairResolve.row, { status: "repair-needed" }, { to: "resolved" }), "L4")
+    assert.equal(advisoryRowId(plainRepairResolve.row, { status: "repair-needed" }, { to: "resolved" }), "L7")
   })
 
   it("accepts the FR-29 exits on row 15 with a disposition or an override", () => {
@@ -310,6 +316,37 @@ describe("lane transition contract", () => {
     assert.equal(overridden.row.id, "15")
     const thirdPartyWithoutOverride = applyTransition(repair, "handoff resolve", { to: "resolved", actor: "gemini", humanDisposition: true })
     assert.equal(thirdPartyWithoutOverride.row.id, "L7")
+  })
+
+  it("designates the WS4 rows: PR-flow shortcut, non-terminal poll sources, reassignment, resync", () => {
+    const linked = { status: "changes-requested", owner: "codex", reviewer: "claude", prNumber: "42" }
+    const prFlow = { prLinked: true, prFlowChangesRequested: true }
+    assert.equal(applyTransition(linked, "handoff update --status", { to: "pr-review", actor: "codex", ...prFlow }).row.id, "12")
+    assert.equal(applyTransition(linked, "handoff update --status", { to: "pr-review", actor: "claude", ...prFlow }).row.id, "L4")
+    // A local request-changes withdraws approval: the shortcut falls back to L4.
+    assert.equal(applyTransition(linked, "handoff update --status", { to: "pr-review", actor: "codex", prLinked: true, prFlowChangesRequested: false }).row.id, "L4")
+    assert.equal(applyTransition(linked, "pr-poll", { to: "pr-review", actor: "system", ...prFlow }).row.id, "8")
+    assert.equal(applyTransition(linked, "pr-poll", { to: "ready-to-merge", actor: "system", ...prFlow }).row.id, "10")
+    assert.equal(applyTransition(linked, "pr-poll", { to: "pr-review", actor: "system", prLinked: true, prFlowChangesRequested: false }).row.id, "L5")
+    assert.equal(applyTransition({ status: "ready-to-merge", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "8")
+    assert.equal(applyTransition({ status: "in-progress", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "L5")
+
+    const lane = { status: "in-progress", owner: "codex", reviewer: "claude" }
+    assert.equal(applyTransition(lane, "handoff update --reassign", { actor: "codex", ownerChanged: true, distinctReviewer: true }).row.id, "20")
+    assert.equal(applyTransition(lane, "handoff update --reassign", { actor: "claude", ownerChanged: true, distinctReviewer: true }).row.id, "L10")
+    assert.equal(applyTransition(lane, "handoff update --reassign", { actor: "claude", ownerChanged: false, distinctReviewer: true }).row.id, "20")
+    assert.equal(applyTransition(lane, "handoff update --reassign", { actor: "codex", ownerChanged: false, reviewerIsPriorAuthor: true }).row.id, "L10")
+    assert.equal(applyTransition({ ...lane, status: "pr-review" }, "handoff update --reassign", { actor: "codex", ownerChanged: false, prLinked: true }).row.id, "L10")
+
+    const review = { status: "needs-review", owner: "codex", reviewer: "claude" }
+    assert.equal(applyTransition(review, "handoff update --files", { actor: "codex", filesChanged: false }).row.id, "17")
+    assert.equal(applyTransition(review, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "L6")
+    assert.equal(applyTransition(lane, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "17")
+    assert.equal(applyTransition(review, "handoff update --files", { actor: "claude", filesChanged: false }).row.id, "L6")
+    assert.equal(applyTransition(lane, "handoff resolve", { to: "resolved", actor: "claude", prFlowEnabled: true }).row.id, "6")
+    assert.equal(applyTransition(lane, "handoff resolve", { to: "resolved", actor: "gemini", prFlowEnabled: true }).row.id, "L11")
+    assert.equal(applyTransition({ status: "idle" }, "handoff resolve", { to: "resolved", actor: "codex", prFlowEnabled: true }).row.id, "L2")
+    assert.equal(applyTransition({ status: "pr-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "resolved", actor: "codex", prFlowEnabled: true, prLinked: true }).row.id, "L1")
   })
 
   it("classifies combined updates by the mutation that changes workflow state", () => {

@@ -52,13 +52,18 @@
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-18: One retry budget before human escalation
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-20: Lock retention during `repair-needed`
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-29: `repair-needed` transitions
-\* Pinned-hash: fc3117f1bfac449ec6e2b649dfd02abd8542b11d9c07f8ca8d4cf2896481b86e
-EXTENDS Naturals
+\* Pinned-hash: ad666069a87f4229b84db969398041d7bba9b78632835109242c153ca3960f27
+EXTENDS Naturals, TLC
 
-\* Pilot bounds (tla-author: small by design; widen only after this passes).
-Lanes == {"x", "y"}
-Agents == {"alpha", "beta", "gamma"}
-NoAgent == "none"
+\* Pilot bounds live in LaneLock.cfg (tla-author: small by design; widen only
+\* after this passes): 2 lanes, 3 agents. Since spec 016 WS4 they are model
+\* values so TLC can exploit their symmetry (Symm below); the harness names
+\* them alpha/beta/gamma and x/y, which is the same abstraction. Doctor is the
+\* spec 006 FR-2 guardian for lock resync (spec 015 row 17 "system"); it is
+\* never a lane agent.
+CONSTANTS Lanes, Agents, NoAgent, Doctor
+ASSUME NoAgent \notin Agents /\ Doctor \notin Agents /\ Doctor # NoAgent
+Symm == Permutations(Lanes) \union Permutations(Agents)
 
 \* Abstract lock paths. "pa" nests under "pnested", so they conflict; "pb"
 \* is disjoint (spec 002 Lock Enforcement: prefix overlap conflicts).
@@ -94,10 +99,17 @@ VARIABLES
   lastActor,   \* lane -> most recent canonical workflow actor (FR-7)
   repairOwner, \* lane -> responsible repair actor while repair-needed (FR-7/FR-15)
   approver,    \* lane -> the agent whose PeerResolve admitted the lane to the PR flow
-  decision     \* lane -> FR-29 human decision while repair-needed: none, disposed, override
+  decision,    \* lane -> FR-29 human decision while repair-needed: none, disposed, override
+  priorOwner   \* lane -> the agent displaced by an owner reassignment this task (spec 005 FR-5 author history)
 
 vars == <<status, owner, reviewer, locked, registry, uncovered, prLinked,
-          repairCount, peerApproved, lastActor, repairOwner, approver, decision>>
+          repairCount, peerApproved, lastActor, repairOwner, approver, decision,
+          priorOwner>>
+
+\* spec 005 FR-5 author history: with three agents and a reviewer distinct
+\* from every author, a task never has more than two authors, so one prior
+\* owner slot represents the set exactly.
+Authors(l) == {owner[l], priorOwner[l]} \ {NoAgent}
 
 \* Authority predicates (spec 002 PR-flow actors; spec 006 FR-7 responsible
 \* actor). Named once so the authority rule is reviewable in one place
@@ -124,6 +136,7 @@ Init ==
   /\ repairOwner = [l \in Lanes |-> NoAgent]
   /\ approver = [l \in Lanes |-> NoAgent]
   /\ decision = [l \in Lanes |-> "none"]
+  /\ priorOwner = [l \in Lanes |-> NoAgent]
 
 \* spec 002 CLI Commands: claim requires an idle or resolved lane, files,
 \* exclusive locks, and a peer reviewer distinct from the owner.
@@ -144,6 +157,7 @@ Claim(l, o, r, fs) ==
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
   /\ decision' = [decision EXCEPT ![l] = "none"]
+  /\ priorOwner' = [priorOwner EXCEPT ![l] = NoAgent]
 
 \* spec 005 status model / FR-7: the owner hands off from in-progress or,
 \* after rework, from changes-requested. Locks are retained.
@@ -153,7 +167,7 @@ ToNeedsReview(l, a) ==
   /\ status' = [status EXCEPT ![l] = "needs-review"]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, peerApproved, repairOwner, approver, decision>>
+                 repairCount, peerApproved, repairOwner, approver, decision, priorOwner>>
 
 \* spec 005 FR-2/FR-3/FR-5/FR-10: the reviewer returns findings; the lane
 \* stays active with the same owner, reviewer, and locks.
@@ -165,7 +179,7 @@ RequestChanges(l, a) ==
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, repairOwner, decision>>
+                 repairCount, repairOwner, decision, priorOwner>>
 
 \* spec 002 v1.1.2: peer resolve at needs-review is local approval — the
 \* reviewer advances the lane to nonterminal ready-for-pr; locks retained.
@@ -178,7 +192,7 @@ PeerResolve(l, a) ==
   /\ approver' = [approver EXCEPT ![l] = a]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, repairOwner, decision>>
+                 repairCount, repairOwner, decision, priorOwner>>
 
 \* spec 002 PR-flow actors: the owner creates or links the PR.
 LinkPr(l, a) ==
@@ -188,22 +202,56 @@ LinkPr(l, a) ==
   /\ prLinked' = [prLinked EXCEPT ![l] = TRUE]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, repairCount,
-                 peerApproved, repairOwner, approver, decision>>
+                 peerApproved, repairOwner, approver, decision, priorOwner>>
 
-\* btrain pr poll --apply outcomes (spec 002 PR-flow states).
+\* btrain pr poll --apply outcomes (spec 002 PR-flow states, designated
+\* 2026-09-09 for spec 015 rows 8-10): non-terminal outcomes apply to a
+\* PR-flow status or to PR-flow changes-requested with a linked PR. clear on
+\* a linked changes-requested lane advances it; waiting after ready-to-merge
+\* (new head or re-requested review) returns it to pr-review.
+\* "PR-flow changes-requested" is the changes-requested entered by PrFeedback,
+\* where local approval still stands (peerApproved). A local RequestChanges
+\* withdraws it, and the lane then re-enters the PR flow only through a new
+\* PeerResolve.
 PrClear(l) ==
-  /\ status[l] = "pr-review"
+  /\ prLinked[l]
+  /\ peerApproved[l]
+  /\ status[l] \in {"pr-review", "changes-requested"}
   /\ status' = [status EXCEPT ![l] = "ready-to-merge"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, peerApproved, lastActor, repairOwner, approver, decision>>
+                 repairCount, peerApproved, lastActor, repairOwner, approver, decision, priorOwner>>
 
+\* spec 015 Q1 (Option A, 2026-09-08): local approval survives GitHub
+\* feedback, so peerApproved and approver are kept; the owner returns the
+\* lane to pr-review directly (ReturnToPr) once the fix is pushed.
 PrFeedback(l) ==
   /\ status[l] \in {"pr-review", "ready-to-merge"}
   /\ status' = [status EXCEPT ![l] = "changes-requested"]
-  /\ peerApproved' = [peerApproved EXCEPT ![l] = FALSE]
-  /\ approver' = [approver EXCEPT ![l] = NoAgent]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, lastActor, repairOwner, decision>>
+                 repairCount, peerApproved, approver, lastActor, repairOwner,
+                 decision, priorOwner>>
+
+PrRepoll(l) ==
+  /\ prLinked[l]
+  /\ peerApproved[l]
+  /\ status[l] \in {"ready-to-merge", "changes-requested"}
+  /\ status' = [status EXCEPT ![l] = "pr-review"]
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount, peerApproved, approver, lastActor, repairOwner,
+                 decision, priorOwner>>
+
+\* spec 002 PR-flow states (row 12, Q1 Option A): the owner returns a linked
+\* changes-requested lane directly to pr-review after pushing the fix.
+ReturnToPr(l, a) ==
+  /\ IsOwner(l, a)
+  /\ prLinked[l]
+  /\ peerApproved[l]
+  /\ status[l] = "changes-requested"
+  /\ status' = [status EXCEPT ![l] = "pr-review"]
+  /\ lastActor' = [lastActor EXCEPT ![l] = a]
+  /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
+                 repairCount, peerApproved, approver, repairOwner, decision,
+                 priorOwner>>
 
 \* Terminal PR outcomes: merge and close-without-merge are both terminal
 \* resolved plus lock release (spec 002 v1.1.2; close is NOT repair-needed).
@@ -219,6 +267,7 @@ PrTerminal(l) ==
   /\ peerApproved' = [peerApproved EXCEPT ![l] = FALSE]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
+  /\ priorOwner' = [priorOwner EXCEPT ![l] = NoAgent]
   /\ UNCHANGED <<owner, reviewer, lastActor, decision>>
 
 \* Terminal resolve outside the review/PR flow: the owner or reviewer
@@ -240,6 +289,7 @@ AbandonResolve(l, a) ==
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
+  /\ priorOwner' = [priorOwner EXCEPT ![l] = NoAgent]
   /\ UNCHANGED <<owner, reviewer, decision>>
 
 \* spec 006 FR-4/FR-20 with the spec 014 designation: repair-needed enters
@@ -257,7 +307,7 @@ RepairEnter(l) ==
               ELSE repairCount[l] + 1]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = lastActor[l]]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 peerApproved, lastActor, approver, decision>>
+                 peerApproved, lastActor, approver, decision, priorOwner>>
 
 \* spec 006 FR-15 with the spec 014 designation: the responsible repair
 \* actor (FR-7) clears the repair and same-lane work continues. The other
@@ -272,7 +322,7 @@ RepairClear(l, a) ==
   \* A pending FR-29 decision is void once work continues.
   /\ decision' = [decision EXCEPT ![l] = "none"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, peerApproved, approver>>
+                 repairCount, peerApproved, approver, priorOwner>>
 
 \* spec 006 FR-29 (spec 015 row 15; open questions Q3 decided 2026-09-08):
 \* repair exits to resolved only as a terminal disposition backed by a
@@ -287,7 +337,7 @@ RepairDispose(l) ==
   /\ decision' = [decision EXCEPT ![l] = "disposed"]
   /\ UNCHANGED <<status, owner, reviewer, locked, registry, uncovered,
                  prLinked, repairCount, peerApproved, lastActor, repairOwner,
-                 approver>>
+                 approver, priorOwner>>
 
 \* Bounded on purpose: the grant is admitted only during repair-needed and
 \* only while no decision is pending, so one decision slot suffices. btrain
@@ -299,7 +349,7 @@ RepairOverrideGrant(l) ==
   /\ decision' = [decision EXCEPT ![l] = "override"]
   /\ UNCHANGED <<status, owner, reviewer, locked, registry, uncovered,
                  prLinked, repairCount, peerApproved, lastActor, repairOwner,
-                 approver>>
+                 approver, priorOwner>>
 
 RepairResolve(l, a) ==
   /\ status[l] = "repair-needed"
@@ -316,6 +366,7 @@ RepairResolve(l, a) ==
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
+  /\ priorOwner' = [priorOwner EXCEPT ![l] = NoAgent]
   /\ UNCHANGED <<owner, reviewer>>
 
 \* spec 014 rescope designation: the owner replaces the lock set during
@@ -334,7 +385,49 @@ Rescope(l, a, fs) ==
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<status, owner, reviewer, prLinked, repairCount,
+                 peerApproved, repairOwner, approver, decision, priorOwner>>
+
+\* spec 005 FR-5 reassignment (spec 015 row 20; Q8 Option C with swap policy
+\* A-i, 2026-09-08): only the owner reassigns the owner, either lane agent
+\* reassigns the reviewer, the two stay distinct, and no author of the current
+\* task may become its reviewer. Available outside the PR flow and repair,
+\* where the approver and repair owner are recorded identities. Ownership
+\* transfer makes the new owner the responsible actor (FR-7).
+Reassign(l, a, o2, r2) ==
+  /\ status[l] \in {"in-progress", "needs-review", "changes-requested"}
+  /\ ~prLinked[l]
+  /\ <<o2, r2>> # <<owner[l], reviewer[l]>>
+  /\ o2 # r2
+  /\ (o2 = owner[l] \/ IsOwner(l, a))
+  /\ (r2 = reviewer[l] \/ IsLaneAgent(l, a))
+  /\ r2 \notin Authors(l) \union {o2}
+  /\ owner' = [owner EXCEPT ![l] = o2]
+  /\ reviewer' = [reviewer EXCEPT ![l] = r2]
+  /\ priorOwner' = [priorOwner EXCEPT ![l] = IF o2 = owner[l] THEN priorOwner[l] ELSE owner[l]]
+  \* The responsible actor stays a lane agent (LastActorIsLaneAgent): the
+  \* acting agent if it still holds a role afterwards, else the new owner.
+  /\ lastActor' = [lastActor EXCEPT ![l] = IF a \in {o2, r2} THEN a ELSE o2]
+  /\ UNCHANGED <<status, locked, registry, uncovered, prLinked, repairCount,
                  peerApproved, repairOwner, approver, decision>>
+
+\* spec 006 FR-2 lock/status resync with the spec 014 rescope/resync split
+\* (spec 015 row 17; Q2 Option B, 2026-09-08): restore registry coverage for
+\* the handoff's recorded set without changing scope. The owner may resync in
+\* any active status; btrain doctor (Doctor, a system actor) only while the
+\* lane is in-progress, changes-requested, or repair-needed, so a reviewer's
+\* lock view stays fixed during review and the PR flow. A resync is not a
+\* canonical workflow action for Doctor, so lastActor is unchanged then.
+Resync(l, a) ==
+  /\ status[l] \in ActiveStatuses
+  /\ uncovered[l]
+  /\ \/ (a = Doctor /\ status[l] \in {"in-progress", "changes-requested", "repair-needed"})
+     \/ IsOwner(l, a)
+  /\ NoConflictWithOthers(l, locked[l])
+  /\ registry' = [registry EXCEPT ![l] = locked[l]]
+  /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
+  /\ lastActor' = [lastActor EXCEPT ![l] = IF a = Doctor THEN lastActor[l] ELSE a]
+  /\ UNCHANGED <<status, owner, reviewer, locked, prLinked, repairCount,
+                 peerApproved, repairOwner, approver, decision, priorOwner>>
 
 \* spec 002 Force-release override + spec 006 FR-2c/FR-2d: an audited,
 \* human-confirmed override suspends matching lock coverage. The handoff
@@ -348,7 +441,7 @@ ForceRelease(l, a) ==
   \* An audited override is not a canonical workflow action (FR-7), so the
   \* requester does not become the responsible actor.
   /\ UNCHANGED <<status, owner, reviewer, locked, prLinked, repairCount,
-                 peerApproved, lastActor, repairOwner, approver, decision>>
+                 peerApproved, lastActor, repairOwner, approver, decision, priorOwner>>
 
 \* Agent-driven actions quantify over the acting agent; the action's own
 \* guard decides whether that agent is authorized. GitHub and watchdog
@@ -362,6 +455,8 @@ Next ==
   \/ \E l \in Lanes : \E a \in Agents : LinkPr(l, a)
   \/ \E l \in Lanes : PrClear(l)
   \/ \E l \in Lanes : PrFeedback(l)
+  \/ \E l \in Lanes : PrRepoll(l)
+  \/ \E l \in Lanes : \E a \in Agents : ReturnToPr(l, a)
   \/ \E l \in Lanes : PrTerminal(l)
   \/ \E l \in Lanes : \E a \in Agents : AbandonResolve(l, a)
   \/ \E l \in Lanes : RepairEnter(l)
@@ -370,6 +465,8 @@ Next ==
   \/ \E l \in Lanes : RepairOverrideGrant(l)
   \/ \E l \in Lanes : \E a \in Agents : RepairResolve(l, a)
   \/ \E l \in Lanes : \E a \in Agents, fs \in FileSets : Rescope(l, a, fs)
+  \/ \E l \in Lanes : \E a \in Agents, o2 \in Agents, r2 \in Agents : Reassign(l, a, o2, r2)
+  \/ \E l \in Lanes : \E a \in Agents \union {Doctor} : Resync(l, a)
   \/ \E l \in Lanes : \E a \in Agents : ForceRelease(l, a)
 
 Spec == Init /\ [][Next]_vars
@@ -392,6 +489,7 @@ TypeOK ==
   /\ repairOwner \in [Lanes -> Agents \union {NoAgent}]
   /\ approver \in [Lanes -> Agents \union {NoAgent}]
   /\ decision \in [Lanes -> Decisions]
+  /\ priorOwner \in [Lanes -> Agents \union {NoAgent}]
 
 \* spec 002 Lock Enforcement: no two lanes hold conflicting paths.
 Exclusivity ==
@@ -472,6 +570,18 @@ DecisionOnlyDuringRepair ==
 DispositionAfterEscalation ==
   \A l \in Lanes : decision[l] = "disposed" => repairCount[l] >= MaxRepair
 
+\* spec 005 FR-5 with swap policy A-i (Q8): no author of the current task is
+\* its reviewer, in one step or through a sequence of reassignments.
+AuthorSeparation ==
+  \A l \in Lanes :
+    status[l] \in ActiveStatuses => reviewer[l] \notin Authors(l)
+
+\* spec 002 PR-flow states: pr-review and ready-to-merge always carry a
+\* linked PR (ReturnToPr, PrRepoll, and PrClear require it).
+PrReviewIsLinked ==
+  \A l \in Lanes :
+    status[l] \in {"pr-review", "ready-to-merge"} => prLinked[l]
+
 -----------------------------------------------------------------------------
 \* Action properties (checked as PROPERTY in LaneLock.cfg). State invariants
 \* cannot see a guard that was removed when every terminal action also resets
@@ -507,6 +617,16 @@ PrFlowEntryByReviewer ==
          => /\ status[l] = "needs-review"
             /\ approver'[l] = reviewer[l]
             /\ approver'[l] # owner[l]]_vars
+
+\* spec 005 FR-5: an owner change on an active lane happens only in
+\* in-progress, needs-review, or unlinked changes-requested (Reassign); the
+\* PR flow and repair keep their recorded identities.
+OwnerChangesOnlyByReassign ==
+  [][\A l \in Lanes :
+       (status[l] \in ActiveStatuses /\ owner'[l] # owner[l])
+         => /\ status[l] \in {"in-progress", "needs-review", "changes-requested"}
+            /\ ~prLinked[l]
+            /\ status'[l] = status[l]]_vars
 
 \* Every active lane records a canonical actor, and it is a lane agent.
 LastActorIsLaneAgent ==
