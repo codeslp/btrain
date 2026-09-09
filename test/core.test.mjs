@@ -2953,6 +2953,19 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.equal(update.details["transition-advisory"], undefined)
     assert.deepEqual(update.details.authorHistory, ["third", "writer"])
     assert.equal(update.details.ownerChanged, true)
+    assert.equal(update.actor, "third", "the new owner is the recorded responsible actor")
+    assert.equal(update.details.actingAgent, "writer")
+
+    // spec 006 FR-7 routing reads that actor: a repair right after the transfer belongs to the new owner.
+    const repairAfterTransfer = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "a", actor: "reviewer", reasonCode: "state-conflict" }), tmpDir)
+    assert.equal(repairAfterTransfer.code, 0, repairAfterTransfer.stderr)
+    assert.match(repairAfterTransfer.stdout, /repair owner: third/)
+    const cleared = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "in-progress", "--actor", "third"], tmpDir)
+    assert.equal(cleared.code, 0, cleared.stderr)
+
+    const valueless = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--actor", "third", "--reviewer"], tmpDir)
+    assert.notEqual(valueless.code, 0)
+    assert.match(valueless.stderr, /`--reviewer` requires an agent name/)
 
     const priorAuthorAsReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--reviewer", "writer", "--actor", "third"], tmpDir)
     assert.equal(priorAuthorAsReviewer.code, 0, priorAuthorAsReviewer.stderr)

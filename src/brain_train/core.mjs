@@ -4693,23 +4693,48 @@ function countRepairEntries(events, reasonCode) {
 // spec 015 row 20 / spec 005 FR-5 (Q8): the gate inputs for a reassignment,
 // read once from the workflow log (FR-12: the gate itself reads no files).
 // Shared by the lane and single-handoff branches of patchHandoff.
-async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCurrent, updates, transitionEvent }) {
+async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCurrent, updates, transitionEvent, actor = "" }) {
   const reassigning = transitionEvent === "handoff update --reassign"
+  if (reassigning) {
+    for (const flag of ["owner", "reviewer"]) {
+      if (updates[flag] !== undefined && (typeof updates[flag] !== "string" || !updates[flag].trim())) {
+        throw new BtrainError({
+          message: `\`--${flag}\` requires an agent name.`,
+          reason: "A reassignment must name the agent taking the role; an empty or missing value would leave the lane without a usable identity.",
+          fix: `btrain handoff update${laneId ? ` --lane ${laneId}` : ""} --${flag} <agent> --actor "${actor || existingCurrent.owner || "<agent>"}"`,
+        })
+      }
+    }
+  }
   const authorHistory = reassigning
     ? authorHistorySinceClaim(await readWorkflowEvents(repoRoot, config, laneId), existingCurrent)
     : new Set()
+  const previousOwnerKey = normalizeAgentName(existingCurrent.owner).toLowerCase()
+  const previousReviewerKey = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
   const nextOwnerKey = normalizeAgentName(updates.owner ?? existingCurrent.owner).toLowerCase()
   const nextReviewerKey = normalizeAgentName(updates.reviewer ?? existingCurrent.reviewer).toLowerCase()
-  const ownerChanged = updates.owner !== undefined
-    && nextOwnerKey !== normalizeAgentName(existingCurrent.owner).toLowerCase()
+  const ownerChanged = updates.owner !== undefined && nextOwnerKey !== previousOwnerKey
+  const reviewerChanged = updates.reviewer !== undefined && nextReviewerKey !== previousReviewerKey
   const reviewerIsPriorAuthor = reassigning
     && !!nextReviewerKey
     && (authorHistory.has(nextReviewerKey) || nextReviewerKey === nextOwnerKey)
+  const actorKey = normalizeAgentName(actor).toLowerCase()
+  // spec 005 FR-5 (designated 2026-09-09): after a reassignment the recorded
+  // canonical actor is a current lane agent. Ownership transfer makes the new
+  // owner responsible; a reviewer that replaced itself hands responsibility
+  // to the owner. spec 006 FR-7 repair routing reads this actor.
+  let responsibleActor = ""
+  if (reassigning) {
+    if (ownerChanged) responsibleActor = updates.owner
+    else if (reviewerChanged && actorKey && actorKey === previousReviewerKey) responsibleActor = existingCurrent.owner
+  }
   return {
     reassigning,
     ownerChanged,
     reviewerIsPriorAuthor,
-    distinctReviewer: !nextReviewerKey || !nextOwnerKey || nextReviewerKey !== nextOwnerKey,
+    // Both identities must exist and differ; an empty identity never counts as distinct.
+    distinctReviewer: reassigning ? (!!nextOwnerKey && !!nextReviewerKey && nextOwnerKey !== nextReviewerKey) : undefined,
+    responsibleActor,
     authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(),
   }
 }
@@ -5510,7 +5535,7 @@ async function patchHandoff(repoRoot, options) {
       // spec 005 FR-5 reassignment (Q8, swap policy A-i): who may change which
       // role, and whether the resulting reviewer was ever an author of this
       // task. The history is read once here (FR-12: the gate reads no files).
-      const reassign = await resolveReassignInputs(repoRoot, config, { laneId, existingCurrent, updates, transitionEvent })
+      const reassign = await resolveReassignInputs(repoRoot, config, { laneId, existingCurrent, updates, transitionEvent, actor: resolvedActor })
       let matchedRow = null
       const validateStructuralTransition = (source) => {
         const transition = applyTransition(source, transitionEvent, {
@@ -5713,7 +5738,7 @@ async function patchHandoff(repoRoot, options) {
           : null
 
       const updateHandoffArgs = [repoRoot, updates, {
-        actorLabel: resolvedActor || effectiveOwner,
+        actorLabel: reassign.responsibleActor || resolvedActor || effectiveOwner,
         config,
         overrideHandoffPath: handoffPath,
         delegationPacketSectionText:
@@ -5735,7 +5760,9 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(transitionAdvisory ? { "transition-advisory": transitionAdvisory } : {}),
           ...(selfRepairAudit ? { "self-repair-audit": true } : {}),
-          ...(reassign.reassigning ? { authorHistory: reassign.authorHistory, ownerChanged: reassign.ownerChanged } : {}),
+          ...(reassign.reassigning
+            ? { authorHistory: reassign.authorHistory, ownerChanged: reassign.ownerChanged, actingAgent: resolvedActor || "" }
+            : {}),
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
       }]
@@ -5807,7 +5834,7 @@ async function patchHandoff(repoRoot, options) {
   updates.reasonCode = reasonMetadata.reasonCode
   updates.reasonTags = reasonMetadata.reasonTags
   const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
-  const singleReassign = await resolveReassignInputs(repoRoot, config, { existingCurrent, updates, transitionEvent })
+  const singleReassign = await resolveReassignInputs(repoRoot, config, { existingCurrent, updates, transitionEvent, actor: resolvedActor })
   const singleTransition = applyTransition(existingCurrent, transitionEvent, {
     to: nextStatus,
     actor: resolvedActor,
@@ -5926,7 +5953,7 @@ async function patchHandoff(repoRoot, options) {
       : null
 
   const updatedCurrent = await updateHandoff(repoRoot, updates, {
-    actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
+    actorLabel: singleReassign.responsibleActor || resolvedActor || updates.owner || existingCurrent.owner || "btrain",
     delegationPacketSectionText:
       delegationPacketUpdated
         ? buildDelegationPacketSection(nextDelegationPacket, {
@@ -5946,7 +5973,9 @@ async function patchHandoff(repoRoot, options) {
       repairAttempts: updates.repairAttempts || 0,
       ...(singleAdvisory ? { "transition-advisory": singleAdvisory } : {}),
       ...(singleSelfRepairAudit ? { "self-repair-audit": true } : {}),
-      ...(singleReassign.reassigning ? { authorHistory: singleReassign.authorHistory, ownerChanged: singleReassign.ownerChanged } : {}),
+      ...(singleReassign.reassigning
+        ? { authorHistory: singleReassign.authorHistory, ownerChanged: singleReassign.ownerChanged, actingAgent: resolvedActor || "" }
+        : {}),
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
   })
