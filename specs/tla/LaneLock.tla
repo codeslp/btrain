@@ -52,8 +52,8 @@
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-18: One retry budget before human escalation
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-20: Lock retention during `repair-needed`
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-29: `repair-needed` transitions
-\* Pinned-hash: ad666069a87f4229b84db969398041d7bba9b78632835109242c153ca3960f27
-EXTENDS Naturals, TLC
+\* Pinned-hash: 209cbee9023e3b1ca35e5cead4c78b30f1f4ac7afadc414b2de51d6dfb512bc9
+EXTENDS Naturals, FiniteSets, TLC
 
 \* Pilot bounds live in LaneLock.cfg (tla-author: small by design; widen only
 \* after this passes): 2 lanes, 3 agents. Since spec 016 WS4 they are model
@@ -63,6 +63,11 @@ EXTENDS Naturals, TLC
 \* never a lane agent.
 CONSTANTS Lanes, Agents, NoAgent, Doctor
 ASSUME NoAgent \notin Agents /\ Doctor \notin Agents /\ Doctor # NoAgent
+\* Authors(l) below represents the author-history set with one priorOwner
+\* slot, which is exact only while a task can have at most two authors, i.e.
+\* with three agents (AuthorSeparation keeps the reviewer outside the set).
+\* Widening Agents requires a set-valued author history.
+ASSUME Cardinality(Agents) <= 3
 Symm == Permutations(Lanes) \union Permutations(Agents)
 
 \* Abstract lock paths. "pa" nests under "pnested", so they conflict; "pb"
@@ -225,6 +230,7 @@ PrClear(l) ==
 \* feedback, so peerApproved and approver are kept; the owner returns the
 \* lane to pr-review directly (ReturnToPr) once the fix is pushed.
 PrFeedback(l) ==
+  /\ prLinked[l]
   /\ status[l] \in {"pr-review", "ready-to-merge"}
   /\ status' = [status EXCEPT ![l] = "changes-requested"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
@@ -621,6 +627,7 @@ PrFlowEntryByReviewer ==
 \* spec 005 FR-5: an owner change on an active lane happens only in
 \* in-progress, needs-review, or unlinked changes-requested (Reassign); the
 \* PR flow and repair keep their recorded identities.
+\* (the unlinked requirement applies to all three statuses).
 OwnerChangesOnlyByReassign ==
   [][\A l \in Lanes :
        (status[l] \in ActiveStatuses /\ owner'[l] # owner[l])

@@ -126,6 +126,28 @@ describe("btrain watchdog repairs", () => {
     assert.equal(recoveryResult.code, 0, recoveryResult.stderr)
   })
 
+  it("does not escalate a repair-needed lane on its own repeated runs (FR-18, Q4)", async () => {
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    let content = await fs.readFile(handoffPath, "utf8")
+    content = content.replace("Status: idle", "Status: in-progress")
+    content = content.replace(/^Active Agent: .*$/m, "Active Agent: Gemini")
+    content = content.replace(/^Last Updated: .*$/m, "Last Updated: Gemini 2099-01-01T00:00:00.000Z")
+    await fs.writeFile(handoffPath, content, "utf8")
+
+    const first = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+    assert.match(first.stdout, /contradictory-state repair/)
+    let handoff = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
+    assert.match(handoff.stdout, /status: repair-needed/)
+    assert.match(handoff.stdout, /repair attempts: 1/)
+    assert.doesNotMatch(handoff.stdout, /repair escalation: human/)
+
+    // doctor exits non-zero while the lane still needs repair; only the count matters here.
+    await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+    handoff = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
+    assert.match(handoff.stdout, /repair attempts: 1/)
+    assert.doesNotMatch(handoff.stdout, /repair escalation: human/)
+  })
+
   it("resyncs lock coverage for an in-progress lane as the FR-2 guardian (spec 015 row 17, Q2)", async () => {
     const claim = await runBtrain(
       ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Resync me", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/"],

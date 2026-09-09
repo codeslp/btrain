@@ -340,6 +340,25 @@ describe("lane transition contract", () => {
 
     const review = { status: "needs-review", owner: "codex", reviewer: "claude" }
     assert.equal(applyTransition(review, "handoff update --files", { actor: "codex", filesChanged: false }).row.id, "17")
+    // A different set in review is a rescope, which spec 014 forbids there: L6, not row 17.
+    assert.equal(applyTransition(review, "handoff update --files", { actor: "codex", filesChanged: true }).row.id, "L6")
+    // Rows 14 and 16 check their actors: a third party rescoping in-progress work or clearing
+    // a repair it does not own falls to the advisory rows.
+    assert.equal(applyTransition(lane, "handoff update --files", { actor: "gemini", filesChanged: true }).row.id, "L6")
+    assert.equal(applyTransition(lane, "handoff update --files", { actor: "codex", filesChanged: true }).row.id, "16")
+    const repair = { status: "repair-needed", owner: "codex", reviewer: "claude", repairOwner: "codex" }
+    assert.equal(applyTransition(repair, "handoff update --status", { to: "in-progress", actor: "codex" }).row.id, "14")
+    assert.equal(applyTransition(repair, "handoff update --status", { to: "in-progress", actor: "claude" }).row.id, "L4")
+    // Idempotent poll outcomes stay on their contract rows; ready-for-pr takes no poll outcome.
+    const rtm = { status: "ready-to-merge", owner: "codex", reviewer: "claude", prNumber: "42" }
+    assert.equal(applyTransition(rtm, "pr-poll", { to: "ready-to-merge", actor: "system", prLinked: true }).row.id, "10")
+    assert.equal(applyTransition(linked, "pr-poll", { to: "changes-requested", actor: "system", ...prFlow, feedbackReason: "pr-review-feedback" }).row.id, "9")
+    assert.equal(applyTransition({ status: "ready-for-pr", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "L5")
+    // An unlinked changes-requested abandon by a third party is L11, not L1.
+    assert.equal(applyTransition({ status: "changes-requested", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "resolved", actor: "gemini", prFlowEnabled: true }).row.id, "L11")
+    // L9: peer approval on a lane whose coverage was force-released.
+    assert.equal(applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: false }).row.id, "L9")
+    assert.equal(applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: true }).row.id, "4")
     assert.equal(applyTransition(review, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "L6")
     assert.equal(applyTransition(lane, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "17")
     assert.equal(applyTransition(review, "handoff update --files", { actor: "claude", filesChanged: false }).row.id, "L6")

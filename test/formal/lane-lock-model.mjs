@@ -412,8 +412,19 @@ export class LaneLockModel {
     const suppliedPr = pr ? String(pr) : ""
     if (this.mode === "contract") {
       if (!s.prNumber && !suppliedPr) return this.#reject("no-linked-pr")
+      const terminal = outcome === "merged" || outcome === "closed"
+      // Terminal outcomes (PrTerminal, spec 015 row 11) apply to any linked
+      // PR-flow or changes-requested lane. Non-terminal outcomes (rows 8-10,
+      // spec 002 as designated 2026-09-09) apply only from pr-review,
+      // ready-to-merge, or PR-flow changes-requested: entered by pr-poll
+      // feedback while local approval stands. ready-for-pr has no linked PR
+      // yet in the contract, so it takes no outcome.
       const prFlowChangesRequested = s.status === "changes-requested" && s.reasonCode === "pr-review-feedback"
-      if (!PR_FLOW_STATUSES.has(s.status) && !prFlowChangesRequested) {
+      if (terminal) {
+        if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
+          return this.#reject("pr-outcome-from-invalid-status")
+        }
+      } else if (!["pr-review", "ready-to-merge"].includes(s.status) && !prFlowChangesRequested) {
         return this.#reject("pr-outcome-from-invalid-status")
       }
     }

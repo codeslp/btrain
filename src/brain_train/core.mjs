@@ -4700,7 +4700,6 @@ function authorHistorySinceClaim(events, current) {
     if (key) authors.add(key)
   }
   for (const event of eventsSinceLastClaim(events)) {
-    if (event.type === "claim") add(event.after?.owner)
     if (event.type === "update" && event.after?.owner) add(event.after.owner)
   }
   const list = events || []
@@ -5974,6 +5973,7 @@ async function requestChangesHandoff(repoRoot, options) {
       ? parseCurrentSection(await readText(overrideHandoffPath))
       : await readCurrentState(repoRoot)
 
+  let requestChangesAdvisory = ""
   const validateRequestChanges = (source) => {
     if (source.status !== "needs-review") {
       throw new BtrainError({
@@ -6005,7 +6005,6 @@ async function requestChangesHandoff(repoRoot, options) {
     requestChangesAdvisory = advisoryRowId(transition.row, source, { to: "changes-requested" })
     return reasonMetadata
   }
-  let requestChangesAdvisory = ""
   validateRequestChanges(existingCurrent)
   if (requestChangesAdvisory) {
     options.onEvent?.(formatAdvisoryWarning(requestChangesAdvisory, {
@@ -6239,6 +6238,14 @@ async function resolveHandoff(repoRoot, options) {
   }
 
   const reviewerResolveTarget = prFlow.enabled ? "ready-for-pr" : "resolved"
+  // spec 002 Force-release override (spec 015 L9): local approval does not
+  // re-acquire coverage suspended by an audited force-release. The gate sees
+  // laneCovered; an uncovered lane lands on L9 (advisory) until enforcement.
+  const laneCoverage = laneId
+    ? decorateLaneState(existingCurrent, getLaneLocks(await listLocks(repoRoot), laneId)).lockState
+    : "active"
+  const laneCovered = laneCoverage !== "missing" && laneCoverage !== "mismatch"
+  let peerResolveAdvisory = ""
   const normalizedResolveActor = normalizeAgentName(resolvedActor).toLowerCase()
   const normalizedReviewer = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
   const actorIsConfigured = agentCheck.configuredAgents.some(
@@ -6324,12 +6331,16 @@ async function resolveHandoff(repoRoot, options) {
           fix: `Re-read lane ${laneId || "(single)"}, verify its current owner, reviewer, and files, then run the resolve command again.`,
         })
       }
-      applyTransition(latestCurrent, "handoff resolve", {
+      const peerTransition = applyTransition(latestCurrent, "handoff resolve", {
         to: "ready-for-pr",
         actor: resolvedActor,
         prFlowEnabled: true,
         prLinked: !!latestCurrent.prNumber,
+        laneCovered,
       })
+      peerResolveAdvisory = reviewerAuthorityAdvisory
+        ? "L8"
+        : advisoryRowId(peerTransition.row, latestCurrent, { to: "ready-for-pr" })
       resolvedCurrent = await updateHandoff(
         repoRoot,
         {
@@ -6352,7 +6363,7 @@ async function resolveHandoff(repoRoot, options) {
             summary: options.summary || "",
             localReviewApproved: true,
             nextStatus: "ready-for-pr",
-            ...(reviewerAuthorityAdvisory ? { "transition-advisory": "L8" } : {}),
+            ...(peerResolveAdvisory ? { "transition-advisory": peerResolveAdvisory } : {}),
           },
           overrideHandoffPath,
         },
@@ -6370,6 +6381,15 @@ async function resolveHandoff(repoRoot, options) {
       await publishResolve()
     }
     if (reviewerAuthorityAdvisory) options.onEvent?.(reviewerAuthorityAdvisory)
+    if (peerResolveAdvisory === "L9") {
+      options.onEvent?.(formatAdvisoryWarning("L9", {
+        event: "handoff resolve",
+        from: "needs-review",
+        to: "ready-for-pr",
+        actor: resolvedActor,
+        detail: "spec 002 Force-release override: coverage suspended by an audited force-release stays suspended until claim or rescope; local approval re-acquired it",
+      }))
+    }
     return resolvedCurrent
   }
 
@@ -9556,12 +9576,21 @@ async function applyWatchdogRepairs(repoRoot, {
     if (integrityIssues.length > 0) {
       // Use the first integrity issue as the primary repair reason
       const issue = integrityIssues[0]
-      const repairMetadata = await resolveRepairAssignment(repoRoot, config, {
-        laneId: laneState._laneId,
-        existingCurrent: laneState,
-        reasonCode: issue.reasonCode,
-        actorLabel,
-      })
+      // spec 006 FR-18 (Q4): a re-write of a lane that is already
+      // repair-needed is not a new attempt; keep its recorded metadata so
+      // repeated doctor runs do not escalate on their own.
+      const repairMetadata = laneState.status === "repair-needed"
+        ? {
+            repairOwner: laneState.repairOwner || actorLabel,
+            repairEscalation: laneState.repairEscalation || "",
+            repairAttempts: Number(laneState.repairAttempts) || 1,
+          }
+        : await resolveRepairAssignment(repoRoot, config, {
+            laneId: laneState._laneId,
+            existingCurrent: laneState,
+            reasonCode: issue.reasonCode,
+            actorLabel,
+          })
 
       const laneHandoffPath = getLaneHandoffPath(repoRoot, config, laneState._laneId)
       applyTransition(laneState, "watchdog-repair", {

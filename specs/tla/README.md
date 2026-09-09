@@ -58,7 +58,7 @@ not be reused; re-run TLC and `npm run test:formal`. The verifier is the only sa
 this file. Consumer wiring lands in its own lanes because those files are
 outside this lane's locks: `tla-run-tlc` (PR #40), `tla-trace-explain`, the
 `formal-advisory` CI workflow, and `pre-handoff`. TLC baseline (2026-09-09, spec 016 WS4, with symmetry): 143,465,581 states
-generated, 10,832,481 distinct, depth 32, 5 min 05 s with 10 workers (the
+generated, 10,832,481 distinct, depth 31 (32 on an earlier run: with symmetry the reported depth depends on exploration order), 5 min 05 s with 10 workers (the
 model carries 16 invariants and 5 action properties). Earlier baselines:
 2026-09-08 (WS3, no symmetry) 159,482,257 generated, 14,990,809 distinct,
 depth 25, 3 min 57 s; 2026-09-02 88,436,305 generated, 8,236,969 distinct,
@@ -207,7 +207,8 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   re-entry. The model's single `decision` slot also forbids an override
   after a disposition, which the implementation allows as two coexisting
   records. Neither is harness-observable (no overrides in throwaway repos).
-  Tighten the implementation or relax the model in WS4.
+  Tighten the implementation or relax the model in a follow-up lane after
+  WS4 (deferred; `grantOverride` is unchanged by WS4).
 - The FR-15 override clear (`RepairClear` by an audited override rather than
   the repair owner) is distinct from the FR-29 `repair-resolve` override
   modeled as `decision = "override"`, and is not modeled. Adding it would
@@ -232,14 +233,17 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   and the mirror admits the same only when the lane's reason code is
   `pr-review-feedback`. (b) resolved 2026-09-09: the mirror's contract-mode
   `resolve()` now rejects a linked `changes-requested` lane, matching
-  `AbandonResolve`'s `~prLinked`. (c) `Claim` with reviewer = owner is
+  `AbandonResolve`'s `~prLinked`. (e) the mirror's `update` accepts
+  `changes-requested -> in-progress` by the owner (pre-existing); the model
+  has no such action (row 14 is the repair exit only), so that path is
+  undesignated and stays a mirror-only acceptance until prose speaks. (c) `Claim` with reviewer = owner is
   rejected by the model and silently reassigned to a distinct peer by the
   harness; reachable states are equivalent. (d) the harness mirror has no
   override path at all (`disposition` only); the model's `override` branch of
   `RepairResolve` is exercised by TLC and by `test/core.test.mjs`.
-- `Reassign` is admitted only in `in-progress`, `needs-review`, and unlinked
-  `changes-requested` (spec 005 FR-5 as designated 2026-09-09); the registry
-  owner label is not modeled. `Resync` fires only from the force-release
+- `Reassign` is admitted only in `in-progress`, `needs-review`, and
+  `changes-requested`, in each case without a linked PR (spec 005 FR-5 as
+  designated 2026-09-09); the registry owner label is not modeled. `Resync` fires only from the force-release
   `uncovered` state; btrain's doctor also repairs a registry that was emptied
   outside btrain, which the model treats as the same event. The harness
   generator emits no reassignments and no doctor resync;

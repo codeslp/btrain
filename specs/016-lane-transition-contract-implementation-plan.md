@@ -397,6 +397,12 @@ L1-L15, retire the harness candidate labels to regressions (WS5 precondition),
 and rewrite the advisory-stage tests to rejections. The Q4 reclaim regression
 and the Q8 provenance tests are production-level CLI tests in
 `test/core.test.mjs`; the harness generator still emits no reassignments.
+The three legacy-path tests this plan named for rewriting
+(`test/core.test.mjs` manual `--status ready-to-merge` and the `--final`
+sequence; `test/watchdog.test.mjs` recovery through a CLI `--files` update
+as `btrain doctor`) are deliberately left as they are: they exercise paths
+that are advisory now and are rewritten to rejections in the enforcement
+step. New tests cover the designated paths (doctor resync end to end).
 
 ### Workstream 5: Spec 014 Phase 3
 
@@ -423,9 +429,11 @@ pilot model in CI.
 | 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | advisory stage in review 2026-09-09 (lane c); enforcement step after the FR-5 window |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
 
-As of 2026-09-08 steps 1 through 5 are complete. Step 6 is ready to claim.
-Step 7 follows step 6 because both workstreams lock the same runtime, model,
-and test files; they are serialized, not parallel. Step 8 waits on both.
+As of 2026-09-09 steps 1 through 6 are complete (step 6 as its advisory
+stage) and step 7's advisory stage is in review. Step 7 followed step 6
+because both workstreams lock the same runtime, model, and test files. Step 8
+waits on the enforcement lanes for both, which may start no earlier than 14
+days after each advisory merge.
 
 ## Rollback Points
 

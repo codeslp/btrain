@@ -2962,7 +2962,8 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.equal(update.details["transition-advisory"], "L10")
     assert.ok(update.details.authorHistory.includes("writer"), "the author history persists across the sequence")
 
-    const ownerChangeByReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--owner", "reviewer", "--actor", "writer"], tmpDir)
+    // Authority alone: the reviewer (never an author) tries to hand ownership to a fresh agent.
+    const ownerChangeByReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--owner", "reviewer", "--actor", "reviewer"], tmpDir)
     assert.equal(ownerChangeByReviewer.code, 0, ownerChangeByReviewer.stderr)
     assert.match(ownerChangeByReviewer.stdout, /warning: transition-advisory L10/)
   })
@@ -3006,6 +3007,7 @@ describe("spec 016 WS4: single-handoff claim over active work (L13)", () => {
   it("accepts the overwrite with the L13 advisory during the FR-5 window", async () => {
     const first = await runBtrain(["handoff", "claim", "--repo", tmpDir, "--task", "first", "--owner", "WriterBot", "--reviewer", "ReviewerBot"], tmpDir)
     assert.equal(first.code, 0, first.stderr)
+    assert.doesNotMatch(first.stdout, /transition-advisory/)
     const second = await runBtrain(["handoff", "claim", "--repo", tmpDir, "--task", "second", "--owner", "ReviewerBot", "--reviewer", "WriterBot"], tmpDir)
     assert.equal(second.code, 0, second.stderr)
     assert.match(second.stdout, /warning: transition-advisory L13: handoff claim `in-progress` by `ReviewerBot`/)
