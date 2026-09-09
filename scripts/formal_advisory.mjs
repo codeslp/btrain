@@ -180,7 +180,8 @@ export function verifyExecutionTree(root, requestedHead) {
 
 export function classifyPaths(files, declaredImpact = "auto", proseChanged = true) {
   const modeledProse = files.some(file => MODELED_PROSE.has(file))
-  const tlaArtifacts = files.some(file => file.startsWith("specs/tla/") && /\.(tla|cfg|class|jar)$/i.test(file))
+  const tlaArtifacts = files.some(file => file === CONTRACT.config
+    || (file.startsWith("specs/tla/") && /\.(tla|cfg|class|jar)$/i.test(file)))
   const executableModel = files.some(file => EXECUTABLE_MODEL_FILES.has(file))
   const pinTool = files.includes("scripts/tla_pin.py")
   const cli = files.includes("src/brain_train/cli.mjs")
@@ -368,7 +369,7 @@ function runTlc(root, tlaFiles, cache = {}) {
   }
   return tlaFiles.map((tlaFile) => {
     const parsed = path.parse(tlaFile)
-    const config = path.join(parsed.dir, `${parsed.name}.cfg`)
+    const config = path.resolve(root, CONTRACT.config)
     if (!fs.existsSync(config)) {
       return {
         name: `tlc:${parsed.name}`,
@@ -398,7 +399,7 @@ function runTlc(root, tlaFiles, cache = {}) {
     try {
       run = command(
         "java",
-        buildTlcArgs(jar, path.basename(config), path.basename(tlaFile), metadir),
+        buildTlcArgs(jar, path.relative(parsed.dir, config), path.basename(tlaFile), metadir),
         { cwd: parsed.dir, timeoutMs: TLC_TIMEOUT_MS, measureMemory: true },
       )
     } finally {
@@ -417,8 +418,8 @@ function currentTlcIdentity(root, tlaFile, jar) {
   const version = command("java", ["-version"], { cwd: root, echo: false, timeoutMs: 10000 })
   if (version.status !== 0) throw new Error("Cannot identify the Java runtime for TLC cache reuse.")
   const parsed = path.parse(tlaFile)
-  return tlcIdentity(root, path.relative(root, tlaFile), jar, `${version.stdout}${version.stderr}`,
-    buildTlcArgs("<tool-sha256>", `${parsed.name}.cfg`, parsed.base))
+  return tlcIdentity(root, path.relative(root, tlaFile), CONTRACT.config, jar, `${version.stdout}${version.stderr}`,
+    buildTlcArgs("<tool-sha256>", path.relative(parsed.dir, path.resolve(root, CONTRACT.config)), parsed.base))
 }
 
 function runHarness(root) {

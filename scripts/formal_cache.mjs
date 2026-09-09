@@ -9,11 +9,11 @@ function digest(value) {
 // Hash the entire module directory, including Java overrides and local imports.
 // Documentation and old verdicts cannot affect TLC execution. External module
 // paths and JVM injection disable reuse rather than creating incomplete keys.
-export function tlcIdentity(root, model, jar, javaVersion, args) {
+export function tlcIdentity(root, model, config, jar, javaVersion, args) {
   for (const name of ["TLA_LIBRARY", "CLASSPATH", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"]) {
     if (process.env[name]) throw new Error(`${name} prevents hermetic TLC cache reuse.`)
   }
-  const files = new Set(["scripts/formal_advisory.mjs", "scripts/formal_cache.mjs", "scripts/formal_contracts.json"])
+  const files = new Set(["scripts/formal_advisory.mjs", "scripts/formal_cache.mjs", "scripts/formal_contracts.json", config])
   function collect(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const full = path.join(directory, entry.name)

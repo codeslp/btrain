@@ -114,8 +114,12 @@ test("a real bounded TLC run produces reusable model evidence", { skip: !process
   const f = fixture(t)
   f.env.TLC_JAR = process.env.TLC_JAR
   f.env.PATH = process.env.PATH
+  const manifest = JSON.parse(fs.readFileSync(path.join(f.root, "scripts/formal_contracts.json")))
+  manifest.contracts[0].config = "config/alternate.cfg"
+  f.write("scripts/formal_contracts.json", JSON.stringify(manifest))
   f.write("specs/tla/LaneLock.tla", "\\* Pinned to: specs/002-multi-lane-handoffs.md § Rule\n\\* Pinned-hash: UNPINNED\n---- MODULE LaneLock ----\nEXTENDS Naturals\nVARIABLE x\nInit == x = 0\nNext == x' = 1 - x\nSpec == Init /\\ [][Next]_x\nSafe == x \\in {0, 1}\n====\n")
   f.write("specs/tla/LaneLock.cfg", "SPECIFICATION Spec\nINVARIANT Safe\n")
+  f.write("config/alternate.cfg", "SPECIFICATION Spec\nINVARIANT Safe\n")
   assert.equal(f.run("python3", ["scripts/tla_pin.py", "--repin", "specs/tla/LaneLock.tla"]).status, 0)
   f.commit()
   const first = f.advisory()
@@ -123,6 +127,12 @@ test("a real bounded TLC run produces reusable model evidence", { skip: !process
   const second = f.advisory()
   assert.equal(second.checks.find(c => c.name === "tlc:LaneLock").cache.hit, true)
   assert.equal(f.calls("harness"), 2)
+  f.write("config/alternate.cfg", "SPECIFICATION Spec\nINVARIANT MissingInvariant\n")
+  f.commit()
+  const changed = f.advisory().checks.find(c => c.name === "tlc:LaneLock")
+  assert.equal(changed.cache.hit, false)
+  assert.equal(changed.verdict, "infrastructure_failure")
+  assert.match(changed.stdout + changed.stderr, /MissingInvariant/)
 })
 
 test("cache keys include the verifier, manifest, and execution policy", t => {
@@ -137,6 +147,39 @@ test("cache keys include the verifier, manifest, and execution policy", t => {
     key = next
   }
   assert.equal(f.calls("tlc"), 0)
+})
+
+test("TLC executes and hashes the declared configuration outside the model directory", t => {
+  const f = fixture(t)
+  const manifest = JSON.parse(fs.readFileSync(path.join(f.root, "scripts/formal_contracts.json")))
+  manifest.contracts[0].config = "config/alternate.cfg"
+  f.write("scripts/formal_contracts.json", JSON.stringify(manifest))
+  f.write("config/alternate.cfg", "SPECIFICATION Spec\n")
+  f.commit()
+  // Make configuration changes the only selection trigger.
+  f.git("branch", "config-base")
+  f.write("config/alternate.cfg", "SPECIFICATION OtherSpec\n")
+  f.commit()
+  const first = f.advisory(false, ["--base", "config-base"])
+  const check = first.checks.find(c => c.name === "tlc:LaneLock")
+  assert.ok(check, JSON.stringify(first))
+  assert.match(check.command, /-config \.\.\/\.\.\/config\/alternate\.cfg /)
+  assert.equal(check.verdict, "pass")
+  assert.equal(f.advisory(false, ["--base", "config-base"]).checks.find(c => c.name === "tlc:LaneLock").cache.hit, true)
+  const key = f.advisory(false, ["--cache-key-only"]).cacheKey
+  assert.equal(key, check.cache.key)
+  f.write("config/alternate.cfg", "SPECIFICATION ThirdSpec\n")
+  f.commit()
+  const next = f.advisory(false, ["--base", "config-base"]).checks.find(c => c.name === "tlc:LaneLock")
+  assert.notEqual(next.cache.key, key)
+  assert.equal(next.cache.hit, false)
+  assert.equal(f.calls("tlc"), 2)
+  fs.rmSync(path.join(f.root, "config/alternate.cfg"))
+  f.commit()
+  const missing = f.advisory(false, ["--base", "config-base"]).checks.find(c => c.name === "tlc:LaneLock")
+  assert.equal(missing.verdict, "infrastructure_failure")
+  assert.match(missing.detail, /config\/alternate.cfg is missing/)
+  assert.equal(f.calls("tlc"), 2)
 })
 
 test("external JVM configuration disables reuse without suppressing checks", t => {
