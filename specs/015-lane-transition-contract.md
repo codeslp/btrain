@@ -1,10 +1,10 @@
 # 015 — Lane Transition Contract as a Guarded-Action List
 
 **Status**: Draft
-**Version**: 0.1.3
+**Version**: 0.1.4
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-02 (v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
+**Updated**: 2026-09-08 (v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
 
 ## Decision
 
@@ -594,9 +594,54 @@ Each question lists the viable options, which contract rows and legacy rows
 change, what safety property is affected, and what follow-up work each answer
 unlocks. The questions are independent except where noted.
 
+### Decisions (2026-09-08)
+
+Brian Faris answered all eight questions on 2026-09-08. The answers below are
+the human decisions spec 016 Workstream 0 required. They do not by themselves
+designate any row: each row still moves to `designated` only when the owning
+prose change named in its follow-up lands (spec 016 WS3 for unpinned prose,
+WS4 for pinned prose). The option text under each question remains the
+authoritative description of what the chosen answer requires.
+
+| Q | Decision | Chosen option | Owning prose | Lands in |
+| --- | --- | --- | --- | --- |
+| Q1 | The owner may return PR-flow `changes-requested` directly to `pr-review`. Designate row 12. | A | spec 002 PR-flow states (pinned) | WS4 |
+| Q2 | `btrain doctor` may resync lock coverage only in `in-progress`, `changes-requested`, and `repair-needed`. In `needs-review` and PR-flow statuses resync is owner only, with no override path. | B, owner-only sub-row | spec 006 FR-2 designation text (unpinned) | WS3 |
+| Q3 | A `repair-needed` lane resolves through either the FR-18 escalation disposition or a consumed FR-2c/2d override. | A | spec 006 FR-29 (unpinned) | WS3 |
+| Q4 | A fresh claim resets the FR-18 repair count; `RepairClear` does not. The implementation scopes the count to events after the most recent claim and keeps the full event history. | A | spec 006 FR-18 clarification (unpinned) | WS3 |
+| Q5 | Either lane agent (owner or reviewer) may abandon an unlinked `in-progress` or `changes-requested` lane. Retire L11 once row 6 is enforced. | A | spec 002 CLI Commands (pinned) | WS4 |
+| Q6 | In enforcement mode an unverified actor is always rejected. When exactly one agent is configured, the rejection message names it: `export BTRAIN_AGENT=<the-one-agent>`. | C | spec 015 FR-6 (this spec) | WS3 |
+| Q7 | Any configured agent (plus `system`) may declare `repair-needed`. An owner declaring repair on their own lane is recorded with a `self-repair-audit` field in the canonical lane-event log; that field is not a `transition-advisory` and does not count against the FR-5 retirement gate. | C | spec 006 FR-29 (unpinned) | WS3 |
+| Q8 | Only the current owner may reassign `--owner`; either lane agent may reassign `--reviewer`. Swap policy A-i applies: the lane records its authors and prior owners, and any update that makes one of them the reviewer is rejected, whether in one step or through intermediate assignments. Retire L10 once row 20 is enforced. | C with A-i | spec 005 FR-5 (unpinned) | Phase B step 4 |
+
+Consequences worth restating:
+
+- Q1 adds a `ReturnToPr` action to `LaneLock.tla` and forces a repin of
+  spec 002 PR-flow states. Q5 and Q4 need no model change. Q8 adds
+  `authorHistory` and the `AuthorSeparation` invariant. Q3 adds an
+  `overrideConsumed` disjunct to `RepairResolve`.
+- Q2 opens a model question WS3 must settle. `LaneLock.tla` `Rescope` is
+  owner-only and exists only in `in-progress` and `changes-requested`; the
+  agent pool has no `system` actor and no action restores coverage during
+  `repair-needed`. WS3 must either add a system resync action for the three
+  permitted statuses (same set, coverage restore only) or record doctor
+  resync as an abstract external event alongside the watchdog, and the FR-6
+  harness mirror must match whichever is chosen.
+- Q5 chose Option A, so the Q8 Option B deadlock caveat does not apply and
+  no guardian takeover path is required.
+- Q2's owner-only choice for `needs-review` and PR-flow means the row-17
+  actor stays `owner` and no override wording is added to the requirement or
+  guidance. `test/watchdog.test.mjs:122` must be reworked to exercise
+  `btrain doctor --repair` end to end for the permitted statuses and to
+  confirm rejection in the restricted ones.
+- Q6 changes only the error formatter and the FR-6 text. No new implicit
+  authority is introduced.
+
 ---
 
 ### Q1. Row 12 — direct return to `pr-review` from PR-flow `changes-requested`
+
+**Decided 2026-09-08: Option A.**
 
 May the owner return a PR-flow `changes-requested` lane directly to
 `pr-review`, as the CLI instructs today, or must PR feedback go back through
@@ -650,6 +695,8 @@ stays as-is.
 ---
 
 ### Q2. Row 17 — does `btrain doctor` count as the spec 006 guardian for resync?
+
+**Decided 2026-09-08: Option B, owner-only in `needs-review` and PR-flow.**
 
 Does `btrain doctor` count as the spec 006 guardian for resync during
 `repair-needed`, `needs-review`, and PR-flow?
@@ -715,6 +762,8 @@ not. The row-17 designation can land in Phase B step 3 when the pins lift.
 
 ### Q3. Row 15 — override exit from `repair-needed`
 
+**Decided 2026-09-08: Option A.**
+
 Accept the audited-override exit from `repair-needed`, or keep the spec 014
 designation that only escalation unlocks resolve?
 
@@ -776,6 +825,8 @@ in Phase B step 2.
 ---
 
 ### Q4. FR-18 budget — does a fresh claim reset the repair count?
+
+**Decided 2026-09-08: Option A.**
 
 Does a fresh claim on the same lane reset the repair count?
 
@@ -848,6 +899,8 @@ step 2.
 
 ### Q5. Row 6 — who may abandon an `in-progress` lane?
 
+**Decided 2026-09-08: Option A.**
+
 Who may abandon an `in-progress` or `changes-requested` lane (without a linked
 PR), owner only or both owner and reviewer?
 
@@ -887,6 +940,8 @@ waits for Phase B step 3. The model change (if option B) can land alongside.
 ---
 
 ### Q6. FR-6 — unverified actor in enforcement mode
+
+**Decided 2026-09-08: Option C.**
 
 In enforcement mode, should an unverified actor be rejected or treated as the
 lane owner when only one agent is configured?
@@ -938,6 +993,8 @@ messages and whether `resolveVerifiedActor` changes. Independent of pins.
 ---
 
 ### Q7. Row 13 — who may declare `repair-needed` manually?
+
+**Decided 2026-09-08: Option C.**
 
 Who may declare `repair-needed` manually: any configured agent, or only the
 reviewer, the guardian, and the watchdog?
@@ -994,6 +1051,8 @@ can carry this. Phase B step 2.
 ---
 
 ### Q8. Row 20 — owner reassignment by a lane agent
+
+**Decided 2026-09-08: Option C with swap policy A-i.**
 
 May the owner of a lane be reassigned by a lane agent (via `handoff update
 --owner`), or only through a fresh claim (`handoff claim`)?

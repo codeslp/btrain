@@ -1,9 +1,10 @@
 # Plan: Implement the Lane Transition Contract (spec 015)
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.1.1
 **Author**: btrain
 **Date**: 2026-09-01
+**Updated**: 2026-09-08 (v0.1.1: WS0 decisions recorded in spec 015 v0.1.4)
 
 ## Summary
 
@@ -131,6 +132,10 @@ rules to encode.
 **Owner**: a human. No agent may decide these.
 
 **Blocked by**: nothing. Can start today.
+
+**Status**: done. Brian Faris answered all eight on 2026-09-08; the decision
+record is spec 015 v0.1.4, section `Decisions (2026-09-08)`. WS4 and Phase B
+step 4 are no longer blocked on this workstream.
 
 ### Workstream 1: Unpinned prose (this lane)
 
@@ -322,7 +327,7 @@ pilot model in CI.
 
 | Step | Work | Owner | Blocked by | Status 2026-09-01 |
 | --- | --- | --- | --- | --- |
-| 1 | WS0 decisions | human | none | open |
+| 1 | WS0 decisions | human | none | decided 2026-09-08 (spec 015 v0.1.4) |
 | 2 | WS1 unpinned prose | claude, lane `k` | none | in progress |
 | 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
 | 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | changes-requested |
