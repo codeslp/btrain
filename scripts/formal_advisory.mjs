@@ -13,8 +13,15 @@ const MODELED_RUNTIME_FILES = new Set([
   "src/brain_train/core.mjs",
   "src/brain_train/pr-flow.mjs",
 ])
-const TLC_MAX_HEAP_MB = 1024
-const TLC_WORKERS = 2
+// spec 016 WS3 (2026-09-08): the FR-29 decision variable grew LaneLock to
+// ~15M distinct states (3 min 57 s with 10 workers). Two workers, 1 GB, and a
+// five-minute cap reported state_space_exhausted, so the budget follows the
+// model: 4 workers (ubuntu-latest has 4 vCPUs), 2 GB heap, 15 minutes. The
+// workflow's 25-minute job timeout still leaves room for the harness and the
+// CLI contract. TLC metadata goes to a temp dir, not specs/tla/states/.
+const TLC_MAX_HEAP_MB = 2048
+const TLC_WORKERS = 4
+const TLC_TIMEOUT_MS = 900_000
 const MAX_TLA_FILES = 1
 const FORMAL_HARNESS_TIMEOUT_MS = 300_000
 const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000
@@ -228,13 +235,14 @@ export function classifyTlcResult(run) {
   return "infrastructure_failure"
 }
 
-function buildTlcArgs(jar, configName, tlaName) {
+function buildTlcArgs(jar, configName, tlaName, metadir = "") {
   return [
     `-Xmx${TLC_MAX_HEAP_MB}m`,
     "-cp", jar,
     "tlc2.TLC",
     "-config", configName,
     "-workers", String(TLC_WORKERS),
+    ...(metadir ? ["-metadir", metadir] : []),
     tlaName,
   ]
 }
@@ -363,11 +371,17 @@ function runTlc(root, tlaFiles) {
         detail: `${path.relative(root, config)} is missing.`,
       }
     }
-    const run = command(
-      "java",
-      buildTlcArgs(jar, path.basename(config), path.basename(tlaFile)),
-      { cwd: parsed.dir, timeoutMs: 300_000, measureMemory: true },
-    )
+    const metadir = fs.mkdtempSync(path.join(os.tmpdir(), "formal-advisory-tlc-"))
+    let run
+    try {
+      run = command(
+        "java",
+        buildTlcArgs(jar, path.basename(config), path.basename(tlaFile), metadir),
+        { cwd: parsed.dir, timeoutMs: TLC_TIMEOUT_MS, measureMemory: true },
+      )
+    } finally {
+      fs.rmSync(metadir, { recursive: true, force: true })
+    }
     return { name: `tlc:${parsed.name}`, verdict: classifyMeasuredVerdict(run, classifyTlcResult(run)), ...run }
   })
 }
@@ -555,7 +569,11 @@ function runSelfTest() {
   assert.equal(classifyTlcResult({ stdout: "", stderr: "java.lang.OutOfMemoryError: Java heap space" }), "state_space_exhausted")
   assert.deepEqual(
     buildTlcArgs("/tmp/tla2tools.jar", "LaneLock.cfg", "LaneLock.tla"),
-    ["-Xmx1024m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "2", "LaneLock.tla"],
+    ["-Xmx2048m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "4", "LaneLock.tla"],
+  )
+  assert.deepEqual(
+    buildTlcArgs("/tmp/tla2tools.jar", "LaneLock.cfg", "LaneLock.tla", "/tmp/tlc-meta"),
+    ["-Xmx2048m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "4", "-metadir", "/tmp/tlc-meta", "LaneLock.tla"],
   )
   assert.deepEqual(
     buildMeasuredCommandArgs("npm", ["run", "test:formal"], "/tmp/peak-rss-kb.txt"),
