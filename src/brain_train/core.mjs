@@ -5485,7 +5485,7 @@ async function patchHandoff(repoRoot, options) {
 
         if (!inferredReviewer) {
           throw new BtrainError({
-            message: `Could not infer a reviewer different from "${resolvedActor || "the actor"}".`,
+            message: `Could not infer a reviewer different from "${updates.owner || existingCurrent.owner || resolvedActor || "the owner"}".`,
             reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
             fix: `Pass --reviewer <other-agent> explicitly, or add more agents with \`btrain agents add --repo . --agent <name>\`.`,
           })
@@ -5704,7 +5704,7 @@ async function patchHandoff(repoRoot, options) {
 
     if (!inferredReviewer) {
       throw new BtrainError({
-        message: `Could not infer a reviewer different from "${resolvedActor || "the actor"}".`,
+        message: `Could not infer a reviewer different from "${updates.owner || existingCurrent.owner || resolvedActor || "the owner"}".`,
         reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
         fix: `Pass --reviewer <other-agent> explicitly, or add more agents with \`btrain agents add --repo . --agent <name>\`.`,
       })

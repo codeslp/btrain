@@ -154,8 +154,8 @@ replacing `RepairResolve`'s decision disjunction with plain `IsLaneAgent`
 violates `RepairResolveNeedsDecision` (verified 2026-09-08, spec 016 WS3);
 the budget guard moved from `RepairResolve` to `RepairDispose`, and deleting
 `repairCount[l] >= MaxRepair` there violates the state invariant
-`DispositionAfterEscalation` (reachable via Claim, RepairEnter, RepairClear,
-RepairEnter, RepairDispose at count 1); changing `PeerResolve`'s guard to `IsOwner`
+`DispositionAfterEscalation` (by construction; shortest violating trace
+Claim, RepairEnter, RepairDispose at count 1); changing `PeerResolve`'s guard to `IsOwner`
 violates `PrFlowNeedsPeerApproval` and `PrFlowEntryByReviewer`; changing
 `RepairClear`'s guard to `IsLaneAgent` violates
 `RepairClearByResponsibleActor`; assigning `owner[l]` instead of
