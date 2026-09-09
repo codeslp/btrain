@@ -82,6 +82,28 @@ jobs:
           curl --fail --location --silent --show-error "$TLC_URL" --output "$RUNNER_TEMP/tla2tools.jar"
           echo "$TLC_SHA256  $RUNNER_TEMP/tla2tools.jar" | sha256sum --check
 
+      - name: Compute the TLC content key
+        id: tlc-key
+        if: steps.select.outputs.needs_tlc == 'true'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TLC_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          node scripts/formal_advisory.mjs --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --cache-key-only --output "$RUNNER_TEMP/tlc-key.json"
+          echo "key=$(jq -r '.cacheKey // ""' "$RUNNER_TEMP/tlc-key.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore completed TLC evidence
+        id: tlc-cache
+        if: steps.tlc-key.outputs.key != ''
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/btrain-tlc-cache
+          key: tlc-v1-${{ runner.os }}-${{ steps.tlc-key.outputs.key }}
+
       - name: Run affected formal checks
         id: formal
         if: steps.select.outputs.formal_surface == 'true'
@@ -97,6 +119,7 @@ jobs:
               --base "$BASE_SHA" \
               --head "$HEAD_SHA" \
               --impact "$FORMAL_IMPACT" \
+              --cache-dir "$RUNNER_TEMP/btrain-tlc-cache" \
               --output "$RUNNER_TEMP/formal-advisory.json"
           status=$?
           if [[ ! -f "$RUNNER_TEMP/formal-advisory.json" ]]; then
@@ -111,6 +134,24 @@ jobs:
               > "$RUNNER_TEMP/formal-advisory.json"
           fi
           exit "$status"
+
+      - name: Check for new TLC evidence
+        id: cache-ready
+        if: always() && steps.tlc-key.outputs.key != ''
+        env:
+          TLC_CACHE_KEY: ${{ steps.tlc-key.outputs.key }}
+        run: |
+          if [[ -f "$RUNNER_TEMP/btrain-tlc-cache/$TLC_CACHE_KEY.json" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save completed TLC evidence
+        if: always() && steps.cache-ready.outputs.ready == 'true' && steps.tlc-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/btrain-tlc-cache
+          key: tlc-v1-${{ runner.os }}-${{ steps.tlc-key.outputs.key }}
 
       - name: Record the no-op reason
         if: steps.select.outputs.formal_surface != 'true'
@@ -131,6 +172,9 @@ jobs:
           echo "| Check | Verdict | Duration (ms) | Peak RSS (KiB) |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- | ---: | ---: |" >> "$GITHUB_STEP_SUMMARY"
           jq -r '.checks[] | "| \(.name) | \(.verdict) | \(.durationMs) | \(.peakRssKb // "n/a") |"' "$result" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.checks[] | select(.cache.hit == true) | "TLC cache reused from `\(.cache.sourceHead)`; original duration: \(.cache.originalDurationMs) ms. Implementation validation ran independently."' "$result" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.checks[] | select(.cache.gap != null) | "Cache gap: \(.cache.gap)"' "$result" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.checks[] | select(.memoryMeasurement == "unavailable") | "Resource measurement unavailable for \(.name); correctness verdict retained."' "$result" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$(jq -r '.verdict' "$result")" == "no_formal_surface" ]]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "No modeled prose, TLA+, formal harness, or modeled runtime file changed." >> "$GITHUB_STEP_SUMMARY"
