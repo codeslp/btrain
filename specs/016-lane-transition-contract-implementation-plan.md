@@ -272,11 +272,19 @@ files or `locks.json` in this phase.
   rejected, `repair-needed -> in-progress -> needs-review` is the legal path
 - TLC passes with the modified `RepairResolve`
 - advisory events appear in the workflow log for one exercised legacy path
+- Q7 `self-repair-audit`: positive check that an owner declaring
+  `repair-needed` on their own lane emits the field in the lane-event log;
+  negative checks that a reviewer or `system` declaration does not emit it;
+  and a check that the field is not counted by the FR-5 advisory-retirement
+  tally
+- Q6 error message: with exactly one configured agent and no verified actor,
+  enforcement rejects and the message names that agent; with two or more
+  agents the generic `--actor` / `BTRAIN_AGENT` fix is shown
 
 **Formal impact**: semantic. Prose (WS1) first, model, then code.
 
-**Blocked by**: WS1 merged, WS2 merged, and lane `j` released so `specs/tla/`
-can be locked (PR #35 merge).
+**Blocked by**: nothing as of 2026-09-08. WS1 (#37), WS2 (#42), and PR #35
+are merged and lane `j` released `specs/tla/`.
 
 ### Workstream 4: Phase B pinned designations
 
@@ -330,7 +338,8 @@ can be locked (PR #35 merge).
 **Formal impact**: semantic. Independent model-family review required (spec
 014 FR-9).
 
-**Blocked by**: PR #35 merged, WS0 answered, WS2 merged.
+**Blocked by**: nothing as of 2026-09-08. PR #35 and WS2 (#42) are merged
+and WS0 is answered (spec 015 v0.1.4).
 
 ### Workstream 5: Spec 014 Phase 3
 
@@ -349,16 +358,16 @@ pilot model in CI.
 | Step | Work | Owner | Blocked by | Status (updated 2026-09-08) |
 | --- | --- | --- | --- | --- |
 | 1 | WS0 decisions | human | none | decided 2026-09-08 (spec 015 v0.1.4) |
-| 2 | WS1 unpinned prose | claude, lane `k` | none | in progress |
+| 2 | WS1 unpinned prose | claude, lane `k` | none | merged 2026-09-02 (#37) |
 | 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
-| 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | changes-requested |
-| 5 | WS2 structural gate | any agent | none | ready |
-| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | blocked |
-| 7 | WS4 pinned designations | any agent | steps 1, 4, 5 | blocked |
+| 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-02 (#35) |
+| 5 | WS2 structural gate | any agent | none | merged 2026-09-02 (#42) |
+| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | ready |
+| 7 | WS4 pinned designations | any agent | steps 1, 4, 5 | ready |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
 
-Steps 1 and 2 run now. Steps 3 and 4 belong to codex's lanes and are not
-touched by this lane. Steps 5 through 8 follow.
+As of 2026-09-08 steps 1 through 5 are complete. Steps 6 and 7 are ready to
+claim and are independent of each other. Step 8 waits on both.
 
 ## Rollback Points
 
