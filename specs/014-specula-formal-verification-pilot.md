@@ -97,19 +97,14 @@ Exact normative ranges for the first model:
   human-escalation bound, lock retention, and the audited override
   (not GitHub close)
 
-Spec 006 establishes that `repair-needed` exists and who clears it, but it
-does not fix legal source or destination statuses. Spec 014 designates them
-for the first model, provisionally until spec 006 adopts its own transition
-prose:
-
-- Entry: only from an active lane status, for a workflow-integrity failure.
-  Entry from `idle` or `resolved` is invalid.
-- Exit to `in-progress`: the responsible repair actor clears the repair and
-  same-lane work continues.
-- Exit to `resolved`: a terminal disposition after the FR-18 escalation
-  decides the lane will not continue. Terminal lock release applies.
-- No other exit is legal in the first model. Repair must not move directly
-  to `needs-review` or to a PR-flow status.
+Spec 006 establishes that `repair-needed` exists and who clears it. Spec 014
+designated the legal source and destination statuses provisionally for the
+first model; since 2026-09-01 spec 006 FR-29 owns that prose (entry from an
+active status only; exit to `in-progress` by the responsible repair actor;
+exit to `resolved` only with a recorded human decision, a `repair-disposition`
+after the FR-18 escalation or an audited `repair-resolve` override; no other
+exit). The model pins FR-29 directly (spec 016 WS3, 2026-09-08). The
+provisional list below is retired; FR-29 is authoritative.
 
 Spec 002 mentions rescoping without defining it, and spec 006 FR-20 covers
 only guardian or human rescoping during repair. Spec 014 designates the
@@ -127,6 +122,18 @@ adopts its own:
 - Rescoping during `needs-review` or a PR-flow status is invalid. Review and
   PR retention (spec 002 v1.1.2) hold a fixed, approved scope until return,
   merge, or closure.
+
+Rescope and resync are distinct (spec 015 Q2, Option B, decided 2026-09-08;
+designated 2026-09-09):
+
+- A resync is `btrain handoff update --lane <id> --files "<paths>"` whose set
+  equals the handoff locked-file record. It restores lock-registry coverage
+  and changes no scope.
+- The owner may resync in any active status.
+- `btrain doctor --repair` (a system actor, spec 006 FR-2 "lock/status
+  resync") may resync only in `in-progress`, `changes-requested`, and
+  `repair-needed`. In `needs-review` and the PR-flow statuses the reviewer's
+  lock view stays fixed, and only the owner may restore coverage.
 
 ## Goals
 

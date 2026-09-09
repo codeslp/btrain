@@ -72,9 +72,11 @@ These statuses and actors are the designated contract for the spec 014 first mod
 | `ready-for-pr` | Local peer approved; a PR may be opened or relinked | Assigned reviewer via `handoff resolve`. The owner acts next (opens or relinks the PR) after the lane is already in this status. | retained |
 | `pr-review` | A GitHub PR is linked and waiting on GitHub review/CI | Owner via `btrain pr create`, or owner via `handoff update --status pr-review --pr` to relink | retained |
 | `ready-to-merge` | GitHub review/CI disposition is mergeable | `btrain pr poll --apply` (PR-flow), not a peer `handoff resolve` | retained |
-| `changes-requested` (PR-flow) | GitHub review returned findings | `btrain pr poll --apply` when overall status is feedback; then the writer acts (spec 005) | retained |
+| `changes-requested` (PR-flow) | GitHub review returned findings | `btrain pr poll --apply` when overall status is feedback; then the writer acts (spec 005). After pushing the fix the owner returns the lane directly to `pr-review` with `btrain pr request-review` or `handoff update --status pr-review`; GitHub review covers the fix and local approval survives GitHub feedback (spec 015 Q1, Option A, decided 2026-09-08) | retained |
 | `resolved` after merge | PR merged | `btrain pr poll --apply` on merge | released |
-| `resolved` after close without merge | PR closed unmerged; the lane is abandoned or replaced | `btrain pr poll --apply` on close, or a human/owner intentionally resolving | released |
+| `resolved` after close without merge | PR closed unmerged; the lane is abandoned or replaced | `btrain pr poll --apply` on close, or, when a human or the owner abandons the work, closing the PR on GitHub and then running `btrain pr poll --apply` (a plain `handoff resolve` from a PR-flow status is rejected; spec 015 Phase B step 3, 2026-09-09) | released |
+
+Non-terminal `btrain pr poll --apply` outcomes (`waiting`, `feedback`, `clear`) apply only to a lane in `pr-review` or `ready-to-merge`, or in PR-flow `changes-requested` with a linked PR (`ready-for-pr` has no linked PR yet); an explicit `--pr` on a lane in any other status is rejected. PR-flow `changes-requested` means the lane entered `changes-requested` through `pr poll --apply` feedback (reason code `pr-review-feedback`) and local approval still stands. If the owner instead re-hands off locally and the reviewer requests changes, that approval is withdrawn and the lane re-enters the PR flow only through a new local approval (`ready-for-pr`). `waiting` observed after `ready-to-merge` (a new head, or a re-requested review) returns the lane to `pr-review`; `clear` observed on PR-flow `changes-requested` advances it to `ready-to-merge`. Designated 2026-09-09 for spec 015 rows 8, 9, 10, 12 (ledger finding 9).
 
 Close without merge is a **terminal lock-release** event. It is not `repair-needed`. Spec 006 `repair-needed` is for workflow-integrity failures and retains locks; GitHub close is an external completion event. The lane becomes `resolved` and locks release.
 
@@ -122,6 +124,19 @@ All `handoff` subcommands accept `--lane <id>`:
 | `btrain doctor` | Checks lane files, locks.json validity, stale locks, lock overlaps |
 
 If `--lane` is omitted on `claim`, btrain auto-selects the first idle or resolved lane.
+
+### Resolve, update, and claim authority
+
+Designated 2026-09-09 (spec 015 Phase B steps 3 and 4; open questions Q5 and Q8 decided 2026-09-08):
+
+- `handoff resolve` requires an active lane. Resolving an `idle` lane, or resolving a `resolved` lane again, is rejected (ledger findings 5 and L14).
+- A plain `handoff resolve` from `ready-for-pr`, `pr-review`, `ready-to-merge`, or from `changes-requested` with a linked PR is rejected. A PR-flow lane terminates only through its PR outcome, `btrain pr poll --apply` after the PR merges or is closed (ledger finding 4).
+- Either the owner or the reviewer may resolve an active lane that has not entered review or the PR flow and has no linked PR: `in-progress`, or `changes-requested` without a linked PR (spec 015 row 6; Q5, Option A).
+- `handoff update` that changes only metadata (no `--status`, `--files`, `--owner`, or `--reviewer`) is a lane-agent action: the owner or the reviewer (spec 015 row 19).
+- `handoff claim` requires an `idle` or `resolved` lane in single-handoff mode as well as in lane mode; a claim over an active handoff is rejected (spec 015 L13).
+- `handoff request-changes` is the recorded reviewer's action (spec 005 FR-8). An actor verified as someone other than the recorded reviewer is rejected, as today. With no recorded reviewer, or with no verifiable actor at all, the request is accepted with a `transition-advisory` (spec 015 L15) during the advisory window and rejected after it.
+
+These rules enter spec 015 FR-5 advisory mode when the designating change merges and are enforced after the advisory window.
 
 ## Health Checks (`btrain doctor`)
 

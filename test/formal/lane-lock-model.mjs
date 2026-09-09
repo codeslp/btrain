@@ -71,6 +71,17 @@ function emptyLane() {
     // for the current repair after the FR-18 escalation fired. The harness
     // never grants overrides, so the override exit is not modeled here.
     disposition: false,
+    // spec 002 PR-flow states: TRUE while the lane sits in the
+    // changes-requested that `pr poll --apply` feedback entered (the
+    // implementation reads the originating workflow event). A local
+    // request-changes or any other status change clears it.
+    prFeedbackEntered: false,
+    // spec 005 FR-5 author history (spec 015 Q8): every agent that has owned
+    // the current task. A fresh claim starts a new history.
+    authors: [],
+    // spec 002 Force-release override: TRUE while registry coverage for an
+    // active lane is suspended (registry emptied outside a claim or rescope).
+    uncovered: false,
   }
 }
 
@@ -149,6 +160,7 @@ export class LaneLockModel {
       // A pending FR-29 disposition is void once the repair is cleared.
       s.disposition = false
     }
+    s.prFeedbackEntered = false
     s.lastActor = actor
   }
 
@@ -182,17 +194,93 @@ export class LaneLockModel {
       lockedFiles: [...normalized].sort(),
       prNumber: "",
       fileExists: true,
-      // repairReasonsSeen deliberately NOT reset: the implementation counts
-      // repair history from the lane's event log, which spans re-claims.
-      // Whether the FR-18 budget should span tasks is a designation question
-      // recorded in the README ledger.
+      // spec 006 FR-18 (spec 015 Q4, Option A, designated 2026-09-09): the
+      // budget belongs to the task, so a fresh claim starts a new reason
+      // memory; the implementation counts entries after the last claim.
+      repairReasonsSeen: [],
       escalationExpected: false,
       reasonCode: "",
       repairOwner: "",
       lastActor: owner,
       disposition: false,
+      prFeedbackEntered: false,
+      authors: [owner],
+      uncovered: false,
     })
     this.#setRegistry(lane, normalized)
+    return this.#accept()
+  }
+
+  // spec 005 FR-5 reassignment (spec 015 row 20; Q8 Option C with swap policy
+  // A-i, designated 2026-09-09). Contract: only in in-progress, needs-review,
+  // or changes-requested without a linked PR; the owner reassigns the owner;
+  // either lane agent reassigns the reviewer; roles stay distinct; no author
+  // of the task becomes its reviewer. Ownership transfer makes the new owner
+  // the responsible actor. Implementation mirror: during the spec 015 FR-5
+  // window every case is accepted with an L10 advisory record, so the
+  // mirror applies the same effects without the guards.
+  reassign({ lane, actor, owner, reviewer }) {
+    const s = this.lane(lane)
+    if (this.mode === "implementation" && !s.fileExists) return this.#reject("no-handoff-file")
+    if (s.status === "resolved") return this.#reject("resolved-via-update-forbidden")
+    const newOwner = owner ?? s.owner
+    const newReviewer = reviewer ?? s.reviewer
+    const ownerChanged = newOwner !== s.owner
+    const reviewerChanged = newReviewer !== s.reviewer
+    if (this.mode === "contract") {
+      if (!["in-progress", "needs-review", "changes-requested"].includes(s.status) || s.prNumber) {
+        return this.#reject("reassign-from-invalid-status")
+      }
+      if (ownerChanged && actor !== s.owner) return this.#reject("reassign-owner-requires-owner")
+      if (!ownerChanged && ![s.owner, s.reviewer].includes(actor)) return this.#reject("reassign-requires-lane-agent")
+      if (reviewerChanged && ![s.owner, s.reviewer].includes(actor)) return this.#reject("reassign-requires-lane-agent")
+      if (newOwner === newReviewer) return this.#reject("reassign-roles-not-distinct")
+      if (reviewerChanged && [...s.authors, newOwner].includes(newReviewer)) return this.#reject("reassign-reviewer-is-author")
+    }
+    s.owner = newOwner
+    s.reviewer = newReviewer
+    if (ownerChanged && !s.authors.includes(newOwner)) s.authors = [...s.authors, newOwner]
+    s.lastActor = ownerChanged ? newOwner : [newOwner, newReviewer].includes(actor) ? actor : newOwner
+    s.fileExists = true
+    return this.#accept()
+  }
+
+  // Registry loss outside btrain (or an audited force-release): the handoff
+  // keeps its paths, the registry entry disappears, coverage is suspended.
+  dropRegistry({ lane }) {
+    const s = this.lane(lane)
+    this.#releaseRegistry(lane)
+    if (ACTIVE_STATUSES.has(s.status) && s.lockedFiles.length > 0) s.uncovered = true
+    return this.#accept()
+  }
+
+  // spec 006 FR-2 lock/status resync with the spec 014 rescope/resync split
+  // (spec 015 row 17; Q2 Option B): `btrain doctor --repair` restores
+  // coverage for the handoff's recorded set only while the lane is
+  // in-progress, changes-requested, or repair-needed. In needs-review and
+  // the PR flow it leaves coverage to the owner; the lane then fails the
+  // active-without-locks integrity check and enters repair-needed (spec 015
+  // row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
+  // lock-mismatch).
+  doctorRepair() {
+    for (const [lane, s] of this.lanes) {
+      if (!s.uncovered) continue
+      if (["in-progress", "changes-requested", "repair-needed"].includes(s.status)) {
+        if (this.#conflicts(lane, s.lockedFiles)) continue
+        this.#setRegistry(lane, s.lockedFiles)
+        s.uncovered = false
+        continue
+      }
+      if (ACTIVE_STATUSES.has(s.status)) {
+        const reason = "lock-mismatch"
+        if (s.repairReasonsSeen.includes(reason)) s.escalationExpected = true
+        else s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
+        s.status = "repair-needed"
+        s.reasonCode = reason
+        s.repairOwner = s.lastActor || s.owner
+        s.prFeedbackEntered = false
+      }
+    }
     return this.#accept()
   }
 
@@ -250,10 +338,17 @@ export class LaneLockModel {
     }
 
     if (status === "pr-review") {
-      // Owner links or creates the PR after local approval (spec 002).
-      if (s.status !== "ready-for-pr") return this.#reject("pr-review-from-invalid-status")
+      // Owner links or creates the PR after local approval (spec 002), or
+      // returns a linked changes-requested lane to pr-review after pushing
+      // the fix (spec 002 PR-flow changes-requested row; spec 015 row 12, Q1
+      // Option A, designated 2026-09-09).
+      // PR-flow changes-requested: entered by pr-poll feedback (reason
+      // pr-review-feedback) while local approval stands. A local
+      // request-changes (any other reason) withdraws it.
+      const returnToPr = s.status === "changes-requested" && Boolean(s.prNumber || pr) && s.prFeedbackEntered
+      if (s.status !== "ready-for-pr" && !returnToPr) return this.#reject("pr-review-from-invalid-status")
       if (actor !== s.owner) return this.#reject("pr-review-requires-owner")
-      if (!pr) return this.#reject("pr-review-requires-linked-pr")
+      if (!pr && !s.prNumber) return this.#reject("pr-review-requires-linked-pr")
       s.status = "pr-review"
       this.#applyUpdateEffects(s, status, actor, reason)
       if (pr) s.prNumber = String(pr)
@@ -317,6 +412,7 @@ export class LaneLockModel {
     // spec 005 FR-4/FR-15: the reviewer's findings and reason code persist
     // in the canonical record. The harness submits a fixed reason.
     s.reasonCode = "spec-mismatch"
+    s.prFeedbackEntered = false
     s.lastActor = actor
     return this.#accept()
   }
@@ -347,7 +443,13 @@ export class LaneLockModel {
     // spec 002 v1.1.2 PR-flow retention: a PR-flow lane terminates through
     // merge or closure, not through a direct plain resolve that would
     // release retained locks early.
-    if (this.mode === "contract" && PR_FLOW_STATUSES.has(s.status)) {
+    if (
+      this.mode === "contract"
+      && (PR_FLOW_STATUSES.has(s.status) || (s.status === "changes-requested" && s.prNumber))
+    ) {
+      // spec 002 CLI Commands resolve authority (designated 2026-09-09, the
+      // line 77 reconciliation): a linked lane, including PR-flow
+      // changes-requested, terminates only through its PR outcome.
       return this.#reject("resolve-from-pr-flow-status")
     }
 
@@ -380,6 +482,7 @@ export class LaneLockModel {
     s.fileExists = true
     s.escalationExpected = false
     s.disposition = false
+    s.prFeedbackEntered = false
     s.reasonCode = ""
     s.repairOwner = ""
     s.lastActor = actor
@@ -398,7 +501,19 @@ export class LaneLockModel {
     const suppliedPr = pr ? String(pr) : ""
     if (this.mode === "contract") {
       if (!s.prNumber && !suppliedPr) return this.#reject("no-linked-pr")
-      if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
+      const terminal = outcome === "merged" || outcome === "closed"
+      // Terminal outcomes (PrTerminal, spec 015 row 11) apply to any linked
+      // PR-flow or changes-requested lane. Non-terminal outcomes (rows 8-10,
+      // spec 002 as designated 2026-09-09) apply only from pr-review,
+      // ready-to-merge, or PR-flow changes-requested: entered by pr-poll
+      // feedback while local approval stands. ready-for-pr has no linked PR
+      // yet in the contract, so it takes no outcome.
+      const prFlowChangesRequested = s.status === "changes-requested" && s.prFeedbackEntered
+      if (terminal) {
+        if (!PR_FLOW_STATUSES.has(s.status) && s.status !== "changes-requested") {
+          return this.#reject("pr-outcome-from-invalid-status")
+        }
+      } else if (!["pr-review", "ready-to-merge"].includes(s.status) && !prFlowChangesRequested) {
         return this.#reject("pr-outcome-from-invalid-status")
       }
     }
@@ -423,6 +538,7 @@ export class LaneLockModel {
       s.reasonCode = ""
       s.repairOwner = ""
       s.disposition = false
+      s.prFeedbackEntered = false
       s.lastActor = s.owner || s.lastActor
       this.#releaseRegistry(lane)
       return this.#accept()
@@ -442,6 +558,7 @@ export class LaneLockModel {
 
     if (outcome === "feedback") {
       s.status = "changes-requested"
+      s.prFeedbackEntered = true
       s.reasonCode = "pr-review-feedback"
       s.lastActor = s.owner || s.lastActor
       if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
@@ -449,6 +566,7 @@ export class LaneLockModel {
     }
     if (outcome === "clear") {
       s.status = "ready-to-merge"
+      s.prFeedbackEntered = false
       s.reasonCode = ""
       s.lastActor = s.owner || s.lastActor
       if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
@@ -456,6 +574,7 @@ export class LaneLockModel {
     }
     // waiting
     s.status = "pr-review"
+    s.prFeedbackEntered = false
     s.reasonCode = ""
     s.lastActor = s.owner || s.lastActor
     if (suppliedPr && !s.prNumber) s.prNumber = suppliedPr
@@ -489,6 +608,20 @@ export class LaneLockModel {
       if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
       s.lockedFiles = [...normalized].sort()
       this.#setRegistry(lane, normalized)
+      s.uncovered = false
+      return this.#accept()
+    }
+    // spec 014 rescope/resync split (spec 015 row 17; Q2 Option B, designated
+    // 2026-09-09): the same set is a resync, which restores registry coverage
+    // without changing scope. The owner may resync in any active status.
+    const sameSet =
+      JSON.stringify([...normalized].sort()) === JSON.stringify([...s.lockedFiles].sort())
+    if (sameSet && ACTIVE_STATUSES.has(s.status)) {
+      if (actor !== s.owner) return this.#reject("resync-requires-owner")
+      if (this.#conflicts(lane, normalized)) return this.#reject("lock-conflict")
+      this.#setRegistry(lane, normalized)
+      s.uncovered = false
+      s.lastActor = actor
       return this.#accept()
     }
     if (s.status === "repair-needed") return this.#reject("repair-rescope-requires-guardian")
@@ -528,6 +661,8 @@ export class LaneLockModel {
     s.reviewer = real.reviewer
     s.lockedFiles = [...real.lockedFiles]
     s.fileExists = true
+    s.uncovered = false
+    if (!s.authors.includes(real.owner) && real.owner) s.authors = [...s.authors, real.owner]
     this.#setRegistry(laneId, real.registry)
   }
 
@@ -548,7 +683,7 @@ export class LaneLockModel {
     for (const [id, s] of this.lanes) {
       if (skip.has(id)) continue
       const registryPaths = this.registryPaths(id)
-      if (ACTIVE_STATUSES.has(s.status) && this.mode === "contract") {
+      if (ACTIVE_STATUSES.has(s.status) && this.mode === "contract" && !s.uncovered) {
         const expected = JSON.stringify([...s.lockedFiles].sort())
         if (expected !== JSON.stringify(registryPaths)) {
           violations.push(`coverage: lane ${id} ${s.status} lockedFiles != registry`)

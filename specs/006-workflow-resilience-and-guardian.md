@@ -141,6 +141,8 @@ The watchdog may auto-repair only mechanical or derived-state problems that do n
 - derived cache refresh
 - restoring missing non-semantic metadata from canonical state
 
+Resync authority (spec 015 open question Q2, Option B, decided 2026-09-08; designated 2026-09-09): `btrain doctor --repair` is a guardian for lock/status resync only while the lane is `in-progress`, `changes-requested`, or `repair-needed`. In `needs-review` and the PR-flow statuses only the lane owner may restore coverage, so a reviewer's lock view does not shift mid-review. A resync restores registry coverage for the handoff's recorded set and never widens or narrows it; widening or narrowing is a rescope (spec 014).
+
 ### FR-2a: Invalid handoffs should fail before transition
 
 `btrain handoff update --status needs-review` should hard-fail when the handoff payload is malformed or incomplete, including cases such as:
@@ -308,6 +310,8 @@ It must be possible for human operators to inspect whether:
 ### FR-18: One retry budget before human escalation
 
 For non-systemic workflow failures, `btrain` should normally allow one meaningful repair attempt by the responsible actor. If the same lane re-enters `repair-needed` again for the same unresolved problem, or if guardian intervention still cannot restore healthy state, the lane must escalate to a human.
+
+The budget belongs to the task, not the lane: a fresh `handoff claim` starts a new task and resets the count, while clearing `repair-needed` within the same task does not (spec 015 open question Q4, Option A, decided 2026-09-08; designated 2026-09-09). The implementation counts `repair-needed` entries recorded after the most recent claim and keeps the earlier events in the workflow log for audit.
 
 ### FR-19: Split repair storage model
 

@@ -620,6 +620,86 @@ describe("PR review flow classification", () => {
 })
 
 describe("PR review flow handoff application", () => {
+  it("records L5 when a non-terminal outcome with an explicit PR lands on a lane outside the PR flow (spec 015 finding 9)", async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-l5-"))
+    const previousHome = process.env.BRAIN_TRAIN_HOME
+    const previousAgent = process.env.BTRAIN_AGENT
+
+    try {
+      process.env.BRAIN_TRAIN_HOME = path.join(repoRoot, ".btrain-test-home")
+      process.env.BTRAIN_AGENT = "Codex"
+      await execFileAsync("git", ["init", repoRoot])
+      await initRepo(repoRoot, { agent: ["Codex", "Claude"] })
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# L5 test\n", "utf8")
+      await claimHandoff(repoRoot, {
+        lane: "a",
+        task: "Still in progress",
+        owner: "Codex",
+        reviewer: "Claude",
+        files: "README.md",
+      })
+
+      const warnings = []
+      await applyPrStatusToHandoff(repoRoot, { lane: "a", pr: "31", onEvent: (line) => warnings.push(line) }, {
+        overall: "waiting",
+        bots: [{ id: "codex", state: "waiting" }],
+        pr: { number: 31 },
+      })
+
+      const handoff = await checkHandoff(repoRoot)
+      const lane = handoff.lanes.find((candidate) => candidate._laneId === "a")
+      assert.equal(lane.status, "pr-review")
+      const events = (await fs.readFile(path.join(repoRoot, ".btrain", "events", "lane-a.jsonl"), "utf8"))
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      const update = [...events].reverse().find((event) => event.type === "update")
+      assert.equal(update.details["transition-advisory"], "L5")
+    } finally {
+      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
+      else process.env.BRAIN_TRAIN_HOME = previousHome
+      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
+      else process.env.BTRAIN_AGENT = previousAgent
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("designates the owner's return to pr-review only after genuine pr-poll feedback (row 12)", async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-row12-"))
+    const previousHome = process.env.BRAIN_TRAIN_HOME
+    const previousAgent = process.env.BTRAIN_AGENT
+
+    try {
+      process.env.BRAIN_TRAIN_HOME = path.join(repoRoot, ".btrain-test-home")
+      process.env.BTRAIN_AGENT = "Codex"
+      await execFileAsync("git", ["init", repoRoot])
+      await initRepo(repoRoot, { agent: ["Codex", "Claude"] })
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# row 12\n", "utf8")
+      await claimHandoff(repoRoot, { lane: "a", task: "Row 12", owner: "Codex", reviewer: "Claude", files: "README.md" })
+      await patchHandoff(repoRoot, { lane: "a", actor: "Codex", status: "pr-review", pr: "12" })
+      await applyPrStatusToHandoff(repoRoot, { lane: "a" }, {
+        overall: "feedback",
+        bots: [{ id: "codex", state: "feedback" }],
+        pr: { number: 12 },
+      })
+
+      const warnings = []
+      await patchHandoff(repoRoot, { lane: "a", actor: "Codex", status: "pr-review", "no-dispatch": true, onEvent: (line) => warnings.push(line) })
+      const events = (await fs.readFile(path.join(repoRoot, ".btrain", "events", "lane-a.jsonl"), "utf8"))
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      const feedback = events.filter((event) => event.after?.status === "changes-requested").at(-1)
+      assert.equal(feedback.details.transitionEvent, "pr-poll")
+      const shortcut = [...events].reverse().find((event) => event.type === "update")
+      assert.equal(shortcut.after.status, "pr-review")
+      assert.equal(shortcut.details["transition-advisory"], undefined)
+      assert.equal(warnings.filter((line) => /transition-advisory/.test(line)).length, 0)
+    } finally {
+      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
+      else process.env.BRAIN_TRAIN_HOME = previousHome
+      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
+      else process.env.BTRAIN_AGENT = previousAgent
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
   it("infers the pinned runner identity when applying PR feedback", async () => {
     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-"))
     const previousHome = process.env.BRAIN_TRAIN_HOME

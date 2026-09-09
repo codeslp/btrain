@@ -1,10 +1,10 @@
 # 015 — Lane Transition Contract as a Guarded-Action List
 
 **Status**: Draft
-**Version**: 0.1.5
+**Version**: 0.1.6
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-08 (v0.1.5: spec 016 WS3 designates rows 2, 13, 15 and stages L3, L7, and the L4 repair cases in advisory; v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
+**Updated**: 2026-09-09 (v0.1.6: spec 016 WS4 designates rows 6, 8-10, 12, 14, 16, 17, 19, 20 and stages every remaining legacy row in advisory; v0.1.5: spec 016 WS3 designates rows 2, 13, 15 and stages L3, L7, and the L4 repair cases in advisory; v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
 
 ## Decision
 
@@ -159,38 +159,38 @@ uses `explicitPr || linkedPr`, `pr-flow.mjs:394-420`).
 | 1 | Claim | `handoff claim` | `idle`, `resolved` | `in-progress` | any-agent | files non-empty; no cross-lane conflict; reviewer distinct from owner | acquire | 002 Lock Enforcement item 1, CLI Commands | designated |
 | 2 | ToNeedsReview | `handoff update --status needs-review` | `in-progress`, `changes-requested` | `needs-review` | owner | reviewer context complete; reviewable diff or consumed override | retain | 005 Proposed Status Model, FR-7 (owner-only clause, PR #37) | designated (2026-09-08; L3 in advisory) |
 | 3 | RequestChanges | `handoff request-changes` | `needs-review` | `changes-requested` | reviewer (see L15 for the unverified-actor and no-recorded-reviewer cases) | reason code present | retain | 005 FR-8, FR-15 | designated |
-| 4 | PeerResolve | `handoff resolve` (PR flow on) | `needs-review` | `ready-for-pr` | reviewer, distinct from owner | none | retain; a lane uncovered by an audited force-release stays uncovered until claim or rescope (002 Force-release override) | 002 Lock Enforcement, PR-flow states row 1 | designated |
+| 4 | PeerResolve | `handoff resolve` (PR flow on) | `needs-review` | `ready-for-pr` | reviewer, distinct from owner | none beyond PR flow enabled; the lane's coverage must not be suspended by a force-release (else L9) | retain; a lane uncovered by an audited force-release stays uncovered until claim or rescope (002 Force-release override) | 002 Lock Enforcement, PR-flow states row 1 | designated |
 | 5 | TerminalResolve | `handoff resolve` (PR flow off) | `needs-review` | `resolved` | reviewer | none | release | 002 Lock Enforcement item 2 (005 FR-9 applies only without PR flow; spec 014 excludes it otherwise) | designated |
-| 6 | AbandonResolve | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | lane-agent | no linked PR (`LaneLock.tla` `AbandonResolve` requires `~prLinked`; 002 lines 62 and 75 retain locks on a linked PR until merge or close) | release | `LaneLock.tla`; 002 Lock Enforcement for the linked case | undesignated (actor); linked case forbidden, see L1 |
+| 6 | AbandonResolve | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | lane-agent | no linked PR (`LaneLock.tla` `AbandonResolve` requires `~prLinked`; 002 lines 62 and 75 retain locks on a linked PR until merge or close) | release | 002 CLI Commands, resolve authority (Q5 Option A, 2026-09-09) | designated (2026-09-09; L11 in advisory) |
 | 7 | LinkPr | `pr create`; `handoff update --status pr-review --pr` | `ready-for-pr` | `pr-review` | owner | PR number present | retain | 002 PR-flow states row 2 | designated |
-| 8 | PrRepoll | `pr-poll` waiting | `pr-review` | `pr-review` | system | linked PR | retain | 002 PR-flow states | designated |
-| 9 | PrFeedback | `pr-poll` feedback | `pr-review`, `ready-to-merge` | `changes-requested` | system | linked PR; reason `pr-review-feedback` | retain | 002 PR-flow states row 4 | designated |
-| 10 | PrClear | `pr-poll` clear | `pr-review` | `ready-to-merge` | system | linked PR | retain | 002 PR-flow states row 3 | designated |
+| 8 | PrRepoll | `pr-poll` waiting | `pr-review`, `ready-to-merge`, PR-flow `changes-requested` | `pr-review` | system | linked PR; from `changes-requested` only while local approval stands (entered via `pr-poll` feedback, reason `pr-review-feedback`) | retain | 002 PR-flow states, non-terminal outcomes (2026-09-09) | designated |
+| 9 | PrFeedback | `pr-poll` feedback | `pr-review`, `ready-to-merge`, PR-flow `changes-requested` (repeat feedback) | `changes-requested` | system | linked PR; reason `pr-review-feedback` | retain | 002 PR-flow states row 4 | designated |
+| 10 | PrClear | `pr-poll` clear | `pr-review`, `ready-to-merge` (repeat clear), PR-flow `changes-requested` | `ready-to-merge` | system | linked PR; PR-flow `changes-requested` as in row 8 | retain | 002 PR-flow states row 3 and non-terminal outcomes (2026-09-09) | designated |
 | 11 | PrTerminal | `pr-poll` merged or closed | PrFlow, `changes-requested` | `resolved` | system | linked PR | release | 002 PR-flow states rows 5 and 6 | designated |
-| 12 | ReturnToPr | `handoff update --status pr-review` | `changes-requested` with linked PR | `pr-review` | owner | linked PR; feedback reason code | retain | none; CLI guidance and live use only | undesignated |
+| 12 | ReturnToPr | `handoff update --status pr-review` | PR-flow `changes-requested` with linked PR | `pr-review` | owner | linked PR; local approval still stands (a local `request-changes` withdraws it) | retain | 002 PR-flow `changes-requested` row (Q1 Option A) | designated (2026-09-09; L4 fallback in advisory) |
 | 13 | RepairEnter | `handoff update --status repair-needed`; `watchdog-repair` | Active minus `repair-needed` for the CLI event; any Active including `repair-needed` for `watchdog-repair` (the watchdog re-writes a `repair-needed` lane whose locks were released, `core.mjs:4530-4536`, `:8717`) | `repair-needed` | any configured agent (including the owner), system (Q7 Option C; an owner self-declaration records `self-repair-audit: true`) | reason code; FR-18 count and escalation computed | retain | 006 FR-4, FR-20, FR-29 entry authority | designated (2026-09-08; L4 repair-entry case in advisory) |
-| 14 | RepairClear | `handoff update --status in-progress` | `repair-needed` | `in-progress` | repair-owner, system, or override | none | retain | 006 FR-15; 014 designation | provisional |
+| 14 | RepairClear | `handoff update --status in-progress` | `repair-needed` | `in-progress` | repair-owner, system, or override | none | retain | 006 FR-15; 006 FR-29 exit to `in-progress` | designated (2026-09-09) |
 | 15 | RepairResolve | `handoff resolve` | `repair-needed` | `resolved` | lane-agent with a recorded human disposition, or any configured agent presenting a consumed override | a `repair-disposition` event for the current repair recorded after FR-18 escalation (`btrain repair dispose`), or a consumed `repair-resolve` FR-2c/2d override; the escalation flag alone is not a decision | release | 006 FR-29 (Q3 Option A) | designated (2026-09-08; L7 in advisory) |
-| 16 | Rescope | `handoff update --files` (set differs) | `in-progress`, `changes-requested`, `repair-needed` | same | owner in `in-progress` or `changes-requested`; system or override in `repair-needed` | non-empty; no cross-lane conflict | replace | 014 rescope designation; 006 FR-20 | provisional, product call |
-| 17 | Resync | `handoff update --files` (set equals handoff record); doctor repair | Active | same | owner, or system | no cross-lane conflict; equality after `normalizePathList` (trim, dedupe, sort; no slash rewriting) | restore coverage | 006 FR-2 "lock/status resync" (concept only) | undesignated |
+| 16 | Rescope | `handoff update --files` (set differs) | `in-progress`, `changes-requested`, `repair-needed` | same | owner in `in-progress` or `changes-requested`; system or override in `repair-needed` | non-empty; no cross-lane conflict | replace | 014 rescope designation (set differs); 006 FR-20 | designated (2026-09-09; L6 in advisory) |
+| 17 | Resync | `handoff update --files` (set equals handoff record); `btrain doctor --repair` | Active | same | owner in any active status; system (doctor) only in `in-progress`, `changes-requested`, `repair-needed` | set equals the handoff record after `normalizePathList` (a different set is a rescope); no cross-lane conflict | restore coverage | 006 FR-2 resync authority; 014 rescope/resync split (Q2 Option B) | designated (2026-09-09; L6 in advisory) |
 | 18 | ForceRelease | `locks release`, `locks release-lane` | Active | same | override | none beyond the override | suspend | 002 Force-release override | designated |
-| 19 | MetadataUpdate | `handoff update` without `--status`, `--files`, `--owner`, or `--reviewer` | any | same | lane-agent | none | unchanged | none | undesignated |
-| 20 | Reassign | `handoff update --owner` or `--reviewer` | Active | same | lane-agent | new reviewer distinct from owner; new owner distinct from reviewer | unchanged (registry owner label follows the new owner) | 005 FR-5 "unless explicitly reassigned" (reviewer only) | undesignated (owner reassignment) |
-| L1 | legacy | `handoff resolve` | PrFlow, and `changes-requested` with a linked PR | `resolved` | any | none | release | forbidden by 002 Lock Enforcement (locks held until merge or close) | legacy (#4) |
-| L2 | legacy | `handoff resolve` | `idle` | `resolved` | any | none | none | forbidden by implication of 002 CLI Commands | legacy (#5) |
+| 19 | MetadataUpdate | `handoff update` without `--status`, `--files`, `--owner`, or `--reviewer` | any | same | lane-agent | none | unchanged | 002 CLI Commands, update authority | designated (2026-09-09; L12 in advisory) |
+| 20 | Reassign | `handoff update --owner` or `--reviewer` | `in-progress`, `needs-review`, `changes-requested` without a linked PR | same | `--owner`: owner only; `--reviewer`: lane-agent (Q8 Option C) | new owner and reviewer distinct; the new reviewer is not in the task's author history (swap policy A-i); no linked PR | unchanged (registry owner label follows the new owner; the new owner becomes the responsible actor) | 005 FR-5 reassignment | designated (2026-09-09; L10 in advisory) |
+| L1 | legacy | `handoff resolve` | PrFlow, and `changes-requested` with a linked PR | `resolved` | any | PR-flow status, or `changes-requested` with a linked PR (an unlinked `changes-requested` abandon by a non-lane-agent is L11) | release | forbidden by 002 Lock Enforcement (locks held until merge or close) | advisory (#4; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L2 | legacy | `handoff resolve` | `idle` | `resolved` | any | none | none | forbidden by implication of 002 CLI Commands | advisory (#5; 14-day minimum begins when spec 016 WS4 merges to `main`) |
 | L3 | legacy | `handoff update --status needs-review` | any Active | `needs-review` | any | none (FR-9 fix: the reviewer is no longer reassigned) | retain | forbidden by 005 FR-5, FR-7 | advisory (#6; 14-day minimum begins when spec 016 WS3 merges to `main`) |
-| L4 | legacy | `handoff update --status <X>` | any | `<X>` | any | target name valid | per target | forbidden by 002 PR-flow states, 006 FR-29 repair entry and exits | legacy (#7); the `repair-needed` entry and exit cases are in advisory (spec 016 WS3, 2026-09-08), the rest wait for WS4 |
-| L5 | legacy | `pr-poll` waiting, feedback, clear | any Active with a linked PR (recorded or `--pr`), or an inactive lane whose registry still holds stale locks (`patchHandoff` falls back to `currentLane.lockPaths`) | per outcome | system | none | retain | forbidden by 002 PR-flow states | legacy (#9 residual) |
-| L6 | legacy | `handoff update --files` | any status | same | any | non-empty when Active | replace when Active; release both records when `idle` (`core.mjs:5292-5295`); in single-handoff mode set `lockedFiles` only | forbidden by 014 rescope designation | legacy (#10) |
+| L4 | legacy | `handoff update --status <X>` | any | `<X>` | any | target name valid | per target | forbidden by 002 PR-flow states, 006 FR-29 repair entry and exits | advisory (#7; every case since spec 016 WS4, the repair cases since WS3; 14-day minimum begins when WS4 merges to `main`) |
+| L5 | legacy | `pr-poll` waiting, feedback, clear | any Active with a linked PR (recorded or `--pr`), or an inactive lane whose registry still holds stale locks (`patchHandoff` falls back to `currentLane.lockPaths`) | per outcome | system | none | retain | forbidden by 002 PR-flow states | advisory (#9 residual; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L6 | legacy | `handoff update --files` | any status | same | any | non-empty when Active | replace when Active; release both records when `idle` (`core.mjs:5292-5295`); in single-handoff mode set `lockedFiles` only | forbidden by 014 rescope designation | advisory (#10; 14-day minimum begins when spec 016 WS4 merges to `main`) |
 | L7 | legacy | `handoff resolve` | `repair-needed` | `resolved` | any | row 15 not satisfied: no recorded human disposition and no consumed override (the escalation flag alone does not satisfy row 15), or a disposition presented by an actor row 15 does not authorize | release | forbidden by 006 FR-29 | advisory (#11; 14-day minimum begins when spec 016 WS3 merges to `main`) |
-| L8 | legacy | `handoff resolve` | `needs-review` | `ready-for-pr` (PR flow on) or `resolved` (off) | any, actor unchecked | none | as rows 4 and 5 | forbidden by 002 PR-flow states row 1 (reviewer enters ready-for-pr) | advisory (14-day minimum begins when this change merges to `main`) |
-| L9 | legacy | `handoff resolve` (PR flow on) | `needs-review`, lane uncovered by force-release | `ready-for-pr` | reviewer | none | re-acquires the handoff paths (`core.mjs:5711`), which can fail if another lane took them | forbidden by 002 Force-release override (coverage stays suspended until claim or rescope) | legacy (new observation, not yet in the ledger) |
-| L10 | legacy | `handoff update --owner` or `--reviewer` | any status, including `resolved` and `idle` | same | any, actor unchecked | none | registry owner label follows the new owner | undesignated (open question 8) | legacy (row 20 fallback) |
-| L11 | legacy | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | any, actor unchecked (`resolveHandoff` compares no actor) | none | release | row 6 actor undesignated (open question 5) | legacy (row 6 fallback) |
-| L12 | legacy | `handoff update` with only `--task`, `--next`, `--base`, `--pr`, `--mode`, packet or reviewer-context fields | any | same | any, actor unchecked | none | unchanged | row 19 actor undesignated | legacy (row 19 fallback) |
-| L13 | legacy | `handoff claim` in single-handoff mode (no `[lanes]`) | any, including `in-progress` and `needs-review` | `in-progress` | any-agent | none; the source guard exists only in the lane branch (`core.mjs:4996`) | none (no registry) | undesignated | legacy (single-handoff claim overwrite) |
-| L14 | legacy | `handoff resolve` | `resolved` | `resolved` | any | none | none | undesignated; repeated resolve is accepted today | legacy (repeat resolve) |
-| L15 | legacy | `handoff request-changes` | `needs-review` | `changes-requested` | any when the lane records no reviewer or the actor is unverified (`core.mjs:5602` checks only when both are set) | reason code present | retain | 005 FR-8 designates the reviewer; the empty-actor case is undesignated | legacy (row 3 fallback) |
+| L8 | legacy | `handoff resolve` | `needs-review` | `ready-for-pr` (PR flow on) or `resolved` (off) | any, actor unchecked | actor is not the recorded reviewer (the reviewer's approval on an uncovered lane is L9) | as rows 4 and 5 | forbidden by 002 PR-flow states row 1 (reviewer enters ready-for-pr) | advisory (14-day minimum begins when this change merges to `main`) |
+| L9 | legacy | `handoff resolve` (PR flow on) | `needs-review`, lane uncovered by force-release | `ready-for-pr` | reviewer | none | re-acquires the handoff paths (`core.mjs:5711`), which can fail if another lane took them | forbidden by 002 Force-release override (coverage stays suspended until claim or rescope) | advisory (force-release re-acquire, designated with the spec 002 line 77 reconciliation; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L10 | legacy | `handoff update --owner` or `--reviewer` | any status, including `resolved` and `idle` | same | any, actor unchecked | none | registry owner label follows the new owner | undesignated (open question 8) | advisory (Q8 decided; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L11 | legacy | `handoff resolve` | `in-progress`, `changes-requested` | `resolved` | any, actor unchecked (`resolveHandoff` compares no actor) | none | release | row 6 actor undesignated (open question 5) | advisory (Q5 decided; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L12 | legacy | `handoff update` with only `--task`, `--next`, `--base`, `--pr`, `--mode`, packet or reviewer-context fields | any | same | any, actor unchecked | none | unchanged | row 19 actor undesignated | advisory (row 19 designated in 002 CLI Commands; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L13 | legacy | `handoff claim` in single-handoff mode (no `[lanes]`) | any, including `in-progress` and `needs-review` | `in-progress` | any-agent | none; the source guard exists only in the lane branch (`core.mjs:4996`) | none (no registry) | undesignated | advisory (claim authority designated in 002 CLI Commands; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L14 | legacy | `handoff resolve` | `resolved` | `resolved` | any | none | none | undesignated; repeated resolve is accepted today | advisory (repeat resolve rejected by 002 CLI Commands; 14-day minimum begins when spec 016 WS4 merges to `main`) |
+| L15 | legacy | `handoff request-changes` | `needs-review` | `changes-requested` | any when the lane records no reviewer or the actor is unverified (`core.mjs:5602` checks only when both are set) | reason code present | retain | 005 FR-8 designates the reviewer; the empty-actor case is undesignated | advisory (recorded-reviewer rule designated in 002 CLI Commands; 14-day minimum begins when spec 016 WS4 merges to `main`) |
 | L16 | system | `watchdog-repair` stale or TTL-expired lock release | any | same | system | lock is stale (lane not active) or past `lockTtlMs` | release registry entries (`core.mjs:8641-8690`) | 006 FR-2 safe auto-repair catalog ("stale lock cleanup") | designated |
 
 Rows 1 through 20 and L16 are the intended contract. Rows L1 through L15
@@ -641,6 +641,28 @@ Consequences worth restating:
   confirm rejection in the restricted ones.
 - Q6 changes only the error formatter and the FR-6 text. No new implicit
   authority is introduced.
+- WS4 readings (2026-09-09), added while implementing the decisions and
+  awaiting Brian's one-line confirmation: (i) Q1's "PR-flow
+  `changes-requested`" is the `changes-requested` entered through `pr poll`
+  feedback (reason `pr-review-feedback`) while local approval still stands; a
+  local `request-changes` withdraws that approval and the lane re-enters the
+  PR flow only through a new local approval. TLC forced this reading: without
+  it the shortcut re-enters `pr-review` with no standing peer approval. (ii)
+  Q8's row 20 is admitted only in `in-progress`, `needs-review`, and
+  `changes-requested`, in each case without a linked PR. The `repair-needed`
+  and reviewer-in-PR-flow bars are forced by the recorded repair owner and PR
+  approver; the owner-in-PR-flow bar and the unlinked requirement in
+  `in-progress`/`needs-review` are policy choices made for consistency. (iii)
+  When the reviewer replaces itself, the owner becomes the responsible actor.
+  (iv) Phase B step 3-4 designations that were not human questions: rows 8-10
+  (non-terminal `pr poll` outcomes apply from `pr-review`, `ready-to-merge`,
+  or PR-flow `changes-requested`; repeat `feedback` and `clear` are accepted;
+  `ready-for-pr` takes no non-terminal outcome), rows 19, L2, L12-L15
+  (metadata updates, resolve of an `idle` lane, single-handoff claim, repeat
+  resolve, request-changes with no recorded reviewer), and the spec 002 line
+  77 reconciliation (close on GitHub, then `pr poll --apply`). (v) Row 16 is
+  designated on Q2 plus the spec 014 rescope paragraph, whose "provisionally
+  until spec 002 adopts its own" wording stands until spec 002 owns rescope.
 
 ---
 

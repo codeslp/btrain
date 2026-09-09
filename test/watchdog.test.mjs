@@ -126,6 +126,87 @@ describe("btrain watchdog repairs", () => {
     assert.equal(recoveryResult.code, 0, recoveryResult.stderr)
   })
 
+  it("does not escalate a repair-needed lane on its own repeated runs (FR-18, Q4)", async () => {
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
+    let content = await fs.readFile(handoffPath, "utf8")
+    content = content.replace("Status: idle", "Status: in-progress")
+    content = content.replace(/^Active Agent: .*$/m, "Active Agent: Gemini")
+    content = content.replace(/^Last Updated: .*$/m, "Last Updated: Gemini 2099-01-01T00:00:00.000Z")
+    await fs.writeFile(handoffPath, content, "utf8")
+
+    const first = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+    assert.match(first.stdout, /contradictory-state repair/)
+    let handoff = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
+    assert.match(handoff.stdout, /status: repair-needed/)
+    assert.match(handoff.stdout, /repair attempts: 1/)
+    assert.doesNotMatch(handoff.stdout, /repair escalation: human/)
+
+    // doctor exits non-zero while the lane still needs repair; only the count matters here.
+    await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+    handoff = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
+    assert.match(handoff.stdout, /repair attempts: 1/)
+    assert.doesNotMatch(handoff.stdout, /repair escalation: human/)
+  })
+
+  it("resyncs lock coverage for an in-progress lane as the FR-2 guardian (spec 015 row 17, Q2)", async () => {
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Resync me", "--owner", "Gemini", "--reviewer", "Claude", "--files", "src/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+    // Drop the registry entry behind the handoff's back.
+    const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+    const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+    registry.locks = registry.locks.filter((lock) => lock.lane !== "a")
+    await fs.writeFile(locksPath, JSON.stringify(registry, null, 2), "utf8")
+
+    const repairResult = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+    assert.equal(repairResult.code, 0, repairResult.stderr)
+    assert.match(repairResult.stdout, /lane a: lock-resync repair/)
+    assert.doesNotMatch(repairResult.stdout, /contradictory-state repair/)
+
+    const locks = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.match(locks.stdout, /a: src\//)
+    const handoffResult = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
+    assert.match(handoffResult.stdout, /status: in-progress/)
+    const events = (await fs.readFile(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"), "utf8"))
+      .split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const resync = [...events].reverse().find((event) => event.type === "watchdog-repair")
+    assert.equal(resync.details.repairType, "lock-resync")
+    assert.deepEqual(resync.details.paths, ["src/"])
+  })
+
+  it("does not resync a needs-review lane; the owner restores coverage there (Q2 Option B)", async () => {
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Fixed view", "--owner", "Gemini", "--reviewer", "Claude", "--files", "docs/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+    const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md")
+    let content = await fs.readFile(handoffPath, "utf8")
+    content = content.replace(/^Status: in-progress$/m, "Status: needs-review")
+    await fs.writeFile(handoffPath, content, "utf8")
+    const locksPath = path.join(tmpDir, ".btrain", "locks.json")
+    const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+    registry.locks = registry.locks.filter((lock) => lock.lane !== "b")
+    await fs.writeFile(locksPath, JSON.stringify(registry, null, 2), "utf8")
+
+    const repairResult = await runBtrain(["doctor", "--repo", tmpDir, "--repair"], tmpDir)
+    assert.doesNotMatch(repairResult.stdout, /lane b: lock-resync repair/)
+    const locks = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.doesNotMatch(locks.stdout, /b: docs\//)
+
+    const ownerResync = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "b", "--files", "docs/", "--actor", "Gemini"],
+      tmpDir,
+      { BTRAIN_AGENT: "Gemini" },
+    )
+    assert.equal(ownerResync.code, 0, ownerResync.stderr)
+    assert.doesNotMatch(ownerResync.stdout, /transition-advisory/)
+    const locksAfter = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.match(locksAfter.stdout, /b: docs\//)
+  })
+
   it("assigns repair-needed to same-family fallback when original actor is unavailable", async () => {
     // Setup active agents: "Gemini 3.1", "Claude 3.5 Sonnet"
     await runBtrain(["agents", "set", "--repo", tmpDir, "--agent", "Gemini 3.1", "--agent", "Claude 3.5 Sonnet"], tmpDir)

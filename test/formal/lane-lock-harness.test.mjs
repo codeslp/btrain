@@ -33,6 +33,7 @@ import {
   requestChangesHandoff,
   resolveHandoff,
   disposeRepair,
+  doctor,
   releaseLaneLocksAudited,
   readAllLaneStates,
   readLockRegistry,
@@ -205,7 +206,17 @@ function commandArb() {
     // spec 006 FR-29: the human disposition record that makes a repair-needed
     // exit legal. A human is outside the agent pool, so no actor selector.
     { arbitrary: fc.record({ t: fc.constant("dispose"), lane }), weight: 2 },
+    // spec 005 FR-5 reassignment (spec 015 row 20, Q8): owner and/or reviewer
+    // changes by owner, reviewer, or a third agent.
+    { arbitrary: fc.record({ t: fc.constant("reassign"), lane, actorSel, owner: fc.option(fc.constantFrom(...AGENTS), { nil: undefined }), reviewer: fc.option(fc.constantFrom(...AGENTS), { nil: undefined }) }), weight: 2 },
   )
+}
+
+async function dropLaneRegistry(repo, lane) {
+  const locksPath = path.join(repo, ".btrain", "locks.json")
+  const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+  registry.locks = (registry.locks || []).filter((lock) => lock.lane !== lane)
+  await fs.writeFile(locksPath, JSON.stringify(registry, null, 2), "utf8")
 }
 
 async function runReal(repo, cmd, actor) {
@@ -289,6 +300,23 @@ async function runReal(repo, cmd, actor) {
         "confirmed-by": "human",
         reason: "formal probe disposition",
       })
+    case "reassign":
+      // A reassign with neither role supplied is a metadata update; the
+      // generator can produce it, so send a harmless --next instead.
+      return asAgent(actor, () =>
+        patchHandoff(repo, {
+          lane: cmd.lane,
+          actor,
+          "no-dispatch": true,
+          ...(cmd.owner !== undefined ? { owner: cmd.owner } : {}),
+          ...(cmd.reviewer !== undefined ? { reviewer: cmd.reviewer } : {}),
+          ...(cmd.owner === undefined && cmd.reviewer === undefined ? { next: "formal probe metadata" } : {}),
+        }),
+      )
+    case "dropRegistry":
+      return dropLaneRegistry(repo, cmd.lane)
+    case "doctorRepair":
+      return doctor({ repoRoot: repo, repair: true, skipFeedback: true })
     default:
       throw new Error(`unknown command ${cmd.t}`)
   }
@@ -318,6 +346,13 @@ function applyModel(model, cmd, actor) {
       return model.releaseLane(cmd)
     case "dispose":
       return model.dispose(cmd)
+    case "reassign":
+      if (cmd.owner === undefined && cmd.reviewer === undefined) return { ok: true }
+      return model.reassign({ lane: cmd.lane, actor, owner: cmd.owner, reviewer: cmd.reviewer })
+    case "dropRegistry":
+      return model.dropRegistry(cmd)
+    case "doctorRepair":
+      return model.doctorRepair()
     default:
       throw new Error(`unknown command ${cmd.t}`)
   }
@@ -347,6 +382,13 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["rescope-requires-owner", "rescope-authorization"],
   ["rescope-from-invalid-status", "rescope-authorization"],
   ["repair-rescope-requires-guardian", "rescope-authorization"],
+  ["resync-requires-owner", "rescope-authorization"],
+  // spec 015 row 20 (Q8): accepted with an L10 record during the FR-5 window.
+  ["reassign-from-invalid-status", "reassign-authorization"],
+  ["reassign-owner-requires-owner", "reassign-authorization"],
+  ["reassign-requires-lane-agent", "reassign-authorization"],
+  ["reassign-roles-not-distinct", "reassign-authorization"],
+  ["reassign-reviewer-is-author", "reassign-authorization"],
   ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],
   ["repair-clear-requires-repair-owner", "update-actor-unchecked"],
 ])
@@ -799,6 +841,35 @@ test(
     }
   },
 )
+
+// spec 006 FR-2 resync authority with the spec 014 rescope/resync split
+// (spec 015 row 17, Q2 Option B): the real `btrain doctor --repair` restores
+// coverage only in the three permitted statuses and enters repair-needed
+// (row 13 via watchdog-repair) elsewhere; the owner then resyncs by hand.
+// Deterministic witness in both modes: the generator never drops a registry
+// entry because status updates on an uncovered lane are undesignated.
+for (const mode of ["contract", "implementation"]) {
+  test(`doctor resync restores coverage in permitted statuses and repairs review lanes (${mode} mode)`, { skip: !ENABLED }, async () => {
+    const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      { t: "claim", lane: "y", owner: "beta", reviewer: "gamma", files: ["docs/"] },
+      { t: "update", lane: "y", actorSel: "owner", status: "needs-review" },
+      { t: "dropRegistry", lane: "x" },
+      { t: "dropRegistry", lane: "y" },
+      { t: "doctorRepair", lane: "x" },
+      // The owner restores coverage on the repaired review lane (row 17).
+      { t: "rescope", lane: "y", actorSel: "owner", files: ["docs/"] },
+    ])
+    assert.equal(designatedTally.size, 0, "no designated drift on the resync chain")
+    assert.equal(candidateTally.size, 0, `no candidate finding on the resync chain: ${[...candidateTally.keys()].join(", ")}`)
+    const last = trace.at(-1)
+    assert.equal(last.realState.x.status, "in-progress")
+    assert.deepEqual(last.realState.x.registry, ["src/a/"])
+    assert.equal(last.realState.y.status, "repair-needed")
+    assert.deepEqual(last.realState.y.registry, ["docs/"])
+    assert.equal(last.realRepair.y.owner, "beta")
+  })
+}
 
 // Positive FR-18 witness: the implementation escalates a same-reason repair
 // re-entry to a human (spec 006 FR-18, spec 014 designation). Guards

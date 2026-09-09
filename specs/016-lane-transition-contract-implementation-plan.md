@@ -1,10 +1,10 @@
 # Plan: Implement the Lane Transition Contract (spec 015)
 
 **Status**: Draft
-**Version**: 0.1.2
+**Version**: 0.1.3
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-08 (v0.1.2: WS3 advisory stage delivered, enforcement step pending; v0.1.1: WS0 decisions recorded in spec 015 v0.1.4)
+**Updated**: 2026-09-09 (v0.1.3: WS4 advisory stage delivered; v0.1.2: WS3 advisory stage delivered, enforcement step pending; v0.1.1: WS0 decisions recorded in spec 015 v0.1.4)
 
 ## Summary
 
@@ -374,12 +374,35 @@ harness labels `update-actor-unchecked` (needs-review case) and
 **Formal impact**: semantic. Independent model-family review required (spec
 014 FR-9).
 
-**Blocked by**: WS3 merged. PR #35 and WS2 (#42) are merged and WS0 is
-answered (spec 015 v0.1.4), but WS3 and WS4 both edit
-`src/brain_train/transitions.mjs`, `specs/tla/LaneLock.tla`, `test/formal/*`,
-and `test/core.test.mjs`, so under lane file locks only one can hold them at a
-time. WS3 goes first because it is smaller and repins nothing beyond
-`RepairResolve`.
+**Blocked by**: WS3 merged (PR #58, 2026-09-09).
+
+**Status (2026-09-09)**: advisory stage delivered in lane `c`. Landed:
+designations in spec 002 (resolve, update, and claim authority; PR-flow
+non-terminal outcomes; the row 12 shortcut with the "local approval still
+stands" rule; line 77 reconciled), spec 005 FR-5 (Q8, swap policy A-i,
+statuses restricted to `in-progress`, `needs-review`, unlinked
+`changes-requested`), spec 006 FR-18 (Q4) and FR-2 (Q2), spec 014 (repair
+exits point at FR-29; rescope/resync split). Model: `ReturnToPr`, `PrRepoll`,
+`PrClear` from PR-flow `changes-requested`, `PrFeedback` keeps local approval,
+`Reassign` with `priorOwner` and `AuthorSeparation`, `Resync` with the `Doctor`
+guardian, `PrReviewIsLinked`, `OwnerChangesOnlyByReassign`; Lanes and Agents
+became symmetric constants; repinned. Code: rows 6, 8, 10, 12, 14, 16, 17,
+19, 20 designated; every remaining legacy row (L1, L2, L4, L5, L6, L9,
+L10-L15) records `transition-advisory` with a warning; the FR-18 count is
+scoped to the current task; `--owner`/`--reviewer` carry the author history
+and Q8 guards; `btrain doctor --repair` resyncs coverage in the three
+permitted statuses. Remaining for the enforcement step (no earlier than 14
+days after this merge, 7 quiet days): reject on every advisory row, remove
+L1-L15, retire the harness candidate labels to regressions (WS5 precondition),
+and rewrite the advisory-stage tests to rejections. The Q4 reclaim regression
+and the Q8 provenance tests are production-level CLI tests in
+`test/core.test.mjs`; the harness generator still emits no reassignments.
+The three legacy-path tests this plan named for rewriting
+(`test/core.test.mjs` manual `--status ready-to-merge` and the `--final`
+sequence; `test/watchdog.test.mjs` recovery through a CLI `--files` update
+as `btrain doctor`) are deliberately left as they are: they exercise paths
+that are advisory now and are rewritten to rejections in the enforcement
+step. New tests cover the designated paths (doctor resync end to end).
 
 ### Workstream 5: Spec 014 Phase 3
 
@@ -402,13 +425,15 @@ pilot model in CI.
 | 3 | PR #34 feedback and merge | claude, lane `b` | none | merged 2026-09-01 |
 | 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-01 (#35) |
 | 5 | WS2 structural gate | any agent | none | merged 2026-09-02 (#42) |
-| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | advisory stage in review 2026-09-08 (lane c); enforcement step after the FR-5 window |
-| 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | ready once the WS3 advisory PR merges (the WS3 enforcement step is a separate later lane and does not block WS4) |
+| 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | advisory stage merged 2026-09-09 (#58); enforcement step no earlier than 2026-09-23 |
+| 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | advisory stage in review 2026-09-09 (lane c); enforcement step after the FR-5 window |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
 
-As of 2026-09-08 steps 1 through 5 are complete. Step 6 is ready to claim.
-Step 7 follows step 6 because both workstreams lock the same runtime, model,
-and test files; they are serialized, not parallel. Step 8 waits on both.
+As of 2026-09-09 steps 1 through 6 are complete (step 6 as its advisory
+stage) and step 7's advisory stage is in review. Step 7 followed step 6
+because both workstreams lock the same runtime, model, and test files. Step 8
+waits on the enforcement lanes for both, which may start no earlier than 14
+days after each advisory merge.
 
 ## Rollback Points
 

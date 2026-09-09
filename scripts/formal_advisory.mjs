@@ -17,11 +17,14 @@ const MODELED_RUNTIME_FILES = new Set([
 // ~15M distinct states (3 min 57 s with 10 workers). Two workers, 1 GB, and a
 // five-minute cap reported state_space_exhausted, so the budget follows the
 // model: 4 workers (ubuntu-latest has 4 vCPUs), 2 GB heap, 15 minutes. The
-// workflow's 25-minute job timeout still leaves room for the harness and the
-// CLI contract. TLC metadata goes to a temp dir, not specs/tla/states/.
+// TLC metadata goes to a temp dir, not specs/tla/states/. Spec 016 WS4 added
+// reassignment, resync, and the PR-flow shortcut and moved Lanes/Agents to
+// symmetric constants: ~10.8M distinct states, 5 min at 10 workers locally,
+// so the cap is 20 minutes at 4 workers and the workflow job timeout is 35
+// minutes (TLC 20 + harness 5 + CLI contract 5 + pin checks and setup).
 const TLC_MAX_HEAP_MB = 2048
 const TLC_WORKERS = 4
-const TLC_TIMEOUT_MS = 900_000
+const TLC_TIMEOUT_MS = 1_200_000
 const MAX_TLA_FILES = 1
 const FORMAL_HARNESS_TIMEOUT_MS = 300_000
 const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000
@@ -628,7 +631,7 @@ function runSelfTest() {
   assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
   assert.match(workflow, /FORMAL_IMPACT: \$\{\{ steps\.select\.outputs\.formal_impact \}\}/)
   assert.match(workflow, /jq -r '\.verdict'.*== "no_formal_surface"/)
-  assert.match(workflow, /timeout-minutes: 25/)
+  assert.match(workflow, /timeout-minutes: 35/)
   const source = fs.readFileSync(new URL(import.meta.url), "utf8")
   assert.match(source, /timeoutMs: FORMAL_HARNESS_TIMEOUT_MS/)
   process.stdout.write("formal_advisory self-test passed\n")

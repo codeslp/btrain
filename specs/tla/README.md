@@ -57,11 +57,12 @@ implementation mode, trace validation) are not all passes means the file must
 not be reused; re-run TLC and `npm run test:formal`. The verifier is the only sanctioned way to consume
 this file. Consumer wiring lands in its own lanes because those files are
 outside this lane's locks: `tla-run-tlc` (PR #40), `tla-trace-explain`, the
-`formal-advisory` CI workflow, and `pre-handoff`. TLC baseline (2026-09-08, spec 016 WS3): 159,482,257 states generated,
-14,990,809 distinct, depth 25, 3 min 57 s with 10 workers (the model carries
-14 invariants and 4 action properties). The 2026-09-02 baseline before the
-FR-29 decision variable was 88,436,305 generated, 8,236,969 distinct, 1 min
-17 s.
+`formal-advisory` CI workflow, and `pre-handoff`. TLC baseline (2026-09-09, spec 016 WS4, with symmetry): 143,465,581 states
+generated, 10,832,481 distinct, depth 31 (32 on an earlier run: with symmetry the reported depth depends on exploration order), 5 min 05 s with 10 workers (the
+model carries 16 invariants and 5 action properties). Earlier baselines:
+2026-09-08 (WS3, no symmetry) 159,482,257 generated, 14,990,809 distinct,
+depth 25, 3 min 57 s; 2026-09-02 88,436,305 generated, 8,236,969 distinct,
+1 min 17 s.
 
 ## Pin check
 
@@ -118,9 +119,22 @@ requires a decision: a disposition carried out by a lane agent, or an override
 presented by any configured agent. `RepairClear` voids a pending decision.
 The pin list gained spec 006 § FR-29.
 
-Pilot bounds (in-module, per the tla-author skill): 2 lanes, 3 agents,
-3 abstract paths with one nesting conflict, 4 claimable lock sets. Small by
-design; widen only after the small model passes.
+Pilot bounds (per the tla-author skill): 2 lanes, 3 agents, 3 abstract paths
+with one nesting conflict, 4 claimable lock sets. Small by design; widen only
+after the small model passes. Since spec 016 WS4 (2026-09-09) `Lanes`,
+`Agents`, `NoAgent`, and `Doctor` are model-value constants in `LaneLock.cfg`
+with `SYMMETRY Symm` over lanes and agents, which keeps TLC inside the CI
+budget as the model grows; paths stay in-module because the nesting conflict
+breaks their symmetry.
+
+Spec 016 WS4 (2026-09-09) added: `ReturnToPr` (row 12, Q1: the owner returns
+a PR-flow `changes-requested` lane to `pr-review` while local approval stands),
+`PrRepoll` and `PrClear` from PR-flow `changes-requested`, `PrFeedback` keeping
+`peerApproved` and `approver` (local approval survives GitHub feedback; a local
+`RequestChanges` withdraws it), `Reassign` (row 20, Q8 Option C with swap
+policy A-i, tracked by `priorOwner` and `Authors(l)`), and `Resync` (row 17,
+Q2 Option B, with the `Doctor` guardian admitted only in `in-progress`,
+`changes-requested`, and `repair-needed`).
 
 ### Invariant-to-prose mapping
 
@@ -139,6 +153,9 @@ design; widen only after the small model passes.
 | `LinkedLaneStaysActive` | spec 002 PR-flow states and actors: a lane with a linked PR never reaches a terminal status except through `PrTerminal` or a decision-backed `RepairResolve`; `AbandonResolve` is guarded on `~prLinked` |
 | `DecisionOnlyDuringRepair` | spec 006 FR-29: a recorded human decision (disposition or override) exists only while the lane is `repair-needed`; clearing or resolving the repair voids it |
 | `DispositionAfterEscalation` | spec 006 FR-29: a disposition is recorded only after the FR-18 escalation fired (`repairCount >= MaxRepair`); the override path needs no escalation |
+| `AuthorSeparation` | spec 005 FR-5 reassignment (Q8, swap policy A-i): no author of the current task (owner or prior owner) is its reviewer |
+| `PrReviewIsLinked` | spec 002 PR-flow states: `pr-review` and `ready-to-merge` always carry a linked PR |
+| `OwnerChangesOnlyByReassign` (action property) | spec 005 FR-5: an active lane's owner changes only in `in-progress`, `needs-review`, or unlinked `changes-requested`, and the status does not change in the same step |
 | `RepairResolveNeedsDecision` (action property) | spec 006 FR-29 (spec 015 row 15, Q3 Option A): the step repair-needed → resolved requires `decision # "none"` before it, and a `disposed` decision additionally requires `repairCount >= MaxRepair`; this is what makes the `RepairResolve` guard checkable rather than structural |
 | `RepairClearByResponsibleActor` (action property) | spec 006 FR-15: the actor who clears repair-needed is the recorded repair owner |
 | `RepairEnterAssignsLastActor` (action property) | spec 006 FR-7: entering repair assigns the most recent canonical actor |
@@ -159,7 +176,9 @@ Claim, RepairEnter, RepairDispose at count 1); changing `PeerResolve`'s guard to
 violates `PrFlowNeedsPeerApproval` and `PrFlowEntryByReviewer`; changing
 `RepairClear`'s guard to `IsLaneAgent` violates
 `RepairClearByResponsibleActor`; assigning `owner[l]` instead of
-`lastActor[l]` in `RepairEnter` violates `RepairEnterAssignsLastActor`.
+`lastActor[l]` in `RepairEnter` violates `RepairEnterAssignsLastActor`; dropping
+`r2 \notin Authors(l) \union {o2}` from `Reassign` violates `AuthorSeparation`
+(verified 2026-09-09, spec 016 WS4).
 
 ### Actor authority
 
@@ -188,13 +207,17 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   re-entry. The model's single `decision` slot also forbids an override
   after a disposition, which the implementation allows as two coexisting
   records. Neither is harness-observable (no overrides in throwaway repos).
-  Tighten the implementation or relax the model in WS4.
+  Tighten the implementation or relax the model in a follow-up lane after
+  WS4 (deferred; `grantOverride` is unchanged by WS4).
 - The FR-15 override clear (`RepairClear` by an audited override rather than
   the repair owner) is distinct from the FR-29 `repair-resolve` override
   modeled as `decision = "override"`, and is not modeled. Adding it would
   relax `RepairClearByResponsibleActor`; deferred until prose designates who
   the recorded actor is after an override clear.
-- Prose conflict to reconcile before the model leaves pilot: spec 002
+- Resolved 2026-09-09 (spec 016 WS4): the spec 002 row "resolved after
+  close without merge" now reads as closing the PR on GitHub and running
+  `btrain pr poll --apply`; a plain resolve from a PR-flow status is
+  designated as rejected. Kept for history: spec 002
   `PR-flow states and actors`, row `resolved after close without merge`,
   permits "a human/owner intentionally resolving". The model has no
   lane-agent exit from a PR-flow status; only `PrTerminal` (a GitHub outcome)
@@ -205,21 +228,29 @@ the harness transcription rejects agent-pool repair rescopes the same way.
 - Two hand transcriptions of the same contract exist (this model and
   `test/formal/lane-lock-model.mjs`); they are kept independent and
   cross-checked by review, and spec 015 FR-7 adds an executable cross-check.
-  Known differences, each an undesignated prose question (spec 016 WS4):
-  (a) the harness accepts `pr-poll` `clear` and `waiting` from PR-flow
-  `changes-requested` (changes-requested → ready-to-merge / pr-review); the
-  model has no such action and routes PR feedback back through
-  `ToNeedsReview` → `PeerResolve` → `LinkPr`, which also voids
-  `peerApproved`. Whether local approval survives GitHub feedback is not
-  decided in prose. (b) the harness's contract-mode `resolve()` lets a lane
-  agent terminal-resolve PR-flow `changes-requested` with a linked PR; the
-  model forbids it (`AbandonResolve` requires `~prLinked`,
-  `LinkedLaneStaysActive`). The harness must tighten to `~prLinked` when the
-  spec 002 line 77 reconciliation lands. (c) `Claim` with reviewer = owner is
+  Known differences: (a) resolved 2026-09-09 (spec 016 WS4): `PrRepoll` and
+  `PrClear` fire from PR-flow `changes-requested` while local approval stands,
+  and the mirror admits the same only when the lane's reason code is
+  `pr-review-feedback`. (b) resolved 2026-09-09: the mirror's contract-mode
+  `resolve()` now rejects a linked `changes-requested` lane, matching
+  `AbandonResolve`'s `~prLinked`. (c) `Claim` with reviewer = owner is
   rejected by the model and silently reassigned to a distinct peer by the
   harness; reachable states are equivalent. (d) the harness mirror has no
   override path at all (`disposition` only); the model's `override` branch of
-  `RepairResolve` is exercised by TLC and by `test/core.test.mjs`.
+  `RepairResolve` is exercised by TLC and by `test/core.test.mjs`. (e) the mirror's `update` accepts
+  `changes-requested -> in-progress` by the owner (pre-existing); the model
+  has no such action (row 14 is the repair exit only), so that path is
+  undesignated and stays a mirror-only acceptance until prose speaks.
+- `Reassign` is admitted only in `in-progress`, `needs-review`, and
+  `changes-requested`, in each case without a linked PR (spec 005 FR-5 as
+  designated 2026-09-09); the registry owner label is not modeled. `Resync` fires only from the force-release
+  `uncovered` state; btrain's doctor also repairs a registry that was emptied
+  outside btrain, which the model treats as the same event. The harness
+  generates reassignments (mirror `reassign`, label
+  `reassign-authorization` during the FR-5 window) and runs the real
+  `btrain doctor --repair` in a deterministic resync witness (mirror
+  `dropRegistry` + `doctorRepair`); status updates on an uncovered lane stay
+  out of the generator because their contract is undesignated.
 - Crash windows between the handoff write and the registry write are not
   modeled; the writes are atomic in the model.
 - TLC trace validation against harness-emitted traces is future work
