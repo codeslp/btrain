@@ -258,7 +258,12 @@ files or `locks.json` in this phase.
   `self-repair-audit` field in the canonical lane-event log (one sentence in
   spec 006 FR-29, unpinned). The field is not a `transition-advisory` and is
   excluded from the FR-5 retirement gate. Row 13 moves from `provisional` to
-  `designated`; L4 retires for this case on enforcement
+  `designated`. Before L4 retires for repair entry, stage a
+  `transition-advisory` for every repair-entry declaration L4 accepts today
+  that row 13 will reject (unconfigured or unverified actor, invalid source
+  status), and enforce only after the spec 015 FR-5 advisory minimum and
+  quiescence windows pass. `self-repair-audit` is not that advisory and does
+  not shorten the window
 
 **Likely files**
 
@@ -334,12 +339,28 @@ are merged and lane `j` released `specs/tla/`.
   `specs/tla/README.md` still reports a violation when a guard is removed
 - candidate tally reaches zero; the `candidate findings absent` gate test
   passes and is then retired
+- Q4 reclaim regression against the real CLI and event log: a lane enters
+  `repair-needed`, is cleared, resolves, is reclaimed, and enters
+  `repair-needed` for the same reason; the new task starts at attempt one and
+  the earlier repair events remain in the log. The FR-6 harness does not
+  compare attempt-counting internals (`test/formal/README.md` Known gaps), so
+  this is a production-level test, not a harness fixture
+- Q8 provenance against the real CLI and event storage: a direct
+  owner/reviewer swap is rejected; a sequence of individually valid
+  reassignments that would make a prior owner or author the reviewer is
+  rejected; `authorHistory` survives across the sequence. The formal command
+  generator (`test/formal/lane-lock-harness.test.mjs`) does not emit
+  reassignments, so these must be production-level tests
 
 **Formal impact**: semantic. Independent model-family review required (spec
 014 FR-9).
 
-**Blocked by**: nothing as of 2026-09-08. PR #35 and WS2 (#42) are merged
-and WS0 is answered (spec 015 v0.1.4).
+**Blocked by**: WS3 merged. PR #35 and WS2 (#42) are merged and WS0 is
+answered (spec 015 v0.1.4), but WS3 and WS4 both edit
+`src/brain_train/transitions.mjs`, `specs/tla/LaneLock.tla`, `test/formal/*`,
+and `test/core.test.mjs`, so under lane file locks only one can hold them at a
+time. WS3 goes first because it is smaller and repins nothing beyond
+`RepairResolve`.
 
 ### Workstream 5: Spec 014 Phase 3
 
@@ -363,11 +384,12 @@ pilot model in CI.
 | 4 | PR #35 feedback, line 77 reconciliation, merge | codex, lane `j` | codex bot feedback | merged 2026-09-02 (#35) |
 | 5 | WS2 structural gate | any agent | none | merged 2026-09-02 (#42) |
 | 6 | WS3 unpinned designations | any agent | steps 2, 4, 5 | ready |
-| 7 | WS4 pinned designations | any agent | steps 1, 4, 5 | ready |
+| 7 | WS4 pinned designations | any agent | steps 1, 4, 5, 6 | blocked on step 6 (shared file locks) |
 | 8 | WS5 014 Phase 3 | any agent | steps 6, 7 | blocked |
 
-As of 2026-09-08 steps 1 through 5 are complete. Steps 6 and 7 are ready to
-claim and are independent of each other. Step 8 waits on both.
+As of 2026-09-08 steps 1 through 5 are complete. Step 6 is ready to claim.
+Step 7 follows step 6 because both workstreams lock the same runtime, model,
+and test files; they are serialized, not parallel. Step 8 waits on both.
 
 ## Rollback Points
 
