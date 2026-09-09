@@ -2,18 +2,18 @@
   "status": "validation_mismatch",
   "status_note": "spec 014 verdict for the whole chain: TLC passed and implementation mode passes, but the FR-6 candidate gate tallies ledgered candidate findings (test/formal/README.md; findings 4-11 are all designated and sit in their spec 015 FR-5 advisory windows, so contract mode still rejects what the implementation accepts with a transition-advisory record) and TLC trace validation has not run. A `pass` requires every validation outcome to pass.",
   "keys": {
-    "tla_content_sha256": "9d9484a9aaed1ba724e49667f95d5e58f586873f96f4c26b963868a10f7aaee2",
+    "tla_content_sha256": "1262dfd510f7daff4a6c473455572736e72d12162e52cfdccd9daefff4fb2cd7",
     "cfg_sha256": "d4cbd155114f1e0aaece3fe21becf7d58eb08aadbbcab9a0b0e8180aa8dcbf3e",
-    "pinned_prose_sha256": "209cbee9023e3b1ca35e5cead4c78b30f1f4ac7afadc414b2de51d6dfb512bc9",
+    "pinned_prose_sha256": "96d1a78efe52f4168781f759a4d8fbc428a6dee4dc9bbf4c75d4e63c0db04c4b",
     "harness_sha256": "61ee31f49a33d08f07e4597938ca4934cd5355e4586c201c71e4cbf7c033f21c",
     "harness_files": [
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "964ec0ec8f368dac56ac0da95336ba121c2b1545",
+    "source_commit": "d3fb985faf9ee425bbab8977a7acd4a158481d7b",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
-    "inputs_sha256": "bccec21ab835584bfed8fdbea536fc4714f70bf261d546df8d319781360fcadc",
+    "inputs_sha256": "a4cfe688fe11955c6fc67b716d5b436cd89aa2c6d81c70eaaea96ff61a261ea8",
     "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, every git-tracked file under src/brain_train/, test/formal/README.md, package.json, and package-lock.json; the reuse key, valid across squash merges"
   },
   "tlc": {

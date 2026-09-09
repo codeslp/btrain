@@ -134,7 +134,7 @@ Designated 2026-09-09 (spec 015 Phase B steps 3 and 4; open questions Q5 and Q8 
 - Either the owner or the reviewer may resolve an active lane that has not entered review or the PR flow and has no linked PR: `in-progress`, or `changes-requested` without a linked PR (spec 015 row 6; Q5, Option A).
 - `handoff update` that changes only metadata (no `--status`, `--files`, `--owner`, or `--reviewer`) is a lane-agent action: the owner or the reviewer (spec 015 row 19).
 - `handoff claim` requires an `idle` or `resolved` lane in single-handoff mode as well as in lane mode; a claim over an active handoff is rejected (spec 015 L13).
-- `handoff request-changes` is the recorded reviewer's action. With no recorded reviewer, or with an actor that cannot be verified as that reviewer, it is rejected (spec 015 L15; spec 005 FR-8).
+- `handoff request-changes` is the recorded reviewer's action (spec 005 FR-8). An actor verified as someone other than the recorded reviewer is rejected, as today. With no recorded reviewer, or with no verifiable actor at all, the request is accepted with a `transition-advisory` (spec 015 L15) during the advisory window and rejected after it.
 
 These rules enter spec 015 FR-5 advisory mode when the designating change merges and are enforced after the advisory window.
 

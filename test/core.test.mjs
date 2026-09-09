@@ -3018,6 +3018,26 @@ describe("spec 016 WS4: single-handoff claim over active work (L13)", () => {
     await rmDir(tmpDir)
   })
 
+  it("applies the Q8 reassignment guards in single-handoff mode too (L10 and the author history)", async () => {
+    await setActiveAgents(tmpDir, ["WriterBot", "ReviewerBot", "ThirdBot"])
+    const claim = await runBtrain(["handoff", "claim", "--repo", tmpDir, "--task", "single reassign", "--owner", "WriterBot", "--reviewer", "ReviewerBot"], tmpDir)
+    assert.equal(claim.code, 0, claim.stderr)
+    const byReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--owner", "ThirdBot", "--actor", "ReviewerBot"], tmpDir, { BTRAIN_AGENT: "ReviewerBot" })
+    assert.equal(byReviewer.code, 0, byReviewer.stderr)
+    assert.match(byReviewer.stdout, /warning: transition-advisory L10/)
+    const eventsPath = path.join(tmpDir, ".btrain", "events", "repo.jsonl")
+    const events = (await fs.readFile(eventsPath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const update = [...events].reverse().find((event) => event.type === "update")
+    assert.equal(update.details["transition-advisory"], "L10")
+    assert.deepEqual(update.details.authorHistory, ["thirdbot", "writerbot"])
+    const byOwner = await runBtrain(["handoff", "update", "--repo", tmpDir, "--reviewer", "WriterBot", "--actor", "ThirdBot"], tmpDir, { BTRAIN_AGENT: "ThirdBot" })
+    assert.equal(byOwner.code, 0, byOwner.stderr)
+    assert.match(byOwner.stdout, /warning: transition-advisory L10/, "a prior author cannot become the reviewer")
+    // Leave the handoff resolved for the L13 test that follows (ThirdBot owns it now).
+    const release = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--summary", "single reassign done", "--actor", "ThirdBot"], tmpDir, { BTRAIN_AGENT: "ThirdBot" })
+    assert.equal(release.code, 0, release.stderr)
+  })
+
   it("accepts the overwrite with the L13 advisory during the FR-5 window", async () => {
     const first = await runBtrain(["handoff", "claim", "--repo", tmpDir, "--task", "first", "--owner", "WriterBot", "--reviewer", "ReviewerBot"], tmpDir)
     assert.equal(first.code, 0, first.stderr)

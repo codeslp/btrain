@@ -52,7 +52,7 @@
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-18: One retry budget before human escalation
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-20: Lock retention during `repair-needed`
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-29: `repair-needed` transitions
-\* Pinned-hash: 209cbee9023e3b1ca35e5cead4c78b30f1f4ac7afadc414b2de51d6dfb512bc9
+\* Pinned-hash: 96d1a78efe52f4168781f759a4d8fbc428a6dee4dc9bbf4c75d4e63c0db04c4b
 EXTENDS Naturals, FiniteSets, TLC
 
 \* Pilot bounds live in LaneLock.cfg (tla-author: small by design; widen only

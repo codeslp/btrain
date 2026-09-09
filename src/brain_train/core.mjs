@@ -4690,6 +4690,30 @@ function countRepairEntries(events, reasonCode) {
   }).length
 }
 
+// spec 015 row 20 / spec 005 FR-5 (Q8): the gate inputs for a reassignment,
+// read once from the workflow log (FR-12: the gate itself reads no files).
+// Shared by the lane and single-handoff branches of patchHandoff.
+async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCurrent, updates, transitionEvent }) {
+  const reassigning = transitionEvent === "handoff update --reassign"
+  const authorHistory = reassigning
+    ? authorHistorySinceClaim(await readWorkflowEvents(repoRoot, config, laneId), existingCurrent)
+    : new Set()
+  const nextOwnerKey = normalizeAgentName(updates.owner ?? existingCurrent.owner).toLowerCase()
+  const nextReviewerKey = normalizeAgentName(updates.reviewer ?? existingCurrent.reviewer).toLowerCase()
+  const ownerChanged = updates.owner !== undefined
+    && nextOwnerKey !== normalizeAgentName(existingCurrent.owner).toLowerCase()
+  const reviewerIsPriorAuthor = reassigning
+    && !!nextReviewerKey
+    && (authorHistory.has(nextReviewerKey) || nextReviewerKey === nextOwnerKey)
+  return {
+    reassigning,
+    ownerChanged,
+    reviewerIsPriorAuthor,
+    distinctReviewer: !nextReviewerKey || !nextOwnerKey || nextReviewerKey !== nextOwnerKey,
+    authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(),
+  }
+}
+
 // spec 005 FR-5 author history (spec 015 Q8, swap policy A-i): every agent
 // that has owned the current task, from the claim and later owner
 // reassignments recorded since it.
@@ -5486,19 +5510,7 @@ async function patchHandoff(repoRoot, options) {
       // spec 005 FR-5 reassignment (Q8, swap policy A-i): who may change which
       // role, and whether the resulting reviewer was ever an author of this
       // task. The history is read once here (FR-12: the gate reads no files).
-      const laneEvents = transitionEvent === "handoff update --reassign"
-        ? await readWorkflowEvents(repoRoot, config, laneId)
-        : []
-      const authorHistory = transitionEvent === "handoff update --reassign"
-        ? authorHistorySinceClaim(laneEvents, existingCurrent)
-        : new Set()
-      const nextOwnerKey = normalizeAgentName(updates.owner ?? existingCurrent.owner).toLowerCase()
-      const nextReviewerKey = normalizeAgentName(updates.reviewer ?? existingCurrent.reviewer).toLowerCase()
-      const ownerChanged = updates.owner !== undefined
-        && nextOwnerKey !== normalizeAgentName(existingCurrent.owner).toLowerCase()
-      const reviewerIsPriorAuthor = transitionEvent === "handoff update --reassign"
-        && !!nextReviewerKey
-        && (authorHistory.has(nextReviewerKey) || nextReviewerKey === nextOwnerKey)
+      const reassign = await resolveReassignInputs(repoRoot, config, { laneId, existingCurrent, updates, transitionEvent })
       let matchedRow = null
       const validateStructuralTransition = (source) => {
         const transition = applyTransition(source, transitionEvent, {
@@ -5510,9 +5522,9 @@ async function patchHandoff(repoRoot, options) {
             source.status === "changes-requested" && source.reasonCode === "pr-review-feedback",
           reasonCode: reasonMetadata.reasonCode,
           feedbackReason: reasonMetadata.reasonCode,
-          ownerChanged,
-          reviewerIsPriorAuthor,
-          distinctReviewer: !nextReviewerKey || !nextOwnerKey || nextReviewerKey !== nextOwnerKey,
+          ownerChanged: reassign.ownerChanged,
+          reviewerIsPriorAuthor: reassign.reviewerIsPriorAuthor,
+          distinctReviewer: reassign.distinctReviewer,
           structuralCompatibility: options.transitionCompatibility === true,
           filesChanged:
             options.files === undefined
@@ -5723,9 +5735,7 @@ async function patchHandoff(repoRoot, options) {
           repairAttempts: updates.repairAttempts || 0,
           ...(transitionAdvisory ? { "transition-advisory": transitionAdvisory } : {}),
           ...(selfRepairAudit ? { "self-repair-audit": true } : {}),
-          ...(transitionEvent === "handoff update --reassign"
-            ? { authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(), ownerChanged }
-            : {}),
+          ...(reassign.reassigning ? { authorHistory: reassign.authorHistory, ownerChanged: reassign.ownerChanged } : {}),
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
       }]
@@ -5797,13 +5807,19 @@ async function patchHandoff(repoRoot, options) {
   updates.reasonCode = reasonMetadata.reasonCode
   updates.reasonTags = reasonMetadata.reasonTags
   const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
+  const singleReassign = await resolveReassignInputs(repoRoot, config, { existingCurrent, updates, transitionEvent })
   const singleTransition = applyTransition(existingCurrent, transitionEvent, {
     to: nextStatus,
     actor: resolvedActor,
     prFlowEnabled: getPrFlowConfig(config).enabled,
     prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+    prFlowChangesRequested:
+      existingCurrent.status === "changes-requested" && existingCurrent.reasonCode === "pr-review-feedback",
     reasonCode: reasonMetadata.reasonCode,
     feedbackReason: reasonMetadata.reasonCode,
+    ownerChanged: singleReassign.ownerChanged,
+    reviewerIsPriorAuthor: singleReassign.reviewerIsPriorAuthor,
+    distinctReviewer: singleReassign.distinctReviewer,
     structuralCompatibility: options.transitionCompatibility === true,
     filesChanged: options.files === undefined
       ? undefined
@@ -5930,6 +5946,7 @@ async function patchHandoff(repoRoot, options) {
       repairAttempts: updates.repairAttempts || 0,
       ...(singleAdvisory ? { "transition-advisory": singleAdvisory } : {}),
       ...(singleSelfRepairAudit ? { "self-repair-audit": true } : {}),
+      ...(singleReassign.reassigning ? { authorHistory: singleReassign.authorHistory, ownerChanged: singleReassign.ownerChanged } : {}),
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
   })
