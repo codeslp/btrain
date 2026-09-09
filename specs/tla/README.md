@@ -105,8 +105,18 @@ pin list is complete. Treat a gap in coverage as a defect, not a shortcut.
 
 Models the designated lane/lock contract. The model encodes INTENDED
 behavior only — designated implementation drift (close-without-merge to
-`repair-needed`, unaudited release, the `--final` bypass) does not exist in
-the model. The FR-6 harness (`test/formal/`) covers the code side.
+`repair-needed`, unaudited release, the `--final` bypass, a repair resolve
+without a recorded human decision) does not exist in the model. The FR-6
+harness (`test/formal/`) covers the code side.
+
+Spec 016 WS3 (2026-09-08) added the spec 006 FR-29 decision: `decision[l]`
+is `none`, `disposed`, or `override`. `RepairDispose` (only after the FR-18
+escalation) and `RepairOverrideGrant` are actor-free human records that change
+no status, lock, owner, or reviewer, so they have no spec 015 transition row
+(`test/transitions.test.mjs` lists them as record-only). `RepairResolve` now
+requires a decision: a disposition carried out by a lane agent, or an override
+presented by any configured agent. `RepairClear` voids a pending decision.
+The pin list gained spec 006 § FR-29.
 
 Pilot bounds (in-module, per the tla-author skill): 2 lanes, 3 agents,
 3 abstract paths with one nesting conflict, 4 claimable lock sets. Small by
@@ -122,12 +132,14 @@ design; widen only after the small model passes.
 | `ReviewerSeparation` | spec 014 Pilot Scope: owner and reviewer separation on active lanes |
 | `ActiveHasLocks` | designated active-lane lock requirement (spec 014 v0.1.9) |
 | `PrFlowRetention` | spec 002 v1.1.2: locks retained through `ready-for-pr`, `pr-review`, `ready-to-merge` |
-| `RepairBudgetBounded` | spec 014 designation of spec 006 FR-18: repair resolves only after the escalation budget is exhausted (structural guard on `RepairResolve`); terminal lanes carry a reset count |
+| `RepairBudgetBounded` | spec 006 FR-18 via FR-29: the `MaxRepair` guard sits on `RepairDispose` (a disposition needs the exhausted budget; the override exit does not); every terminal transition resets the count, so terminal lanes carry `repairCount = 0` |
 | `PrFlowNeedsPeerApproval` | spec 002 v1.1.2 review routing: no lane sits in the PR flow without a peer approval by a reviewer distinct from the owner |
 | `RepairOwnerAssigned` | spec 006 FR-7: a `repair-needed` lane always carries a responsible actor, and it is the lane's owner or reviewer (the most recent canonical workflow actor); outside repair none is assigned |
 | `LastActorIsLaneAgent` | spec 006 FR-7 support: the recorded canonical actor of an active lane is always a lane agent, never GitHub, the watchdog, or an override requester |
-| `LinkedLaneStaysActive` | spec 002 PR-flow states and actors: a lane with a linked PR never reaches a terminal status except through `PrTerminal` or a post-escalation `RepairResolve`; `AbandonResolve` is guarded on `~prLinked` |
-| `RepairResolveNeedsEscalation` (action property) | spec 014 designation of FR-18: the step repair-needed → resolved requires `repairCount >= MaxRepair` before it; this is what makes the `RepairResolve` guard checkable rather than structural |
+| `LinkedLaneStaysActive` | spec 002 PR-flow states and actors: a lane with a linked PR never reaches a terminal status except through `PrTerminal` or a decision-backed `RepairResolve`; `AbandonResolve` is guarded on `~prLinked` |
+| `DecisionOnlyDuringRepair` | spec 006 FR-29: a recorded human decision (disposition or override) exists only while the lane is `repair-needed`; clearing or resolving the repair voids it |
+| `DispositionAfterEscalation` | spec 006 FR-29: a disposition is recorded only after the FR-18 escalation fired (`repairCount >= MaxRepair`); the override path needs no escalation |
+| `RepairResolveNeedsDecision` (action property) | spec 006 FR-29 (spec 015 row 15, Q3 Option A): the step repair-needed → resolved requires `decision # "none"` before it, and a `disposed` decision additionally requires `repairCount >= MaxRepair`; this is what makes the `RepairResolve` guard checkable rather than structural |
 | `RepairClearByResponsibleActor` (action property) | spec 006 FR-15: the actor who clears repair-needed is the recorded repair owner |
 | `RepairEnterAssignsLastActor` (action property) | spec 006 FR-7: entering repair assigns the most recent canonical actor |
 | `PrFlowEntryByReviewer` (action property) | spec 002 v1.1.2: entry to `ready-for-pr` happens only from `needs-review` by the assigned reviewer, distinct from the owner; `PrFlowNeedsPeerApproval` now also checks the recorded `approver` |
@@ -139,9 +151,11 @@ The baseline run includes mutation checks that remove or swap a GUARD (not
 merely the field an invariant reads), so the properties are load-bearing:
 removing `NoConflictWithOthers` from `Claim` violates `Exclusivity`;
 replacing `RepairResolve`'s decision disjunction with plain `IsLaneAgent`
-violates `RepairResolveNeedsDecision` (verified 2026-09-08, spec 016 WS3;
-the earlier `repairCount[l] >= MaxRepair` mutation now lives inside the
-`disposed` branch and is covered by `DispositionAfterEscalation`); changing `PeerResolve`'s guard to `IsOwner`
+violates `RepairResolveNeedsDecision` (verified 2026-09-08, spec 016 WS3);
+the budget guard moved from `RepairResolve` to `RepairDispose`, and deleting
+`repairCount[l] >= MaxRepair` there violates the state invariant
+`DispositionAfterEscalation` (reachable via Claim, RepairEnter, RepairClear,
+RepairEnter, RepairDispose at count 1); changing `PeerResolve`'s guard to `IsOwner`
 violates `PrFlowNeedsPeerApproval` and `PrFlowEntryByReviewer`; changing
 `RepairClear`'s guard to `IsLaneAgent` violates
 `RepairClearByResponsibleActor`; assigning `owner[l]` instead of
@@ -150,10 +164,13 @@ violates `PrFlowNeedsPeerApproval` and `PrFlowEntryByReviewer`; changing
 ### Actor authority
 
 `RepairClear` is guarded on `IsRepairOwner`, the actor `RepairEnter` copied
-from `lastActor` (spec 006 FR-7/FR-15). `RepairResolve` stays `IsLaneAgent`:
-the FR-18 escalation is a human decision, and either lane agent may carry out
-the terminal disposition, matching `test/formal/lane-lock-model.mjs`
-`resolve()`. `Rescope` has no `repair-needed` branch: FR-20 reserves repair
+from `lastActor` (spec 006 FR-7/FR-15). `RepairResolve` is guarded on the
+recorded `decision` (FR-29 as amended 2026-09-08): `disposed` admits a lane
+agent, `override` admits any configured agent. `RepairDispose` and
+`RepairOverrideGrant` are actor-free human records that change only
+`decision`. `test/formal/lane-lock-model.mjs` `resolve()` mirrors the
+disposition path through its `dispose()` op; the harness grants no overrides,
+so the override path is covered by `test/core.test.mjs` only. `Rescope` has no `repair-needed` branch: FR-20 reserves repair
 rescoping for a guardian or human, neither of which is in the agent pool, and
 the harness transcription rejects agent-pool repair rescopes the same way.
 
@@ -161,6 +178,22 @@ the harness transcription rejects agent-pool repair rescopes the same way.
 
 - FR-18 is modeled as a per-lane `repairCount` (0..2) without reason
   identity; distinct-reason repair sequences share one budget in the model.
+  Spec 015 Q4 (Option A, 2026-09-08) keeps the model's claim-resets-count
+  behavior; the implementation aligns in spec 016 WS4.
+- Override scoping (spec 016 WS3 review): the model admits a `repair-resolve`
+  override grant only while the lane is `repair-needed` and voids a pending
+  one on `RepairClear`; the implementation scopes neither (`grantOverride`
+  checks no lane status, and `resolveHandoff` consumes any active
+  `repair-resolve` grant for the lane), so a grant survives a clear and
+  re-entry. The model's single `decision` slot also forbids an override
+  after a disposition, which the implementation allows as two coexisting
+  records. Neither is harness-observable (no overrides in throwaway repos).
+  Tighten the implementation or relax the model in WS4.
+- The FR-15 override clear (`RepairClear` by an audited override rather than
+  the repair owner) is distinct from the FR-29 `repair-resolve` override
+  modeled as `decision = "override"`, and is not modeled. Adding it would
+  relax `RepairClearByResponsibleActor`; deferred until prose designates who
+  the recorded actor is after an override clear.
 - Prose conflict to reconcile before the model leaves pilot: spec 002
   `PR-flow states and actors`, row `resolved after close without merge`,
   permits "a human/owner intentionally resolving". The model has no
@@ -184,7 +217,9 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   `LinkedLaneStaysActive`). The harness must tighten to `~prLinked` when the
   spec 002 line 77 reconciliation lands. (c) `Claim` with reviewer = owner is
   rejected by the model and silently reassigned to a distinct peer by the
-  harness; reachable states are equivalent.
+  harness; reachable states are equivalent. (d) the harness mirror has no
+  override path at all (`disposition` only); the model's `override` branch of
+  `RepairResolve` is exercised by TLC and by `test/core.test.mjs`.
 - Crash windows between the handoff write and the registry write are not
   modeled; the writes are atomic in the model.
 - TLC trace validation against harness-emitted traces is future work

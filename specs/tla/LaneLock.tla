@@ -289,6 +289,10 @@ RepairDispose(l) ==
                  prLinked, repairCount, peerApproved, lastActor, repairOwner,
                  approver>>
 
+\* Bounded on purpose: the grant is admitted only during repair-needed and
+\* only while no decision is pending, so one decision slot suffices. btrain
+\* itself accepts a grant at any time and lets an override coexist with a
+\* disposition; that widening is recorded in specs/tla/README.md Known gaps.
 RepairOverrideGrant(l) ==
   /\ status[l] = "repair-needed"
   /\ decision[l] = "none"
@@ -430,11 +434,11 @@ PrFlowRetention ==
     status[l] \in PrFlowStatuses =>
       (locked[l] # {} /\ (~uncovered[l] => registry[l] = locked[l]))
 
-\* spec 014 designation of spec 006 FR-18: a repair-needed lane resolves
-\* only after the escalation budget is exhausted. Every reachable resolved
-\* lane therefore has repairCount 0 (reset on the terminal transition), and
-\* no RepairResolve fires below MaxRepair — encoded structurally by the
-\* action guard; this invariant pins the count's bounds after resets.
+\* spec 006 FR-18 via FR-29: the MaxRepair guard sits on RepairDispose (a
+\* disposition needs the exhausted budget; the override exit does not).
+\* Every terminal transition resets the count, so every reachable terminal
+\* lane has repairCount 0; this invariant pins the count's bounds after
+\* resets, while DispositionAfterEscalation pins the guard itself.
 RepairBudgetBounded ==
   \A l \in Lanes : status[l] \in TerminalStatuses => repairCount[l] = 0
 
@@ -449,8 +453,8 @@ RepairOwnerAssigned ==
       ELSE repairOwner[l] = NoAgent
 
 \* spec 002 PR-flow states and actors: once a PR is linked, the lane stays
-\* active until a GitHub outcome (PrTerminal) or a post-escalation repair
-\* disposition (RepairResolve) terminates it and clears the link. No plain
+\* active until a GitHub outcome (PrTerminal) or a decision-backed repair
+\* exit (RepairResolve) terminates it and clears the link. No plain
 \* agent resolve may abandon a linked lane, so a linked lane is never found in
 \* a terminal status. (A linked lane may pass through repair-needed and back:
 \* workflow-integrity repair does not unlink the PR.)

@@ -2,7 +2,7 @@
   "status": "validation_mismatch",
   "status_note": "spec 014 verdict for the whole chain: TLC passed and implementation mode passes, but the FR-6 candidate gate tallies ledgered candidate findings (test/formal/README.md; findings 4, 5, 7, 9, 10 undesignated, 6 and 11 in their spec 015 FR-5 advisory window) and TLC trace validation has not run. A `pass` requires every validation outcome to pass.",
   "keys": {
-    "tla_content_sha256": "2e7206eb6ba338f47ebbb2128d1db9bf90c5a404ce0b16e8268177e9986220e2",
+    "tla_content_sha256": "571003f9d613252d57941ed075832854a9d2d9a562c3299c3628d6863fd6e303",
     "cfg_sha256": "e7ece7e264ab3ddb7a81b08ef5f8dce8448caaf4a57d7b7e0cb650784c767c78",
     "pinned_prose_sha256": "fc3117f1bfac449ec6e2b649dfd02abd8542b11d9c07f8ca8d4cf2896481b86e",
     "harness_sha256": "c38f8f1162c893a4950b471a2b63cfbf17c55a6baf0aa6883dc3e4b41010609f",
@@ -10,10 +10,10 @@
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "5883beea23d127b1c67702418eea0cda90ff39ad",
+    "source_commit": "ec31abee956cade908bb4db09b380d166b8fd622",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
-    "inputs_sha256": "04e89e02c289a44f29dd207cf8ca35a3d4824f92507d3cbaaacdafc229b85d77",
+    "inputs_sha256": "8cfd191d7378a484eafefb3b5fb76c9a13d235f35b497767c19e4abac07836d1",
     "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, every git-tracked file under src/brain_train/, test/formal/README.md, package.json, and package-lock.json; the reuse key, valid across squash merges"
   },
   "tlc": {
@@ -50,12 +50,12 @@
     ],
     "mutation_checks": [
       "Claim without NoConflictWithOthers violates Exclusivity",
-      "RepairResolve with plain IsLaneAgent instead of the decision disjunction violates action property RepairResolveNeedsDecision (verified 2026-09-09T04:12Z, spec 016 WS3)",
+      "RepairResolve with plain IsLaneAgent instead of the decision disjunction violates action property RepairResolveNeedsDecision (verified 2026-09-09T02:14Z, spec 016 WS3)",
       "PeerResolve guarded on IsOwner violates PrFlowNeedsPeerApproval and PrFlowEntryByReviewer (by construction: approver' = a # reviewer)",
       "RepairClear guarded on IsLaneAgent violates RepairClearByResponsibleActor (by construction)",
       "RepairEnter assigning owner[l] violates RepairEnterAssignsLastActor (by construction)"
     ],
-    "run_at": "2026-09-09T04:11:13Z"
+    "run_at": "2026-09-09T02:11:13Z"
   },
   "validation": {
     "engine": "fast-check model-based (spec 014 FR-6)",
@@ -72,6 +72,6 @@
     "candidate_gate": "fail as designed while ledger candidates 4, 5, 7, 9, 10 exist and 6, 11 are in advisory",
     "implementation_mode": "pass (mirror includes the FR-29 dispose op, spec 016 WS3)",
     "trace_validation": "not run; TLC trace validation of harness traces is future work",
-    "run_at": "2026-09-09T04:14:00Z"
+    "run_at": "2026-09-09T02:15:00Z"
   }
 }
