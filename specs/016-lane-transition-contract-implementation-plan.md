@@ -248,6 +248,10 @@ files or `locks.json` in this phase.
 - ledger: mark 6, 8, 11 closed; harness candidate labels
   `update-actor-unchecked` (needs-review case) and
   `repair-resolve-before-escalation` become regressions
+- WS0 Q6 (Option C): keep unconditional rejection of an unverified actor in
+  enforcement mode; when exactly one agent is configured, the rejection
+  message names it (`export BTRAIN_AGENT=<the-one-agent>`). Error-formatter
+  change plus the spec 015 FR-6 text; no pin involved
 
 **Likely files**
 
@@ -281,14 +285,24 @@ can be locked (PR #35 merge).
 - spec 014 `Normative-source prerequisite`: point repair exits at spec 006
   FR-29; split rescope from resync (WS0 Q2)
 - spec 005 `Proposed Status Model`: no change expected; confirm
+- spec 006 FR-18 (pinned): WS0 Q4 clarification that a fresh claim resets the
+  repair count and `RepairClear` does not; scope the implementation count to
+  events after the most recent claim without deleting history; update the
+  `test/formal/README.md` Known gaps entry
+- spec 006 FR-2 designation text and the spec 014 rescope/resync split (WS0
+  Q2, Option B): doctor resyncs only in `in-progress`, `changes-requested`,
+  `repair-needed`; owner only elsewhere; decide whether `Resync` is a system
+  action in the model or an abstract external event
 - repin `LaneLock.tla`; add `ReturnToPr`, `Resync`, and `Reassign` actions if
   designated; TLC
 - production rows 6, 12, 17, 20 move from `undesignated` to `designated`
   or are removed
 - advisory then enforce; remove L1, L2, L4, L5, L6, L8, L9
 - spec 015 Phase B step 4 in the same lane: one-line designations for L10
-  (spec 005 FR-5), L11-L15 (spec 002 CLI Commands); then advisory, then
-  enforce; remove them
+  (spec 005 FR-5, pinned; WS0 Q8 Option C with swap policy A-i, row 20 split
+  into `--owner` and `--reviewer` sub-rows, `authorHistory` and
+  `AuthorSeparation` in the model), L11-L15 (spec 002 CLI Commands); then
+  advisory, then enforce; remove them
 - rewrite `test/core.test.mjs:1495-1503`, `test/core.test.mjs:1539`,
   `test/watchdog.test.mjs:122` to the designated paths
 
@@ -325,7 +339,7 @@ pilot model in CI.
 
 ## Sequencing
 
-| Step | Work | Owner | Blocked by | Status 2026-09-01 |
+| Step | Work | Owner | Blocked by | Status (updated 2026-09-08) |
 | --- | --- | --- | --- | --- |
 | 1 | WS0 decisions | human | none | decided 2026-09-08 (spec 015 v0.1.4) |
 | 2 | WS1 unpinned prose | claude, lane `k` | none | in progress |

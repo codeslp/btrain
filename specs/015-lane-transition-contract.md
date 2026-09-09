@@ -599,20 +599,21 @@ unlocks. The questions are independent except where noted.
 Brian Faris answered all eight questions on 2026-09-08. The answers below are
 the human decisions spec 016 Workstream 0 required. They do not by themselves
 designate any row: each row still moves to `designated` only when the owning
-prose change named in its follow-up lands (spec 016 WS3 for unpinned prose,
-WS4 for pinned prose). The option text under each question remains the
+prose change named in its follow-up lands. The `Lands in` column names the
+spec 016 workstream that carries each one; spec 016 v0.1.1 adds Q4 and Q6 to
+its workstreams. The option text under each question remains the
 authoritative description of what the chosen answer requires.
 
 | Q | Decision | Chosen option | Owning prose | Lands in |
 | --- | --- | --- | --- | --- |
 | Q1 | The owner may return PR-flow `changes-requested` directly to `pr-review`. Designate row 12. | A | spec 002 PR-flow states (pinned) | WS4 |
-| Q2 | `btrain doctor` may resync lock coverage only in `in-progress`, `changes-requested`, and `repair-needed`. In `needs-review` and PR-flow statuses resync is owner only, with no override path. | B, owner-only sub-row | spec 006 FR-2 designation text (unpinned) | WS3 |
+| Q2 | `btrain doctor` may resync lock coverage only in `in-progress`, `changes-requested`, and `repair-needed`. In `needs-review` and PR-flow statuses resync is owner only, with no override path. | B, owner-only sub-row | spec 006 FR-2 designation text (unpinned); spec 014 `Normative-source prerequisite` rescope/resync split (pinned; repin) | WS4 |
 | Q3 | A `repair-needed` lane resolves through either the FR-18 escalation disposition or a consumed FR-2c/2d override. | A | spec 006 FR-29 (unpinned) | WS3 |
-| Q4 | A fresh claim resets the FR-18 repair count; `RepairClear` does not. The implementation scopes the count to events after the most recent claim and keeps the full event history. | A | spec 006 FR-18 clarification (unpinned) | WS3 |
+| Q4 | A fresh claim resets the FR-18 repair count; `RepairClear` does not. The implementation scopes the count to events after the most recent claim and keeps the full event history. | A | spec 006 FR-18 clarification (pinned; repin) | WS4 |
 | Q5 | Either lane agent (owner or reviewer) may abandon an unlinked `in-progress` or `changes-requested` lane. Retire L11 once row 6 is enforced. | A | spec 002 CLI Commands (pinned) | WS4 |
-| Q6 | In enforcement mode an unverified actor is always rejected. When exactly one agent is configured, the rejection message names it: `export BTRAIN_AGENT=<the-one-agent>`. | C | spec 015 FR-6 (this spec) | WS3 |
+| Q6 | In enforcement mode an unverified actor is always rejected. When exactly one agent is configured, the rejection message names it: `export BTRAIN_AGENT=<the-one-agent>`. | C | spec 015 FR-6 (this spec; independent of pins) | WS3 |
 | Q7 | Any configured agent (plus `system`) may declare `repair-needed`. An owner declaring repair on their own lane is recorded with a `self-repair-audit` field in the canonical lane-event log; that field is not a `transition-advisory` and does not count against the FR-5 retirement gate. | C | spec 006 FR-29 (unpinned) | WS3 |
-| Q8 | Only the current owner may reassign `--owner`; either lane agent may reassign `--reviewer`. Swap policy A-i applies: the lane records its authors and prior owners, and any update that makes one of them the reviewer is rejected, whether in one step or through intermediate assignments. Retire L10 once row 20 is enforced. | C with A-i | spec 005 FR-5 (unpinned) | Phase B step 4 |
+| Q8 | Only the current owner may reassign `--owner`; either lane agent may reassign `--reviewer`. Row 20 splits into an `--owner` sub-row (actor `owner`) and a `--reviewer` sub-row (actor `lane-agent`). Swap policy A-i applies: the lane records its authors and prior owners, and any update that makes one of them the reviewer is rejected, whether in one step or through intermediate assignments. Retire L10 once row 20 is enforced. | C with A-i | spec 005 FR-5 (pinned; repin) | WS4 (Phase B step 4) |
 
 Consequences worth restating:
 
@@ -620,18 +621,19 @@ Consequences worth restating:
   spec 002 PR-flow states. Q5 and Q4 need no model change. Q8 adds
   `authorHistory` and the `AuthorSeparation` invariant. Q3 adds an
   `overrideConsumed` disjunct to `RepairResolve`.
-- Q2 opens a model question WS3 must settle. `LaneLock.tla` `Rescope` is
+- Q2 opens a model question WS4 must settle. `LaneLock.tla` `Rescope` is
   owner-only and exists only in `in-progress` and `changes-requested`; the
-  agent pool has no `system` actor and no action restores coverage during
-  `repair-needed`. WS3 must either add a system resync action for the three
-  permitted statuses (same set, coverage restore only) or record doctor
-  resync as an abstract external event alongside the watchdog, and the FR-6
-  harness mirror must match whichever is chosen.
+  agent pool has no `system` actor and no action restores coverage while a
+  lane remains in `repair-needed`. WS4 must either add a system resync action
+  for the three permitted statuses (same set, coverage restore only) or
+  record doctor resync as an abstract external event alongside the watchdog,
+  and the FR-6 harness mirror must match whichever is chosen.
 - Q5 chose Option A, so the Q8 Option B deadlock caveat does not apply and
   no guardian takeover path is required.
-- Q2's owner-only choice for `needs-review` and PR-flow means the row-17
-  actor stays `owner` and no override wording is added to the requirement or
-  guidance. `test/watchdog.test.mjs:122` must be reworked to exercise
+- Q2's owner-only choice for `needs-review` and PR-flow means row 17
+  splits: the restricted-status sub-row uses actor `owner`, the permitted
+  sub-row keeps `owner, or system`, and neither is widened to
+  `owner, or override`. `test/watchdog.test.mjs:122` must be reworked to exercise
   `btrain doctor --repair` end to end for the permitted statuses and to
   confirm rejection in the restricted ones.
 - Q6 changes only the error formatter and the FR-6 text. No new implicit
@@ -892,7 +894,8 @@ unrelated repair reason starts its own count. The model must change to match.
 **Safety property:** escalation reachability (how quickly a fragile lane
 reaches human attention).
 **Dependency:** the Known gaps entry in `test/formal/README.md` tracks this.
-Can land as a spec 006 FR-18 clarification (unpinned paragraph) in Phase B
+Correction 2026-09-08: spec 006 FR-18 is pinned by `LaneLock.tla` (header
+line 46), so the clarification forces a repin and lands in WS4, not Phase B
 step 2.
 
 ---
@@ -1147,5 +1150,6 @@ their own ownership). The reviewer can still be reassigned by either agent.
 **Affected rows:** 20, L10.
 **Safety property:** ownership integrity (whether ownership can change without
 a clean claim boundary).
-**Dependency:** spec 005 FR-5 is unpinned for the reassignment sentence. Can
-land in Phase B step 4.
+**Dependency:** Correction 2026-09-08: spec 005 FR-5 is pinned by
+`LaneLock.tla` (header line 32) and the pin covers the whole section, so the
+reassignment sentence forces a repin. Lands in WS4 as Phase B step 4.
