@@ -10,10 +10,10 @@
       "test/formal/lane-lock-model.mjs",
       "test/formal/lane-lock-harness.test.mjs"
     ],
-    "source_commit": "f8853b13714ee89d4008ec76be83160a8beb48fc",
+    "source_commit": "59de5fa672591e1be481cf31399b494eddc42263",
     "source_commit_note": "provenance only; not a reuse key",
     "tla2tools_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
-    "inputs_sha256": "94d450e0256f4bac4417af89f0fdd1819f2ddae4dd9cc8f3725f61f02775b9eb",
+    "inputs_sha256": "d1a10371fd3b1fdf23a026b325410f0a50a7d650b1a9cf4a40b9beba8c22ada9",
     "inputs_note": "sha256 over (path, sha256(content)) of the .tla, .cfg, pinned prose files, harness files, every git-tracked file under src/brain_train/, test/formal/README.md, package.json, and package-lock.json; the reuse key, valid across squash merges"
   },
   "tlc": {

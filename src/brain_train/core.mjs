@@ -4693,8 +4693,22 @@ function countRepairEntries(events, reasonCode) {
 // spec 015 row 20 / spec 005 FR-5 (Q8): the gate inputs for a reassignment,
 // read once from the workflow log (FR-12: the gate itself reads no files).
 // Shared by the lane and single-handoff branches of patchHandoff.
+// spec 002 PR-flow states: "PR-flow changes-requested" is the changes-requested
+// that `btrain pr poll --apply` entered. Provenance comes from the workflow
+// event that made the transition (details.transitionEvent === "pr-poll"), not
+// from the user-settable reason code.
+function enteredChangesRequestedViaPrPoll(events, current) {
+  if (current?.status !== "changes-requested") return false
+  const entry = [...(events || [])].reverse().find(
+    (event) => event.after?.status === "changes-requested" && event.before?.status !== "changes-requested",
+  )
+  return entry?.details?.transitionEvent === "pr-poll"
+}
+
 async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCurrent, updates, transitionEvent, actor = "" }) {
-  const reassigning = transitionEvent === "handoff update --reassign"
+  // Role guards apply whenever a role is supplied, even when a --status change
+  // is the primary transition event (spec 015 row 20 rides along).
+  const reassigning = updates.owner !== undefined || updates.reviewer !== undefined
   if (reassigning) {
     for (const flag of ["owner", "reviewer"]) {
       if (updates[flag] !== undefined && (typeof updates[flag] !== "string" || !updates[flag].trim())) {
@@ -5536,6 +5550,21 @@ async function patchHandoff(repoRoot, options) {
       // role, and whether the resulting reviewer was ever an author of this
       // task. The history is read once here (FR-12: the gate reads no files).
       const reassign = await resolveReassignInputs(repoRoot, config, { laneId, existingCurrent, updates, transitionEvent, actor: resolvedActor })
+      const prFlowChangesRequested = existingCurrent.status === "changes-requested"
+        ? enteredChangesRequestedViaPrPoll(await readWorkflowEvents(repoRoot, config, laneId), existingCurrent)
+        : false
+      // A role change bundled with another mutation still meets the row 20
+      // guards; a miss records L10 alongside the primary transition.
+      const roleAdvisory = reassign.reassigning && transitionEvent !== "handoff update --reassign"
+        ? advisoryRowId(applyTransition(existingCurrent, "handoff update --reassign", {
+            to: existingCurrent.status,
+            actor: resolvedActor,
+            prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+            ownerChanged: reassign.ownerChanged,
+            reviewerIsPriorAuthor: reassign.reviewerIsPriorAuthor,
+            distinctReviewer: reassign.distinctReviewer,
+          }).row, existingCurrent, { to: existingCurrent.status })
+        : ""
       let matchedRow = null
       const validateStructuralTransition = (source) => {
         const transition = applyTransition(source, transitionEvent, {
@@ -5543,8 +5572,7 @@ async function patchHandoff(repoRoot, options) {
           actor: resolvedActor,
           prFlowEnabled: getPrFlowConfig(config).enabled,
           prLinked: !!(updates.prNumber || source.prNumber),
-          prFlowChangesRequested:
-            source.status === "changes-requested" && source.reasonCode === "pr-review-feedback",
+          prFlowChangesRequested,
           reasonCode: reasonMetadata.reasonCode,
           feedbackReason: reasonMetadata.reasonCode,
           ownerChanged: reassign.ownerChanged,
@@ -5758,7 +5786,9 @@ async function patchHandoff(repoRoot, options) {
           repairOwner: updates.repairOwner || "",
           repairEscalation: updates.repairEscalation || "",
           repairAttempts: updates.repairAttempts || 0,
-          ...(transitionAdvisory ? { "transition-advisory": transitionAdvisory } : {}),
+          transitionEvent,
+          ...(transitionAdvisory || roleAdvisory ? { "transition-advisory": transitionAdvisory || roleAdvisory } : {}),
+          ...(roleAdvisory ? { "role-advisory": roleAdvisory } : {}),
           ...(selfRepairAudit ? { "self-repair-audit": true } : {}),
           ...(reassign.reassigning
             ? { authorHistory: reassign.authorHistory, ownerChanged: reassign.ownerChanged, actingAgent: resolvedActor || "" }
@@ -5767,6 +5797,15 @@ async function patchHandoff(repoRoot, options) {
         },
       }]
       for (const line of advisoryWarnings) options.onEvent?.(line)
+      if (roleAdvisory) {
+        options.onEvent?.(formatAdvisoryWarning(roleAdvisory, {
+          event: "handoff update --reassign (with --status)",
+          from: existingCurrent.status,
+          to: existingCurrent.status,
+          actor: resolvedActor,
+          detail: "spec 005 FR-5 reassignment: owner-only owner changes, no prior author as reviewer, distinct roles",
+        }))
+      }
 
       // Publish the active-status handoff inside the lock mutex so that
       // a concurrent release-lane audit cannot observe stale (inactive)
@@ -5835,13 +5874,25 @@ async function patchHandoff(repoRoot, options) {
   updates.reasonTags = reasonMetadata.reasonTags
   const transitionEvent = classifyTransitionEvent(options, existingCurrent.status, nextStatus)
   const singleReassign = await resolveReassignInputs(repoRoot, config, { existingCurrent, updates, transitionEvent, actor: resolvedActor })
+  const singlePrFlowChangesRequested = existingCurrent.status === "changes-requested"
+    ? enteredChangesRequestedViaPrPoll(await readWorkflowEvents(repoRoot, config, ""), existingCurrent)
+    : false
+  const singleRoleAdvisory = singleReassign.reassigning && transitionEvent !== "handoff update --reassign"
+    ? advisoryRowId(applyTransition(existingCurrent, "handoff update --reassign", {
+        to: existingCurrent.status,
+        actor: resolvedActor,
+        prLinked: !!(updates.prNumber || existingCurrent.prNumber),
+        ownerChanged: singleReassign.ownerChanged,
+        reviewerIsPriorAuthor: singleReassign.reviewerIsPriorAuthor,
+        distinctReviewer: singleReassign.distinctReviewer,
+      }).row, existingCurrent, { to: existingCurrent.status })
+    : ""
   const singleTransition = applyTransition(existingCurrent, transitionEvent, {
     to: nextStatus,
     actor: resolvedActor,
     prFlowEnabled: getPrFlowConfig(config).enabled,
     prLinked: !!(updates.prNumber || existingCurrent.prNumber),
-    prFlowChangesRequested:
-      existingCurrent.status === "changes-requested" && existingCurrent.reasonCode === "pr-review-feedback",
+    prFlowChangesRequested: singlePrFlowChangesRequested,
     reasonCode: reasonMetadata.reasonCode,
     feedbackReason: reasonMetadata.reasonCode,
     ownerChanged: singleReassign.ownerChanged,
@@ -5867,6 +5918,15 @@ async function patchHandoff(repoRoot, options) {
     configuredAgents,
   })
   for (const line of singleWarnings) options.onEvent?.(line)
+  if (singleRoleAdvisory) {
+    options.onEvent?.(formatAdvisoryWarning(singleRoleAdvisory, {
+      event: "handoff update --reassign (with --status)",
+      from: existingCurrent.status,
+      to: existingCurrent.status,
+      actor: resolvedActor,
+      detail: "spec 005 FR-5 reassignment: owner-only owner changes, no prior author as reviewer, distinct roles",
+    }))
+  }
   let repairMetadata = {
     repairOwner: existingCurrent.repairOwner || "",
     repairEscalation: existingCurrent.repairEscalation || "",
@@ -5971,7 +6031,9 @@ async function patchHandoff(repoRoot, options) {
       repairOwner: updates.repairOwner || "",
       repairEscalation: updates.repairEscalation || "",
       repairAttempts: updates.repairAttempts || 0,
-      ...(singleAdvisory ? { "transition-advisory": singleAdvisory } : {}),
+      transitionEvent,
+      ...(singleAdvisory || singleRoleAdvisory ? { "transition-advisory": singleAdvisory || singleRoleAdvisory } : {}),
+      ...(singleRoleAdvisory ? { "role-advisory": singleRoleAdvisory } : {}),
       ...(singleSelfRepairAudit ? { "self-repair-audit": true } : {}),
       ...(singleReassign.reassigning
         ? { authorHistory: singleReassign.authorHistory, ownerChanged: singleReassign.ownerChanged, actingAgent: resolvedActor || "" }

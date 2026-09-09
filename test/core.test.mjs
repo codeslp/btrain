@@ -2923,12 +2923,16 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     const back = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "b", "--status", "changes-requested", "--reason-code", "pr-review-feedback", "--actor", "writer"], tmpDir)
     assert.equal(back.code, 0, back.stderr)
 
+    // A changes-requested entered by hand, even with the pr-review-feedback reason code, is
+    // not PR-flow changes-requested: provenance comes from the pr-poll event, so the owner's
+    // shortcut is L4 here. The genuine path is covered in test/pr-flow.test.mjs.
     const shortcut = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "b", "--status", "pr-review", "--actor", "writer", "--no-dispatch"], tmpDir)
     assert.equal(shortcut.code, 0, shortcut.stderr)
-    assert.doesNotMatch(shortcut.stdout, /transition-advisory/)
+    assert.match(shortcut.stdout, /transition-advisory L4/)
     assert.match(shortcut.stdout, /status: pr-review/)
     let events = await readLaneEvents(tmpDir, "b")
-    assert.equal(lastEventOfType(events, "update").details["transition-advisory"], undefined)
+    assert.equal(lastEventOfType(events, "update").details["transition-advisory"], "L4")
+    assert.equal(lastEventOfType(events, "update").details.transitionEvent, "handoff update --status")
 
     const plainResolve = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "done early", "--actor", "writer"], tmpDir)
     assert.equal(plainResolve.code, 0, plainResolve.stderr)
@@ -2966,6 +2970,23 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     const valueless = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--actor", "third", "--reviewer"], tmpDir)
     assert.notEqual(valueless.code, 0)
     assert.match(valueless.stderr, /`--reviewer` requires an agent name/)
+    const valuelessWithStatus = await runBtrain(
+      [...laneNeedsReviewArgs(tmpDir, "a", "third"), "--owner"],
+      tmpDir,
+    )
+    assert.notEqual(valuelessWithStatus.code, 0)
+    assert.match(valuelessWithStatus.stderr, /`--owner` requires an agent name/)
+
+    // Roles bundled with a status change still meet the row 20 guards: the owner hands
+    // off to needs-review while making a prior author (writer) the reviewer.
+    const bundled = await runBtrain([...laneNeedsReviewArgs(tmpDir, "a", "third"), "--reviewer", "writer"], tmpDir)
+    assert.equal(bundled.code, 0, bundled.stderr)
+    assert.match(bundled.stdout, /transition-advisory L10: handoff update --reassign \(with --status\)/)
+    const bundledEvents = await readLaneEvents(tmpDir, "a")
+    const bundledUpdate = lastEventOfType(bundledEvents, "update")
+    assert.equal(bundledUpdate.details["role-advisory"], "L10")
+    assert.equal(bundledUpdate.details["transition-advisory"], "L10")
+    assert.equal(bundledUpdate.after.status, "needs-review")
 
     const priorAuthorAsReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--reviewer", "writer", "--actor", "third"], tmpDir)
     assert.equal(priorAuthorAsReviewer.code, 0, priorAuthorAsReviewer.stderr)
