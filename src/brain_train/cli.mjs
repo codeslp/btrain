@@ -9,6 +9,7 @@ import {
   claimHandoff,
   compactHandoffHistory,
   consumeOverride,
+  disposeRepair,
   doctor,
   extractSpillPathFromNextAction,
   forceReleaseLockAudited,
@@ -132,8 +133,10 @@ Usage:
   btrain transitions [--format json|mermaid]                                    Print the guarded lane-transition contract
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
-  btrain override grant --action <push|needs-review|force-release> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
+  btrain override grant --action <push|needs-review|force-release|repair-resolve> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
+  btrain repair dispose --lane <id> --confirmed-by <human> --reason <text> [--actor <name>]
+                                                                              Record the human disposition that lets an escalated repair-needed lane resolve (spec 006 FR-29)
   btrain repos [--json]                                                          List registered repos, including disabled repos
   btrain repos enable|disable|remove <name-or-path>                              Control whether a repo appears in global operations and the dashboard
   btrain repos prune                                                             Remove registry entries whose paths no longer exist
@@ -2238,6 +2241,26 @@ async function run() {
       // read as a successful remediation.
       process.exitCode = 1
     }
+    return
+  }
+
+  if (command === "repair") {
+    const subcommand = rest[0] === "dispose" ? rest[0] : null
+    if (!subcommand) {
+      throw new BtrainError({
+        message: "`btrain repair` requires a subcommand.",
+        reason: "No subcommand was provided.",
+        fix: 'btrain repair dispose --lane <id> --confirmed-by <human> --reason "..."',
+        context: "Available subcommands: dispose.",
+      })
+    }
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const record = await disposeRepair(repoRoot, options)
+    console.log(`repair disposition recorded${record.laneId ? ` for lane ${record.laneId}` : ""}: terminate`)
+    console.log(`confirmed by: ${record.confirmedBy}`)
+    console.log(`reason: ${record.reason}`)
+    console.log(`next: ${record.next}`)
     return
   }
 

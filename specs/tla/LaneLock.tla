@@ -2,8 +2,8 @@
 \* Bounded model of the designated btrain lane/lock contract (spec 014
 \* Phase 1). The model encodes INTENDED behavior only: transitions that the
 \* designated prose forbids (final-resolve bypass, unaudited release,
-\* close-without-merge to repair-needed, repair resolution before FR-18
-\* escalation) do not exist here. The FR-6 harness (test/formal/) compares
+\* close-without-merge to repair-needed, repair resolution without a recorded
+\* human decision) do not exist here. The FR-6 harness (test/formal/) compares
 \* the implementation against the same contract and ledgers the known drift.
 \*
 \* Actor authority is explicit: every agent-driven action takes the acting
@@ -16,7 +16,13 @@
 \* into repairOwner, and only that actor may clear the repair (FR-15).
 \* Rescoping a repair-needed lane is a guardian or human act (FR-20) that the
 \* agent pool cannot perform, so the model has no such action; the FR-6
-\* harness transcription rejects it the same way.
+\* harness transcription rejects it the same way. decision records the human
+\* decision spec 006 FR-29 requires before a repair-needed lane may resolve:
+\* a disposition (btrain repair dispose, only after the FR-18 escalation) or
+\* an audited FR-2c/FR-2d override. Both are records written by humans
+\* outside the agent pool, so RepairDispose and RepairOverrideGrant are
+\* actor-free and change no status, lock, owner, or reviewer; they are not
+\* spec 015 transition rows (FR-1 gates only those four fields).
 \*
 \* Pinned to: specs/014-specula-formal-verification-pilot.md § Normative-source prerequisite
 \* Pinned to: specs/002-multi-lane-handoffs.md § Lock Enforcement
@@ -45,7 +51,8 @@
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-15: Clearing `repair-needed`
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-18: One retry budget before human escalation
 \* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-20: Lock retention during `repair-needed`
-\* Pinned-hash: 56a39c3b1778bdc1840a293c7cfde4dc0186f7d763c468befabee5fb307f5a7c
+\* Pinned to: specs/006-workflow-resilience-and-guardian.md § FR-29: `repair-needed` transitions
+\* Pinned-hash: fc3117f1bfac449ec6e2b649dfd02abd8542b11d9c07f8ca8d4cf2896481b86e
 EXTENDS Naturals
 
 \* Pilot bounds (tla-author: small by design; widen only after this passes).
@@ -65,6 +72,8 @@ Statuses == {"idle", "in-progress", "needs-review", "changes-requested",
              "ready-for-pr", "pr-review", "ready-to-merge", "repair-needed",
              "resolved"}
 ActiveStatuses == Statuses \ {"idle", "resolved"}
+\* spec 006 FR-29 human decision on a repair-needed lane (see RepairResolve).
+Decisions == {"none", "disposed", "override"}
 PrFlowStatuses == {"ready-for-pr", "pr-review", "ready-to-merge"}
 TerminalStatuses == {"idle", "resolved"}
 
@@ -84,10 +93,11 @@ VARIABLES
   peerApproved, \* lane -> TRUE after a peer reviewer approved this lane
   lastActor,   \* lane -> most recent canonical workflow actor (FR-7)
   repairOwner, \* lane -> responsible repair actor while repair-needed (FR-7/FR-15)
-  approver     \* lane -> the agent whose PeerResolve admitted the lane to the PR flow
+  approver,    \* lane -> the agent whose PeerResolve admitted the lane to the PR flow
+  decision     \* lane -> FR-29 human decision while repair-needed: none, disposed, override
 
 vars == <<status, owner, reviewer, locked, registry, uncovered, prLinked,
-          repairCount, peerApproved, lastActor, repairOwner, approver>>
+          repairCount, peerApproved, lastActor, repairOwner, approver, decision>>
 
 \* Authority predicates (spec 002 PR-flow actors; spec 006 FR-7 responsible
 \* actor). Named once so the authority rule is reviewable in one place
@@ -113,6 +123,7 @@ Init ==
   /\ lastActor = [l \in Lanes |-> NoAgent]
   /\ repairOwner = [l \in Lanes |-> NoAgent]
   /\ approver = [l \in Lanes |-> NoAgent]
+  /\ decision = [l \in Lanes |-> "none"]
 
 \* spec 002 CLI Commands: claim requires an idle or resolved lane, files,
 \* exclusive locks, and a peer reviewer distinct from the owner.
@@ -132,6 +143,7 @@ Claim(l, o, r, fs) ==
   /\ lastActor' = [lastActor EXCEPT ![l] = o]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
+  /\ decision' = [decision EXCEPT ![l] = "none"]
 
 \* spec 005 status model / FR-7: the owner hands off from in-progress or,
 \* after rework, from changes-requested. Locks are retained.
@@ -141,7 +153,7 @@ ToNeedsReview(l, a) ==
   /\ status' = [status EXCEPT ![l] = "needs-review"]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, peerApproved, repairOwner, approver>>
+                 repairCount, peerApproved, repairOwner, approver, decision>>
 
 \* spec 005 FR-2/FR-3/FR-5/FR-10: the reviewer returns findings; the lane
 \* stays active with the same owner, reviewer, and locks.
@@ -153,7 +165,7 @@ RequestChanges(l, a) ==
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, repairOwner>>
+                 repairCount, repairOwner, decision>>
 
 \* spec 002 v1.1.2: peer resolve at needs-review is local approval — the
 \* reviewer advances the lane to nonterminal ready-for-pr; locks retained.
@@ -166,7 +178,7 @@ PeerResolve(l, a) ==
   /\ approver' = [approver EXCEPT ![l] = a]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, repairOwner>>
+                 repairCount, repairOwner, decision>>
 
 \* spec 002 PR-flow actors: the owner creates or links the PR.
 LinkPr(l, a) ==
@@ -176,14 +188,14 @@ LinkPr(l, a) ==
   /\ prLinked' = [prLinked EXCEPT ![l] = TRUE]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, repairCount,
-                 peerApproved, repairOwner, approver>>
+                 peerApproved, repairOwner, approver, decision>>
 
 \* btrain pr poll --apply outcomes (spec 002 PR-flow states).
 PrClear(l) ==
   /\ status[l] = "pr-review"
   /\ status' = [status EXCEPT ![l] = "ready-to-merge"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, peerApproved, lastActor, repairOwner, approver>>
+                 repairCount, peerApproved, lastActor, repairOwner, approver, decision>>
 
 PrFeedback(l) ==
   /\ status[l] \in {"pr-review", "ready-to-merge"}
@@ -191,7 +203,7 @@ PrFeedback(l) ==
   /\ peerApproved' = [peerApproved EXCEPT ![l] = FALSE]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 repairCount, lastActor, repairOwner>>
+                 repairCount, lastActor, repairOwner, decision>>
 
 \* Terminal PR outcomes: merge and close-without-merge are both terminal
 \* resolved plus lock release (spec 002 v1.1.2; close is NOT repair-needed).
@@ -207,7 +219,7 @@ PrTerminal(l) ==
   /\ peerApproved' = [peerApproved EXCEPT ![l] = FALSE]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
-  /\ UNCHANGED <<owner, reviewer, lastActor>>
+  /\ UNCHANGED <<owner, reviewer, lastActor, decision>>
 
 \* Terminal resolve outside the review/PR flow: the owner or reviewer
 \* abandons or supersedes the lane. Terminal resolved releases locks. Once a
@@ -228,7 +240,7 @@ AbandonResolve(l, a) ==
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
   /\ approver' = [approver EXCEPT ![l] = NoAgent]
-  /\ UNCHANGED <<owner, reviewer>>
+  /\ UNCHANGED <<owner, reviewer, decision>>
 
 \* spec 006 FR-4/FR-20 with the spec 014 designation: repair-needed enters
 \* only from an active status, for a workflow-integrity failure; locks are
@@ -245,7 +257,7 @@ RepairEnter(l) ==
               ELSE repairCount[l] + 1]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = lastActor[l]]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
-                 peerApproved, lastActor, approver>>
+                 peerApproved, lastActor, approver, decision>>
 
 \* spec 006 FR-15 with the spec 014 designation: the responsible repair
 \* actor (FR-7) clears the repair and same-lane work continues. The other
@@ -257,18 +269,39 @@ RepairClear(l, a) ==
   /\ status' = [status EXCEPT ![l] = "in-progress"]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ repairOwner' = [repairOwner EXCEPT ![l] = NoAgent]
+  \* A pending FR-29 decision is void once work continues.
+  /\ decision' = [decision EXCEPT ![l] = "none"]
   /\ UNCHANGED <<owner, reviewer, locked, registry, uncovered, prLinked,
                  repairCount, peerApproved, approver>>
 
-\* spec 014 designation: repair may exit to resolved only as a terminal
-\* disposition AFTER the FR-18 escalation decides the lane will not
-\* continue. The escalation is a human decision; either lane agent may
-\* carry out the terminal disposition (the FR-6 transcription accepts the
-\* same actors, lane-lock-model.mjs resolve()). Terminal release applies.
-RepairResolve(l, a) ==
-  /\ IsLaneAgent(l, a)
+\* spec 006 FR-29 (spec 015 row 15; open questions Q3 decided 2026-09-08):
+\* repair exits to resolved only as a terminal disposition backed by a
+\* recorded human decision. Either a disposition record written after the
+\* FR-18 escalation fired (then a lane agent carries it out) or an audited
+\* FR-2c/FR-2d override (then any configured agent may present it). The
+\* escalation flag alone is not a decision. Terminal release applies.
+RepairDispose(l) ==
   /\ status[l] = "repair-needed"
   /\ repairCount[l] >= MaxRepair
+  /\ decision[l] = "none"
+  /\ decision' = [decision EXCEPT ![l] = "disposed"]
+  /\ UNCHANGED <<status, owner, reviewer, locked, registry, uncovered,
+                 prLinked, repairCount, peerApproved, lastActor, repairOwner,
+                 approver>>
+
+RepairOverrideGrant(l) ==
+  /\ status[l] = "repair-needed"
+  /\ decision[l] = "none"
+  /\ decision' = [decision EXCEPT ![l] = "override"]
+  /\ UNCHANGED <<status, owner, reviewer, locked, registry, uncovered,
+                 prLinked, repairCount, peerApproved, lastActor, repairOwner,
+                 approver>>
+
+RepairResolve(l, a) ==
+  /\ status[l] = "repair-needed"
+  /\ \/ (decision[l] = "disposed" /\ IsLaneAgent(l, a))
+     \/ (decision[l] = "override" /\ a \in Agents)
+  /\ decision' = [decision EXCEPT ![l] = "none"]
   /\ status' = [status EXCEPT ![l] = "resolved"]
   /\ locked' = [locked EXCEPT ![l] = {}]
   /\ registry' = [registry EXCEPT ![l] = {}]
@@ -297,7 +330,7 @@ Rescope(l, a, fs) ==
   /\ uncovered' = [uncovered EXCEPT ![l] = FALSE]
   /\ lastActor' = [lastActor EXCEPT ![l] = a]
   /\ UNCHANGED <<status, owner, reviewer, prLinked, repairCount,
-                 peerApproved, repairOwner, approver>>
+                 peerApproved, repairOwner, approver, decision>>
 
 \* spec 002 Force-release override + spec 006 FR-2c/FR-2d: an audited,
 \* human-confirmed override suspends matching lock coverage. The handoff
@@ -311,11 +344,12 @@ ForceRelease(l, a) ==
   \* An audited override is not a canonical workflow action (FR-7), so the
   \* requester does not become the responsible actor.
   /\ UNCHANGED <<status, owner, reviewer, locked, prLinked, repairCount,
-                 peerApproved, lastActor, repairOwner, approver>>
+                 peerApproved, lastActor, repairOwner, approver, decision>>
 
 \* Agent-driven actions quantify over the acting agent; the action's own
 \* guard decides whether that agent is authorized. GitHub and watchdog
-\* events (PrClear, PrFeedback, PrTerminal, RepairEnter) carry no actor.
+\* events (PrClear, PrFeedback, PrTerminal, RepairEnter) carry no actor, and
+\* neither do the FR-29 human records (RepairDispose, RepairOverrideGrant).
 Next ==
   \/ \E l \in Lanes : \E o \in Agents, r \in Agents, fs \in FileSets : Claim(l, o, r, fs)
   \/ \E l \in Lanes : \E a \in Agents : ToNeedsReview(l, a)
@@ -328,6 +362,8 @@ Next ==
   \/ \E l \in Lanes : \E a \in Agents : AbandonResolve(l, a)
   \/ \E l \in Lanes : RepairEnter(l)
   \/ \E l \in Lanes : \E a \in Agents : RepairClear(l, a)
+  \/ \E l \in Lanes : RepairDispose(l)
+  \/ \E l \in Lanes : RepairOverrideGrant(l)
   \/ \E l \in Lanes : \E a \in Agents : RepairResolve(l, a)
   \/ \E l \in Lanes : \E a \in Agents, fs \in FileSets : Rescope(l, a, fs)
   \/ \E l \in Lanes : \E a \in Agents : ForceRelease(l, a)
@@ -351,6 +387,7 @@ TypeOK ==
   /\ lastActor \in [Lanes -> Agents \union {NoAgent}]
   /\ repairOwner \in [Lanes -> Agents \union {NoAgent}]
   /\ approver \in [Lanes -> Agents \union {NoAgent}]
+  /\ decision \in [Lanes -> Decisions]
 
 \* spec 002 Lock Enforcement: no two lanes hold conflicting paths.
 Exclusivity ==
@@ -420,17 +457,30 @@ RepairOwnerAssigned ==
 LinkedLaneStaysActive ==
   \A l \in Lanes : prLinked[l] => status[l] \in ActiveStatuses
 
+\* spec 006 FR-29: a human decision exists only while the lane is in
+\* repair-needed; clearing or resolving the repair voids it.
+DecisionOnlyDuringRepair ==
+  \A l \in Lanes : decision[l] # "none" => status[l] = "repair-needed"
+
+\* spec 006 FR-29: a disposition is recorded only after the FR-18 escalation
+\* fired. The override path carries its own human confirmation and needs no
+\* escalation.
+DispositionAfterEscalation ==
+  \A l \in Lanes : decision[l] = "disposed" => repairCount[l] >= MaxRepair
+
 -----------------------------------------------------------------------------
 \* Action properties (checked as PROPERTY in LaneLock.cfg). State invariants
 \* cannot see a guard that was removed when every terminal action also resets
 \* the fields it reads, so these constrain the transitions themselves.
 
-\* spec 014 designation of spec 006 FR-18: a repair-needed lane may only
-\* become resolved when the escalation budget was exhausted before the step.
-RepairResolveNeedsEscalation ==
+\* spec 006 FR-29: a repair-needed lane may only become resolved when a human
+\* decision was recorded before the step, and a disposition (as opposed to an
+\* override) only after the FR-18 escalation budget was exhausted.
+RepairResolveNeedsDecision ==
   [][\A l \in Lanes :
        (status[l] = "repair-needed" /\ status'[l] = "resolved")
-         => repairCount[l] >= MaxRepair]_vars
+         => /\ decision[l] # "none"
+            /\ (decision[l] = "disposed" => repairCount[l] >= MaxRepair)]_vars
 
 \* spec 006 FR-15: only the responsible repair actor clears repair-needed;
 \* the actor who cleared is the recorded lastActor after the step.

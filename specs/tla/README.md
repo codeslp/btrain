@@ -57,9 +57,11 @@ implementation mode, trace validation) are not all passes means the file must
 not be reused; re-run TLC and `npm run test:formal`. The verifier is the only sanctioned way to consume
 this file. Consumer wiring lands in its own lanes because those files are
 outside this lane's locks: `tla-run-tlc` (PR #40), `tla-trace-explain`, the
-`formal-advisory` CI workflow, and `pre-handoff`. TLC baseline: 88,436,305 states generated, 8,236,969 distinct, depth
-25, 1 min 17 s with 10 workers (the model now carries 12 invariants and 4
-action properties).
+`formal-advisory` CI workflow, and `pre-handoff`. TLC baseline (2026-09-08, spec 016 WS3): 159,482,257 states generated,
+14,990,809 distinct, depth 25, 3 min 57 s with 10 workers (the model carries
+14 invariants and 4 action properties). The 2026-09-02 baseline before the
+FR-29 decision variable was 88,436,305 generated, 8,236,969 distinct, 1 min
+17 s.
 
 ## Pin check
 
@@ -135,9 +137,11 @@ design; widen only after the small model passes.
 
 The baseline run includes mutation checks that remove or swap a GUARD (not
 merely the field an invariant reads), so the properties are load-bearing:
-removing `NoConflictWithOthers` from `Claim` violates `Exclusivity`; deleting
-`repairCount[l] >= MaxRepair` from `RepairResolve` violates
-`RepairResolveNeedsEscalation`; changing `PeerResolve`'s guard to `IsOwner`
+removing `NoConflictWithOthers` from `Claim` violates `Exclusivity`;
+replacing `RepairResolve`'s decision disjunction with plain `IsLaneAgent`
+violates `RepairResolveNeedsDecision` (verified 2026-09-08, spec 016 WS3;
+the earlier `repairCount[l] >= MaxRepair` mutation now lives inside the
+`disposed` branch and is covered by `DispositionAfterEscalation`); changing `PeerResolve`'s guard to `IsOwner`
 violates `PrFlowNeedsPeerApproval` and `PrFlowEntryByReviewer`; changing
 `RepairClear`'s guard to `IsLaneAgent` violates
 `RepairClearByResponsibleActor`; assigning `owner[l]` instead of

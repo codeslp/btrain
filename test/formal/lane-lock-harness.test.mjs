@@ -32,6 +32,7 @@ import {
   patchHandoff,
   requestChangesHandoff,
   resolveHandoff,
+  disposeRepair,
   releaseLaneLocksAudited,
   readAllLaneStates,
   readLockRegistry,
@@ -201,6 +202,9 @@ function commandArb() {
     { arbitrary: fc.record({ t: fc.constant("prOutcome"), lane, outcome: fc.constantFrom("merged", "closed", "feedback", "clear", "waiting") }), weight: 3 },
     { arbitrary: fc.record({ t: fc.constant("rescope"), lane, actorSel, files: fc.uniqueArray(fc.constantFrom(...FILE_POOL), { minLength: 1, maxLength: 2 }) }), weight: 2 },
     { arbitrary: fc.record({ t: fc.constant("releaseLane"), lane }), weight: 1 },
+    // spec 006 FR-29: the human disposition record that makes a repair-needed
+    // exit legal. A human is outside the agent pool, so no actor selector.
+    { arbitrary: fc.record({ t: fc.constant("dispose"), lane }), weight: 2 },
   )
 }
 
@@ -279,6 +283,12 @@ async function runReal(repo, cmd, actor) {
       // The audited CLI path: rejects unaudited releases of active lanes
       // (no override is ever granted in the throwaway repos).
       return releaseLaneLocksAudited(repo, cmd.lane)
+    case "dispose":
+      return disposeRepair(repo, {
+        lane: cmd.lane,
+        "confirmed-by": "human",
+        reason: "formal probe disposition",
+      })
     default:
       throw new Error(`unknown command ${cmd.t}`)
   }
@@ -306,6 +316,8 @@ function applyModel(model, cmd, actor) {
       return model.rescope({ lane: cmd.lane, actor, files: cmd.files })
     case "releaseLane":
       return model.releaseLane(cmd)
+    case "dispose":
+      return model.dispose(cmd)
     default:
       throw new Error(`unknown command ${cmd.t}`)
   }

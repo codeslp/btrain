@@ -6,7 +6,9 @@
 //     Force-release override, CLI Commands.
 //   - spec 005 v0.1.0: Proposed Status Model, FR-1..FR-8, FR-10, FR-11
 //     (FR-9 excluded as conflicting prose; spec 002 supersedes it).
-//   - spec 006 v0.1.0: FR-2c, FR-2d, FR-4, FR-5, FR-7, FR-15, FR-18, FR-20.
+//   - spec 006 v0.1.0: FR-2c, FR-2d, FR-4, FR-5, FR-7, FR-15, FR-18, FR-20,
+//     and FR-29 (repair-needed entry authority and the two terminal exits;
+//     spec 016 WS3).
 //
 // The model encodes the CONTRACT, not the implementation. Where the
 // implementation is designated as drift, `mode: "implementation"` mirrors the
@@ -65,6 +67,10 @@ function emptyLane() {
     // workflow actor recorded BEFORE the repair transition.
     repairOwner: "",
     lastActor: "",
+    // spec 006 FR-29: a human disposition (`btrain repair dispose`) recorded
+    // for the current repair after the FR-18 escalation fired. The harness
+    // never grants overrides, so the override exit is not modeled here.
+    disposition: false,
   }
 }
 
@@ -140,17 +146,20 @@ export class LaneLockModel {
       s.reasonCode = ""
       s.repairOwner = ""
       if (status === "in-progress") s.escalationExpected = false
+      // A pending FR-29 disposition is void once the repair is cleared.
+      s.disposition = false
     }
     s.lastActor = actor
   }
 
-  // Mirrors inferPeerReviewer's candidate order when the acting agent would
-  // otherwise be its own reviewer: explicit > current (≠ actor) > owner >
-  // first configured agent ≠ actor.
+  // Mirrors inferPeerReviewer after spec 015 FR-9 (spec 016 WS3): a current
+  // reviewer distinct from the owner is kept regardless of who acts; only a
+  // missing reviewer, or one equal to the owner, is re-inferred as the first
+  // configured agent that differs from the owner.
   #reassignReviewer(s, actor) {
-    if (s.reviewer && s.reviewer !== actor) return
-    const candidates = [s.owner, ...this.agents]
-    s.reviewer = candidates.find((a) => a && a !== actor) || ""
+    const owner = s.owner || actor
+    if (s.reviewer && s.reviewer !== owner) return
+    s.reviewer = this.agents.find((a) => a && a !== owner) || ""
   }
 
   // spec 002 CLI Commands: claim requires an idle or resolved lane, files,
@@ -181,8 +190,23 @@ export class LaneLockModel {
       reasonCode: "",
       repairOwner: "",
       lastActor: owner,
+      disposition: false,
     })
     this.#setRegistry(lane, normalized)
+    return this.#accept()
+  }
+
+  // spec 006 FR-29: `btrain repair dispose --lane <id> --confirmed-by <human>`
+  // records the terminal disposition of an escalated repair. It is a record,
+  // not a transition: no status, lock, owner, or reviewer changes. Both modes
+  // share the guard because the command was written to the contract in the
+  // same lane (spec 016 WS3); a divergence here is a regression.
+  dispose({ lane }) {
+    const s = this.lane(lane)
+    if (s.status !== "repair-needed") return this.#reject("dispose-requires-repair-needed")
+    if (!s.escalationExpected) return this.#reject("dispose-requires-escalation")
+    if (s.disposition) return this.#reject("dispose-already-recorded")
+    s.disposition = true
     return this.#accept()
   }
 
@@ -341,16 +365,21 @@ export class LaneLockModel {
     if (this.mode === "contract" && actor !== s.owner && actor !== s.reviewer) {
       return this.#reject("resolve-requires-lane-actor")
     }
-    // spec 014 designation: repair-needed exits to resolved only as a
-    // terminal disposition after the FR-18 escalation decides the lane will
-    // not continue. A premature resolve releases contained locks early.
-    if (this.mode === "contract" && s.status === "repair-needed" && !s.escalationExpected) {
+    // spec 006 FR-29 (row 15): repair-needed exits to resolved only with a
+    // recorded human decision: a disposition written after the FR-18
+    // escalation (the harness path) or an audited override (never granted in
+    // throwaway repos). The escalation flag alone is not a decision. During
+    // L7's advisory window the implementation still accepts the plain
+    // resolve with a `transition-advisory: L7` record, so this stays a
+    // candidate finding until enforcement lands.
+    if (this.mode === "contract" && s.status === "repair-needed" && !s.disposition) {
       return this.#reject("repair-resolve-before-escalation")
     }
     s.status = "resolved"
     s.lockedFiles = []
     s.fileExists = true
     s.escalationExpected = false
+    s.disposition = false
     s.reasonCode = ""
     s.repairOwner = ""
     s.lastActor = actor
@@ -393,6 +422,7 @@ export class LaneLockModel {
       s.fileExists = true
       s.reasonCode = ""
       s.repairOwner = ""
+      s.disposition = false
       s.lastActor = s.owner || s.lastActor
       this.#releaseRegistry(lane)
       return this.#accept()

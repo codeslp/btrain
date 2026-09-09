@@ -401,6 +401,8 @@ Spec 014 designated the legal `repair-needed` transitions provisionally for its 
 
 Entry: a lane enters `repair-needed` only from an active lane status (`in-progress`, `needs-review`, `changes-requested`, `ready-for-pr`, `pr-review`, `ready-to-merge`), and only for a workflow-integrity failure with a reason code from the `repair-needed` taxonomy. Entry from `idle` or `resolved` is invalid. Each entry counts against the FR-18 budget.
 
+Who may declare entry: any configured agent, including the lane's own owner, or the system (the watchdog and `btrain doctor`), may declare `repair-needed` manually with a reason code (spec 015 row 13; spec 015 open question Q7, Option C, decided 2026-09-08). When the owner declares repair on their own lane, btrain records `self-repair-audit: true` on that workflow event so the pattern stays visible in the canonical lane-event log. The field is an audit marker only: it is not a `transition-advisory` and does not count toward the spec 015 FR-5 advisory-retirement gate.
+
 Exit to `in-progress`: the responsible repair actor (FR-7, FR-15) clears the repair and same-lane work continues; per FR-15, a guardian or human override may clear it when responsibility is unclear or the responsible actor failed. The lane's locks are retained (FR-20).
 
 Exit to `resolved`: a terminal disposition, legal only with a recorded human decision. One of two records must exist in canonical workflow history for this lane:
@@ -410,11 +412,13 @@ Exit to `resolved`: a terminal disposition, legal only with a recorded human dec
 
 The FR-18 escalation flag (`repairEscalation: "human"`) is a request for a human decision. It is not itself the decision and does not authorize the terminal exit.
 
+Both exits stand (spec 015 open question Q3, Option A, decided 2026-09-08). The disposition path requires the escalation to have fired first; the override path does not. The override for this exit is granted with `btrain override grant --action repair-resolve --lane <id> --requested-by <agent> --confirmed-by <human> --reason "..."` and consumed by the resolving `btrain handoff resolve --lane <id>`. With a disposition the resolving actor must be a lane agent (owner or reviewer); with an override any configured agent may present it.
+
 Terminal `resolved` releases the lane's locks, as spec 002 specifies. A plain `btrain handoff resolve` on a `repair-needed` lane that meets neither condition must be rejected with guidance to clear the repair first or to request an override.
 
 No other exit is legal. A lane must not move from `repair-needed` directly to `needs-review`, `changes-requested`, or any PR-flow status.
 
-Designated 2026-09-01 for ledger finding 11 in `test/formal/README.md`; see spec 015. Spec 014's Normative-source prerequisite should point here once its pinned section reopens.
+Designated 2026-09-01 for ledger finding 11 in `test/formal/README.md`; see spec 015. Entry authority and both exits confirmed 2026-09-08 (spec 015 Decisions, Q3 and Q7). This section is pinned by `specs/tla/LaneLock.tla` from spec 016 WS3 onward. Spec 014's Normative-source prerequisite should point here once its pinned section reopens.
 
 ## Edge Case Categories
 

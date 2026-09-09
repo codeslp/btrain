@@ -2527,6 +2527,289 @@ describe("repair-needed routing", () => {
 // Integration tests: btrain doctor
 // ──────────────────────────────────────────────
 
+// ──────────────────────────────────────────────
+// Spec 016 WS3: FR-29 repair decisions, advisory stage, self-repair audit
+// ──────────────────────────────────────────────
+
+async function setActiveAgents(tmpDir, agents) {
+  const tomlPath = path.join(tmpDir, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  const rendered = `active = [${agents.map((name) => `"${name}"`).join(", ")}]`
+  await fs.writeFile(tomlPath, toml.replace(/^active = \[.*\]$/m, rendered), "utf8")
+}
+
+async function readLaneEvents(tmpDir, laneId) {
+  const eventsPath = path.join(tmpDir, ".btrain", "events", `lane-${laneId}.jsonl`)
+  const content = await fs.readFile(eventsPath, "utf8")
+  return content.split("\n").filter(Boolean).map((line) => JSON.parse(line))
+}
+
+function lastEventOfType(events, type) {
+  return [...events].reverse().find((event) => event.type === type)
+}
+
+function laneNeedsReviewArgs(tmpDir, lane, actor) {
+  return [
+    ...buildNeedsReviewArgs(tmpDir, { actor, lane, base: "main" }),
+    "--no-diff",
+    "--no-dispatch",
+  ]
+}
+
+describe("spec 016 WS3: repair decisions and the FR-5 advisory stage", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await setActiveAgents(tmpDir, ["writer", "reviewer"])
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "WS3 lane a", "--owner", "writer", "--reviewer", "reviewer", "--files", "src/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("keeps the reviewer when the reviewer hands off (FR-9) and records the L3 advisory", async () => {
+    const result = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "reviewer"), tmpDir)
+    assert.equal(result.code, 0, result.stderr)
+    assert.match(result.stdout, /warning: transition-advisory L3: only the lane owner should move `in-progress -> needs-review`/)
+    assert.match(result.stdout, /peer reviewer: reviewer/)
+    assert.match(result.stdout, /active agent: writer/)
+    const events = await readLaneEvents(tmpDir, "a")
+    const update = lastEventOfType(events, "update")
+    assert.equal(update.details["transition-advisory"], "L3")
+    assert.equal(update.after.reviewer, "reviewer")
+  })
+
+  it("records self-repair-audit only when the owner declares repair on their own lane (Q7)", async () => {
+    const changes = await runBtrain(
+      ["handoff", "request-changes", "--repo", tmpDir, "--lane", "a", "--actor", "reviewer", "--reason-code", "spec-mismatch", "--summary", "findings"],
+      tmpDir,
+    )
+    assert.equal(changes.code, 0, changes.stderr)
+
+    const ownerDeclares = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "a", actor: "writer" }), tmpDir)
+    assert.equal(ownerDeclares.code, 0, ownerDeclares.stderr)
+    assert.doesNotMatch(ownerDeclares.stdout, /transition-advisory/)
+    let events = await readLaneEvents(tmpDir, "a")
+    let update = lastEventOfType(events, "update")
+    assert.equal(update.details["self-repair-audit"], true)
+    assert.equal(update.details["transition-advisory"], undefined)
+
+    const cleared = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "in-progress", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.equal(cleared.code, 0, cleared.stderr)
+
+    const reviewerDeclares = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "a", actor: "reviewer" }), tmpDir)
+    assert.equal(reviewerDeclares.code, 0, reviewerDeclares.stderr)
+    assert.match(reviewerDeclares.stdout, /repair escalation: human/)
+    events = await readLaneEvents(tmpDir, "a")
+    update = lastEventOfType(events, "update")
+    assert.equal(update.details["self-repair-audit"], undefined)
+  })
+
+  it("rejects a disposition before the FR-18 escalation and on a lane that is not in repair", async () => {
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "WS3 lane b", "--owner", "writer", "--reviewer", "reviewer", "--files", "docs/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const notInRepair = await runBtrain(
+      ["repair", "dispose", "--repo", tmpDir, "--lane", "b", "--confirmed-by", "brian", "--reason", "too early"],
+      tmpDir,
+    )
+    assert.notEqual(notInRepair.code, 0)
+    assert.match(notInRepair.stderr, /is `in-progress`, not `repair-needed`/)
+
+    const firstRepair = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "b", actor: "reviewer", reasonCode: "lock-mismatch" }), tmpDir)
+    assert.equal(firstRepair.code, 0, firstRepair.stderr)
+    const beforeEscalation = await runBtrain(
+      ["repair", "dispose", "--repo", tmpDir, "--lane", "b", "--confirmed-by", "brian", "--reason", "too early"],
+      tmpDir,
+    )
+    assert.notEqual(beforeEscalation.code, 0)
+    assert.match(beforeEscalation.stderr, /has not reached the FR-18 escalation/)
+    assert.match(beforeEscalation.stderr, /--action repair-resolve --lane b/)
+
+    const missingHuman = await runBtrain(
+      ["repair", "dispose", "--repo", tmpDir, "--lane", "b", "--reason", "no human"],
+      tmpDir,
+    )
+    assert.notEqual(missingHuman.code, 0)
+    assert.match(missingHuman.stderr, /requires --confirmed-by/)
+  })
+
+  it("accepts a plain resolve of an escalated repair with the L7 advisory during the FR-5 window", async () => {
+    const cleared = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "b", "--status", "in-progress", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.equal(cleared.code, 0, cleared.stderr)
+    const secondRepair = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "b", actor: "reviewer", reasonCode: "lock-mismatch" }), tmpDir)
+    assert.equal(secondRepair.code, 0, secondRepair.stderr)
+    assert.match(secondRepair.stdout, /repair escalation: human/)
+
+    const resolve = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "abandoned", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.equal(resolve.code, 0, resolve.stderr)
+    assert.match(resolve.stdout, /warning: transition-advisory L7: resolving `repair-needed` without a recorded human decision/)
+    assert.match(resolve.stdout, /status: resolved/)
+    const events = await readLaneEvents(tmpDir, "b")
+    const resolved = lastEventOfType(events, "resolve")
+    assert.equal(resolved.details["transition-advisory"], "L7")
+    assert.equal(resolved.details.repairDisposition, undefined)
+  })
+
+  it("records the human disposition once and lets a lane agent resolve on row 15 without an advisory", async () => {
+    const dispose = await runBtrain(
+      ["repair", "dispose", "--repo", tmpDir, "--lane", "a", "--confirmed-by", "brian", "--reason", "systemic lock problem", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.equal(dispose.code, 0, dispose.stderr)
+    assert.match(dispose.stdout, /repair disposition recorded for lane a: terminate/)
+    assert.match(dispose.stdout, /confirmed by: brian/)
+    let events = await readLaneEvents(tmpDir, "a")
+    const disposition = lastEventOfType(events, "repair-disposition")
+    assert.equal(disposition.laneId, "a")
+    assert.equal(disposition.details.confirmedBy, "brian")
+    assert.equal(disposition.details.disposition, "terminate")
+    assert.equal(disposition.details.reason, "systemic lock problem")
+
+    const duplicate = await runBtrain(
+      ["repair", "dispose", "--repo", tmpDir, "--lane", "a", "--confirmed-by", "brian", "--reason", "again"],
+      tmpDir,
+    )
+    assert.notEqual(duplicate.code, 0)
+    assert.match(duplicate.stderr, /already carries a disposition/)
+
+    const resolve = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "terminated by disposition", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.equal(resolve.code, 0, resolve.stderr)
+    assert.doesNotMatch(resolve.stdout, /transition-advisory/)
+    assert.match(resolve.stdout, /status: resolved/)
+    events = await readLaneEvents(tmpDir, "a")
+    const resolved = lastEventOfType(events, "resolve")
+    assert.equal(resolved.details.repairDisposition, true)
+    assert.equal(resolved.details["transition-advisory"], undefined)
+    const locks = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.doesNotMatch(locks.stdout, /lane a:/)
+  })
+
+  it("consumes a repair-resolve override as the second FR-29 exit (Q3)", async () => {
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "WS3 override", "--owner", "writer", "--reviewer", "reviewer", "--files", "docs/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+    const repair = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "b", actor: "reviewer", reasonCode: "state-conflict" }), tmpDir)
+    assert.equal(repair.code, 0, repair.stderr)
+
+    const grant = await runBtrain(
+      ["override", "grant", "--repo", tmpDir, "--action", "repair-resolve", "--lane", "b", "--requested-by", "writer", "--confirmed-by", "brian", "--reason", "abandon the lane"],
+      tmpDir,
+    )
+    assert.equal(grant.code, 0, grant.stderr)
+    const overrideId = grant.stdout.match(/override granted: (\S+)/)[1]
+
+    const resolve = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "via override", "--actor", "reviewer"],
+      tmpDir,
+    )
+    assert.equal(resolve.code, 0, resolve.stderr)
+    assert.doesNotMatch(resolve.stdout, /transition-advisory/)
+    assert.match(resolve.stdout, /status: resolved/)
+    const events = await readLaneEvents(tmpDir, "b")
+    const resolved = lastEventOfType(events, "resolve")
+    assert.equal(resolved.details.overrideId, overrideId)
+    assert.ok(lastEventOfType(events, "override-consumed"))
+    const list = await runBtrain(["override", "list", "--repo", tmpDir], tmpDir)
+    assert.match(list.stdout, /No active overrides/)
+  })
+})
+
+describe("spec 016 WS3: L4 repair advisories, Q6 fix text, and finding 8", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", tmpDir])
+    await runBtrain(["init", tmpDir], tmpDir)
+    await enableLanes(tmpDir)
+    await setActiveAgents(tmpDir, ["writer"])
+    const claim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "WS3 lone agent", "--owner", "writer", "--reviewer", "reviewer", "--files", "src/"],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+  })
+
+  it("stages the L4 advisory for a repair entry by an unconfigured actor and names the lone agent (Q6)", async () => {
+    const result = await runBtrain(buildRepairNeededArgs(tmpDir, { lane: "a", actor: "ghost" }), tmpDir)
+    assert.equal(result.code, 0, result.stderr)
+    assert.match(result.stdout, /warning: transition-advisory L4: `repair-needed` entry from `in-progress` by `ghost`/)
+    assert.match(result.stdout, /Fix: export BTRAIN_AGENT=writer\./)
+    const events = await readLaneEvents(tmpDir, "a")
+    assert.equal(lastEventOfType(events, "update").details["transition-advisory"], "L4")
+  })
+
+  it("stages the L4 advisory for a direct repair-needed -> needs-review exit (FR-29) instead of rejecting yet", async () => {
+    const result = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "writer"), tmpDir)
+    assert.equal(result.code, 0, result.stderr)
+    assert.match(result.stdout, /warning: transition-advisory L4: `repair-needed -> needs-review` is not a legal exit/)
+    assert.doesNotMatch(result.stdout, /transition-advisory L3/)
+    const events = await readLaneEvents(tmpDir, "a")
+    assert.equal(lastEventOfType(events, "update").details["transition-advisory"], "L4")
+  })
+
+  it("reports a missing lane handoff file as a BtrainError, never a raw ENOENT (finding 8)", async () => {
+    await fs.rm(path.join(tmpDir, ".claude", "collab", "HANDOFF_B.md"))
+    const update = await runBtrain(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "b", "--status", "in-progress", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.notEqual(update.code, 0)
+    assert.match(update.stderr, /Lane b handoff file is missing/)
+    assert.doesNotMatch(update.stderr, /ENOENT/)
+    const resolve = await runBtrain(
+      ["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "x", "--actor", "writer"],
+      tmpDir,
+    )
+    assert.notEqual(resolve.code, 0)
+    assert.match(resolve.stderr, /Lane b handoff file is missing/)
+    assert.doesNotMatch(resolve.stderr, /ENOENT/)
+    const dispose = await runBtrain(
+      ["repair", "dispose", "--repo", tmpDir, "--lane", "b", "--confirmed-by", "brian", "--reason", "x"],
+      tmpDir,
+    )
+    assert.notEqual(dispose.code, 0)
+    assert.match(dispose.stderr, /Lane b handoff file is missing/)
+  })
+})
+
 describe("btrain doctor", () => {
   let tmpDir
 

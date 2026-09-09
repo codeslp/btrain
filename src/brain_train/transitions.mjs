@@ -27,7 +27,7 @@ function row(id, action, event, from, to, actor, guard, locks, owner, state, kin
 
 export const TRANSITION_ROWS = Object.freeze([
   row("1", "Claim", "handoff claim", ["idle", "resolved"], "in-progress", "any-agent", "files; conflicts; distinct reviewer", "acquire", "002 Lock Enforcement and CLI Commands", "designated"),
-  row("2", "ToNeedsReview", "handoff update --status", ["in-progress", "changes-requested"], "needs-review", "owner", "review context and diff", "retain", "005 Proposed Status Model and FR-7", "provisional"),
+  row("2", "ToNeedsReview", "handoff update --status", ["in-progress", "changes-requested"], "needs-review", "owner", "review context and diff", "retain", "005 Proposed Status Model and FR-7 (owner-only clause)", "designated"),
   row("3", "RequestChanges", "handoff request-changes", ["needs-review"], "changes-requested", "reviewer", "reason code", "retain", "005 FR-8 and FR-15", "designated"),
   row("4", "PeerResolve", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "PR flow enabled", "retain", "002 Lock Enforcement and PR-flow row 1", "designated"),
   row("5", "TerminalResolve", "handoff resolve", ["needs-review"], "resolved", "reviewer", "PR flow disabled", "release", "002 Lock Enforcement item 2", "designated"),
@@ -38,9 +38,9 @@ export const TRANSITION_ROWS = Object.freeze([
   row("10", "PrClear", "pr-poll", ["pr-review"], "ready-to-merge", "system", "linked PR", "retain", "002 PR-flow row 3", "designated"),
   row("11", "PrTerminal", "pr-poll", [...PR_FLOW_STATUSES, "changes-requested"], "resolved", "system", "linked PR", "release", "002 PR-flow rows 5 and 6", "designated"),
   row("12", "ReturnToPr", "handoff update --status", ["changes-requested"], "pr-review", "owner", "linked PR and feedback reason", "retain", "none", "undesignated"),
-  row("13", "RepairEnter", ["handoff update --status", "watchdog-repair"], ACTIVE_STATUSES, "repair-needed", "any-agent or system", "reason and repair accounting", "retain", "006 FR-4 and FR-20; 014 designation", "provisional"),
+  row("13", "RepairEnter", ["handoff update --status", "watchdog-repair"], ACTIVE_STATUSES, "repair-needed", "any-agent or system", "reason and repair accounting", "retain", "006 FR-4, FR-20, and FR-29 entry authority (Q7)", "designated"),
   row("14", "RepairClear", "handoff update --status", ["repair-needed"], "in-progress", "repair-owner, system, or override", "none", "retain", "006 FR-15; 014 designation", "provisional"),
-  row("15", "RepairResolve", "handoff resolve", ["repair-needed"], "resolved", "lane-agent or override", "human disposition or override", "release", "014 designation; 006 FR-29", "provisional"),
+  row("15", "RepairResolve", "handoff resolve", ["repair-needed"], "resolved", "lane-agent or override", "human disposition or override", "release", "006 FR-29 (Q3)", "designated"),
   row("16", "Rescope", "handoff update --files", ["in-progress", "changes-requested", "repair-needed"], "$same", "owner, system, or override", "non-empty and no conflict", "replace", "014 rescope; 006 FR-20", "provisional"),
   row("17", "Resync", ["handoff update --files", "doctor repair"], ACTIVE_STATUSES, "$same", "owner or system", "no conflict", "restore", "006 FR-2", "undesignated"),
   row("18", "ForceRelease", ["locks release", "locks release-lane"], ACTIVE_STATUSES, "$same", "override", "consumed override", "suspend", "002 Force-release override", "designated"),
@@ -49,11 +49,11 @@ export const TRANSITION_ROWS = Object.freeze([
 
   row("L1", "legacy", "handoff resolve", [...PR_FLOW_STATUSES, "changes-requested"], "resolved", "any", "none", "release", "forbidden by 002 Lock Enforcement", "legacy", "legacy"),
   row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "legacy", "legacy"),
-  row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "legacy", "legacy"),
+  row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy"),
   row("L4", "legacy", "handoff update --status", "$any", "$any", "any", "valid status", "per target", "forbidden by 002 and 014", "legacy", "legacy"),
   row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "legacy", "legacy"),
   row("L6", "legacy", "handoff update --files", "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope", "legacy", "legacy"),
-  row("L7", "legacy", "handoff resolve", ["repair-needed"], "resolved", "any", "row 15 guard unmet", "release", "forbidden by 014 and 006 FR-29", "legacy", "legacy"),
+  row("L7", "legacy", "handoff resolve", ["repair-needed"], "resolved", "any", "row 15 guard unmet", "release", "forbidden by 006 FR-29", "advisory", "legacy"),
   row("L8", "legacy", "handoff resolve", ["needs-review"], ["ready-for-pr", "resolved"], "any", "actor unchecked", "retain or release", "forbidden by 002 PR-flow row 1", "advisory", "legacy"),
   row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "legacy", "legacy"),
   row("L10", "legacy", "handoff update --reassign", "$any", "$same", "any", "actor unchecked", "unchanged", "open question 8", "legacy", "legacy"),
@@ -79,13 +79,16 @@ function matchesEvent(rule, event) {
   return asArray(rule).includes(event)
 }
 
-function actorMatches(rowValue, state, actor) {
+function actorMatches(rowValue, state, actor, input = {}) {
   const normalized = String(actor || "").toLowerCase()
   const owner = String(state.owner || "").toLowerCase()
   const reviewer = String(state.reviewer || "").toLowerCase()
   if (rowValue === "owner") return !!normalized && normalized === owner
   if (rowValue === "reviewer") return !!normalized && normalized === reviewer
   if (rowValue === "lane-agent") return !!normalized && [owner, reviewer].includes(normalized)
+  if (rowValue === "lane-agent or override") {
+    return (!!normalized && [owner, reviewer].includes(normalized)) || input.override === true
+  }
   return true
 }
 
@@ -127,7 +130,11 @@ function guardMatches(rowValue, state, input) {
       || input.staleLocks === true
       || (input.prLinked === undefined && input.staleLocks === undefined),
     "current behavior": () => true,
-    "row 15 guard unmet": () => !(input.humanDisposition || input.override),
+    // L7 is the fallback for every repair-needed resolve that row 15 did not
+    // accept: no human decision, or a decision presented by an actor row 15
+    // does not authorize (a non-lane agent with a disposition). Rows are
+    // evaluated in order, so reaching L7 already means row 15 rejected.
+    "row 15 guard unmet": () => true,
     "lane uncovered": () => input.laneCovered !== true,
     "single-handoff overwrite": () => true,
     "repeat resolve": () => state.status === "resolved",
@@ -148,7 +155,7 @@ function rowMatches(candidate, state, event, input) {
     && matchesValue(candidate.to, target, state.status)
     && (input.structuralCompatibility === true && candidate.action === "LinkPr"
       ? true
-      : actorMatches(candidate.actor, state, input.actor))
+      : actorMatches(candidate.actor, state, input.actor, input))
     && guardMatches(candidate.guard, state, input)
 }
 
@@ -167,6 +174,23 @@ export function applyTransition(state, event, input = {}) {
       status: target,
     },
   }
+}
+
+// spec 015 FR-5: a legacy row in advisory mode is still accepted, but the
+// caller records `transition-advisory: <row id>` on the workflow event and
+// warns. Row L4 is advisory only for the FR-29 repair-entry and repair-exit
+// cases (spec 016 WS3); its other matches stay silent until WS4 designates
+// them.
+export function advisoryRowId(row, state = {}, input = {}) {
+  if (!row || row.kind !== "legacy") return ""
+  const target = input.to ?? state.status
+  // spec 006 FR-29: the only exits from repair-needed are RepairClear (row
+  // 14) and RepairResolve (row 15). Any legacy match leaving repair-needed is
+  // the L4 exit case, even when an earlier legacy row (L3) matched first.
+  if (state.status === "repair-needed" && target !== "repair-needed") return "L4"
+  if (row.state === "advisory") return row.id
+  if (row.id === "L4" && target === "repair-needed") return "L4"
+  return ""
 }
 
 export function getPrimaryTransition(status) {
