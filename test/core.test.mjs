@@ -2079,6 +2079,7 @@ describe("audited overrides", () => {
 
     try {
       await exec("git", ["init", tmpDir])
+      await configureGitIdentity(tmpDir)
       await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
       await runBtrain(["init", tmpDir], tmpDir)
 
@@ -5144,6 +5145,7 @@ describe("multi-lane handoff lifecycle", () => {
     const { promisify } = await import("node:util")
     const exec = promisify(execFile)
     await exec("git", ["init", tmpDir])
+    await configureGitIdentity(tmpDir)
     await exec("git", ["-C", tmpDir, "commit", "--allow-empty", "-m", "initial"])
     await runBtrain(["init", tmpDir], tmpDir)
     await enableLanes(tmpDir)
