@@ -654,10 +654,15 @@ Consequences worth restating:
   approver; the owner-in-PR-flow bar and the unlinked requirement in
   `in-progress`/`needs-review` are policy choices made for consistency. (iii)
   When the reviewer replaces itself, the owner becomes the responsible actor.
-  (iv) Phase B step 3-4 designations that were not human questions: rows 19,
-  L12-L15 (metadata updates, single-handoff claim, repeat resolve,
-  request-changes with no recorded reviewer) and the spec 002 line 77
-  reconciliation (close on GitHub, then `pr poll --apply`).
+  (iv) Phase B step 3-4 designations that were not human questions: rows 8-10
+  (non-terminal `pr poll` outcomes apply from `pr-review`, `ready-to-merge`,
+  or PR-flow `changes-requested`; repeat `feedback` and `clear` are accepted;
+  `ready-for-pr` takes no non-terminal outcome), rows 19, L2, L12-L15
+  (metadata updates, resolve of an `idle` lane, single-handoff claim, repeat
+  resolve, request-changes with no recorded reviewer), and the spec 002 line
+  77 reconciliation (close on GitHub, then `pr poll --apply`). (v) Row 16 is
+  designated on Q2 plus the spec 014 rescope paragraph, whose "provisionally
+  until spec 002 adopts its own" wording stands until spec 002 owns rescope.
 
 ---
 

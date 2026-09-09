@@ -2962,10 +2962,24 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.equal(update.details["transition-advisory"], "L10")
     assert.ok(update.details.authorHistory.includes("writer"), "the author history persists across the sequence")
 
-    // Authority alone: the reviewer (never an author) tries to hand ownership to a fresh agent.
-    const ownerChangeByReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "a", "--owner", "reviewer", "--actor", "reviewer"], tmpDir)
+    // Authority alone, on a fresh lane so the author-history guard cannot also fire: the
+    // reviewer (a lane agent, not the owner, never an author) hands ownership to a third agent
+    // while the reviewer role stays put.
+    const freshClaim = await runBtrain(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "WS4 authority", "--owner", "writer", "--reviewer", "reviewer", "--files", "docs/"],
+      tmpDir,
+    )
+    assert.equal(freshClaim.code, 0, freshClaim.stderr)
+    const ownerChangeByReviewer = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "b", "--owner", "third", "--actor", "reviewer"], tmpDir)
     assert.equal(ownerChangeByReviewer.code, 0, ownerChangeByReviewer.stderr)
     assert.match(ownerChangeByReviewer.stdout, /warning: transition-advisory L10/)
+    const freshEvents = await readLaneEvents(tmpDir, "b")
+    const freshUpdate = lastEventOfType(freshEvents, "update")
+    assert.equal(freshUpdate.details["transition-advisory"], "L10")
+    assert.deepEqual(freshUpdate.details.authorHistory, ["third", "writer"])
+    // Leave lane b free for the next test (the accepted advisory update made third the owner).
+    const release = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "authority probe done", "--actor", "third"], tmpDir)
+    assert.equal(release.code, 0, release.stderr)
   })
 
   it("records L15 when request-changes runs without a verifiable reviewer actor", async () => {

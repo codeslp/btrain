@@ -233,14 +233,14 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   and the mirror admits the same only when the lane's reason code is
   `pr-review-feedback`. (b) resolved 2026-09-09: the mirror's contract-mode
   `resolve()` now rejects a linked `changes-requested` lane, matching
-  `AbandonResolve`'s `~prLinked`. (e) the mirror's `update` accepts
-  `changes-requested -> in-progress` by the owner (pre-existing); the model
-  has no such action (row 14 is the repair exit only), so that path is
-  undesignated and stays a mirror-only acceptance until prose speaks. (c) `Claim` with reviewer = owner is
+  `AbandonResolve`'s `~prLinked`. (c) `Claim` with reviewer = owner is
   rejected by the model and silently reassigned to a distinct peer by the
   harness; reachable states are equivalent. (d) the harness mirror has no
   override path at all (`disposition` only); the model's `override` branch of
-  `RepairResolve` is exercised by TLC and by `test/core.test.mjs`.
+  `RepairResolve` is exercised by TLC and by `test/core.test.mjs`. (e) the mirror's `update` accepts
+  `changes-requested -> in-progress` by the owner (pre-existing); the model
+  has no such action (row 14 is the repair exit only), so that path is
+  undesignated and stays a mirror-only acceptance until prose speaks.
 - `Reassign` is admitted only in `in-progress`, `needs-review`, and
   `changes-requested`, in each case without a linked PR (spec 005 FR-5 as
   designated 2026-09-09); the registry owner label is not modeled. `Resync` fires only from the force-release
