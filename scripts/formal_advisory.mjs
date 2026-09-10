@@ -181,7 +181,7 @@ export function verifyExecutionTree(root, requestedHead) {
 
 export function classifyPaths(files, declaredImpact = "auto", proseChanged = true) {
   const modeledProse = files.some(file => MODELED_PROSE.has(file))
-  const tlaArtifacts = files.some(file => file === CONTRACT.config
+  const tlaArtifacts = files.some(file => file === CONTRACT.model || file === CONTRACT.config
     || (file.startsWith("specs/tla/") && /\.(tla|cfg|class|jar)$/i.test(file)))
   const executableModel = files.some(file => EXECUTABLE_MODEL_FILES.has(file))
   const pinTool = files.includes("scripts/tla_pin.py")
@@ -222,12 +222,8 @@ function changedPinnedProse(root, base, files) {
 }
 
 function findTlaFiles(root) {
-  const directory = path.join(root, "specs", "tla")
-  if (!fs.existsSync(directory)) return []
-  return fs.readdirSync(directory)
-    .filter((entry) => entry === path.basename(CONTRACT.model) || (entry.endsWith(".tla") && fs.existsSync(path.join(directory, `${path.parse(entry).name}.cfg`))))
-    .sort()
-    .map((entry) => path.join(directory, entry))
+  const model = path.resolve(root, CONTRACT.model)
+  return fs.existsSync(model) ? [model] : []
 }
 
 export function classifyTlcResult(run) {
@@ -334,7 +330,7 @@ export function classifyPinResult(run) {
   if (run.status === 0) return "pass"
   const stdout = run.stdout || ""
   const stderr = run.stderr || ""
-  const reportedStalePin = /^STALE\s+specs\/tla\/.*$/m.test(stdout)
+  const reportedStalePin = /^STALE\s+.+\.tla(?:\s|:).*$/m.test(stdout)
     && /^\d+ stale pin\(s\)\. Re-pin with:/m.test(stdout)
   const toolCrashed = /Traceback|SyntaxError|ImportError|ModuleNotFoundError/i.test(stderr)
   if (run.status === 1 && reportedStalePin && !toolCrashed) return "stale_pin"
