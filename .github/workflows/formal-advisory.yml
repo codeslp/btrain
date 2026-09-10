@@ -14,7 +14,7 @@ concurrency:
 jobs:
   formal-advisory:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - name: Check out the exact pull request head
         uses: actions/checkout@v4

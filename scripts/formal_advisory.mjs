@@ -26,8 +26,8 @@ const MODELED_PROSE = new Set([...CONTRACT.prose, ...pinPaths])
 // TLC metadata goes to a temp dir, not specs/tla/states/. Spec 016 WS4 added
 // reassignment, resync, and the PR-flow shortcut and moved Lanes/Agents to
 // symmetric constants: ~10.8M distinct states, 5 min at 10 workers locally,
-// so the cap is 20 minutes at 4 workers and the workflow job timeout is 35
-// minutes (TLC 20 + harness 5 + CLI contract 5 + pin checks and setup).
+// so the cap is 20 minutes at 4 workers and the workflow job timeout is 40
+// minutes (TLC 20 + harness 5 + CLI contract 5 + integration 5 + setup).
 const TLC_MAX_HEAP_MB = 2048
 const TLC_WORKERS = 4
 const TLC_TIMEOUT_MS = 1_200_000
@@ -36,6 +36,7 @@ const FORMAL_HARNESS_TIMEOUT_MS = 300_000
 const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000
 const PIN_CHECK_TIMEOUT_MS = 30_000
 const ADVISORY_SELF_TEST_TIMEOUT_MS = 60_000
+const ADVISORY_INTEGRATION_TIMEOUT_MS = 300_000
 const CLI_CONTRACT_TIMEOUT_MS = 300_000
 const EXECUTABLE_MODEL_FILES = new Set([CONTRACT.executableModel])
 
@@ -184,6 +185,8 @@ export function classifyPaths(files, declaredImpact = "auto", proseChanged = tru
     || (file.startsWith("specs/tla/") && /\.(tla|cfg|class|jar)$/i.test(file)))
   const executableModel = files.some(file => EXECUTABLE_MODEL_FILES.has(file))
   const pinTool = files.includes("scripts/tla_pin.py")
+  // Manifest edits can redirect the model or configuration without editing either artifact.
+  const contractManifest = files.includes("scripts/formal_contracts.json")
   const cli = files.includes("src/brain_train/cli.mjs")
   const tooling = [".github/workflows/formal-advisory.yml", "scripts/formal_advisory.mjs", "scripts/formal_cache.mjs", "scripts/formal_contracts.json", "test/formal-advisory.test.mjs"]
   const selfTest = files.some(file => tooling.includes(file))
@@ -200,7 +203,7 @@ export function classifyPaths(files, declaredImpact = "auto", proseChanged = tru
   const semanticProse = modeledProse && proseChanged && !codeFreeNoSemanticProse
   const harness = semanticProse || harnessSurface
   const pin = modeledProse || tlaArtifacts || executableModel || pinTool || harness
-  const tlc = semanticProse || tlaArtifacts || executableModel
+  const tlc = semanticProse || tlaArtifacts || executableModel || contractManifest
   let impact = "none"
   if (codeFreeNoSemanticProse) impact = "no-semantic"
   else if (tlc) impact = "semantic"
@@ -662,7 +665,7 @@ function runSelfTest() {
   assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
   assert.match(workflow, /FORMAL_IMPACT: \$\{\{ steps\.select\.outputs\.formal_impact \}\}/)
   assert.match(workflow, /jq -r '\.verdict'.*== "no_formal_surface"/)
-  assert.match(workflow, /timeout-minutes: 35/)
+  assert.match(workflow, /timeout-minutes: 40/)
   const source = fs.readFileSync(new URL(import.meta.url), "utf8")
   assert.match(source, /timeoutMs: FORMAL_HARNESS_TIMEOUT_MS/)
   process.stdout.write("formal_advisory self-test passed\n")
@@ -713,7 +716,7 @@ async function main() {
     if (selection.tlc && !pinBlocked) result.checks.push(...runTlc(root, tlaFiles, { directory: cacheDirectory, head: executionTree.head }))
     if (selection.selfTest) {
       result.checks.push(runAdvisorySelfTest(root))
-      const run = command("node", ["--test", "test/formal-advisory.test.mjs"], { cwd: root, timeoutMs: ADVISORY_SELF_TEST_TIMEOUT_MS, measureMemory: true })
+      const run = command("node", ["--test", "test/formal-advisory.test.mjs"], { cwd: root, timeoutMs: ADVISORY_INTEGRATION_TIMEOUT_MS, measureMemory: true })
       result.checks.push({ name: "advisory-integration", verdict: classifyHarnessResult(run), ...run })
     }
     if (selection.harness) result.checks.push(runHarness(root))

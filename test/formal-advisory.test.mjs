@@ -194,6 +194,51 @@ test("external JVM configuration disables reuse without suppressing checks", t =
   assert.equal(f.calls("tlc"), 2)
 })
 
+test("manifest-only contract redirection selects TLC even with no-semantic declared", t => {
+  const f = fixture(t)
+  f.write("config/alternate.cfg", "SPECIFICATION OtherSpec\n")
+  f.commit()
+  f.git("branch", "manifest-base")
+  const manifest = JSON.parse(fs.readFileSync(path.join(f.root, "scripts/formal_contracts.json")))
+  manifest.contracts[0].config = "config/alternate.cfg"
+  f.write("scripts/formal_contracts.json", JSON.stringify(manifest))
+  f.commit()
+  const result = f.advisory(false, ["--base", "manifest-base", "--impact", "no-semantic"])
+  assert.deepEqual(result.changedFiles, ["scripts/formal_contracts.json"])
+  assert.equal(result.selection.impact, "semantic")
+  const check = result.checks.find(c => c.name === "tlc:LaneLock")
+  assert.equal(check?.verdict, "pass", JSON.stringify(result))
+  assert.match(check.command, /-config \.\.\/\.\.\/config\/alternate\.cfg /)
+  assert.equal(f.calls("tlc"), 1)
+})
+
+test("advisory integration allows a healthy suite longer than one minute", t => {
+  const f = fixture(t)
+  f.write("test/formal-advisory.test.mjs", "// tooling change\n")
+  f.commit()
+  // Simulate the observed 61.7-second suite at the child-process boundary.
+  // This exercises the CLI's timeout and verdict wiring without a slow sleep.
+  const preload = path.join(f.directory, "simulate-duration.cjs")
+  fs.writeFileSync(preload, `
+    const childProcess = require("node:child_process")
+    const original = childProcess.spawnSync
+    childProcess.spawnSync = function(command, args, options) {
+      if (command === "node" && args[0] === "--test") {
+        return options.timeout > 61_700
+          ? { status: 0, stdout: "tests passed", stderr: "" }
+          : { status: null, signal: "SIGTERM", error: { code: "ETIMEDOUT" } }
+      }
+      return original(command, args, options)
+    }
+    require("node:module").syncBuiltinESMExports()
+  `)
+  f.env.NODE_OPTIONS = `--require=${preload}`
+  f.env.BTRAIN_FORMAL_TIME_BIN = path.join(f.directory, "unavailable-time")
+  const result = f.advisory()
+  const check = result.checks.find(c => c.name === "advisory-integration")
+  assert.equal(check?.verdict, "pass", JSON.stringify(check))
+})
+
 test("failed TLC and stale pins never become reusable passes", t => {
   const f = fixture(t)
   f.write("specs/tla/LaneLock.cfg", "SPECIFICATION Spec\n\\* first\n")
