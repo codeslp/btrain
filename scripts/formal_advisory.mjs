@@ -6,13 +6,19 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import process from "node:process"
+import { tlcIdentity, readTlcCache, writeTlcCache } from "./formal_cache.mjs"
 
 const BLOCKING_VERDICTS = new Set(["counterexample", "stale_pin", "validation_mismatch"])
-const MODELED_RUNTIME_FILES = new Set([
-  "src/brain_train/cli.mjs",
-  "src/brain_train/core.mjs",
-  "src/brain_train/pr-flow.mjs",
-])
+const CONTRACT_MANIFEST = JSON.parse(fs.readFileSync(new URL("./formal_contracts.json", import.meta.url), "utf8"))
+if (CONTRACT_MANIFEST.schemaVersion !== 1 || CONTRACT_MANIFEST.contracts.length !== 1) {
+  throw new Error("The bounded pilot requires one contract in formal_contracts.json.")
+}
+const CONTRACT = CONTRACT_MANIFEST.contracts[0]
+const modelUrl = new URL(`../${CONTRACT.model}`, import.meta.url)
+const pinPaths = fs.existsSync(modelUrl)
+  ? [...fs.readFileSync(modelUrl, "utf8").matchAll(/^\\\*\s*Pinned to:\s*(\S+)\s+§/gm)].map(match => match[1])
+  : []
+const MODELED_PROSE = new Set([...CONTRACT.prose, ...pinPaths])
 // spec 016 WS3 (2026-09-08): the FR-29 decision variable grew LaneLock to
 // ~15M distinct states (3 min 57 s with 10 workers). Two workers, 1 GB, and a
 // five-minute cap reported state_space_exhausted, so the budget follows the
@@ -20,8 +26,8 @@ const MODELED_RUNTIME_FILES = new Set([
 // TLC metadata goes to a temp dir, not specs/tla/states/. Spec 016 WS4 added
 // reassignment, resync, and the PR-flow shortcut and moved Lanes/Agents to
 // symmetric constants: ~10.8M distinct states, 5 min at 10 workers locally,
-// so the cap is 20 minutes at 4 workers and the workflow job timeout is 35
-// minutes (TLC 20 + harness 5 + CLI contract 5 + pin checks and setup).
+// so the cap is 20 minutes at 4 workers and the workflow job timeout is 40
+// minutes (TLC 20 + harness 5 + CLI contract 5 + integration 5 + setup).
 const TLC_MAX_HEAP_MB = 2048
 const TLC_WORKERS = 4
 const TLC_TIMEOUT_MS = 1_200_000
@@ -30,8 +36,9 @@ const FORMAL_HARNESS_TIMEOUT_MS = 300_000
 const PIN_TOOL_SELF_TEST_TIMEOUT_MS = 30_000
 const PIN_CHECK_TIMEOUT_MS = 30_000
 const ADVISORY_SELF_TEST_TIMEOUT_MS = 60_000
+const ADVISORY_INTEGRATION_TIMEOUT_MS = 300_000
 const CLI_CONTRACT_TIMEOUT_MS = 300_000
-const EXECUTABLE_MODEL_FILES = new Set(["test/formal/lane-lock-model.mjs"])
+const EXECUTABLE_MODEL_FILES = new Set([CONTRACT.executableModel])
 
 function parseArgs(argv) {
   const options = {
@@ -41,6 +48,8 @@ function parseArgs(argv) {
     impact: "auto",
     classifyOnly: false,
     selfTest: false,
+    cacheDir: "",
+    cacheKeyOnly: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -50,6 +59,8 @@ function parseArgs(argv) {
     else if (arg === "--impact") options.impact = argv[++index] || ""
     else if (arg === "--classify-only") options.classifyOnly = true
     else if (arg === "--self-test") options.selfTest = true
+    else if (arg === "--cache-dir") options.cacheDir = argv[++index] || ""
+    else if (arg === "--cache-key-only") options.cacheKeyOnly = true
     else throw new Error(`Unknown option: ${arg}`)
   }
   if (!new Set(["auto", "no-semantic"]).has(options.impact)) {
@@ -168,59 +179,51 @@ export function verifyExecutionTree(root, requestedHead) {
   return { head }
 }
 
-export function classifyPaths(files, declaredImpact = "auto") {
-  const modeledProse = files.some((file) => /^specs\/(002|005|006|014)[^/]*\.md$/.test(file))
-  const tlaArtifacts = files.some((file) => file.startsWith("specs/tla/"))
-  const executableModel = files.some((file) => EXECUTABLE_MODEL_FILES.has(file))
+export function classifyPaths(files, declaredImpact = "auto", proseChanged = true) {
+  const modeledProse = files.some(file => MODELED_PROSE.has(file))
+  const tlaArtifacts = files.some(file => file === CONTRACT.model || file === CONTRACT.config
+    || (file.startsWith("specs/tla/") && /\.(tla|cfg|class|jar)$/i.test(file)))
+  const executableModel = files.some(file => EXECUTABLE_MODEL_FILES.has(file))
   const pinTool = files.includes("scripts/tla_pin.py")
+  // Manifest edits can redirect the model or configuration without editing either artifact.
+  const contractManifest = files.includes("scripts/formal_contracts.json")
   const cli = files.includes("src/brain_train/cli.mjs")
-  const advisoryWorkflow = files.includes(".github/workflows/formal-advisory.yml")
-  const selfTest = advisoryWorkflow || files.includes("scripts/formal_advisory.mjs")
+  const tooling = [".github/workflows/formal-advisory.yml", "scripts/formal_advisory.mjs", "scripts/formal_cache.mjs", "scripts/formal_contracts.json", "test/formal-advisory.test.mjs"]
+  const selfTest = files.some(file => tooling.includes(file))
   const pinToolTest = pinTool
-  const harnessSurface = advisoryWorkflow || tlaArtifacts || files.some((file) =>
-    file.startsWith("test/formal/")
-    || file === "package.json"
-    || file === "package-lock.json"
-    || file === "scripts/formal_advisory.mjs"
-    || MODELED_RUNTIME_FILES.has(file),
+  const harnessSurface = selfTest || tlaArtifacts || executableModel || files.some(file =>
+    CONTRACT.harness.includes(file)
+    || (file.startsWith("test/formal/") && /\.[cm]?js$/.test(file))
+    || file === "package.json" || file === "package-lock.json"
+    || CONTRACT.runtime.includes(file)
+    || CONTRACT.runtimeFallback.some(prefix => file.startsWith(prefix)),
   )
   const codeFreeNoSemanticProse = declaredImpact === "no-semantic"
-    && modeledProse
-    && !harnessSurface
-    && !pinTool
-  const harness = !codeFreeNoSemanticProse && (modeledProse || harnessSurface)
-  const pin = modeledProse || tlaArtifacts || executableModel || pinTool
-  const tlc = !codeFreeNoSemanticProse && (modeledProse || tlaArtifacts || executableModel)
+    && modeledProse && !harnessSurface && !pinTool
+  const semanticProse = modeledProse && proseChanged && !codeFreeNoSemanticProse
+  const harness = semanticProse || harnessSurface
+  const pin = modeledProse || tlaArtifacts || executableModel || pinTool || harness
+  const tlc = semanticProse || tlaArtifacts || executableModel || contractManifest
   let impact = "none"
   if (codeFreeNoSemanticProse) impact = "no-semantic"
   else if (tlc) impact = "semantic"
   else if (harness || pinTool) impact = "validation"
-  return {
-    impact,
-    pin,
-    tlc,
-    harness,
-    cli,
-    selfTest,
-    pinToolTest,
-    formalSurface: pin || tlc || harness,
-  }
+  return { impact, pin, tlc, harness, cli, selfTest, pinToolTest, formalSurface: pin || tlc || harness }
 }
 
-export function classifyMeasuredVerdict(run, verdict) {
-  if (verdict === "pass" && run.memoryMeasurement === "unavailable") {
-    return "infrastructure_failure"
-  }
-  return verdict
+function changedPinnedProse(root, base, files) {
+  if (!files.some(file => MODELED_PROSE.has(file))) return false
+  const result = command("python3", ["scripts/tla_pin.py", "--changed-pins", base, CONTRACT.model], { cwd: root, echo: false, timeoutMs: PIN_CHECK_TIMEOUT_MS })
+  try {
+    const data = JSON.parse(result.stdout)
+    if (result.status === 0 && Array.isArray(data.affected)) return data.affected.length > 0
+  } catch { /* Unknown impact selects the full checks. */ }
+  return true
 }
 
 function findTlaFiles(root) {
-  const directory = path.join(root, "specs", "tla")
-  if (!fs.existsSync(directory)) return []
-  return fs.readdirSync(directory)
-    .filter((entry) => entry.endsWith(".tla"))
-    .sort()
-    .map((entry) => path.join(directory, entry))
+  const model = path.resolve(root, CONTRACT.model)
+  return fs.existsSync(model) ? [model] : []
 }
 
 export function classifyTlcResult(run) {
@@ -233,14 +236,15 @@ export function classifyTlcResult(run) {
   ) {
     return "state_space_exhausted"
   }
-  if (/Invariant\s+.+\s+is violated|Error:\s+Invariant/i.test(output)) return "counterexample"
-  if (/Model checking completed\. No error has been found\./.test(output)) return "pass"
+  if (/Invariant\s+.+\s+is violated|Error:\s+Invariant|Temporal properties were violated|Deadlock reached|Error:.*(?:property|assertion).*violat/i.test(output)) return "counterexample"
+  if ((run.status === undefined || run.status === 0) && !run.signal && !run.errorCode && /Model checking completed\. No error has been found\./.test(output)) return "pass"
   return "infrastructure_failure"
 }
 
 function buildTlcArgs(jar, configName, tlaName, metadir = "") {
   return [
     `-Xmx${TLC_MAX_HEAP_MB}m`,
+    "-XX:+UseParallelGC",
     "-cp", jar,
     "tlc2.TLC",
     "-config", configName,
@@ -272,10 +276,10 @@ function runPinCheck(root, tlaFiles) {
   }
   const run = command(
     "python3",
-    [script, "--check"],
+    [script, "--check", ...tlaFiles],
     { cwd: root, timeoutMs: PIN_CHECK_TIMEOUT_MS, measureMemory: true },
   )
-  const verdict = classifyMeasuredVerdict(run, classifyPinResult(run))
+  const verdict = classifyPinResult(run)
   return { name: "pin", verdict, ...run }
 }
 
@@ -315,7 +319,7 @@ function runPinToolSelfTest(root) {
     const expectedFailure = run.status === 1
       && staleLines.length === 2
       && /^2 stale pin\(s\)\. Re-pin with:/m.test(run.stdout || "")
-    const verdict = classifyMeasuredVerdict(run, expectedFailure ? "pass" : "infrastructure_failure")
+    const verdict = expectedFailure ? "pass" : "infrastructure_failure"
     return { name: "pin-tool-self-test", verdict, ...run }
   } finally {
     fs.rmSync(fixtureDirectory, { recursive: true, force: true })
@@ -326,14 +330,14 @@ export function classifyPinResult(run) {
   if (run.status === 0) return "pass"
   const stdout = run.stdout || ""
   const stderr = run.stderr || ""
-  const reportedStalePin = /^STALE\s+specs\/tla\/.*$/m.test(stdout)
+  const reportedStalePin = /^STALE\s+.+\.tla(?:\s|:).*$/m.test(stdout)
     && /^\d+ stale pin\(s\)\. Re-pin with:/m.test(stdout)
   const toolCrashed = /Traceback|SyntaxError|ImportError|ModuleNotFoundError/i.test(stderr)
   if (run.status === 1 && reportedStalePin && !toolCrashed) return "stale_pin"
   return "infrastructure_failure"
 }
 
-function runTlc(root, tlaFiles) {
+function runTlc(root, tlaFiles, cache = {}) {
   if (tlaFiles.length === 0) {
     return [{
       name: "tlc",
@@ -364,7 +368,7 @@ function runTlc(root, tlaFiles) {
   }
   return tlaFiles.map((tlaFile) => {
     const parsed = path.parse(tlaFile)
-    const config = path.join(parsed.dir, `${parsed.name}.cfg`)
+    const config = path.resolve(root, CONTRACT.config)
     if (!fs.existsSync(config)) {
       return {
         name: `tlc:${parsed.name}`,
@@ -374,19 +378,47 @@ function runTlc(root, tlaFiles) {
         detail: `${path.relative(root, config)} is missing.`,
       }
     }
+    let identity
+    let cacheGap = ""
+    try {
+      identity = currentTlcIdentity(root, tlaFile, jar)
+      const previous = cache.directory && readTlcCache(cache.directory, identity)
+      if (previous && classifyTlcResult(previous.check) === "pass") {
+        return {
+          name: `tlc:${parsed.name}`, ...previous.check,
+          durationMs: 0,
+          cache: { hit: true, key: identity.key, sourceHead: previous.sourceHead, createdAt: previous.createdAt, originalDurationMs: previous.check.durationMs },
+        }
+      }
+    } catch (error) {
+      cacheGap = error.message
+    }
     const metadir = fs.mkdtempSync(path.join(os.tmpdir(), "formal-advisory-tlc-"))
     let run
     try {
       run = command(
         "java",
-        buildTlcArgs(jar, path.basename(config), path.basename(tlaFile), metadir),
+        buildTlcArgs(jar, path.relative(parsed.dir, config), path.basename(tlaFile), metadir),
         { cwd: parsed.dir, timeoutMs: TLC_TIMEOUT_MS, measureMemory: true },
       )
     } finally {
       fs.rmSync(metadir, { recursive: true, force: true })
     }
-    return { name: `tlc:${parsed.name}`, verdict: classifyMeasuredVerdict(run, classifyTlcResult(run)), ...run }
+    const check = { name: `tlc:${parsed.name}`, verdict: classifyTlcResult(run), ...run }
+    if (identity && cache.directory) {
+      try { writeTlcCache(cache.directory, identity, check, cache.head) }
+      catch (error) { cacheGap = error.message }
+    }
+    return { ...check, cache: { hit: false, key: identity?.key || "", ...(cacheGap ? { gap: cacheGap } : {}) } }
   })
+}
+
+function currentTlcIdentity(root, tlaFile, jar) {
+  const version = command("java", ["-version"], { cwd: root, echo: false, timeoutMs: 10000 })
+  if (version.status !== 0) throw new Error("Cannot identify the Java runtime for TLC cache reuse.")
+  const parsed = path.parse(tlaFile)
+  return tlcIdentity(root, path.relative(root, tlaFile), CONTRACT.config, jar, `${version.stdout}${version.stderr}`,
+    buildTlcArgs("<tool-sha256>", path.relative(parsed.dir, path.resolve(root, CONTRACT.config)), parsed.base))
 }
 
 function runHarness(root) {
@@ -409,7 +441,7 @@ function runHarness(root) {
     ["run", "test:formal"],
     { cwd: root, timeoutMs: FORMAL_HARNESS_TIMEOUT_MS, measureMemory: true },
   )
-  const verdict = classifyMeasuredVerdict(run, classifyHarnessResult(run, { modeledAssertions: true }))
+  const verdict = classifyHarnessResult(run, { modeledAssertions: true })
   return { name: "fast-check", verdict, ...run }
 }
 
@@ -419,7 +451,7 @@ function runAdvisorySelfTest(root) {
     ["scripts/formal_advisory.mjs", "--self-test"],
     { cwd: root, timeoutMs: ADVISORY_SELF_TEST_TIMEOUT_MS, measureMemory: true },
   )
-  const verdict = classifyMeasuredVerdict(run, classifyHarnessResult(run))
+  const verdict = classifyHarnessResult(run)
   return { name: "advisory-self-test", verdict, ...run }
 }
 
@@ -440,7 +472,7 @@ function runCliContractTests(root) {
     ["--test", "test/core.test.mjs"],
     { cwd: root, timeoutMs: CLI_CONTRACT_TIMEOUT_MS, measureMemory: true },
   )
-  return { name: "cli-contract", verdict: classifyMeasuredVerdict(run, classifyHarnessResult(run)), ...run }
+  return { name: "cli-contract", verdict: classifyHarnessResult(run), ...run }
 }
 
 function exitCodeFor(checks) {
@@ -564,19 +596,17 @@ function runSelfTest() {
   assert.equal(executableModelSelection.impact, "semantic")
   assert.equal(executableModelSelection.pin, true)
   assert.equal(executableModelSelection.tlc, true)
-  assert.equal(classifyMeasuredVerdict({ memoryMeasurement: "unavailable" }, "pass"), "infrastructure_failure")
-  assert.equal(classifyMeasuredVerdict({ memoryMeasurement: "linux-time-max-rss" }, "pass"), "pass")
   assert.equal(classifyTlcResult({ stdout: "Model checking completed. No error has been found.", stderr: "" }), "pass")
   assert.equal(classifyTlcResult({ stdout: "Error: Invariant Exclusivity is violated.", stderr: "" }), "counterexample")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "", errorCode: "ETIMEDOUT" }), "state_space_exhausted")
   assert.equal(classifyTlcResult({ stdout: "", stderr: "java.lang.OutOfMemoryError: Java heap space" }), "state_space_exhausted")
   assert.deepEqual(
     buildTlcArgs("/tmp/tla2tools.jar", "LaneLock.cfg", "LaneLock.tla"),
-    ["-Xmx2048m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "4", "LaneLock.tla"],
+    ["-Xmx2048m", "-XX:+UseParallelGC", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "4", "LaneLock.tla"],
   )
   assert.deepEqual(
     buildTlcArgs("/tmp/tla2tools.jar", "LaneLock.cfg", "LaneLock.tla", "/tmp/tlc-meta"),
-    ["-Xmx2048m", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "4", "-metadir", "/tmp/tlc-meta", "LaneLock.tla"],
+    ["-Xmx2048m", "-XX:+UseParallelGC", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-config", "LaneLock.cfg", "-workers", "4", "-metadir", "/tmp/tlc-meta", "LaneLock.tla"],
   )
   assert.deepEqual(
     buildMeasuredCommandArgs("npm", ["run", "test:formal"], "/tmp/peak-rss-kb.txt"),
@@ -631,7 +661,7 @@ function runSelfTest() {
   assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
   assert.match(workflow, /FORMAL_IMPACT: \$\{\{ steps\.select\.outputs\.formal_impact \}\}/)
   assert.match(workflow, /jq -r '\.verdict'.*== "no_formal_surface"/)
-  assert.match(workflow, /timeout-minutes: 35/)
+  assert.match(workflow, /timeout-minutes: 40/)
   const source = fs.readFileSync(new URL(import.meta.url), "utf8")
   assert.match(source, /timeoutMs: FORMAL_HARNESS_TIMEOUT_MS/)
   process.stdout.write("formal_advisory self-test passed\n")
@@ -647,7 +677,13 @@ async function main() {
   const startedAt = Date.now()
   const executionTree = verifyExecutionTree(root, options.head)
   const files = changedFiles(root, options.base, options.head)
-  const selection = classifyPaths(files, options.impact)
+  const selection = classifyPaths(files, options.impact, changedPinnedProse(root, options.base, files))
+  const gitDirectory = command("git", ["rev-parse", "--absolute-git-dir"], { cwd: root, echo: false }).stdout.trim()
+  const cacheDirectory = options.cacheDir ? path.resolve(options.cacheDir) : path.join(gitDirectory, "btrain-tlc-cache")
+  const relativeCache = path.relative(root, cacheDirectory)
+  if (options.cacheDir && !relativeCache.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeCache)) {
+    throw new Error("--cache-dir must be outside the worktree. Committed evidence is not an execution cache.")
+  }
   const result = {
     schemaVersion: 1,
     advisory: true,
@@ -658,24 +694,36 @@ async function main() {
     checks: [],
   }
 
-  if (options.classifyOnly || !selection.formalSurface) {
+  if (options.cacheKeyOnly) {
+    try {
+      result.cacheKey = currentTlcIdentity(root, path.join(root, CONTRACT.model), process.env.TLC_JAR || "").key
+    } catch (error) {
+      result.cacheKey = ""
+      result.cacheGap = error.message
+    }
+  }
+  if (options.classifyOnly || options.cacheKeyOnly || !selection.formalSurface) {
     result.checks = [{ name: "selection", verdict: "no_formal_surface", durationMs: 0, command: "" }]
   } else {
     const tlaFiles = findTlaFiles(root)
     if (selection.pin) result.checks.push(runPinCheck(root, tlaFiles))
     if (selection.pinToolTest) result.checks.push(runPinToolSelfTest(root))
-    const pinBlocked = result.checks.some((check) => check.verdict === "stale_pin")
-    if (selection.tlc && !pinBlocked) result.checks.push(...runTlc(root, tlaFiles))
-    if (selection.selfTest) result.checks.push(runAdvisorySelfTest(root))
+    const pinBlocked = result.checks.some(check => check.name === "pin" && check.verdict !== "pass")
+    if (selection.tlc && !pinBlocked) result.checks.push(...runTlc(root, tlaFiles, { directory: cacheDirectory, head: executionTree.head }))
+    if (selection.selfTest) {
+      result.checks.push(runAdvisorySelfTest(root))
+      const run = command("node", ["--test", "test/formal-advisory.test.mjs"], { cwd: root, timeoutMs: ADVISORY_INTEGRATION_TIMEOUT_MS, measureMemory: true })
+      result.checks.push({ name: "advisory-integration", verdict: classifyHarnessResult(run), ...run })
+    }
     if (selection.harness) result.checks.push(runHarness(root))
     if (selection.cli) result.checks.push(runCliContractTests(root))
   }
 
   result.durationMs = Date.now() - startedAt
-  result.verdict = options.classifyOnly
+  result.verdict = options.classifyOnly || options.cacheKeyOnly
     ? selection.formalSurface ? "classified" : "no_formal_surface"
     : overallVerdict(result.checks)
-  result.exitCode = options.classifyOnly ? 0 : exitCodeFor(result.checks)
+  result.exitCode = options.classifyOnly || options.cacheKeyOnly ? 0 : exitCodeFor(result.checks)
   writeResult(options.output ? path.resolve(root, options.output) : "", result)
   process.exitCode = result.exitCode
 }

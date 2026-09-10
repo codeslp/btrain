@@ -1,10 +1,10 @@
 # 014 — Specula Formal Verification Pilot
 
 **Status**: Draft
-**Version**: 0.1.11
+**Version**: 0.1.12
 **Author**: btrain
 **Date**: 2026-08-29
-**Updated**: 2026-09-01
+**Updated**: 2026-09-09
 
 ## Decision
 
@@ -363,10 +363,63 @@ Additional evidence by class:
   conventional test command and verdict; specific questions for the
   independent reviewer.
 
-CI must verify evidence against the exact PR head. Cached results are reusable
-only when keyed by all semantic inputs: source commit, prose range/hash, TLA+
-content, TLC configuration, instrumentation mapping, harness version, and trace
-set.
+CI must verify evidence against the exact PR head. Model checking and
+implementation validation have separate evidence and reuse rules:
+
+- TLC checks the bounded model. Its execution cache includes the model,
+  configurations, local TLA+ imports and Java overrides, tool JAR hash,
+  Java version, execution arguments, runner, cache implementation, and contract
+  manifest. The pin check must pass on the current head before TLC evidence
+  can be reused. The TLA+ bytes include the pinned prose hash.
+- Reuse only completed TLC passes. Record the original source commit, time,
+  duration, and cache key beside the current head. A cache hit has zero
+  execution duration and retains the original duration in separate metadata.
+  It does not count as a fresh timing or availability sample for H-6.
+- Implementation validation runs on every selected head, even when TLC is
+  cached. A cached TLC pass cannot replace a harness run, suppress a mismatch,
+  or establish that the full verification chain passed.
+- Existing committed chain verdicts retain their full-input verification
+  rules. They are review artifacts, not execution-cache entries. Source commits
+  provide provenance. Content keys determine whether evidence still applies.
+- Missing, corrupt, incompatible, or unverifiable cache entries cause execution.
+  Cache I/O failure is a reported optimization gap. It does not turn a completed
+  correctness verdict into an infrastructure failure. Missing memory telemetry
+  is also reported separately from correctness.
+
+### Contract selection and execution cache
+
+`scripts/formal_contracts.json` maps the pilot contract to its model, prose
+files, runtime entry points, and harness. TLA+ pin headers remain authoritative
+for the exact prose ranges. Compare those ranges with the merge base before
+selecting TLC. Changes outside them require a pin check only unless executable
+files also changed. A failed range comparison selects the full checks.
+
+Changes to local TLA+ modules, configurations, or Java overrides select TLC.
+Model setup documentation and historical verdict files do not. Unknown runtime
+files under the manifest's fallback prefixes select implementation validation.
+This fallback prevents a new runtime dependency from silently escaping checks.
+The pilot still supports one root model. Additional root models require an
+explicit scope decision. Imported helper modules do not need separate pins.
+
+Local runs keep TLC execution records under the Git directory. `--cache-dir`
+may select a directory outside the worktree. CI uses an isolated Actions cache
+with an exact content key and no prefix restore. Only the runner's completed
+passes populate that cache. Cache artifacts have the same trust boundary as
+the executing workflow. They are not accepted from committed verdict files.
+External TLA+ paths or JVM injection variables disable cache reuse. New models
+that read external data must declare those inputs before reuse is supported.
+
+Specula assessment remains explicit or scheduled. The initial performance
+targets are under one minute for routine added checks and under five minutes
+for affected-model checks. These are optimization targets, not timeout changes
+or Phase 3 activation thresholds. The current LaneLock model exceeds the latter
+target. Decomposition requires separate model and composition evidence before
+the current bounds or invariants can change.
+
+Verification adoption does not itself require a behavior-migration window.
+Spec 015 FR-5 still governs removal of existing legacy transitions. The pilot
+remains advisory, and its known migration mismatches remain visible until the
+existing enforcement conditions are met.
 
 ## Operational and Security Policy
 
@@ -384,9 +437,9 @@ set.
 
 ## Current Bootstrap Gaps
 
-**Status as of 2026-09-01.** The scaffolding items below are closed. Two
-gaps remain — a reference-ownership gap and a skill-parity gap — and the gate
-stays advisory until the Phase 3 activation conditions are met.
+**Status as of 2026-09-09.** The scaffolding items below are closed. The
+reference-ownership and trace-validation gaps remain. The gate stays advisory
+until the Phase 3 activation conditions are met.
 
 Closed:
 
@@ -401,7 +454,7 @@ Closed:
   `validation`, or `semantic` and runs `node scripts/formal_advisory.mjs` for
   the latter two, recording the impact class, command, verdict, and duration as
   handoff evidence. Per the Phase 2 policy the advisory verdict does not block
-  handoff yet. The Codex mirror does not yet include this step (see Open).
+  handoff yet. The Codex mirror includes the same formal-impact step.
 - PR CI contains a formal-verification job. `.github/workflows/formal-advisory.yml`
   checks out the exact PR head, selects the affected checks from the diff, and
   runs the pin, TLC, and harness steps in advisory mode.
@@ -415,15 +468,11 @@ Open:
   Spec 002 has no numbered sections; those rules are owned by this
   specification and by the `pre-handoff` skill. Retargeting the citations is
   listed in the Phase 0 rollout items and stays outside the formal lane locks.
-- The Codex skill mirror (`.agents/skills/pre-handoff/SKILL.md`) does not
-  invoke `formal_advisory.mjs`. Agents loading the mirrored skill proceed from
-  the context gate directly to code review, skipping the formal-impact
-  classification. Semantic changes can reach review without the impact class or
-  advisory evidence described in Phase 2. Syncing the formal-impact step into
-  the mirror or removing the mirror in favor of the canonical skill requires a
-  lane that locks `.agents/skills/`.
+- The fast-check harness validates against the JavaScript contract model.
+  Export and validation of its traces against TLA+ remain unfinished. A TLC
+  cache hit does not close this gap or establish full-chain conformance.
 
-Until the reference and mirror gaps close and Phase 3 activates, btrain has a working
+Until the reference and validation gaps close and Phase 3 activates, btrain has a working
 advisory formal surface, not a complete formal gate. The distinction is
 load-bearing: advisory verdicts are recorded as evidence and reviewed, but no
 verdict blocks a merge today.
@@ -473,7 +522,7 @@ engine evaluation and its revisit conditions are recorded in
 ### FR-7: Focused pre-review verification
 
 Pre-review verification must match the declared formal impact. Semantic-impact
-changes must run affected-model TLC and focused implementation validation
+changes must run or validate cached affected-model TLC and run focused implementation validation
 before entering `needs-review`. No-semantic-impact changes that touch a
 modeled implementation entry point must run focused implementation validation
 before entering `needs-review`. Code-free no-semantic-impact edits require
@@ -481,8 +530,9 @@ the pin check only.
 
 ### FR-8: Exact-head CI verification
 
-CI must rerun deterministic formal checks on the exact PR head for affected
-models before merge once the pilot gate is enabled.
+CI must check pins, verify TLC cache inputs or execute TLC, and rerun selected
+implementation validation on the exact PR head before merge once the pilot
+gate is enabled. The separate evidence rules above apply.
 
 ### FR-9: Independent semantic review
 
@@ -569,9 +619,9 @@ action and required response for each outcome.
 > **Label reconciliation.** The canonical table uses `stale_model`; the CI
 > implementation (`formal_advisory.mjs`) currently emits `stale_pin` for the
 > same condition. The implementation also emits `infrastructure_failure` for
-> missing tools, setup failures, unavailable measurements, and other check
+> missing tools, setup failures, and other check
 > execution failures. Before gate activation, the implementation must map an
-> unavailable tool, provider, setup dependency, or measurement to
+> unavailable tool, provider, or setup dependency to
 > `tool_unavailable`. This includes both absent-model paths in `runPinCheck`
 > and `runTlc`, plus their self-test expectations. The `stale_pin` rename must
 > update the emitted verdict, `BLOCKING_VERDICTS`, and the `pinBlocked` check
