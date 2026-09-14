@@ -141,7 +141,9 @@ function repoRoot() {
 function changedFiles(root, base, head) {
   if (!base) throw new Error("--base must name the review base commit or branch.")
   const target = head || "HEAD"
-  const args = ["diff", "--name-only", `${base}...${target}`, "--"]
+  // Keep both sides of a rename so removing a declared contract path still
+  // selects its pin and model checks.
+  const args = ["diff", "--no-renames", "--name-only", `${base}...${target}`, "--"]
   const result = command("git", args, { cwd: root, echo: false })
   if (result.status !== 0) {
     throw new Error(`Could not classify the diff from ${base}${head ? ` to ${head}` : ""}.\n${result.stderr}`)

@@ -333,3 +333,13 @@ test("selection excludes unpinned documentation but includes transitions and unk
   f.commit()
   assert.equal(f.advisory(true).selection.harness, true)
 })
+
+test("renaming modeled prose away from its declared path still selects pin validation", t => {
+  const f = fixture(t)
+  f.git("mv", "specs/002-multi-lane-handoffs.md", "specs/003-renamed-contract.md")
+  f.commit()
+  const result = f.advisory(true)
+  assert.ok(result.changedFiles.includes("specs/002-multi-lane-handoffs.md"), JSON.stringify(result.changedFiles))
+  assert.equal(result.selection.pin, true)
+  assert.equal(result.selection.formalSurface, true)
+})
