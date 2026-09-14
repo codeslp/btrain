@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "contracts": [
+    {
+      "id": "lane-lock",
+      "model": "specs/tla/LaneLock.tla",
+      "config": "specs/tla/LaneLock.cfg",
+      "prose": [
+        "specs/002-multi-lane-handoffs.md",
+        "specs/005-review-findings-rework-loop.md",
+        "specs/006-workflow-resilience-and-guardian.md",
+        "specs/014-specula-formal-verification-pilot.md"
+      ],
+      "runtime": [
+        "src/brain_train/cli.mjs",
+        "src/brain_train/core.mjs",
+        "src/brain_train/pr-flow.mjs",
+        "src/brain_train/transitions.mjs"
+      ],
+      "runtimeFallback": ["src/brain_train/"],
+      "harness": ["test/formal/lane-lock-harness.test.mjs"],
+      "executableModel": "test/formal/lane-lock-model.mjs"
+    }
+  ]
+}

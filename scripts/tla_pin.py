@@ -25,6 +25,7 @@ Stdlib only. No TLC required.
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -54,9 +55,9 @@ def parse_pins(tla_path: Path):
     return pins, hash_index, recorded, lines
 
 
-def extract_section(md_path: Path, heading_title: str) -> str:
+def extract_section(md_path: Path, heading_title: str, contents: str | None = None) -> str:
     """Prose from the heading line to the next same-or-higher heading."""
-    text = md_path.read_text(encoding="utf-8").splitlines()
+    text = (md_path.read_text(encoding="utf-8") if contents is None else contents).splitlines()
     start = None
     level = None
     for i, line in enumerate(text):
@@ -129,6 +130,28 @@ def cmd_show_range(path: str) -> int:
     for rel_path, heading in pins:
         print(f"--- {rel_path} § {heading} ---")
         print(extract_section(REPO_ROOT / rel_path, heading))
+    return 0
+
+
+def cmd_changed_pins(base: str, paths) -> int:
+    """Compare designated prose with the merge base. Unavailable ranges select TLC."""
+    import subprocess
+    revision = subprocess.run(["git", "-C", str(REPO_ROOT), "merge-base", base, "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    affected = []
+    for tla in target_files(paths):
+        pins, _, _, _ = parse_pins(tla)
+        changed = not pins
+        for relative, heading in pins:
+            previous = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"{revision}:{relative}"],
+                                      capture_output=True, text=True)
+            try:
+                changed |= previous.returncode != 0 or extract_section(REPO_ROOT / relative, heading) != extract_section(REPO_ROOT / relative, heading, previous.stdout)
+            except (KeyError, OSError):
+                changed = True
+        if changed:
+            affected.append(str(tla.relative_to(REPO_ROOT)))
+    print(json.dumps({"affected": affected, "base": revision}))
     return 0
 
 
@@ -313,6 +336,7 @@ def main() -> int:
     group.add_argument("--show-range", metavar="FILE")
     group.add_argument("--repin", metavar="FILE")
     group.add_argument("--verify-verdict", metavar="JSON")
+    group.add_argument("--changed-pins", metavar="BASE", help="emit models whose designated prose differs from the merge base")
     parser.add_argument("--tool-jar", metavar="PATH", help="tla2tools.jar to hash for --verify-verdict (default: $TLC_JAR)")
     parser.add_argument("files", nargs="*", help="explicit .tla targets for --check")
     args = parser.parse_args()
@@ -320,6 +344,8 @@ def main() -> int:
         return cmd_check(args.files)
     if args.show_range:
         return cmd_show_range(args.show_range)
+    if args.changed_pins:
+        return cmd_changed_pins(args.changed_pins, args.files)
     if args.verify_verdict:
         return cmd_verify_verdict(args.verify_verdict, args.tool_jar)
     return cmd_repin(args.repin)

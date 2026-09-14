@@ -35,8 +35,15 @@ Block bad review handoffs before they reach the reviewer.
      Update prose first. Then update the model and harness. Run the same advisory
      command against the complete diff.
    - Record the impact class, exact command, source commit, verdict, duration, and
-     result path in `--verification`. Record each unavailable tool or provider as a
-     separate `--gap`.
+     result path in `--verification`. The runner compares designated prose ranges
+     and reuses completed TLC evidence only when its model and tool inputs match.
+     On a cache hit, record the original source commit and duration separately.
+     Selected implementation validation still runs on the current head.
+     Record each unavailable tool or provider as a separate `--gap`.
+   - Keep the execution cache outside tracked files. Local runs use the Git
+     directory by default. Use `--cache-dir <external-directory>` to share a
+     trusted cache between isolated worktrees. Do not copy committed chain
+     verdicts into that cache.
    - For a code-free modeled-prose edit that changes only formatting, comments, or
      other non-semantic presentation, add the exact line `Formal impact: no-semantic`
      to the PR description. Exact-head CI then runs the pin check without scheduling
