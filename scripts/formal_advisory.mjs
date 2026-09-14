@@ -395,10 +395,27 @@ function runTlc(root, tlaFiles, cache = {}) {
       identity = currentTlcIdentity(root, tlaFile, jar)
       const previous = cache.directory && readTlcCache(cache.directory, identity)
       if (previous && classifyTlcResult(previous.check) === "pass") {
+        const {
+          durationMs: originalDurationMs,
+          peakRssKb: originalPeakRssKb,
+          memoryMeasurement: originalMemoryMeasurement,
+          ...reusedCheck
+        } = previous.check
         return {
-          name: `tlc:${parsed.name}`, ...previous.check,
+          ...reusedCheck,
+          name: `tlc:${parsed.name}`,
           durationMs: 0,
-          cache: { hit: true, key: identity.key, sourceHead: previous.sourceHead, createdAt: previous.createdAt, originalDurationMs: previous.check.durationMs },
+          peakRssKb: null,
+          memoryMeasurement: "cache-reuse",
+          cache: {
+            hit: true,
+            key: identity.key,
+            sourceHead: previous.sourceHead,
+            createdAt: previous.createdAt,
+            originalDurationMs,
+            originalPeakRssKb,
+            originalMemoryMeasurement,
+          },
         }
       }
     } catch (error) {
