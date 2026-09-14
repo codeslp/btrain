@@ -65,7 +65,7 @@ jobs:
         run: npm ci
 
       - name: Set up Java
-        if: steps.select.outputs.needs_tlc == 'true' && hashFiles('specs/tla/*.tla') != ''
+        if: steps.select.outputs.needs_tlc == 'true'
         continue-on-error: true
         uses: actions/setup-java@v4
         with:
@@ -73,7 +73,7 @@ jobs:
           java-version: "17"
 
       - name: Install the pinned TLC tool
-        if: steps.select.outputs.needs_tlc == 'true' && hashFiles('specs/tla/*.tla') != ''
+        if: steps.select.outputs.needs_tlc == 'true'
         continue-on-error: true
         env:
           TLC_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar

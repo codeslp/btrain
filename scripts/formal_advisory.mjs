@@ -181,8 +181,17 @@ export function verifyExecutionTree(root, requestedHead) {
 
 export function classifyPaths(files, declaredImpact = "auto", proseChanged = true) {
   const modeledProse = files.some(file => MODELED_PROSE.has(file))
+  const modelDirectory = path.posix.dirname(CONTRACT.model)
+  const declaredModelArtifact = files.some(file => {
+    const normalized = path.posix.normalize(file)
+    const besideModel = modelDirectory === "."
+      ? !normalized.includes("/")
+      : normalized.startsWith(`${modelDirectory}/`)
+    return besideModel && /\.(tla|cfg|class|jar)$/i.test(normalized)
+  })
   const tlaArtifacts = files.some(file => file === CONTRACT.model || file === CONTRACT.config
     || (file.startsWith("specs/tla/") && /\.(tla|cfg|class|jar)$/i.test(file)))
+    || declaredModelArtifact
   const executableModel = files.some(file => EXECUTABLE_MODEL_FILES.has(file))
   const pinTool = files.includes("scripts/tla_pin.py")
   // Manifest edits can redirect the model or configuration without editing either artifact.

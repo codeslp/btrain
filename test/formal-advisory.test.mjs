@@ -216,6 +216,29 @@ test("manifest model redirection pins, executes, and caches only the declared mo
   assert.equal(f.calls("tlc"), 2)
 })
 
+test("formal artifacts beside a redirected model select TLC", t => {
+  const f = fixture(t)
+  const model = "models/alternate/LaneLock.tla"
+  f.write(model, fs.readFileSync(path.join(f.root, "specs/tla/LaneLock.tla"), "utf8"))
+  f.write("models/alternate/Helper.tla", fs.readFileSync(path.join(f.root, "specs/tla/Helper.tla")))
+  const manifest = JSON.parse(fs.readFileSync(path.join(f.root, "scripts/formal_contracts.json")))
+  manifest.contracts[0].model = model
+  f.write("scripts/formal_contracts.json", JSON.stringify(manifest))
+  f.commit()
+  f.git("branch", "redirected-helper-base")
+  fs.appendFileSync(path.join(f.root, "models/alternate/Helper.tla"), "\\* helper edit\n")
+  f.commit()
+  const result = f.advisory(true, ["--base", "redirected-helper-base"])
+  assert.deepEqual(result.changedFiles, ["models/alternate/Helper.tla"])
+  assert.equal(result.selection.tlc, true)
+  assert.equal(result.selection.formalSurface, true)
+})
+
+test("CI provisions Java and TLC whenever selection requires TLC", () => {
+  const workflow = fs.readFileSync(path.join(source, ".github/workflows/formal-advisory.yml"), "utf8")
+  assert.doesNotMatch(workflow, /needs_tlc == 'true' && hashFiles\('specs\/tla\/\*\.tla'\) != ''/)
+})
+
 test("external JVM configuration disables reuse without suppressing checks", t => {
   const f = fixture(t)
   f.write("specs/tla/LaneLock.cfg", "SPECIFICATION Spec\n\\* first\n")
