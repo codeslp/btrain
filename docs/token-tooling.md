@@ -89,10 +89,8 @@ without capturing it.
 
 ## What is deliberately not here
 
-- **Payload compression proxies.** Rejected in
+- **Payload compression proxies.** They optimize the 0.1 percent above, and a
+  proxy in the model path puts the existing cache hit ratio at risk. Rejected in
   [research/ponytail-headroom-evaluation.md](../research/ponytail-headroom-evaluation.md).
-  They target fresh input, which is 0.1 percent of cost, and a proxy in the
-  model path risks the 98.4 percent cache hit ratio that btrain already has.
-- **Output-style compression.** Output is 83.5 percent tool-call inputs and 11.1
-  percent prose, so prose is about 1.8 percent of total spend. Spec 020 records
-  the full reasoning.
+- **Output-style compression.** Most output is tool-call payload rather than
+  prose, so restyling prose moves almost nothing. Spec 020 has the breakdown.
