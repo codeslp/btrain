@@ -423,6 +423,19 @@ tracked separately.
 
 ---
 
+## Token Tooling
+
+btrain measures its own token spend and keeps agent context small. Cache reads
+are 69.8% of cost and fresh input is 0.1%, so the useful levers are measurement
+and smaller context, not payload compression.
+
+- `npx ccusage@latest session` — see spend per session across claude, codex, and gemini
+- `ast-grep` — structural search, for when a text search would over-match
+
+Neither is a btrain dependency. See [docs/token-tooling.md](docs/token-tooling.md)
+for when each one helps, and [spec 020](specs/020-token-spend-and-decomposition.md)
+for the measurement behind it.
+
 ## Feedback Tracking
 
 btrain scaffolds a `.claude/collab/FEEDBACK_LOG.md` during init and monitors it via `btrain doctor`.
