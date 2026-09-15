@@ -291,7 +291,7 @@ class CgraphAdapter {
     const args = ["blast-radius", "--files", files.join(",")]
     if (laneId) args.push("--lane", laneId)
     if (locksJson) args.push("--locks-json", JSON.stringify(locksJson))
-    return this._exec(args, "blast_radius")
+    return degradeWhenGraphEmpty(await this._exec(args, "blast_radius"))
   }
 
   async reviewPacket(opts = {}) {
@@ -598,6 +598,42 @@ async function failOpen(fn) {
     return await fn()
   } catch {
     return null
+  }
+}
+
+/**
+ * Detect a blast-radius answer that cgraph produced from a graph with no
+ * coverage of the requested files.
+ *
+ * cgraph answers `ok: true` with every array empty in two different cases:
+ * the files genuinely have no callers, or the graph has never indexed them.
+ * Only the first is an answer. `nodes_in_scope` separates them: an indexed
+ * file always contributes its own nodes, so zero nodes against a non-empty
+ * request means the graph cannot speak to these files at all.
+ *
+ * btrain treats the second case as a clean pre-lock collision check unless we
+ * mark it. A lane would then take a lock on the strength of a check that never
+ * ran. Degrade it to the same shape as an unavailable cgraph, which the
+ * caller already handles.
+ *
+ * @param {AdapterResult|null} result
+ * @returns {AdapterResult|null}
+ */
+function degradeWhenGraphEmpty(result) {
+  const summary = result?.payload?.summary
+  if (!result?.ok || !summary) return result
+
+  const requested = summary.files_requested || 0
+  const inScope = summary.nodes_in_scope || 0
+  if (requested === 0 || inScope > 0) return result
+
+  return {
+    ...result,
+    ok: false,
+    unavailable: true,
+    graph_empty: true,
+    stderr_summary: result.stderr_summary
+      || `cgraph has no graph coverage for the ${requested} requested file(s); re-index before trusting this check`,
   }
 }
 

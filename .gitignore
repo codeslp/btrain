@@ -1,4 +1,5 @@
 node_modules/
+.cgcignore
 .DS_Store
 *.log
 .btrain/*

@@ -519,6 +519,79 @@ describe("cgraph_adapter", () => {
     })
   })
 
+  // Spec 020 WS1: an empty graph is not a clean pre-lock collision check.
+  // kkg answers `ok: true` with every array empty when it has never indexed
+  // the requested files. btrain must not read that as "no lane collisions".
+  describe("blastRadius graph coverage", () => {
+    let tmpDir
+
+    before(async () => { tmpDir = await makeTmpDir() })
+    after(async () => { await rmDir(tmpDir) })
+
+    /** Fake kkg whose blast-radius reports the given summary. */
+    async function adapterReporting(summary, name) {
+      const dir = path.join(tmpDir, name)
+      await fs.mkdir(dir, { recursive: true })
+      const binPath = path.join(dir, "kkg")
+      const payload = {
+        ok: true, kind: "blast_radius", schema_version: "1.0",
+        files: ["src/brain_train/core.mjs"],
+        nodes_in_scope: [], transitive_callers: [], transitive_callees: [],
+        lock_overlaps: [], advisories: [], cross_module_impact: [],
+        summary,
+      }
+      const script = [
+        "#!/usr/bin/env node",
+        `const args = process.argv.slice(2);`,
+        `if (args[0] === "manifest") {`,
+        `  process.stdout.write(JSON.stringify(${JSON.stringify(fakeManifestWithCommands())}));`,
+        `} else {`,
+        `  process.stdout.write(JSON.stringify(${JSON.stringify(payload)}));`,
+        `}`,
+      ].join("\n")
+      await fs.writeFile(binPath, script)
+      await fs.chmod(binPath, 0o755)
+      return createAdapter(dir, { cgraph: { bin_path: binPath } })
+    }
+
+    it("treats zero nodes in scope as no graph coverage, not a clean check", async () => {
+      // Exactly what kkg returns on btrain today: 1 file asked for, 0 nodes known.
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "empty",
+      )
+      const result = await adapter.blastRadius(["src/brain_train/core.mjs"], "a")
+
+      assert.equal(result.graph_empty, true, "must flag that the graph knows nothing about the requested files")
+      assert.equal(result.ok, false, "an uncovered file set must not report ok")
+      assert.equal(result.unavailable, true, "must degrade like an unavailable cgraph, not pass as clean")
+    })
+
+    it("keeps a genuine no-callers answer when the graph does cover the files", async () => {
+      // A real leaf module: the graph knows it, and it honestly has no callers.
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 12, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "covered",
+      )
+      const result = await adapter.blastRadius(["src/brain_train/leaf.mjs"], "a")
+
+      assert.equal(result.ok, true, "covered files must still answer")
+      assert.notEqual(result.graph_empty, true)
+      assert.equal(result.unavailable, false)
+    })
+
+    it("does not flag an empty graph when no files were requested", async () => {
+      const adapter = await adapterReporting(
+        { files_requested: 0, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "nofiles",
+      )
+      const result = await adapter.blastRadius([], "a")
+
+      assert.notEqual(result.graph_empty, true, "an empty request is not an empty graph")
+      assert.equal(result.ok, true)
+    })
+  })
+
   describe("timeout constants", () => {
     it("all timeout values are positive integers", () => {
       for (const [key, value] of Object.entries(TIMEOUTS)) {

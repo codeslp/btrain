@@ -54,7 +54,9 @@ async function runCli(args, cwd, envOverrides = {}) {
   }
 }
 
-async function writeFakeKkgBinary(dir, logPath) {
+async function writeFakeKkgBinary(dir, logPath, opts = {}) {
+  const blastSummary = opts.blastRadiusSummary
+    || { files_requested: 1, nodes_in_scope: 4, transitive_callers: 2, transitive_callees: 1, lock_overlaps: 1 }
   const binPath = path.join(dir, "kkg")
   const manifest = {
     ok: true,
@@ -104,7 +106,7 @@ async function writeFakeKkgBinary(dir, logPath) {
     "  process.stdout.write(JSON.stringify({",
     "    ok: true,",
     "    kind: 'blast_radius',",
-    "    summary: { files_requested: 1, nodes_in_scope: 4, transitive_callers: 2, transitive_callees: 1, lock_overlaps: 1 }",
+    `    summary: ${JSON.stringify(blastSummary)}`,
     "  }))",
     "} else if (cmd === 'advise') {",
     "  process.stdout.write(JSON.stringify({",
@@ -381,6 +383,61 @@ async function writeHardFailingKkgBinary(dir, logPath) {
   await fs.chmod(binPath, 0o755)
   return binPath
 }
+
+// Spec 020 WS1 regression: cgraph answers ok:true with every array empty both
+// when a file honestly has no callers and when the graph never indexed it.
+// btrain used to render the second case as a clean "0 overlaps" pre-lock
+// collision check, so a lane could take a lock on a check that never ran.
+describe("cgraph empty-graph lane flow", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    const logPath = path.join(tmpDir, "kkg-calls.jsonl")
+    // Exactly what kkg returns on an unindexed repo: the file was asked for,
+    // and the graph knows nothing about it.
+    const binPath = await writeFakeKkgBinary(tmpDir, logPath, {
+      blastRadiusSummary: {
+        files_requested: 1, nodes_in_scope: 0,
+        transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0,
+      },
+    })
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("reports cgraph degraded instead of a clean zero-overlap collision check", async () => {
+    const claim = await runCli(
+      [
+        "handoff", "claim", "--repo", tmpDir, "--lane", "a",
+        "--task", "Lock a file the graph has never indexed",
+        "--owner", "codex", "--reviewer", "claude", "--files", "src/",
+      ],
+      tmpDir,
+      { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const handoff = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.equal(handoff.code, 0, handoff.stderr)
+
+    // The regression: this line is btrain telling the agent the collision check
+    // came back clean. On an empty graph it never ran.
+    assert.doesNotMatch(
+      handoff.stdout,
+      /blast radius: 0 in scope/,
+      "an empty graph must not render as a clean zero-overlap blast radius",
+    )
+    assert.match(
+      handoff.stdout,
+      /cgraph: degraded/,
+      "an empty graph must surface as degraded so the agent knows the check did not run",
+    )
+  })
+})
 
 describe("cgraph audit hard-violation gate", () => {
   let tmpDir
