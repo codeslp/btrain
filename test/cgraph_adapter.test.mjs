@@ -519,16 +519,16 @@ describe("cgraph_adapter", () => {
     })
   })
 
-  // Spec 020 WS1: an empty graph is not a clean pre-lock collision check.
-  // kkg answers `ok: true` with every array empty when it has never indexed
-  // the requested files. btrain must not read that as "no lane collisions".
-  describe("blastRadius graph coverage", () => {
+  // Spec 020 WS1, corrected after review. cgraph matches entity paths EXACTLY
+  // and never expands directories, so nodes_in_scope==0 has several causes and
+  // the payload cannot tell them apart. btrain therefore does not diagnose the
+  // cause; it only refuses to read "0 overlaps" off an answer with no nodes.
+  describe("blastRadius inconclusive answers", () => {
     let tmpDir
 
     before(async () => { tmpDir = await makeTmpDir() })
     after(async () => { await rmDir(tmpDir) })
 
-    /** Fake kkg whose blast-radius reports the given summary. */
     async function adapterReporting(summary, name) {
       const dir = path.join(tmpDir, name)
       await fs.mkdir(dir, { recursive: true })
@@ -554,41 +554,63 @@ describe("cgraph_adapter", () => {
       return createAdapter(dir, { cgraph: { bin_path: binPath } })
     }
 
-    it("treats zero nodes in scope as no graph coverage, not a clean check", async () => {
-      // Exactly what kkg returns on btrain today: 1 file asked for, 0 nodes known.
+    it("flags an answer with no entities as inconclusive", async () => {
       const adapter = await adapterReporting(
         { files_requested: 1, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
         "empty",
       )
       const result = await adapter.blastRadius(["src/brain_train/core.mjs"], "a")
 
-      assert.equal(result.graph_empty, true, "must flag that the graph knows nothing about the requested files")
-      assert.equal(result.ok, false, "an uncovered file set must not report ok")
-      assert.equal(result.unavailable, true, "must degrade like an unavailable cgraph, not pass as clean")
+      assert.equal(result.blast_radius_inconclusive, true)
+      assert.match(result.inconclusive_reason, /matched no code entities/)
     })
 
-    it("keeps a genuine no-callers answer when the graph does cover the files", async () => {
-      // A real leaf module: the graph knows it, and it honestly has no callers.
+    it("leaves ok and unavailable alone, because the command did run", async () => {
+      // Review finding: ok means "the call worked" and unavailable means "the
+      // binary was missing". An inconclusive answer is neither, so it must not
+      // borrow their meaning.
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "flags",
+      )
+      const result = await adapter.blastRadius(["src/brain_train/core.mjs"], "a")
+
+      assert.equal(result.ok, true, "the command ran and returned valid JSON")
+      assert.equal(result.unavailable, false, "the binary was present")
+    })
+
+    it("flags a directory lock, which cgraph's exact-path match can never satisfy", async () => {
+      // btrain locks directories (--files "src/"). cgraph matches entity paths
+      // exactly, so this returns zero nodes even against a complete graph. It
+      // must read as inconclusive, never as a clean check.
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "dirlock",
+      )
+      const result = await adapter.blastRadius(["src/"], "a")
+
+      assert.equal(result.blast_radius_inconclusive, true)
+    })
+
+    it("leaves an informative answer untouched, even with no callers", async () => {
       const adapter = await adapterReporting(
         { files_requested: 1, nodes_in_scope: 12, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
         "covered",
       )
       const result = await adapter.blastRadius(["src/brain_train/leaf.mjs"], "a")
 
-      assert.equal(result.ok, true, "covered files must still answer")
-      assert.notEqual(result.graph_empty, true)
-      assert.equal(result.unavailable, false)
+      assert.notEqual(result.blast_radius_inconclusive, true)
+      assert.equal(result.ok, true)
     })
 
-    it("does not flag an empty graph when no files were requested", async () => {
+    it("does not flag an empty request", async () => {
       const adapter = await adapterReporting(
         { files_requested: 0, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
         "nofiles",
       )
       const result = await adapter.blastRadius([], "a")
 
-      assert.notEqual(result.graph_empty, true, "an empty request is not an empty graph")
-      assert.equal(result.ok, true)
+      assert.notEqual(result.blast_radius_inconclusive, true)
     })
   })
 

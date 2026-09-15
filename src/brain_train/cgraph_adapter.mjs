@@ -291,7 +291,7 @@ class CgraphAdapter {
     const args = ["blast-radius", "--files", files.join(",")]
     if (laneId) args.push("--lane", laneId)
     if (locksJson) args.push("--locks-json", JSON.stringify(locksJson))
-    return degradeWhenGraphEmpty(await this._exec(args, "blast_radius"))
+    return flagInconclusiveBlastRadius(await this._exec(args, "blast_radius"))
   }
 
   async reviewPacket(opts = {}) {
@@ -425,7 +425,12 @@ class CgraphAdapter {
 
     if (results.blastRadius) {
       const b = results.blastRadius
-      if (b.ok && b.payload?.summary) {
+      if (b.ok && b.blast_radius_inconclusive) {
+        // No entities matched, so the summary's zeros describe nothing. Publishing
+        // them as a blast_radius block is what made an unchecked lock look clean.
+        meta.status = "degraded"
+        meta.degraded_reason = b.inconclusive_reason || "blast-radius inconclusive"
+      } else if (b.ok && b.payload?.summary) {
         meta.blast_radius = {
           nodes_in_scope: b.payload.summary.nodes_in_scope || 0,
           transitive_callers: b.payload.summary.transitive_callers || 0,
@@ -602,24 +607,30 @@ async function failOpen(fn) {
 }
 
 /**
- * Detect a blast-radius answer that cgraph produced from a graph with no
- * coverage of the requested files.
+ * Mark a blast-radius answer that tells btrain nothing about lane collisions.
  *
- * cgraph answers `ok: true` with every array empty in two different cases:
- * the files genuinely have no callers, or the graph has never indexed them.
- * Only the first is an answer. `nodes_in_scope` separates them: an indexed
- * file always contributes its own nodes, so zero nodes against a non-empty
- * request means the graph cannot speak to these files at all.
+ * cgraph's blast-radius matches code-entity nodes (Function, Class, Variable,
+ * ...) by EXACT path: `WHERE n.path IN [...]`. It never queries File nodes and
+ * never expands a directory to its descendants. So `nodes_in_scope: 0` happens
+ * for several unrelated reasons:
  *
- * btrain treats the second case as a clean pre-lock collision check unless we
- * mark it. A lane would then take a lock on the strength of a check that never
- * ran. Degrade it to the same shape as an unavailable cgraph, which the
- * caller already handles.
+ *   - the graph has never indexed those files;
+ *   - the lock names a directory (`src/`), which no entity path equals;
+ *   - the files hold only imports, comments, or constructs cgraph does not model.
+ *
+ * We deliberately do NOT try to tell these apart, because the payload cannot.
+ * The single fact worth acting on is that cgraph returned nothing to reason
+ * about, so the collision check is inconclusive rather than clean. btrain must
+ * not read "0 overlaps" off an answer with no nodes behind it.
+ *
+ * The command still ran and the payload is still valid, so `ok` and
+ * `unavailable` are left alone: those mean "the call worked" and "the binary
+ * was missing". This is a third state, and it gets its own flag.
  *
  * @param {AdapterResult|null} result
  * @returns {AdapterResult|null}
  */
-function degradeWhenGraphEmpty(result) {
+function flagInconclusiveBlastRadius(result) {
   const summary = result?.payload?.summary
   if (!result?.ok || !summary) return result
 
@@ -629,17 +640,14 @@ function degradeWhenGraphEmpty(result) {
 
   return {
     ...result,
-    ok: false,
-    unavailable: true,
-    graph_empty: true,
-    stderr_summary: result.stderr_summary
-      || `cgraph has no graph coverage for the ${requested} requested file(s); re-index before trusting this check`,
+    blast_radius_inconclusive: true,
+    inconclusive_reason:
+      `cgraph matched no code entities for the ${requested} locked path(s). `
+      + "It matches entity paths exactly and does not expand directories, so this "
+      + "is not evidence that the paths are collision-free. Re-index, or lock files "
+      + "rather than directories, before trusting a clean result.",
   }
 }
-
-// ---------------------------------------------------------------------------
-// Exports
-// ---------------------------------------------------------------------------
 
 export {
   CgraphAdapter,

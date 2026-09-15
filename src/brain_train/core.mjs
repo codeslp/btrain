@@ -4346,7 +4346,15 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       )
     metadata.latency_ms.blast_radius = blastRadius.latency_ms
 
-    if (blastRadius.ok && blastRadius.payload?.summary) {
+    if (blastRadius.ok && blastRadius.blast_radius_inconclusive) {
+      // cgraph ran and returned a valid payload with no entities behind it.
+      // Recording "0 overlaps" here would report a collision check that never
+      // had anything to check. Degrade instead, and keep cgraph's own reason.
+      if (metadata.status === "ok") {
+        metadata.status = "degraded"
+        metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
+      }
+    } else if (blastRadius.ok && blastRadius.payload?.summary) {
       metadata.blast_radius = {
         nodes_in_scope: blastRadius.payload.summary.nodes_in_scope || 0,
         transitive_callers: blastRadius.payload.summary.transitive_callers || 0,
@@ -4516,6 +4524,9 @@ async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files =
   if (!blastRadius.ok) {
     metadata.status = "degraded"
     metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
+  } else if (blastRadius.blast_radius_inconclusive) {
+    metadata.status = "degraded"
+    metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
   }
   return metadata
 }

@@ -384,11 +384,12 @@ async function writeHardFailingKkgBinary(dir, logPath) {
   return binPath
 }
 
-// Spec 020 WS1 regression: cgraph answers ok:true with every array empty both
-// when a file honestly has no callers and when the graph never indexed it.
-// btrain used to render the second case as a clean "0 overlaps" pre-lock
-// collision check, so a lane could take a lock on a check that never ran.
-describe("cgraph empty-graph lane flow", () => {
+// Spec 020 WS1 regression, corrected after review. cgraph matches entity paths
+// exactly, so an answer with zero nodes proves nothing about collisions -- the
+// graph may be unindexed, the lock may name a directory, or the files may hold
+// no modelled constructs. btrain used to render that as a clean "0 overlaps"
+// check, so a lane could take a lock on a check that never had anything to check.
+describe("cgraph inconclusive blast-radius lane flow", () => {
   let tmpDir
 
   before(async () => {
@@ -409,7 +410,7 @@ describe("cgraph empty-graph lane flow", () => {
 
   after(async () => { await rmDir(tmpDir) })
 
-  it("reports cgraph degraded instead of a clean zero-overlap collision check", async () => {
+  it("reports degraded instead of a clean zero-overlap collision check", async () => {
     const claim = await runCli(
       [
         "handoff", "claim", "--repo", tmpDir, "--lane", "a",
@@ -434,7 +435,7 @@ describe("cgraph empty-graph lane flow", () => {
     assert.match(
       handoff.stdout,
       /cgraph: degraded/,
-      "an empty graph must surface as degraded so the agent knows the check did not run",
+      "an inconclusive answer must surface as degraded so the agent knows the check proved nothing",
     )
   })
 })
