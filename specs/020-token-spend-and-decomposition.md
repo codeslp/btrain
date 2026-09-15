@@ -50,29 +50,43 @@ Caveman, do not earn a place here. See "Rejected: output-style compression".
 
 ## Evidence
 
-### Scope: these are Claude-session figures
+### Scope: these are Claude-session figures, and Claude is not the whole bill
 
 The reproduction reads only Claude Code transcripts. `.btrain/project.toml`
-activates `claude`, `codex`, `gemini`, and `app-developer`, so "btrain token
-spend" is not what is measured here, and review was right to say so.
+activates `claude`, `codex`, `gemini`, and `app-developer`, so the figures below
+are **not** btrain's total token spend.
 
-Measuring the gap where it is measurable: 118 Codex sessions ran with `cwd` set
-to this repo, totalling **11.2 M tokens** (11.1 M input, of which 10.8 M cached;
-62 K output). Against Claude's 2.24 **billion** cache reads that is roughly half
-a percent of the volume, so the Claude-only view does not misstate where the
-money goes — but the figures below remain Claude-only and should be read that
-way.
+An earlier revision tried to close this by measuring Codex and reported 11.2 M
+tokens, about half a percent of Claude's volume, and concluded that the
+Claude-only view "does not misstate where the money goes". **That was wrong and
+the conclusion was backwards.** Codex transcripts carry two usage fields per
+record: `last_token_usage` for that turn, and `total_token_usage` as a running
+per-session counter. The earlier measurement summed the per-turn field across
+sessions, which undercounts by roughly 78x.
 
-For Gemini, this spec's own script finds nothing: a search of `~/.gemini`,
-including `~/.gemini/tmp`, turned up credentials and history but no per-session
-token counts. `ccusage` nonetheless reports a `Gemini CLI` provider, so it reads
-accounting from somewhere this search did not cover.
+Corrected, over the same 118 Codex sessions whose `cwd` is this repo:
 
-That is the reason to use `ccusage` rather than the script above for any
-cross-runtime question. Verified on this machine: a single
+| Runtime | Tokens | Scope |
+|---|---:|---|
+| Claude | 2,243,726,548 cache reads | this repo |
+| Codex | **873,872,347** total | this repo |
+| Gemini | 56,447,870 total | whole machine, not repo-scoped |
+
+Codex is therefore about **39 percent** of Claude's volume on this repo, not half
+a percent. Any conclusion about total spend has to account for it, and the
+figures below do not.
+
+Gemini was also described earlier as "not measurable locally at all". Also wrong:
+`npx ccusage@latest gemini` returns a populated table. This spec's own script
+finds nothing under `~/.gemini`, but `ccusage` reads the accounting from
+somewhere that search did not cover. The Gemini figure above is machine-wide
+because `ccusage gemini` does not scope by repository, so it is not comparable to
+the other two rows and is shown only to establish that the data exists.
+
+**Use `ccusage` for any cross-runtime question.** Verified on this machine: one
 `npx ccusage@latest session` lists `Claude`, `Codex`, and `Gemini CLI` rows
-together. Provider-specific subcommands (`ccusage codex`, `ccusage gemini`) exist
-for narrowing to one runtime.
+together, and provider subcommands narrow it to one runtime. The script below is
+a Claude-only instrument and should be read as one.
 
 Measured from the local session transcripts Claude Code writes under
 `~/.claude/projects/<encoded repo path>/`. Figures below are the
@@ -136,8 +150,11 @@ hit ratio stays above 98 percent.
 
 ### Reproduction
 
-This script derives **every** figure above, including the cost weighting, the
-session table, and the output composition. Save and run it:
+This script derives the billing-bucket table, the cache hit ratio, the session
+table, the median context per turn, and the output composition. It does **not**
+derive the Codex or Gemini figures above (it reads only Claude transcripts), the
+eight-hour session span, or the peak-context claims, which come from separate
+commands named where they appear. Save and run it:
 
 ```python
 import json, glob, collections, os, sys
