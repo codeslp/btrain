@@ -513,6 +513,29 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
     assert.doesNotMatch(afterEmpty.stdout, /3 overlaps/, "stale overlap count must not be reprinted")
     assert.match(afterEmpty.stdout, /cgraph: degraded/)
   })
+
+  it("does not retire a known lock_overlap advisory on an inconclusive check", async () => {
+    // Second review finding on PR #63. Reconciliation retires any active
+    // advisory the current run did not surface. An inconclusive blast-radius
+    // surfaces nothing, so a real collision would be recorded as resolved --
+    // an empty graph cannot prove the overlap ended.
+    const statePath2 = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    await fs.writeFile(statePath, "1", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    const withOverlap = await fs.readFile(statePath2, "utf8").catch(() => "")
+    assert.match(withOverlap, /lock_overlap/, "phase 1 should record a lock_overlap advisory")
+
+    await fs.writeFile(statePath, "2", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    const afterEmpty = await fs.readFile(statePath2, "utf8").catch(() => "")
+
+    assert.match(
+      afterEmpty,
+      /lock_overlap/,
+      "an inconclusive check must not retire a collision advisory it cannot disprove",
+    )
+  })
 })
 
 describe("cgraph audit hard-violation gate", () => {

@@ -4157,7 +4157,13 @@ function buildResolvedCgraphAdvisoryEntry(activeEntry) {
   })
 }
 
-async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false } = {}) {
+/**
+ * @param {Set<string>} [opts.unprovenKinds] Advisory kinds this run could not
+ *   determine. Their active entries are carried forward untouched instead of
+ *   being read as resolved. Absence of evidence is not evidence of resolution:
+ *   an inconclusive blast-radius cannot show that a lock overlap ended.
+ */
+async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false, unprovenKinds = null } = {}) {
   const now = new Date().toISOString()
   const current = dedupeCgraphAdvisories(advisories)
 
@@ -4216,6 +4222,12 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
 
       for (const activeEntry of activeEntries) {
         if (activeEntry.lane !== laneId) {
+          nextActiveEntries.push(activeEntry)
+          continue
+        }
+
+        // This run produced no evidence about the kind, so it cannot retire it.
+        if (!clearLane && unprovenKinds && unprovenKinds.has(activeEntry.kind)) {
           nextActiveEntries.push(activeEntry)
           continue
         }
@@ -4331,6 +4343,9 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   const claimTimestamp = extractLatestClaimTimestamp(events)
   const adviseKinds = getConfiguredCgraphAdviceKinds(config, laneId)
   const liveAdvisories = []
+  // Advisory kinds whose state this run could not establish. Reconciliation
+  // must not retire them just because nothing was surfaced.
+  const unprovenAdvisoryKinds = new Set()
 
   if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
     const locks = await listLocks(repoRoot)
@@ -4358,6 +4373,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       // the exact collision result this branch exists to suppress, sourced from
       // a graph state that no longer holds.
       delete metadata.blast_radius
+      unprovenAdvisoryKinds.add("lock_overlap")
       if (metadata.status === "ok") {
         metadata.status = "degraded"
         metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
@@ -4459,6 +4475,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   const laneKey = laneId || "repo"
   const { surfaced, resolved } = await reconcileCgraphAdvisories(repoRoot, laneKey, currentAdvisories, {
     adviseOnResolution: config?.cgraph?.advise_on_resolution === true || getCgraphLaneConfig(config, laneId).advise_on_resolution === true,
+    unprovenKinds: unprovenAdvisoryKinds,
   })
 
   if (currentAdvisories.length > 0) {
