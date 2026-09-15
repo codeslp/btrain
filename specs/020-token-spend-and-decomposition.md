@@ -267,7 +267,7 @@ So upstream 0.6.13 fixes causes 1, 4, and the first half of 5. `name_from_symbol
 is **unchanged upstream**, so the symbol-resolution quality for TypeScript and
 JavaScript is unverified even after a merge.
 
-**Conclusion: merge the fork. The spike says it works.**
+**Conclusion: the merge is built and verified.**
 
 Run 2026-09-14 against upstream 0.6.13, installed in an isolated virtualenv with
 an isolated `HOME` and its own KuzuDB, so the working 0.4.2 install and the
@@ -492,6 +492,50 @@ remote has since been added to both fork clones, which sync-check also needs.
 
 Which fork to merge into is settled in the next section.
 
+### Merge outcome
+
+Built and verified on 2026-09-15, on `merge/upstream-0.6.13` in
+`codeslp/cgraph`, in a git worktree so the working checkout was untouched.
+
+The first attempt kept the fork's CLI against upstream internals. They drifted
+until indexing reported success and wrote nothing. The second took upstream
+wholesale for every file under `src/codegraphcontext/` and re-attached the fork
+through a single `register_extensions(app)` hook. `codegraphcontext_ext` merges
+with zero conflicts, so it is the right seam.
+
+Measured on btrain, against the fork's 0 CALLS edges:
+
+| Metric | Fork 0.4.2 | Merged 0.6.13 |
+|---|---:|---:|
+| CALLS edges | 0 | 11,531 |
+| Function nodes | 0 | 4,040 |
+| `.mjs` functions | 0 | 919 |
+| `core.mjs` functions | 0 | 353 |
+
+An independent `grep` counts 352 top-level functions in `core.mjs`, which is the
+strongest evidence that the graph models the JavaScript correctly.
+
+Three gaps surfaced and all three are closed:
+
+- **Storage routing.** `activate_project()` ran on every command and, with no
+  `--project`, inferred a slug from the working directory and rewrote
+  `KUZUDB_PATH`. Upstream's `index` does not route that way, so the writer and
+  every reader used different databases. It now redirects only when a project is
+  actually requested.
+- **Hardcoded root.** `codegraphcontext_ext/project.py` hardcoded
+  `/Volumes/zombie/cgraph/db`, an absolute path to an external volume. It now
+  derives from the config directory, with `CGRAPH_DB_ROOT` still overriding.
+- **`--code-only`.** Ported onto upstream's discovery pipeline and restored as a
+  CLI flag, rather than left inert.
+
+`kkg blast-radius --files src/brain_train/cgraph_adapter.mjs` now returns 50
+nodes in scope, 31 transitive callers, and 11 transitive callees.
+
+A **directory** lock still returns 0 nodes, because blast-radius matches entity
+paths exactly and does not expand directories. That is the case review raised on
+WS1, now confirmed against a real graph, and it is why btrain reads that answer
+as inconclusive rather than clean.
+
 ## Consolidating the cgraph forks
 
 Investigating the merge turned up the real obstacle: **cgraph exists as two
@@ -604,10 +648,12 @@ work. Confirm two points before implementation starts:
 
 1. Does the fail-open adapter treat an empty graph as a clean pre-lock collision
    check today, in the judgment of the reviewer? This spec states that it does.
-2. Who owns the fork merge, and does it get its own spec? The spike settled
-   whether it is worth doing: upstream produces 22,979 CALLS edges on btrain
-   where the fork produces 0. Open questions are ownership, and whether the
-   27-minute index is acceptable or forces indexing out of the request path.
+2. Who owns the merged fork branch, and does it get its own spec? The work
+   itself is done and verified on `merge/upstream-0.6.13` in `codeslp/cgraph`.
+   What remains is a human decision: whether to install it over the working
+   0.4.2, and whether a ~23-minute index is acceptable or forces indexing out of
+   any request path. `TIMEOUTS.index` in `cgraph_adapter.mjs` still budgets 30
+   seconds, which is wrong by two orders of magnitude either way.
 
 ## References
 

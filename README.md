@@ -426,8 +426,9 @@ tracked separately.
 ## Token Tooling
 
 btrain measures its own token spend and keeps agent context small. Cache reads
-are 69.8% of cost and fresh input is 0.1%, so the useful levers are measurement
-and smaller context, not payload compression.
+are about 70% of cost and fresh input is 0.1%, so the useful levers are
+measurement and smaller context, not payload compression. Spec 020 carries the
+exact figures with the date they were measured, because they drift.
 
 - `npx ccusage@latest session` — see spend per session across claude, codex, and gemini
 - `ast-grep` — structural search, for when a text search would over-match

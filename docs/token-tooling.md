@@ -52,7 +52,10 @@ ast-grep run --lang js --pattern 'failOpen($$$)' src/brain_train/
 
 ### When it helps, and when it does not
 
-Measured on `src/brain_train/core.mjs` at commit `054a623`. The two tools count
+Measured on `src/brain_train/core.mjs` as it stood at commit `9150811`, the
+last commit to change that file. Pinning to the measured file rather than to the
+commit that wrote this doc means the reference survives a rebase; confirm with
+`git log -1 --format=%h -- src/brain_train/core.mjs`. The two tools count
 different things, so read the table with that in mind:
 
 - `grep -c` counts **lines that contain the text**, including comments, strings,
