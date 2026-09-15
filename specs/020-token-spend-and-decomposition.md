@@ -12,7 +12,7 @@ integration that the measurement exposed as broken.
 
 The measurement changed the target. Token spend in btrain is not a payload
 problem. It is a context-growth problem. Compression tools shrink fresh input,
-which is 0.1 percent of cost. Cache reads are 69.8 percent. Cache reads scale
+which is 0.1 percent of cost. Cache reads are about 70 percent. Cache reads scale
 with context size multiplied by turn count, so the levers are smaller context
 and fewer turns.
 
@@ -33,50 +33,121 @@ Caveman, do not earn a place here. See "Rejected: output-style compression".
 
 ## Evidence
 
-Measured from 51 local session transcripts under
-`~/.claude/projects/-Users-bfaris96-btrain/`, across 6,180 assistant turns.
+Measured from the local session transcripts under
+`~/.claude/projects/-Users-bfaris96-btrain/`. Figures below are the
+**2026-09-15 03:30Z** run: 51 sessions, 6,713 assistant turns.
 
 | Bucket | Tokens | Share of cost |
 |---|---:|---:|
-| Cache reads | 1,852,379,467 | 69.8% |
-| Output | 8,576,246 | 16.1% |
-| Cache creation | 29,826,527 | 14.0% |
-| Fresh input | 162,899 | 0.1% |
+| Cache reads | 2,008,317,478 | 70.7% |
+| Output | 8,984,968 | 15.8% |
+| Cache creation | 30,461,504 | 13.4% |
+| Fresh input | 163,965 | 0.1% |
 
-The cache hit ratio is 98.4 percent. Prompt caching already works. Any change
-that risks the hit ratio costs more than it saves.
+Cache hit ratio is 98.5 percent. Prompt caching already works. Any change that
+risks the hit ratio costs more than it saves.
 
-Five sessions produce 89.9 percent of all cache reads:
+Cost share is a weighting, not a bill. The script applies fixed per-MTok rates
+(input 3.00, cache write 3.75, cache read 0.30, output 15.00) to compare buckets
+against each other. These sessions ran Fable 5 and 5.1, so the absolute dollar
+figure is indicative. The **proportions** are what the spec relies on, and they
+hold across any pricing where output costs several times input and cache reads
+are discounted an order of magnitude.
 
-| Session | Turns | Mean context per turn | Peak context | Compactions |
-|---|---:|---:|---:|---:|
-| 628702f4 | 1,347 | 519,018 | 997,510 | 2 |
-| c3729997 | 805 | 429,093 | 824,239 | 2 |
-| cf17490d | 519 | 467,892 | 858,310 | 0 |
+Five sessions produce 82.9 percent of all cache reads:
 
-The median session runs at 30,202 tokens of context per turn. These three run
-between 347,000 and 519,000. Session 628702f4 ran for eight hours and held a
-near-full 1M window for over a thousand turns.
+| Session | Turns | Cache reads | Mean context per turn |
+|---|---:|---:|---:|
+| 628702f4 | 1,347 | 699,118,027 | 519,018 |
+| c3729997 | 805 | 345,420,632 | 429,093 |
+| cf17490d | 519 | 242,836,248 | 467,892 |
+| 37a4e562 | 551 | 191,271,769 | 347,135 |
+| 91d9953f | 793 | 186,471,391 | 235,146 |
 
-Reproduce the table:
+The median session runs at 30,202 tokens of context per turn. The top three run
+between 429,000 and 519,000, and session 628702f4 held a near-full 1M window for
+over a thousand turns across eight hours.
 
-```bash
-python3 - <<'EOF'
-import json, glob, collections
-tot = collections.Counter(); turns = 0
-for f in glob.glob('/Users/bfaris96/.claude/projects/-Users-bfaris96-btrain/*.jsonl'):
-    for line in open(f, errors='ignore'):
+Output splits as follows, by assistant content-block type:
+
+| Output component | Share of characters |
+|---|---:|
+| `tool_use` inputs | 83.7% |
+| Prose text | 11.2% |
+| Thinking | 5.0% |
+| Fenced code in text | 0.2% |
+
+### These numbers drift, including from the act of measuring
+
+The corpus includes the sessions that do the analysis. An earlier run on
+2026-09-14 reported the top-five share as 89.9 percent; the same script now
+reports 82.9 percent, because the session doing the work has since added
+hundreds of turns to the denominator. Nothing was miscounted. Re-run the script
+rather than quoting these figures, and record the date whenever you do.
+
+The ratios that drive every decision in this spec are stable across both runs:
+cache reads stay near 70 percent, fresh input stays at 0.1 percent, and the cache
+hit ratio stays above 98 percent.
+
+### Reproduction
+
+This script derives **every** figure above, including the cost weighting, the
+session table, and the output composition. Save and run it:
+
+```python
+import json, glob, collections, os, sys
+
+# Per-MTok rates used only to weight buckets against each other.
+RATE = {"input_tokens": 3.00, "cache_creation_input_tokens": 3.75,
+        "cache_read_input_tokens": 0.30, "output_tokens": 15.00}
+GLOB = os.path.expanduser("~/.claude/projects/-Users-bfaris96-btrain/*.jsonl")
+
+tot, turns, sessions = collections.Counter(), 0, []
+comp = collections.Counter()
+for f in glob.glob(GLOB):
+    cr = n = 0
+    for line in open(f, errors="ignore"):
         try: d = json.loads(line)
         except ValueError: continue
-        u = (d.get('message') or {}).get('usage')
-        if not u: continue
-        turns += 1
-        for k in ('input_tokens', 'output_tokens',
-                  'cache_creation_input_tokens', 'cache_read_input_tokens'):
-            tot[k] += u.get(k, 0) or 0
-print(f"turns: {turns:,}")
-for k, v in tot.items(): print(f"  {k:32s} {v:>15,}")
-EOF
+        m = d.get("message") or {}
+        u = m.get("usage")
+        if u:
+            turns += 1; n += 1
+            for k in RATE: tot[k] += u.get(k, 0) or 0
+            cr += u.get("cache_read_input_tokens", 0) or 0
+        if m.get("role") == "assistant" and isinstance(m.get("content"), list):
+            for b in m["content"]:
+                if not isinstance(b, dict): continue
+                if b.get("type") == "text":
+                    for i, part in enumerate((b.get("text") or "").split("```")):
+                        comp["fenced code" if i % 2 else "prose"] += len(part)
+                elif b.get("type") == "tool_use":
+                    comp["tool_use inputs"] += len(json.dumps(b.get("input", {})))
+                elif b.get("type") == "thinking":
+                    comp["thinking"] += len(b.get("thinking") or "")
+    if n: sessions.append((cr, n, os.path.basename(f)[:8]))
+
+cost = {k: tot[k] / 1e6 * r for k, r in RATE.items()}
+total_cost = sum(cost.values())
+print(f"sessions {len(sessions)}   assistant turns {turns:,}\n")
+print(f"{'bucket':32s}{'tokens':>16s}{'cost share':>12s}")
+for k in sorted(RATE, key=lambda k: -cost[k]):
+    print(f"  {k:30s}{tot[k]:>16,}{cost[k]/total_cost*100:>11.1f}%")
+reads, creates = tot["cache_read_input_tokens"], tot["cache_creation_input_tokens"]
+print(f"\ncache hit ratio  read/(read+creation) : {reads/(reads+creates)*100:.1f}%")
+
+sessions.sort(reverse=True)
+allcr = sum(s[0] for s in sessions)
+print(f"\ntop 5 sessions by cache read ({sum(s[0] for s in sessions[:5])/allcr*100:.1f}% of all reads):")
+for cr, n, name in sessions[:5]:
+    print(f"  {name:10s} {n:>6,} turns  {cr:>15,} reads  {cr//n:>9,} mean ctx/turn")
+med = sorted(s[0]//s[1] for s in sessions)[len(sessions)//2]
+print(f"  median session mean ctx/turn: {med:,}")
+
+ctot = sum(comp.values())
+print(f"\noutput composition (chars):")
+for k, v in comp.most_common():
+    print(f"  {k:22s}{v:>12,}{v/ctot*100:>8.1f}%")
 ```
 
 ### cgraph measurements
@@ -124,7 +195,7 @@ Indexing is not slow. The graph is empty for a different reason.
 ## Design boundaries
 
 1. Do not place any tool in the model request path.
-2. Do not accept a change that lowers the 98.4 percent cache hit ratio.
+2. Do not accept a change that lowers the cache hit ratio, currently above 98 percent.
 3. Do not add a runtime dependency to the btrain package.
 4. Keep the Spec 005 ownership split. cgraph owns code retrieval. btrain owns
    lane state and workflow memory.
@@ -404,19 +475,13 @@ clone has no `upstream` remote. Set both before planning the merge.
 Caveman and similar skills compress agent output by constraining style. This
 spec rejects them for btrain, on measured grounds rather than taste.
 
-Output is 16.1 percent of cost. Output splits as follows, measured over the
-same 51 transcripts by content-block type:
+Output is about 16 percent of cost, and the Evidence section breaks it down by
+content-block type: `tool_use` inputs are 83.7 percent of output characters and
+prose is 11.2 percent.
 
-| Output component | Share |
-|---|---:|
-| `tool_use` inputs | 83.5% |
-| Prose text | 11.1% |
-| Thinking | 5.2% |
-| Fenced code in text | 0.2% |
-
-Prose is therefore about 1.8 percent of total spend. A style skill that cut
-prose by 65 percent would save about 1.2 percent of total spend, and it would
-not touch `tool_use` inputs, where 83.5 percent of output tokens go.
+Prose is therefore roughly 2 percent of total spend. A style skill that cut prose
+by 65 percent would save around 1 percent of total spend, and it would not touch
+`tool_use` inputs, where most output tokens go.
 
 The cgraph-research note `006-token-efficiency-integration-plan.md` already
 rejected Caveman as a repo default, because style compression removes nuance in
