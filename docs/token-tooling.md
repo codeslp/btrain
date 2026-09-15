@@ -69,8 +69,10 @@ different things, so read the table with that in mind:
 agcount() { ast-grep run --lang js --pattern "$1" --json=compact "${@:2}" \
   | python3 -c "import json,sys;print(len(json.loads(sys.stdin.read() or '[]')))"; }
 
-# 1. Rare exact identifier - ast-grep drops the definition and export lines
-grep -h -c "failOpen" src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs
+# 1. Rare exact identifier - ast-grep drops the definition and export lines.
+#    `grep -c` prints one count PER FILE (2 and 14 here), so pipe the matching
+#    lines into wc -l to get the single figure the table quotes.
+grep -h "failOpen" src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs | wc -l
 agcount 'failOpen($$$)' src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs
 
 # 2. Common word - grep over-matches comments, strings and unrelated code

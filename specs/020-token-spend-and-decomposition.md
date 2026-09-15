@@ -65,7 +65,7 @@ Five sessions produce 83.8 percent of all cache reads:
 | 37a4e562 | 551 | 191,271,769 | 347,135 |
 
 The median session runs at 30,202 tokens of context per turn. The top three run
-between 429,000 and 519,000, and session 628702f4 held a near-full 1M window for
+between 373,000 and 519,000, and session 628702f4 held a near-full 1M window for
 over a thousand turns across eight hours.
 
 Output splits as follows, by assistant content-block type:
