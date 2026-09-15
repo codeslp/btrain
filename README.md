@@ -426,7 +426,7 @@ tracked separately.
 ## Token Tooling
 
 btrain measures its own token spend and keeps agent context small. Cache reads
-are about 70% of cost and fresh input is 0.1%, so the useful levers are
+are roughly 70% of cost and fresh input is 0.1%, so the useful levers are
 measurement and smaller context, not payload compression. Spec 020 carries the
 exact figures with the date they were measured, because they drift.
 

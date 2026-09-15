@@ -33,18 +33,18 @@ Caveman, do not earn a place here. See "Rejected: output-style compression".
 
 ## Evidence
 
-Measured from the local session transcripts under
-`~/.claude/projects/-Users-bfaris96-btrain/`. Figures below are the
-**2026-09-15 03:30Z** run: 51 sessions, 6,713 assistant turns.
+Measured from the local session transcripts Claude Code writes under
+`~/.claude/projects/<encoded repo path>/`. Figures below are the
+**2026-09-15 21:30Z** run: 51 sessions, 7,158 assistant turns.
 
 | Bucket | Tokens | Share of cost |
 |---|---:|---:|
-| Cache reads | 2,008,317,478 | 70.7% |
-| Output | 8,984,968 | 15.8% |
-| Cache creation | 30,461,504 | 13.4% |
-| Fresh input | 163,965 | 0.1% |
+| Cache reads | 2,243,726,548 | 72.0% |
+| Output | 9,330,076 | 15.0% |
+| Cache creation | 32,409,845 | 13.0% |
+| Fresh input | 164,855 | 0.1% |
 
-Cache hit ratio is 98.5 percent. Prompt caching already works. Any change that
+Cache hit ratio is 98.6 percent. Prompt caching already works. Any change that
 risks the hit ratio costs more than it saves.
 
 Cost share is a weighting, not a bill. The script applies fixed per-MTok rates
@@ -54,15 +54,15 @@ figure is indicative. The **proportions** are what the spec relies on, and they
 hold across any pricing where output costs several times input and cache reads
 are discounted an order of magnitude.
 
-Five sessions produce 82.9 percent of all cache reads:
+Five sessions produce 83.8 percent of all cache reads:
 
 | Session | Turns | Cache reads | Mean context per turn |
 |---|---:|---:|---:|
 | 628702f4 | 1,347 | 699,118,027 | 519,018 |
+| b75d2356 | 1,078 | 402,242,645 | 373,137 |
 | c3729997 | 805 | 345,420,632 | 429,093 |
 | cf17490d | 519 | 242,836,248 | 467,892 |
 | 37a4e562 | 551 | 191,271,769 | 347,135 |
-| 91d9953f | 793 | 186,471,391 | 235,146 |
 
 The median session runs at 30,202 tokens of context per turn. The top three run
 between 429,000 and 519,000, and session 628702f4 held a near-full 1M window for
@@ -72,18 +72,22 @@ Output splits as follows, by assistant content-block type:
 
 | Output component | Share of characters |
 |---|---:|
-| `tool_use` inputs | 83.7% |
-| Prose text | 11.2% |
-| Thinking | 5.0% |
+| `tool_use` inputs | 83.6% |
+| Prose text | 11.5% |
+| Thinking | 4.8% |
 | Fenced code in text | 0.2% |
 
 ### These numbers drift, including from the act of measuring
 
-The corpus includes the sessions that do the analysis. An earlier run on
-2026-09-14 reported the top-five share as 89.9 percent; the same script now
-reports 82.9 percent, because the session doing the work has since added
-hundreds of turns to the denominator. Nothing was miscounted. Re-run the script
-rather than quoting these figures, and record the date whenever you do.
+The corpus includes the sessions that do the analysis, and the table above now
+demonstrates it. Session `b75d2356` in the top five **is the session that wrote
+this spec**: it did not exist in the first run, and it is now the second-largest
+consumer of cache reads in the repository.
+
+Three runs of the same script, hours apart: the top-five share read 89.9, then
+82.9, then 83.8 percent, and cache reads read 69.8, then 70.7, then 72.0 percent.
+Nothing was miscounted. Re-run the script rather than quoting these figures, and
+record the date whenever you do.
 
 The ratios that drive every decision in this spec are stable across both runs:
 cache reads stay near 70 percent, fresh input stays at 0.1 percent, and the cache
@@ -100,7 +104,15 @@ import json, glob, collections, os, sys
 # Per-MTok rates used only to weight buckets against each other.
 RATE = {"input_tokens": 3.00, "cache_creation_input_tokens": 3.75,
         "cache_read_input_tokens": 0.30, "output_tokens": 15.00}
-GLOB = os.path.expanduser("~/.claude/projects/-Users-bfaris96-btrain/*.jsonl")
+# Transcript location. Claude Code encodes the repo path into the directory
+# name, so derive it from the repo rather than hardcoding one machine's home.
+# Override with BTRAIN_TRANSCRIPTS when the transcripts live elsewhere.
+REPO = os.environ.get("BTRAIN_REPO") or os.getcwd()
+GLOB = os.environ.get("BTRAIN_TRANSCRIPTS") or os.path.join(
+    os.path.expanduser("~/.claude/projects"),
+    "-" + os.path.abspath(REPO).strip("/").replace("/", "-"),
+    "*.jsonl",
+)
 
 tot, turns, sessions = collections.Counter(), 0, []
 comp = collections.Counter()
@@ -429,11 +441,14 @@ Tasks:
 
 1. **Done.** `ast-grep` 0.45.3 installed, confirmed parsing `.mjs`.
 2. **Revised.** An automatic `rtk`-style rewrite is the wrong shape. Measured on
-   `core.mjs`: ast-grep returns the *same* 16 lines as grep for a rare exact
-   identifier, so a blanket rewrite would buy nothing and add a dependency to
-   every search. It wins only when a text search over-matches (`status`: 326 grep
-   hits against 3 assignment hits) or when the query is structural (`catch`
-   blocks returning null: 13 matches against 42 occurrences to read by hand).
+   `core.mjs`, counting ast-grep matches with `--json` rather than piped lines:
+   for a rare exact identifier ast-grep returns 13 call sites against grep's 16
+   raw occurrence lines, so a blanket rewrite would buy little and add a
+   dependency to every search. It wins when a text search over-matches
+   (`status`: 326 grep lines against 3 assignments) or when the query is
+   structural (`catch` blocks returning null: 2 matches against 42 `catch`
+   lines to read by hand). The two tools count different things;
+   `docs/token-tooling.md` labels the columns accordingly.
    Documented as a judgement call rather than wired in as a rewrite.
 3. **Done.** Pattern reference in `docs/token-tooling.md`.
 
