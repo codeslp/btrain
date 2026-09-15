@@ -563,6 +563,32 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       "a payload with no summary proves nothing and must not retire the advisory",
     )
   })
+
+  it("does not retire an advisory kind btrain does not produce itself", async () => {
+    // cgraph also emits `truncated`, `invalid_locks_json` and `no_graph`, and
+    // normalizePayloadAdvisories preserves the kind, so any of them can become a
+    // persisted entry. Seeding the unproven set from a two-element literal left
+    // those kinds retired and logged as resolved on a run with no evidence.
+    const statePath2 = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+    const existing = await fs.readFile(statePath2, "utf8").catch(() => "")
+    await fs.writeFile(
+      statePath2,
+      existing + JSON.stringify({
+        lane: "a", kind: "truncated", context_hash: "deadbeef",
+        detail: "seeded", first_seen: new Date().toISOString(),
+      }) + "\n",
+      "utf8",
+    )
+
+    await fs.writeFile(statePath, "2", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.match(
+      await fs.readFile(statePath2, "utf8").catch(() => ""),
+      /truncated/,
+      "a kind this run produced no evidence about must survive reconciliation",
+    )
+  })
 })
 
 describe("cgraph audit hard-violation gate", () => {

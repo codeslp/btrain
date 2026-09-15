@@ -635,17 +635,46 @@ function flagInconclusiveBlastRadius(result) {
   if (!result?.ok || !summary) return result
 
   const requested = summary.files_requested || 0
+  if (requested === 0) return result
+
   const inScope = summary.nodes_in_scope || 0
-  if (requested === 0 || inScope > 0) return result
+  const callers = summary.transitive_callers || 0
+  const callees = summary.transitive_callees || 0
+  const overlaps = summary.lock_overlaps || 0
+  const crossModule = Array.isArray(result.payload.cross_module_impact)
+    ? result.payload.cross_module_impact.length
+    : 0
+
+  // cgraph computes `lock_overlaps` purely from the transitive caller and callee
+  // lists (`_detect_lock_overlaps(callers, callees, locks, lane)`), which come
+  // from CALLS edges. `nodes_in_scope` comes from a separate query over entity
+  // nodes. Node presence therefore says nothing about whether the overlap
+  // computation had any edges to work with.
+  //
+  // An earlier version of this guard used `nodes_in_scope > 0` as the
+  // conclusiveness test, which is the wrong field: a graph holding entities but
+  // no CALLS edges -- exactly what btrain has today -- answered "0 overlaps" and
+  // read as conclusive. Adding tsconfig.json makes that state MORE likely, not
+  // less, by moving the repo from "no entities" to "entities, few edges".
+  //
+  // Require positive evidence that the traversal produced something: any caller,
+  // callee or overlap, or cross-module impact, which cgraph derives from IMPORTS
+  // edges and is thus an independent witness that relationships exist at all.
+  if (callers > 0 || callees > 0 || overlaps > 0 || crossModule > 0) return result
+
+  const detail = inScope > 0
+    ? `cgraph matched ${inScope} entit${inScope === 1 ? "y" : "ies"} for the ${requested} locked path(s) `
+      + "but produced no call edges, so its overlap count was computed from nothing. "
+      + "A genuine leaf file is indistinguishable from an unindexed one here."
+    : `cgraph matched no code entities for the ${requested} locked path(s). `
+      + "It matches entity paths exactly and does not expand directories, so this "
+      + "is not evidence that the paths are collision-free."
 
   return {
     ...result,
     blast_radius_inconclusive: true,
     inconclusive_reason:
-      `cgraph matched no code entities for the ${requested} locked path(s). `
-      + "It matches entity paths exactly and does not expand directories, so this "
-      + "is not evidence that the paths are collision-free. Re-index, or lock files "
-      + "rather than directories, before trusting a clean result.",
+      detail + " Re-index, or lock files rather than directories, before trusting a clean result.",
   }
 }
 

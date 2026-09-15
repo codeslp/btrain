@@ -4163,6 +4163,24 @@ function buildResolvedCgraphAdvisoryEntry(activeEntry) {
  *   being read as resolved. Absence of evidence is not evidence of resolution:
  *   an inconclusive blast-radius cannot show that a lock overlap ended.
  */
+/**
+ * Advisory kinds this lane currently holds in persisted state.
+ *
+ * Reconciliation retires any active entry the current run did not surface, so
+ * every kind already on record has to be considered before that happens --
+ * including kinds this btrain build does not produce itself.
+ */
+async function listActiveCgraphAdvisoryKinds(repoRoot, laneId) {
+  try {
+    const entries = await readJsonLinesSnapshot(getCgraphAdvisoryStatePath(repoRoot))
+    return new Set(
+      entries.filter((entry) => entry?.lane === laneId && entry?.kind).map((entry) => entry.kind),
+    )
+  } catch {
+    return new Set()
+  }
+}
+
 async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false, unprovenKinds = null } = {}) {
   const now = new Date().toISOString()
   const current = dedupeCgraphAdvisories(advisories)
@@ -4354,6 +4372,14 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   // default.
   const unprovenAdvisoryKinds = new Set(["lock_overlap", "drift"])
 
+  // Any persisted blast_radius describes a previous run's graph. Drop it before
+  // this run decides anything: only a conclusive answer below reinstalls it.
+  // Scoping this to the inconclusive branch left the far more common paths --
+  // unavailable, timed out, no locked files, adapter without the command --
+  // reprinting a stale "N in scope, M overlaps" line, in the unavailable case
+  // directly beside the degraded warning, and in the skipped cases under a
+  // plain "cgraph: ok".
+  delete metadata.blast_radius
   if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
     const locks = await listLocks(repoRoot)
     const blastRadius =
@@ -4373,13 +4399,6 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       // Recording "0 overlaps" here would report a collision check that never
       // had anything to check. Degrade instead, and keep cgraph's own reason.
       //
-      // Drop any carried-over blast_radius as well. `metadata` is spread from
-      // the latest persisted event, so a figure from an earlier run survives
-      // into this one, and cli.mjs prints it whenever the field exists. Leaving
-      // it would show "N in scope, M overlaps" next to the degraded warning --
-      // the exact collision result this branch exists to suppress, sourced from
-      // a graph state that no longer holds.
-      delete metadata.blast_radius
       if (metadata.status === "ok") {
         metadata.status = "degraded"
         metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
@@ -4415,6 +4434,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
     }
   }
 
+  delete metadata.drift
   if (lockedFiles.length > 0 && adapter.supports("drift-check")) {
     const driftResult =
       await runCachedCgraphProducer(
@@ -4462,10 +4482,17 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
     }
   }
 
-  // A kind the operator excluded from advise_on is never surfaced, so
-  // reconciliation would read it as resolved. Keep it unproven instead.
-  for (const kind of [...unprovenAdvisoryKinds, "lock_overlap", "drift"]) {
-    if (!adviseKinds.has(kind)) unprovenAdvisoryKinds.add(kind)
+  // Everything the lane currently has an active advisory for is unproven unless
+  // this run surfaced it. Seeding from the two producer kinds was not enough:
+  // cgraph also emits `truncated`, `invalid_locks_json` and `no_graph`, and
+  // normalizePayloadAdvisories preserves those kinds, so any of them can become
+  // a persisted entry once advise_on lists it. The earlier loop spread
+  // unprovenAdvisoryKinds over itself, so it could only re-add kinds already
+  // present -- dead code that read as general coverage.
+  for (const kind of await listActiveCgraphAdvisoryKinds(repoRoot, laneId || "repo")) {
+    if (!liveAdvisories.some((advisory) => advisory.kind === kind)) {
+      unprovenAdvisoryKinds.add(kind)
+    }
   }
 
   let currentAdvisories = dedupeCgraphAdvisories(
