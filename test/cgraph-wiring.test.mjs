@@ -440,6 +440,81 @@ describe("cgraph inconclusive blast-radius lane flow", () => {
   })
 })
 
+// Review finding on PR #63: metadata is spread from the latest persisted event,
+// so a blast_radius recorded when the graph was healthy survives into a later
+// run whose live check matched nothing -- and cli.mjs prints that field whenever
+// it exists. The degraded warning would then sit next to a stale "N in scope,
+// M overlaps" line: the exact collision result the fix exists to suppress.
+describe("cgraph stale blast-radius after the graph goes empty", () => {
+  let tmpDir, statePath
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    statePath = path.join(tmpDir, "kkg-phase")
+    const logPath = path.join(tmpDir, "kkg-calls.jsonl")
+    const binPath = path.join(tmpDir, "kkg")
+
+    // Phase 1 reports a healthy graph; phase 2 reports zero matched nodes.
+    const script = [
+      "#!/usr/bin/env node",
+      "const fs = require('fs')",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const statePath = ${JSON.stringify(statePath)}`,
+      `fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ cmd }) + "\\n")`,
+      "let phase = '1'",
+      "try { phase = fs.readFileSync(statePath, 'utf8').trim() } catch {}",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      "else if (cmd === 'blast-radius') {",
+      "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 3 }",
+      "  const empty   = { files_requested: 1, nodes_in_scope: 0, transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0 }",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: phase === '1' ? healthy : empty }))",
+      "} else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await fs.writeFile(statePath, "1", "utf8")
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("does not keep printing the old overlap count once the graph stops matching", async () => {
+    // Phase 1: healthy graph, so a blast_radius is persisted on the claim event.
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Persist a healthy blast radius",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const healthy = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(healthy.stdout, /blast radius: 7 in scope/, "phase 1 should record the real figures")
+
+    // Phase 2: same lane, but the graph now matches nothing.
+    await fs.writeFile(statePath, "2", "utf8")
+    const afterEmpty = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.doesNotMatch(
+      afterEmpty.stdout,
+      /blast radius: 7 in scope/,
+      "the persisted figure must not survive a live check that matched nothing",
+    )
+    assert.doesNotMatch(afterEmpty.stdout, /3 overlaps/, "stale overlap count must not be reprinted")
+    assert.match(afterEmpty.stdout, /cgraph: degraded/)
+  })
+})
+
 describe("cgraph audit hard-violation gate", () => {
   let tmpDir
   let logPath

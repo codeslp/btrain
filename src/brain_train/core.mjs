@@ -4350,6 +4350,14 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       // cgraph ran and returned a valid payload with no entities behind it.
       // Recording "0 overlaps" here would report a collision check that never
       // had anything to check. Degrade instead, and keep cgraph's own reason.
+      //
+      // Drop any carried-over blast_radius as well. `metadata` is spread from
+      // the latest persisted event, so a figure from an earlier run survives
+      // into this one, and cli.mjs prints it whenever the field exists. Leaving
+      // it would show "N in scope, M overlaps" next to the degraded warning --
+      // the exact collision result this branch exists to suppress, sourced from
+      // a graph state that no longer holds.
+      delete metadata.blast_radius
       if (metadata.status === "ok") {
         metadata.status = "degraded"
         metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
