@@ -4345,7 +4345,14 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   const liveAdvisories = []
   // Advisory kinds whose state this run could not establish. Reconciliation
   // must not retire them just because nothing was surfaced.
-  const unprovenAdvisoryKinds = new Set()
+  //
+  // Default to unproven and clear a kind only on a conclusive observation.
+  // Marking failures individually kept missing paths: a producer the adapter
+  // does not support, an `ok` result with no summary, and kinds filtered out of
+  // advise_on all reach reconciliation having surfaced nothing, and each would
+  // have retired a real advisory. Proving is the exception; not knowing is the
+  // default.
+  const unprovenAdvisoryKinds = new Set(["lock_overlap", "drift"])
 
   if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
     const locks = await listLocks(repoRoot)
@@ -4373,7 +4380,6 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       // the exact collision result this branch exists to suppress, sourced from
       // a graph state that no longer holds.
       delete metadata.blast_radius
-      unprovenAdvisoryKinds.add("lock_overlap")
       if (metadata.status === "ok") {
         metadata.status = "degraded"
         metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
@@ -4386,6 +4392,8 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
         lock_overlaps: blastRadius.payload.summary.lock_overlaps || 0,
       }
 
+      // A real summary is the only thing that licenses retiring a lock_overlap.
+      unprovenAdvisoryKinds.delete("lock_overlap")
       liveAdvisories.push(...normalizePayloadAdvisories(blastRadius.payload, "lock_overlap"))
       if (
         liveAdvisories.filter((entry) => entry.kind === "lock_overlap").length === 0
@@ -4396,9 +4404,14 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
           detail: `${Number(blastRadius.payload.summary.lock_overlaps)} overlapping lane${Number(blastRadius.payload.summary.lock_overlaps) === 1 ? "" : "s"} detected for the claimed lock set.`,
         }))
       }
-    } else if (metadata.status === "ok") {
-      metadata.status = "degraded"
-      metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
+    } else if (!blastRadius.ok) {
+      // Unavailable or timed out. Same absence of evidence as an inconclusive
+      // answer, and far more common, so reconciliation must not retire a
+      // collision advisory it never got the chance to re-observe.
+      if (metadata.status === "ok") {
+        metadata.status = "degraded"
+        metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
+      }
     }
   }
 
@@ -4429,6 +4442,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
         neighbor_files: neighborFiles,
       }
 
+      unprovenAdvisoryKinds.delete("drift")
       liveAdvisories.push(...normalizePayloadAdvisories(driftResult.payload, "drift"))
       if (liveAdvisories.filter((entry) => entry.kind === "drift").length === 0 && driftedNodes > 0) {
         liveAdvisories.push(buildCgraphAdvisoryEntry({
@@ -4439,10 +4453,19 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
           changedNodeIds: driftResult.payload.changed_node_ids || driftResult.payload.drifted_node_ids || [],
         }))
       }
-    } else if (metadata.status === "ok") {
-      metadata.status = "degraded"
-      metadata.degraded_reason = driftResult.timed_out ? "drift-check timed out" : "drift-check unavailable"
+    } else if (!driftResult.ok) {
+      // No drift evidence this run, so an active drift advisory stands.
+      if (metadata.status === "ok") {
+        metadata.status = "degraded"
+        metadata.degraded_reason = driftResult.timed_out ? "drift-check timed out" : "drift-check unavailable"
+      }
     }
+  }
+
+  // A kind the operator excluded from advise_on is never surfaced, so
+  // reconciliation would read it as resolved. Keep it unproven instead.
+  for (const kind of [...unprovenAdvisoryKinds, "lock_overlap", "drift"]) {
+    if (!adviseKinds.has(kind)) unprovenAdvisoryKinds.add(kind)
   }
 
   let currentAdvisories = dedupeCgraphAdvisories(

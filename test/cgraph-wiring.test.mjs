@@ -476,7 +476,8 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       "else if (cmd === 'blast-radius') {",
       "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 3 }",
       "  const empty   = { files_requested: 1, nodes_in_scope: 0, transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0 }",
-      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: phase === '1' ? healthy : empty }))",
+      "  if (phase === '3') { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius' })) }",
+      "  else { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: phase === '1' ? healthy : empty })) }",
       "} else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
     ].join("\n")
     await fs.writeFile(binPath, script)
@@ -534,6 +535,32 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       afterEmpty,
       /lock_overlap/,
       "an inconclusive check must not retire a collision advisory it cannot disprove",
+    )
+  })
+
+  it("keeps the advisory when blast-radius stops being available at all", async () => {
+    // The first fix marked kinds unproven inside each failure branch, which
+    // missed the paths that never reach a branch: a producer the adapter does
+    // not support, and an `ok` result carrying no summary. Both surface nothing
+    // and would retire a real advisory. The kinds now default to unproven.
+    const statePath2 = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    await fs.writeFile(statePath, "1", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(
+      await fs.readFile(statePath2, "utf8").catch(() => ""),
+      /lock_overlap/,
+      "phase 1 should record a lock_overlap advisory",
+    )
+
+    // Phase 3: blast-radius returns ok with no summary at all.
+    await fs.writeFile(statePath, "3", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.match(
+      await fs.readFile(statePath2, "utf8").catch(() => ""),
+      /lock_overlap/,
+      "a payload with no summary proves nothing and must not retire the advisory",
     )
   })
 })
