@@ -52,13 +52,34 @@ ast-grep run --lang js --pattern 'failOpen($$$)' src/brain_train/
 
 ### When it helps, and when it does not
 
-Measured on `src/brain_train/core.mjs`:
+Measured on `src/brain_train/core.mjs` at commit `e220dd1`. Re-run these to
+check the numbers against the current file:
+
+```bash
+# 1. Rare exact identifier - no difference
+grep -c "failOpen" src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs
+ast-grep run --lang js --pattern 'failOpen($$$)' \
+  src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs | grep -cE '^src/'
+
+# 2. Common word - grep over-matches comments, strings and unrelated code
+grep -c "status" src/brain_train/core.mjs
+ast-grep run --lang js --pattern 'metadata.status = $_' \
+  src/brain_train/core.mjs | grep -cE '^src/'
+
+# 3. Structural - grep cannot express this at all
+grep -c "catch" src/brain_train/core.mjs
+ast-grep run --lang js --pattern 'try { $$$ } catch { return null }' \
+  src/brain_train/core.mjs | grep -cE '^src/'
+```
 
 | Query | grep | ast-grep |
 |---|---:|---:|
-| Call sites of a rare name (`failOpen`) | 16 lines | 16 lines |
-| Occurrences of a common word (`status`) | 326 hits | **3 hits** (assignments only) |
-| `catch` blocks that return null | not expressible | **13 matches** |
+| 1. Call sites of a rare name (`failOpen`) | 16 | 16 |
+| 2. Occurrences of a common word (`status`) | 326 | **3** (assignments only) |
+| 3. `catch` blocks that return null | 42 `catch` to read by hand | **13 matches** |
+
+These counts move as `core.mjs` changes. Treat the *pattern* as the finding, not
+the exact numbers: ast-grep ties grep on row 1 and wins on rows 2 and 3.
 
 The honest summary: ast-grep gives **no** token saving when you already know an
 exact, rare identifier. grep is fine there, and simpler. ast-grep wins in two
