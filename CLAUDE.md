@@ -55,7 +55,7 @@ Project knowledge lives in the docs below. Read them; don't duplicate conclusion
 | Semantic code search evaluation | `research/zvec-grep-evaluation.md` |
 | Writing-standard skill evaluation | `research/ste-writing-evaluation.md` |
 | Property-based test engine choice (spec 014 FR-6) | `research/fastcheck-engine-choice.md` |
-| AgentChatTR MCP bridge proposal (unimplemented) | `research/implementation_plan.md` |
+| AgentChatTR MCP bridge proposal (superseded, not implemented) | `research/implementation_plan.md` |
 | Session continuity | `~/.claude/projects/<repo-path-slug>/memory/MEMORY.md` (outside the repo) |
 
 ## Agent Rules
