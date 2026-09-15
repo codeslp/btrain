@@ -31,8 +31,10 @@ Useful subcommands:
 | `ccusage session` | Usage grouped by session — finds the expensive outliers |
 | `ccusage blocks` | Usage grouped by billing block |
 
-It reports `claude`, `codex`, and `gemini` separately, which covers every
-runtime in `[agents].active`. Use `ccusage session` first: spec 020 found that
+Verified on this machine: one `ccusage session` call lists `Claude`, `Codex`, and
+`Gemini CLI` rows together, which covers the runtimes in `[agents].active`.
+Provider-specific subcommands (`ccusage codex`, `ccusage gemini`) narrow it to
+one runtime. Use `ccusage session` first: spec 020 found that
 five sessions produced most of the cache reads, so the distribution matters more
 than the total.
 
@@ -55,10 +57,18 @@ ast-grep run --lang js --pattern 'failOpen($$$)' src/brain_train/
 
 ### When it helps, and when it does not
 
-Measured on `src/brain_train/core.mjs` as it stood at commit `9150811`, the
-last commit to change that file. Pinning to the measured file rather than to the
-commit that wrote this doc means the reference survives a rebase; confirm with
-`git log -1 --format=%h -- src/brain_train/core.mjs`. The two tools count
+Measured on the files each query names. Row 1 reads **both**
+`src/brain_train/core.mjs` and `src/brain_train/cgraph_adapter.mjs`; rows 2 and 3
+read `core.mjs` only. Confirm neither input has moved since these counts were
+taken:
+
+```bash
+git log -1 --format=%h -- src/brain_train/core.mjs           # 9150811
+git log -1 --format=%h -- src/brain_train/cgraph_adapter.mjs
+```
+
+Pinning every file a count depends on, rather than the commit that wrote this
+doc, means the reference survives a rebase and catches drift in either input. The two tools count
 different things, so read the table with that in mind:
 
 - `grep -c` counts **lines that contain the text**, including comments, strings,

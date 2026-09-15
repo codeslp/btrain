@@ -63,9 +63,16 @@ a percent of the volume, so the Claude-only view does not misstate where the
 money goes — but the figures below remain Claude-only and should be read that
 way.
 
-Gemini is not measurable locally at all: its history stores no per-session token
-accounting, only credentials. `npx ccusage@latest session` reports all three
-runtimes and is the tool to use for a cross-runtime view.
+For Gemini, this spec's own script finds nothing: a search of `~/.gemini`,
+including `~/.gemini/tmp`, turned up credentials and history but no per-session
+token counts. `ccusage` nonetheless reports a `Gemini CLI` provider, so it reads
+accounting from somewhere this search did not cover.
+
+That is the reason to use `ccusage` rather than the script above for any
+cross-runtime question. Verified on this machine: a single
+`npx ccusage@latest session` lists `Claude`, `Codex`, and `Gemini CLI` rows
+together. Provider-specific subcommands (`ccusage codex`, `ccusage gemini`) exist
+for narrowing to one runtime.
 
 Measured from the local session transcripts Claude Code writes under
 `~/.claude/projects/<encoded repo path>/`. Figures below are the
@@ -416,7 +423,70 @@ about 92,000 tokens. It defines 352 top-level functions behind 2 exports. It is
 
 An agent that reads this file spends about half of a 200,000-token window. The
 file then stays in context, and btrain pays for it again as cache reads on every
-later turn. This file is the largest single contributor to the measured cost.
+later turn.
+
+An earlier draft called it "the largest single contributor to the measured cost".
+Review rejected that, correctly: the billing-bucket reproduction records no file
+information at all, and the Evidence section says outright that it cannot
+attribute cached tokens to sources. So a second measurement was run, over the
+`tool_use` arguments in the same transcripts, counting which files agents
+actually opened:
+
+| File | Reads | Bytes | Partial reads | Estimated share of read-bytes |
+|---|---:|---:|---:|---:|
+| `core.mjs` | 50 | 368,903 | 31 | **51.3%** |
+| `lane-lock-harness.test.mjs` | 69 | 40,664 | 2 | 7.8% |
+| `015-lane-transition-contract.md` | 32 | 77,356 | 6 | 6.9% |
+| `lane-lock-model.mjs` | 63 | 31,654 | 1 | 5.5% |
+| `cli.mjs` | 19 | 97,855 | 7 | 5.2% |
+
+By **read count** `core.mjs` is only fourth, at 8.3 percent of the 601
+file-targeted tool calls. Weighted by file size it is 51.3 percent of read-bytes,
+more than the next seven files combined. Both facts matter: it is not the file
+agents open most often, it is the file that costs most when they do.
+
+Reproduce that table:
+
+```python
+import json, glob, collections, os
+REPO = os.environ.get("BTRAIN_REPO") or os.getcwd()
+GLOB = os.environ.get("BTRAIN_TRANSCRIPTS") or os.path.join(
+    os.path.expanduser("~/.claude/projects"),
+    "-" + os.path.abspath(REPO).strip("/").replace("/", "-"), "*.jsonl")
+
+reads, partial = collections.Counter(), collections.Counter()
+for f in glob.glob(GLOB):
+    for line in open(f, errors="ignore"):
+        try: d = json.loads(line)
+        except ValueError: continue
+        m = d.get("message") or {}
+        if m.get("role") != "assistant" or not isinstance(m.get("content"), list): continue
+        for b in m["content"]:
+            if not isinstance(b, dict) or b.get("type") != "tool_use": continue
+            inp = b.get("input") or {}
+            p = inp.get("file_path") or inp.get("path") or ""
+            if isinstance(p, str) and p.startswith("/"):
+                reads[p] += 1
+                if inp.get("limit") or inp.get("offset"): partial[p] += 1
+
+rows = []
+for p, n in reads.items():
+    try: size = os.path.getsize(p)
+    except OSError: continue
+    rows.append((n * size, n, size, partial[p], os.path.basename(p)))
+rows.sort(reverse=True)
+tot = sum(r[0] for r in rows)
+for w, n, sz, pt, name in rows[:8]:
+    print(f"{name:40s} reads={n:<5} bytes={sz:<9,} partial={pt:<4} share={w/tot*100:.1f}%")
+print(f"file-targeted tool calls: {sum(reads.values()):,}")
+```
+
+Treat 51.3 percent as an **upper bound**. The estimate multiplies read count by
+full file size, and 31 of the 50 `core.mjs` reads passed `offset` or `limit`, so
+they read part of the file rather than all of it. The byte figures also depend on
+the checked-out revision: run the script on `main` to get the numbers above. The claim this supports is the
+weaker one: `core.mjs` dominates read-bytes among files agents open. It is not a
+measurement of its share of total spend.
 
 Tasks:
 
@@ -666,8 +736,17 @@ Keep `ste-writing`, which btrain already adopted on 2026-07-29 and which runs
 advisory-only. Keep it for clarity, not for tokens. Its local trial measured
 form, not spend, and this spec makes no token claim for it.
 
-The real output lever is `tool_use` payload, not prose. Workstreams 5 and 6
-address that. Note one counter-effect: the Serena evaluation reports that
+One clarification, raised in review. The `tool_use` share above is measured on
+**assistant-produced JSON arguments**, which are output tokens: file paths,
+patterns, edit bodies. It is not tool *results*. `ast-grep` and Serena mostly
+shrink tool results and retrieved context, which arrive as input and then persist
+in the cache-read bucket. Workstreams 5 and 6 are therefore **context-input**
+reductions, and the output table does not justify them; the cache-read
+arithmetic does.
+
+The genuine output lever is the size of the arguments agents write, chiefly edit
+payloads. This spec does not measure which argument kinds dominate, so it makes
+no recommendation there. Note one counter-effect: the Serena evaluation reports that
 symbolic editing sends **more** payload than a plain text edit for small,
 single-file changes, because the caller must supply the full symbol body. Scope
 Serena to navigation and cross-file refactoring, and keep plain edits for small
@@ -676,7 +755,12 @@ changes.
 ## Dependency order
 
 0. The fork merge now blocks the cgraph half of Workstream 1. The adapter
-   correctness fix does not wait on it and has landed.
+   correctness fix does not wait on it, but it lives on PR #63 and is NOT in
+   this tree. Until #63 merges, `cgraph_adapter.mjs` still publishes a
+   `blast_radius` for any `ok` response carrying a summary, all-zero included,
+   and `core.mjs` does the same on its live path. Do not enable `[cgraph]`
+   before #63 merges: the false-clean collision result this spec describes is
+   still live in the code as it stands here.
 1. Workstream 4 first. Measure before and after.
 2. Workstream 1 next. It is a correctness fix and unblocks graph queries.
 3. Workstream 6 next. It supports Workstream 2.
