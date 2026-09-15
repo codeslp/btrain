@@ -10,11 +10,28 @@
 Cut btrain token spend at its measured source, and repair the code-graph
 integration that the measurement exposed as broken.
 
-The measurement changed the target. Token spend in btrain is not a payload
-problem. It is a context-growth problem. Compression tools shrink fresh input,
-which is 0.1 percent of cost. Cache reads are about 70 percent. Cache reads scale
-with context size multiplied by turn count, so the levers are smaller context
-and fewer turns.
+The measurement changed the target, but not in the way an earlier draft of this
+spec claimed. That draft argued that compression tools shrink fresh input, that
+fresh input is 0.1 percent of cost, and therefore that payload size does not
+matter. **That reasoning is wrong, and review caught it.**
+
+A payload is billed as fresh input only on the turn it arrives. After that it
+becomes cache-creation tokens, and then it is re-read as part of the prompt on
+every later turn of the session. The 0.1 percent figure is what a payload costs
+*once*; its real cost is the share of the ~70 percent cache-read bucket it
+occupies for the rest of the session. Payload size therefore drives cache reads
+directly, and shrinking what enters context is exactly the right lever.
+
+The reproduction script groups provider billing buckets. It does **not**
+attribute cached tokens back to the payloads that produced them, so it cannot
+measure how much of the cache-read bucket any given source owns. Treat the
+bucket shares as a map of where money goes, not as evidence about which content
+is responsible.
+
+What survives from the original analysis is the shape of the problem: cache reads
+are ~70 percent of cost and scale as context size multiplied by turn count. Both
+factors are levers. Smaller payloads reduce the first, and fewer or shorter
+sessions reduce the second.
 
 This spec covers six workstreams:
 
@@ -318,7 +335,10 @@ trial merge aborted.
 
 Tasks:
 
-1. **Done.** `tsconfig.json` added to the btrain root.
+1. **Pending on this branch.** `tsconfig.json` is written and reviewed, but it
+   lands with the WS1 code on PR #63, not with this documentation change. A
+   tree search at this commit finds no `tsconfig.json`, so treat the
+   prerequisite as unmet until #63 merges.
 2. **Superseded.** A two-line cherry-pick is not enough. Causes 1 and 4 both
    need upstream code, and cause 5 is undiagnosed. Do the fork merge.
 3. **Done.** `javascript` added to `SCIP_LANGUAGES`.

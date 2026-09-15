@@ -4,10 +4,13 @@ Two command-line tools that btrain uses to see and reduce token spend. Neither
 is a btrain dependency, and neither sits in the model request path.
 
 Spec 020 measured where btrain's tokens actually go. Cache reads are about 70
-percent of cost, output about 16 percent, and fresh input 0.1 percent. Cache
-reads scale with context size multiplied by turn count, so the useful tools are
-the ones that measure spend or keep context small. Payload compression targets
-the 0.1 percent and is rejected. See
+percent of cost and scale with context size multiplied by turn count, so the
+useful tools are the ones that measure spend or keep context small.
+
+A payload is billed as fresh input only on the turn it arrives; after that it is
+re-read as part of the prompt on every later turn. Payload size therefore feeds
+the cache-read bucket rather than sitting apart from it, and shrinking what
+enters context helps twice. See
 [spec 020](../specs/020-token-spend-and-decomposition.md).
 
 ## ccusage — see the spend
@@ -114,8 +117,11 @@ without capturing it.
 
 ## What is deliberately not here
 
-- **Payload compression proxies.** They optimize the 0.1 percent above, and a
-  proxy in the model path puts the existing cache hit ratio at risk. Rejected in
+- **Payload compression proxies.** Not because compression is pointless — a
+  smaller payload is re-read on every later turn, so it does help. They are
+  rejected because `rtk` already shapes tool output *before* it enters context,
+  and because a proxy in the model path puts the existing 98%+ cache hit ratio
+  at risk for a gain rtk largely already captures. Full reasoning in
   [research/ponytail-headroom-evaluation.md](../research/ponytail-headroom-evaluation.md).
 - **Output-style compression.** Most output is tool-call payload rather than
   prose, so restyling prose moves almost nothing. Spec 020 has the breakdown.
