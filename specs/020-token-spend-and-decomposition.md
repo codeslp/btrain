@@ -320,18 +320,44 @@ Tasks:
    vendored Python. This does not help on 0.4.2, which ignores `.cgcignore`
    during detection, but it is correct for the merged version.
 
-**Correctness fix.** `kkg blast-radius --files src/brain_train/core.mjs`
-currently returns `ok: true` with `nodes_in_scope: []`, `lock_overlaps: []`,
-`transitive_callers: 0`, and `transitive_callees: 0`. The adapter is fail-open,
-so btrain reads this as a clean pre-lock collision check. An empty graph is not
-a clean check. Change the adapter to separate three outcomes:
+**Correctness fix.** Two facts, both established after the first draft of this
+spec and both correcting it.
 
-- cgraph is unavailable. Degrade, and say so.
-- cgraph answered from a populated graph. Trust the answer.
-- cgraph answered from an empty graph. Treat this as unavailable, not clean.
+*The bug is latent, not live.* `.btrain/project.toml` has **no `[cgraph]`
+section**, so `isCgraphEnabled()` returns false and btrain never calls cgraph
+today. An earlier draft said btrain "reads this as a clean pre-lock collision
+check", which overstated it. Nothing is currently reading anything. The fix
+still has to land **before** anyone enables `[cgraph]`, because enabling it is
+exactly what this workstream is for.
 
-Acceptance: a lane that locks a file with known callers reports those callers.
-A run against an empty graph does not report a clean collision check.
+*The first fix was unsound.* `kkg blast-radius` returns `ok: true` with every
+array empty, and the first version inferred "the graph has never indexed these
+files" from `nodes_in_scope == 0`. Review rejected that, and reading
+`codegraphcontext_ext/commands/blast_radius.py` confirms why: it matches
+code-entity nodes (`Function`, `Class`, `Variable`, ...) with
+`WHERE n.path IN [...]`, never queries `File` nodes, and never expands a
+directory to its descendants. So zero nodes has at least three causes:
+
+- the graph has never indexed those files;
+- the lock names a directory, and `src/` equals no entity path — which is
+  btrain's normal lock shape, so the first fix would have fired on every lane
+  against a perfect graph;
+- the files hold only imports, comments, or constructs cgraph does not model.
+
+The payload cannot separate these, so btrain does not try. It asserts only what
+is true: cgraph returned nothing to reason about, so the collision check is
+**inconclusive**, not clean. `ok` and `unavailable` keep their existing meanings
+("the call worked", "the binary was missing"); an inconclusive answer is a third
+state with its own flag, and cgraph's own explanation reaches the operator.
+
+`buildEventMetadata` also stopped publishing the summary's zeros as a
+`blast_radius` block, since that block is what rendered "0 in scope, 0 overlaps"
+and made an unchecked lock look checked.
+
+Acceptance: a lane that locks a file with known callers reports those callers. A
+run that matches no entities reports degraded with cgraph's reason, and never a
+clean collision check. A directory lock is treated as inconclusive rather than
+clean.
 
 ### Workstream 2: Decompose `core.mjs`
 
@@ -452,23 +478,75 @@ function without reading the whole file. The tool count stays at or below six.
 
 ## Fork drift
 
-cgraph is a fork. The fork lives at `/Volumes/zombie/keplerkg`, publishes as
-`codeslp/keplerkg`, and sits at version 0.4.2 with a last commit of 2026-05-18.
-Upstream `CodeGraphContext/CodeGraphContext` is at 0.6.13 and holds **606
-commits** made after that date.
+The installed tool is 0.4.2. Upstream `CodeGraphContext/CodeGraphContext` is at
+0.6.13 and holds 847 commits the fork does not. Upstream carries none of the
+btrain commands: a search of its tree for `blast-radius`, `drift-check`,
+`advise`, and `review-packet` returns zero hits for each, so a plain
+`uv tool upgrade` would delete the lane-collision surface `cgraph_adapter.mjs`
+calls. The update has to be a merge.
 
-Upstream carries none of the btrain commands. A search of the upstream tree for
-`blast-radius`, `drift-check`, `advise`, and `review-packet` returns zero hits
-for each. A plain `uv tool upgrade` would therefore delete the lane-collision
-surface that `cgraph_adapter.mjs` calls.
-
-Treat the merge as separate work with its own spec. This spec takes only the
-two-line `.mjs` fix.
-
-One prerequisite blocks the tooling for that merge. `kkg sync-check` returns
+One prerequisite blocks the tooling. `kkg sync-check` returns
 `{"skipped": true, "reason": "no_source_checkout"}` because
-`[cgraph].source_checkout` is unset in `.btrain/project.toml`, and the fork
-clone has no `upstream` remote. Set both before planning the merge.
+`[cgraph].source_checkout` is unset in `.btrain/project.toml`. An `upstream`
+remote has since been added to both fork clones, which sync-check also needs.
+
+Which fork to merge into is settled in the next section.
+
+## Consolidating the cgraph forks
+
+Investigating the merge turned up the real obstacle: **cgraph exists as two
+divergent forks**, and the merge spike was run against the wrong one.
+
+| | `codeslp/cgraph` | `codeslp/keplerkg` |
+|---|---|---|
+| Checkout | `/Volumes/zombie/cgraph/repo` | `/Volumes/zombie/keplerkg` |
+| Last commit | 2026-04-26 | 2026-04-24 |
+| Commits | 1,050 | 1,031 |
+| btrain advisory contract (Spec 005) | **yes** (`612f1a8`) | no |
+| FalkorDB backend | yes | yes |
+| `codegraphcontext_ext` package | yes | yes |
+
+They share history at `beb5f5c` and have since diverged **both ways**: 61
+commits unique to cgraph, 47 unique to keplerkg. Most of the 47 are the same
+changes as cgraph's, landed under different hashes — `--code-only`, the
+networkx dependency, the FalkorDB migration, the showcase gallery all appear on
+both sides.
+
+**`codeslp/cgraph` is the survivor.** It is the superset: it carries the
+cgraph-to-btrain advisory contract that keplerkg lacks, it is newer, and the
+installed tool was built from a path named `cgraph`, not `keplerkg`.
+
+keplerkg holds three small fixes that cgraph lacks, all on its
+`claude/standards-and-protobuf-fixes` branch:
+
+- `ed8503b` declare the protobuf runtime dependency;
+- `7439eda` exclude `.test.` and `.spec.` paths from `circular_imports`;
+- `54e0148` restrict `missing_docstring_public` to Python files.
+
+### Naming
+
+One project currently answers to four names: the repo is `cgraph`, the package
+is `codegraphcontext`, the product is KeplerKG, and the binary is `kkg` with
+`cgc` and `codegraphcontext` as aliases. btrain's adapter probes all four in
+order. Upstream ships only `cgc` and `codegraphcontext`, so `kkg` is a
+fork-only alias.
+
+### Plan
+
+1. Cherry-pick keplerkg's three fixes into `codeslp/cgraph`.
+2. Merge upstream 0.6.13 into `codeslp/cgraph`. The trial merge on the other
+   fork showed the shape: 45 conflicts, of which 37 are upstream's own
+   `docs/`, `website/`, and `tests/` and resolve to upstream wholesale. The
+   btrain command surface lives entirely in `codegraphcontext_ext/`, which
+   upstream does not have, so it merges with **zero** conflicts. Only three
+   files carry `codegraphcontext_ext` wiring and need hand-resolution:
+   `cli/main.py`, `cli/cli_helpers.py`, and `server.py`.
+3. Pick one CLI name and keep the others as deprecated aliases, so the adapter's
+   four-name probe can shrink.
+4. Archive `codeslp/keplerkg` once its three fixes have landed.
+5. Only then enable `[cgraph]` in btrain, with the inconclusive fix already in.
+
+This is its own spec. It is not part of spec 020's budget.
 
 ## Rejected: output-style compression
 
