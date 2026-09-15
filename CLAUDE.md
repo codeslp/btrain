@@ -42,15 +42,21 @@ This file mirrors `AGENTS.md` so Claude Code auto-loads it. The managed block ab
 
 ## Source of Truth
 
-Project knowledge lives in the research docs. Read them; don't duplicate conclusions.
+Project knowledge lives in the docs below. Read them; don't duplicate conclusions.
 
 | What | Where |
 | --- | --- |
-| Research scope and index | `research/00-research-overview.md` |
-| Recommendation and phased strategy | `research/07-recommendation.md` |
-| Harness evaluation | `research/09-harness-evaluation.md` |
-| Harness recommendations | `research/10-harness-recommendations.md` |
-| Session continuity | `.claude/projects/*/memory/MEMORY.md` |
+| Architecture overview | `docs/architecture.md` |
+| Numbered specs (authoritative) | `specs/` |
+| Current recommendation and phased plan | `research/bth-supervisor-agentchattr-reassessment.md` |
+| Orchestration platforms (A2A, LangGraph, LangSmith) | `research/a2a-langgraph-langsmith-evaluation.md` |
+| Claude Agent SDK + GitHub Actions scoping | `research/014-claude-code-integrations.md` |
+| Lane isolation filesystem evaluation | `research/branchfs-evaluation.md` |
+| Semantic code search evaluation | `research/zvec-grep-evaluation.md` |
+| Writing-standard skill evaluation | `research/ste-writing-evaluation.md` |
+| Property-based test engine choice (spec 014 FR-6) | `research/fastcheck-engine-choice.md` |
+| AgentChatTR MCP bridge proposal (unimplemented) | `research/implementation_plan.md` |
+| Session continuity | `~/.claude/projects/<repo-path-slug>/memory/MEMORY.md` (outside the repo) |
 
 ## Agent Rules
 
