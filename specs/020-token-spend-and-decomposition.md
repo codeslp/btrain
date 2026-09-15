@@ -50,6 +50,23 @@ Caveman, do not earn a place here. See "Rejected: output-style compression".
 
 ## Evidence
 
+### Scope: these are Claude-session figures
+
+The reproduction reads only Claude Code transcripts. `.btrain/project.toml`
+activates `claude`, `codex`, `gemini`, and `app-developer`, so "btrain token
+spend" is not what is measured here, and review was right to say so.
+
+Measuring the gap where it is measurable: 118 Codex sessions ran with `cwd` set
+to this repo, totalling **11.2 M tokens** (11.1 M input, of which 10.8 M cached;
+62 K output). Against Claude's 2.24 **billion** cache reads that is roughly half
+a percent of the volume, so the Claude-only view does not misstate where the
+money goes — but the figures below remain Claude-only and should be read that
+way.
+
+Gemini is not measurable locally at all: its history stores no per-session token
+accounting, only credentials. `npx ccusage@latest session` reports all three
+runtimes and is the tool to use for a cross-runtime view.
+
 Measured from the local session transcripts Claude Code writes under
 `~/.claude/projects/<encoded repo path>/`. Figures below are the
 **2026-09-15 21:30Z** run: 51 sessions, 7,158 assistant turns.
