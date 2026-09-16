@@ -4,7 +4,7 @@ name = "btrain"
 [agents]
 reviewer_default = "codex"
 writer_default = "claude"
-active = ["claude", "codex", "gemini", "app-developer"]
+active = ["claude", "codex", "gemini", "app-developer", "claude-reviewer"]
 
 [agents.runners]
 "claude" = "claude -p"
@@ -13,10 +13,12 @@ active = ["claude", "codex", "gemini", "app-developer"]
 
 "app-developer" = "notify"
 
+"claude-reviewer" = "claude -p"
+
 [lanes]
 per_agent = 3
 enabled = true
-ids = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+ids = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"]
 
 [lanes.a]
 handoff_path = ".claude/collab/HANDOFF_A.md"
@@ -39,7 +41,7 @@ handoff_path = ".claude/collab/HANDOFF_F.md"
 [pr_flow]
 enabled = true
 base = "main"
-required_bots = ["gh-codex"]
+required_bots = ["gh-codex", "claude-reviewer"]
 
 [pr_flow.bots.gh-codex]
 aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
@@ -48,6 +50,15 @@ request_body = "@codex review"
 [pr_flow.bots.gh-unblocked]
 aliases = ["unblocked[bot]", "unblocked"]
 request_body = "@unblocked review again"
+
+# A Claude stand-in reviewer. It has no GitHub account of its own: reviews are
+# posted from the repo owner's account, so `codeslp` is the alias btrain matches
+# on. That means this gate can be satisfied by a human comment from the owner as
+# well as by a posted stand-in review — it is a weaker signal than a bot gate,
+# and it is deliberately additive rather than a replacement for gh-codex.
+[pr_flow.bots.claude-reviewer]
+aliases = ["claude-reviewer", "codeslp"]
+request_body = "@claude-reviewer review"
 
 [lanes.g]
 handoff_path = ".claude/collab/HANDOFF_G.md"
@@ -66,3 +77,12 @@ handoff_path = ".claude/collab/HANDOFF_K.md"
 
 [lanes.l]
 handoff_path = ".claude/collab/HANDOFF_L.md"
+
+[lanes.m]
+handoff_path = ".claude/collab/HANDOFF_M.md"
+
+[lanes.n]
+handoff_path = ".claude/collab/HANDOFF_N.md"
+
+[lanes.o]
+handoff_path = ".claude/collab/HANDOFF_O.md"
