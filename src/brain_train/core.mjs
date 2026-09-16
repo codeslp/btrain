@@ -3947,6 +3947,28 @@ function extractLatestClaimTimestamp(events) {
   return ""
 }
 
+// Everything a previous run measured or concluded describes a graph this run
+// has not looked at. Drop all of it up front: each field below is
+// re-established from this run's own producers, so a copy carried forward can
+// only contradict them. Two paths proved that the hard way. A binary that
+// stopped answering returned early with the persisted block intact, so the CLI
+// printed last run's "7 in scope, 3 overlaps" directly beside "cgraph
+// unavailable". And because every branch that degrades is guarded by
+// `status === "ok"`, a lane that degraded on an empty graph kept reporting
+// "matched no code entities" after a re-index, underneath the fresh blast
+// radius that disproved it.
+//
+// Advisories are the deliberate exception and are not touched here. A collision
+// this run could not re-observe is not a collision that went away;
+// reconcileCgraphAdvisories decides those.
+function clearCgraphRunState(metadata) {
+  if (!metadata) {
+    return metadata
+  }
+  const { blast_radius: _blastRadius, drift: _drift, degraded_reason: _degradedReason, ...rest } = metadata
+  return { ...rest, status: "ok" }
+}
+
 function mergeCgraphMetadata(base, next) {
   if (!base) {
     return next || null
@@ -4347,14 +4369,14 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   const adapter = await getCgraphAdapter(repoRoot, config)
   if (!adapter) {
     return mergeCgraphMetadata(
-      persisted,
+      clearCgraphRunState(persisted),
       createDegradedCgraphMetadata("cgraph unavailable", persisted?.graph_mode || DEFAULT_CGRAPH_GRAPH_MODE),
     )
   }
 
   const metadata = persisted
     ? {
-        ...persisted,
+        ...clearCgraphRunState(persisted),
         latency_ms: { ...(persisted.latency_ms || {}) },
       }
     : {
@@ -4381,15 +4403,6 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   // Without this, seeding every persisted kind as unproven below made
   // advisories immortal and suppressed every resolution notice.
   const conclusiveAdvisoryKinds = new Set()
-
-  // Any persisted blast_radius describes a previous run's graph. Drop it before
-  // this run decides anything: only a conclusive answer below reinstalls it.
-  // Scoping this to the inconclusive branch left the far more common paths --
-  // unavailable, timed out, no locked files, adapter without the command --
-  // reprinting a stale "N in scope, M overlaps" line, in the unavailable case
-  // directly beside the degraded warning, and in the skipped cases under a
-  // plain "cgraph: ok".
-  delete metadata.blast_radius
 
   if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
     const locks = await listLocks(repoRoot)
@@ -4452,8 +4465,6 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
           : "blast-radius unavailable"
     }
   }
-
-  delete metadata.drift
 
   if (lockedFiles.length > 0 && adapter.supports("drift-check")) {
     const driftResult =

@@ -472,7 +472,9 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
         ],
         total_commands: 7,
       })}`,
-      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      // Phase 5 makes the manifest probe fail, which is how createAdapter reports
+      // a binary that has gone missing or stopped answering.
+      "if (cmd === 'manifest') { if (phase === '5') { process.exit(1) } process.stdout.write(JSON.stringify(manifest)) }",
       "else if (cmd === 'blast-radius') {",
       "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 3 }",
       "  const empty   = { files_requested: 1, nodes_in_scope: 0, transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0 }",
@@ -648,6 +650,67 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       activeOverlaps.length,
       0,
       "a conclusive run reporting no overlap must retire the advisory, not preserve it forever",
+    )
+  })
+
+  it("does not reprint the old blast radius once cgraph itself goes away", async () => {
+    // Third review finding on PR #63. The clearing added for the inconclusive
+    // case sits after the `if (!adapter)` early return, so the one path that
+    // cannot re-measure anything is the one path that still carries the old
+    // measurement forward. mergeCgraphMetadata spreads the persisted block and
+    // the degraded object has no blast_radius of its own to overwrite it, so
+    // the CLI prints last run's overlap count directly beside the warning that
+    // cgraph is unavailable.
+    await fs.writeFile(statePath, "1", "utf8")
+    const healthy = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(healthy.stdout, /blast radius: 7 in scope/, "phase 1 should record the real figures")
+
+    // Phase 5: the binary stops answering the manifest probe, so there is no
+    // adapter at all.
+    await fs.writeFile(statePath, "5", "utf8")
+    const gone = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.match(gone.stdout, /cgraph: degraded/, "a missing binary must degrade")
+    assert.doesNotMatch(
+      gone.stdout,
+      /blast radius: 7 in scope/,
+      "a run with no adapter measured nothing and must not reprint the old figures",
+    )
+    assert.doesNotMatch(gone.stdout, /3 overlaps/, "stale overlap count must not outlive the adapter")
+  })
+
+  it("stops reporting the old degradation once the graph comes back", async () => {
+    // Fourth review finding on PR #63. status and degraded_reason are spread
+    // forward from the persisted event, and every branch that sets them is
+    // guarded by `status === "ok"`, so nothing ever clears them. A lane that
+    // degraded on an empty graph kept printing "matched no code entities" after
+    // a re-index, underneath the fresh blast radius that contradicts it.
+    await fs.writeFile(statePath, "2", "utf8")
+    // A path outside lane a's `src/` lock, so this claim does not collide.
+    await fs.mkdir(path.join(tmpDir, "lib"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "lib", "other.js"), "export const other = true\n", "utf8")
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "Persist a degraded reading",
+       "--owner", "codex", "--reviewer", "claude", "--files", "lib/other.js"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+    const degraded = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(degraded.stdout, /matched no code entities/, "phase 2 should persist the inconclusive reason")
+
+    // Phase 4: the graph is re-indexed and answers conclusively.
+    await fs.writeFile(statePath, "4", "utf8")
+    const recovered = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.match(
+      recovered.stdout,
+      /blast radius: 7 in scope/,
+      "the recovered run should print its own figures",
+    )
+    assert.doesNotMatch(
+      recovered.stdout,
+      /matched no code entities/,
+      "a conclusive run must state its own verdict, not repeat the one it just disproved",
     )
   })
 
