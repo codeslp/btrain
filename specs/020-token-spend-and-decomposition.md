@@ -717,7 +717,15 @@ four `claudeBashPermissions()` calls feeding the `CLAUDE_LOOP_*_ALLOWED_TOOLS`
 arrays (lines 286, 322, 326, 330), and `renderPreCommitHook()` and
 `renderPrePushHook()` inside the `TEMPLATE_DEFAULTS` literal (1955, 1956).
 The two calls at 1551-1552 are inside a function and do not run at module
-evaluation. That makes it a temporal-dead-zone crash, not a warning. Leaf-first is
+evaluation.
+
+`node scripts/decomposition_inventory.mjs --module-level` derives this rather
+than asserting it: after excluding the `export { }` block, comments, string
+literals and callbacks inside module-level object literals, exactly three
+functions are called while `core.mjs` evaluates, across those six sites, and all
+three live in `templates`. So the dead-zone constraint is narrow and knowable —
+`templates` must be evaluated before `core.mjs`'s own body runs, and nothing
+else in the plan is exposed to it. That makes it a temporal-dead-zone crash, not a warning. Leaf-first is
 not riskier here; it is wrong.
 
 The thirteen stages. Membership for every one of the 352 functions is in
@@ -886,14 +894,12 @@ uses them. The other 35 would work, but two patterns for one job is worse than
 one.
 
 Verify the surface mechanically after every stage with
-`node scripts/decomposition_inventory.mjs --exports`. It reports all 69 names,
-splits the 68 in the `export { }` block from the 1 declared inline, checks every
-one against the committed assignment, and exits non-zero if any name has no
-home — including the non-function bindings a function inventory misses. Against
-the current assignment: 65 names belong to a module, 4 are re-exports from
-`harness/task-envelope.mjs`, 0 unassigned. `Object.keys()` on the imported
-module must also return the same 69 names, sorted, as the baseline. Do not
-check it by eye.
+`node scripts/decomposition_inventory.mjs --exports`. The surface before stage 1
+is captured in `specs/020-ws2-export-baseline.json`; the command diffs
+`Object.keys()` against it and exits non-zero on any name added or removed, so
+"the same 69 names as the baseline" is a check rather than an instruction. It
+also confirms every name has a home in the assignment, which is where the two
+traps above get caught. Do not check it by eye.
 
 ##### Shared mutable state: there is none
 

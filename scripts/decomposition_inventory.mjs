@@ -160,6 +160,16 @@ export async function checkExportSurface(spans) {
   const doc = JSON.parse(fs.readFileSync(
     path.join(repoRoot, "specs", "020-ws2-module-assignment.json"), "utf8"))
 
+  // The committed baseline is the actual gate: "the same 69 names as before"
+  // is only checkable against a recorded before.
+  const baselinePath = path.join(repoRoot, "specs", "020-ws2-export-baseline.json")
+  let baseline = null, added = [], removed = []
+  if (fs.existsSync(baselinePath)) {
+    baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8")).names
+    added = exported.filter((n) => !baseline.includes(n))
+    removed = baseline.filter((n) => !exported.includes(n))
+  }
+
   const home = new Map()
   for (const [m, fns] of Object.entries(doc.modules)) for (const fn of fns) home.set(fn, m)
   const nonFn = doc.nonFunctionExports || {}
@@ -186,16 +196,78 @@ export async function checkExportSurface(spans) {
     .join("\n").split("}")[0].replace(/^export\s*\{/, "")
     .split(",").map((t) => t.trim()).filter((t) => t && !t.startsWith("//"))
 
-  return { exported, rows, unassigned, reexported, placed, inline, blockNames, order: doc.order }
+  return { exported, rows, unassigned, reexported, placed, inline, blockNames, order: doc.order, baseline, added, removed }
+}
+
+/**
+ * Bindings actually *called* while the module is evaluating.
+ *
+ * These are the ones the staging order has to respect strictly: an import from
+ * a not-yet-evaluated module is a temporal-dead-zone ReferenceError at load,
+ * not a warning, and no test that imports `core.mjs` would survive it.
+ *
+ * Three things have to be excluded or the answer is noise: the `export { }`
+ * block, which mentions almost every name without calling anything; comments
+ * and string literals; and callbacks inside module-level object literals,
+ * which are defined now but run later.
+ */
+export function findModuleEvaluationCalls(spans) {
+  const raw = fs.readFileSync(target, "utf8").split("\n")
+  const inFunction = new Array(raw.length + 2).fill(false)
+  for (const s of spans) for (let i = s.start; i <= s.end; i++) inFunction[i] = true
+
+  const blockStart = raw.findIndex((l) => /^export\s*\{/.test(l))
+  const names = new Set(spans.map((f) => f.name))
+
+  const calls = new Map()
+  for (let i = 1; i <= raw.length; i++) {
+    if (inFunction[i]) continue
+    if (blockStart !== -1 && i > blockStart) continue
+    let line = raw[i - 1]
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue
+    // Strip string and template literals, then inline comments.
+    line = line.replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+      .replace(/`(?:[^`\\]|\\.)*`/g, "``")
+      .replace(/\/\/.*$/, "")
+    // An arrow body defers execution, so a call inside one is not evaluated now.
+    if (/=>/.test(line)) continue
+    for (const m of line.matchAll(/([A-Za-z0-9_$]+)\s*\(/g)) {
+      if (names.has(m[1])) {
+        if (!calls.has(m[1])) calls.set(m[1], [])
+        calls.get(m[1]).push(i)
+      }
+    }
+  }
+  return calls
 }
 
 function main() {
   const args = process.argv.slice(2)
   const { spans, fileLines } = readFunctionSpans(target)
 
+  if (args.includes("--module-level")) {
+    const { spans } = readFunctionSpans(target)
+    const calls = findModuleEvaluationCalls(spans)
+    const doc = JSON.parse(fs.readFileSync(
+      path.join(repoRoot, "specs", "020-ws2-module-assignment.json"), "utf8"))
+    const home = new Map()
+    for (const [m, fns] of Object.entries(doc.modules)) for (const fn of fns) home.set(fn, m)
+
+    console.log(`functions called during module evaluation: ${calls.size}`)
+    for (const [name, lines] of [...calls].sort()) {
+      const mod = home.get(name) || "(unassigned)"
+      console.log(`  ${name.padEnd(26)} stage ${String(doc.order.indexOf(mod) + 1).padStart(2)} ${mod.padEnd(12)} lines ${lines.join(", ")}`)
+    }
+    const stages = new Set([...calls.keys()].map((n) => home.get(n)))
+    console.log(`\nmodules they live in: ${[...stages].join(", ") || "none"}`)
+    console.log("Every one must be evaluated before core.mjs's own module body runs.")
+    return
+  }
+
   if (args.includes("--exports")) {
     const { spans } = readFunctionSpans(target)
-    checkExportSurface(spans).then(({ exported, rows, unassigned, reexported, placed, inline, blockNames, order }) => {
+    checkExportSurface(spans).then(({ exported, rows, unassigned, reexported, placed, inline, blockNames, order, baseline, added, removed }) => {
       console.log(`export surface: ${exported.length} names`)
       console.log(`  export { } block: ${blockNames.length}`)
       console.log(`  inline export function: ${inline.length} (${inline.join(", ") || "none"})`)
@@ -204,6 +276,15 @@ function main() {
       const byStage = new Map()
       for (const r of placed) byStage.set(r.assigned, (byStage.get(r.assigned) || 0) + 1)
       for (const m of order) if (byStage.get(m)) console.log(`    ${String(order.indexOf(m) + 1).padStart(2)} ${m.padEnd(19)} ${byStage.get(m)}`)
+      if (baseline) {
+        console.log(`  baseline (${baseline.length} names): ${added.length === 0 && removed.length === 0 ? "matches" : "DRIFTED"}`)
+        if (added.length) console.log(`    added: ${added.join(", ")}`)
+        if (removed.length) console.log(`    removed: ${removed.join(", ")}`)
+        if (added.length || removed.length) process.exitCode = 1
+      } else {
+        console.log("  baseline: MISSING — specs/020-ws2-export-baseline.json not found")
+        process.exitCode = 1
+      }
       if (unassigned.length) {
         console.log(`\nUNASSIGNED EXPORTS (${unassigned.length}): ${unassigned.map((r) => r.name).join(", ")}`)
         process.exitCode = 1

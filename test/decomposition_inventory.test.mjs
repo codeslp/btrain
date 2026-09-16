@@ -8,6 +8,7 @@ import {
   readFunctionSpans,
   stronglyConnectedComponents,
   checkExportSurface,
+  findModuleEvaluationCalls,
 } from "../scripts/decomposition_inventory.mjs"
 
 async function withSource(source, fn) {
@@ -154,5 +155,53 @@ describe("decomposition inventory, export surface", () => {
     assert.ok(row, "BtrainError is part of the surface")
     assert.equal(row.isFunction, false)
     assert.equal(row.assigned, "fsx")
+  })
+})
+
+describe("decomposition inventory, export baseline", () => {
+  it("matches the committed baseline exactly", async () => {
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const surface = await checkExportSurface(spans)
+
+    assert.ok(surface.baseline, "a baseline must be committed for the check to mean anything")
+    assert.equal(surface.baseline.length, 69)
+    assert.deepEqual(surface.added, [], "no name may appear that the baseline does not have")
+    assert.deepEqual(surface.removed, [], "no baseline name may disappear")
+  })
+})
+
+describe("decomposition inventory, module-evaluation calls", () => {
+  // The staging order has to respect these strictly: importing a binding from a
+  // module that has not finished evaluating is a ReferenceError at load, not a
+  // warning, so nothing that imports core.mjs would run at all.
+
+  it("finds exactly the calls that run while core.mjs is evaluating", async () => {
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const calls = findModuleEvaluationCalls(spans)
+
+    assert.deepEqual(
+      [...calls.keys()].sort(),
+      ["claudeBashPermissions", "renderPreCommitHook", "renderPrePushHook"],
+    )
+    assert.deepEqual(calls.get("claudeBashPermissions"), [286, 322, 326, 330])
+    assert.deepEqual(calls.get("renderPreCommitHook"), [1955])
+    assert.deepEqual(calls.get("renderPrePushHook"), [1956])
+  })
+
+  it("does not count comments, strings, the export block or deferred callbacks", async () => {
+    // Each of these produced a false positive in a first pass: a comment
+    // mentioning releaseLocks, a help string containing "btrain doctor", the
+    // export block naming almost everything, and an arrow callback in a
+    // module-level object literal that is defined now but runs later.
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const calls = findModuleEvaluationCalls(spans)
+
+    for (const name of ["releaseLocks", "doctor", "patchHandoff", "checkHandoff", "runLoop",
+      "shouldSkipBundledAgentchattrPath"]) {
+      assert.equal(calls.has(name), false, `${name} is not called during module evaluation`)
+    }
   })
 })
