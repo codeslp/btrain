@@ -23,7 +23,7 @@
 import { execFileSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const target = path.join(repoRoot, "src", "brain_train", "core.mjs")
@@ -145,9 +145,74 @@ export function checkStages(spans, edges) {
   return { rows, violations, missing, unknown }
 }
 
+/**
+ * Check the whole public surface against the committed assignment.
+ *
+ * The plan's hard constraint is that all 69 exported names stay resolvable from
+ * `core.mjs` after every stage, so the surface is the thing most worth checking
+ * mechanically. Two of its members are exactly the ones a function inventory
+ * misses: `buildReviewArtifactId`, declared `export function` inline rather
+ * than listed in the export block, and `BtrainError`, which is a class.
+ */
+export async function checkExportSurface(spans) {
+  const mod = await import(pathToFileURL(target).href)
+  const exported = Object.keys(mod).sort()
+  const doc = JSON.parse(fs.readFileSync(
+    path.join(repoRoot, "specs", "020-ws2-module-assignment.json"), "utf8"))
+
+  const home = new Map()
+  for (const [m, fns] of Object.entries(doc.modules)) for (const fn of fns) home.set(fn, m)
+  const nonFn = doc.nonFunctionExports || {}
+
+  const fnNames = new Set(spans.map((f) => f.name))
+  const rows = exported.map((name) => {
+    const isFunction = fnNames.has(name)
+    const assigned = isFunction ? home.get(name) : nonFn[name]
+    return { name, isFunction, assigned: assigned || null }
+  })
+
+  const unassigned = rows.filter((r) => !r.assigned)
+  const reexported = rows.filter((r) => (r.assigned || "").startsWith("("))
+  const placed = rows.filter((r) => r.assigned && !r.assigned.startsWith("("))
+
+  // The export block lists names; an inline `export function` does not appear
+  // there. Both are part of the surface and both must be accounted for.
+  const src = fs.readFileSync(target, "utf8").split("\n")
+  const inline = src
+    .map((l) => l.match(/^export\s+(?:async\s+)?function\s+([A-Za-z0-9_$]+)/))
+    .filter(Boolean).map((m) => m[1])
+  const blockStart = src.findIndex((l) => /^export\s*\{/.test(l))
+  const blockNames = blockStart === -1 ? [] : src.slice(blockStart)
+    .join("\n").split("}")[0].replace(/^export\s*\{/, "")
+    .split(",").map((t) => t.trim()).filter((t) => t && !t.startsWith("//"))
+
+  return { exported, rows, unassigned, reexported, placed, inline, blockNames, order: doc.order }
+}
+
 function main() {
   const args = process.argv.slice(2)
   const { spans, fileLines } = readFunctionSpans(target)
+
+  if (args.includes("--exports")) {
+    const { spans } = readFunctionSpans(target)
+    checkExportSurface(spans).then(({ exported, rows, unassigned, reexported, placed, inline, blockNames, order }) => {
+      console.log(`export surface: ${exported.length} names`)
+      console.log(`  export { } block: ${blockNames.length}`)
+      console.log(`  inline export function: ${inline.length} (${inline.join(", ") || "none"})`)
+      console.log(`  assigned to a module: ${placed.length}`)
+      console.log(`  re-exported from a sibling: ${reexported.length}`)
+      const byStage = new Map()
+      for (const r of placed) byStage.set(r.assigned, (byStage.get(r.assigned) || 0) + 1)
+      for (const m of order) if (byStage.get(m)) console.log(`    ${String(order.indexOf(m) + 1).padStart(2)} ${m.padEnd(19)} ${byStage.get(m)}`)
+      if (unassigned.length) {
+        console.log(`\nUNASSIGNED EXPORTS (${unassigned.length}): ${unassigned.map((r) => r.name).join(", ")}`)
+        process.exitCode = 1
+      } else {
+        console.log("\nevery exported name has a home")
+      }
+    })
+    return
+  }
 
   if (args.includes("--cli")) {
     // The cli.mjs half of the workstream. Generated for the same reason the

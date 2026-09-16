@@ -848,7 +848,7 @@ function-line total of 9,729.
 ##### The function call graph has no cycles
 
 Checked, not assumed: `scripts/decomposition_inventory.mjs` runs Tarjan over
-the 786 call edges between the 352 functions and finds **352 strongly connected
+the 886 call edges between the 352 functions and finds **352 strongly connected
 components, none larger than one**. `core.mjs` contains no mutual recursion and
 no call cycle of any length.
 
@@ -885,8 +885,14 @@ those the bare form breaks compilation as soon as a still-unextracted function
 uses them. The other 35 would work, but two patterns for one job is worse than
 one.
 
-Verify the surface mechanically after every stage: `Object.keys()` on the
-imported module must return the same 69 names, sorted, as the baseline. Do not
+Verify the surface mechanically after every stage with
+`node scripts/decomposition_inventory.mjs --exports`. It reports all 69 names,
+splits the 68 in the `export { }` block from the 1 declared inline, checks every
+one against the committed assignment, and exits non-zero if any name has no
+home — including the non-function bindings a function inventory misses. Against
+the current assignment: 65 names belong to a module, 4 are re-exports from
+`harness/task-envelope.mjs`, 0 unassigned. `Object.keys()` on the imported
+module must also return the same 69 names, sorted, as the baseline. Do not
 check it by eye.
 
 ##### Shared mutable state: there is none

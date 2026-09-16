@@ -4,7 +4,11 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import { readFunctionSpans, stronglyConnectedComponents } from "../scripts/decomposition_inventory.mjs"
+import {
+  readFunctionSpans,
+  stronglyConnectedComponents,
+  checkExportSurface,
+} from "../scripts/decomposition_inventory.mjs"
 
 async function withSource(source, fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-inventory-"))
@@ -106,5 +110,49 @@ describe("decomposition inventory, cycle detection", () => {
     const comps = stronglyConnectedComponents(["a", "b", "c"], edges)
     assert.equal(comps.length, 3)
     assert.equal(comps.filter((c) => c.length > 1).length, 0)
+  })
+})
+
+describe("decomposition inventory, export surface", () => {
+  // The plan's hard constraint is that all 69 exported names stay resolvable
+  // from core.mjs after every stage, so the surface is the thing most worth
+  // checking mechanically rather than by eye. Two members are exactly the ones
+  // a function inventory misses.
+
+  it("accounts for every exported name, including the inline and non-function ones", async () => {
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const surface = await checkExportSurface(spans)
+
+    assert.equal(surface.exported.length, 69, "the public surface is 69 names")
+    assert.deepEqual(surface.unassigned, [], "every exported name must have a home")
+    assert.equal(surface.placed.length + surface.reexported.length, 69)
+  })
+
+  it("sees the inline export the export block does not list", async () => {
+    // buildReviewArtifactId is declared `export function` at core.mjs:7677
+    // rather than listed in the block at 10685. An extraction that edits the
+    // block alone drops it from the surface with no syntax error.
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const surface = await checkExportSurface(spans)
+
+    assert.deepEqual(surface.inline, ["buildReviewArtifactId"])
+    assert.equal(surface.blockNames.length, 68)
+    assert.equal(surface.blockNames.includes("buildReviewArtifactId"), false)
+    assert.equal(surface.blockNames.length + surface.inline.length, 69)
+  })
+
+  it("gives BtrainError a home even though it is a class", async () => {
+    // It appears in no function inventory, and it is instantiated at 80 sites
+    // inside core.mjs, so a missed placement breaks the first extraction.
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const surface = await checkExportSurface(spans)
+
+    const row = surface.rows.find((r) => r.name === "BtrainError")
+    assert.ok(row, "BtrainError is part of the surface")
+    assert.equal(row.isFunction, false)
+    assert.equal(row.assigned, "fsx")
   })
 })
