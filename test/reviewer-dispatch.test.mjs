@@ -1,4 +1,4 @@
-import { withoutLaneScope } from "./helpers/runner-scope.mjs"
+import { withoutLaneScope, laneScopeKeys } from "./helpers/runner-scope.mjs"
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
@@ -86,6 +86,9 @@ const { spawnSync } = require("node:child_process")
 const action = process.env.REVIEWER_ACTION || "resolve"
 if (process.env.REVIEWER_SPAWN_MARK) {
   fs.writeFileSync(process.env.REVIEWER_SPAWN_MARK, "spawned\\n")
+}
+if (process.env.REVIEWER_ENV_PATH) {
+  fs.writeFileSync(process.env.REVIEWER_ENV_PATH, JSON.stringify(process.env), "utf8")
 }
 if (process.env.REVIEWER_ARGV_PATH) {
   fs.writeFileSync(process.env.REVIEWER_ARGV_PATH, JSON.stringify(process.argv), "utf8")
@@ -434,6 +437,98 @@ process.exit(1);`,
       assert.equal(await fs.access(spawnMark).then(() => true, () => false), false)
     } finally {
       await rmDir(tmpDir)
+    }
+  })
+})
+
+describe("lane-scope stripping keeps pace with the runner env", () => {
+  // Lane d. test/reviewer-dispatch.test.mjs failed in six consecutive review
+  // rounds and passed in every direct run, because buildLoopRunnerEnv injects
+  // BTRAIN_LOOP_ACTIVE=1 into a spawned runner and withoutLaneScope did not
+  // strip it, so dispatchNeedsReviewReviewer took its nested-dispatch guard and
+  // returned "skipped" instead of spawning.
+  //
+  // Three earlier versions of this guard derived the variable list by regexing
+  // core.mjs. Each was defeated by a spelling it did not anticipate -- a const
+  // not suffixed `_ENV`, a missing prefix, a spread, a template-literal key, a
+  // concatenated key, Object.assign, `env["X"] = v`, a parenthesized spread, a
+  // key built by a call expression -- and each fix added false positives on
+  // legitimate edits. Three rounds of that on a six-element list is the signal
+  // that the derivation was the defect.
+  //
+  // So this observes behaviour instead of syntax: spawn a real reviewer through
+  // the real dispatch path, have it write the environment it was handed, and
+  // assert that nothing lane-scoped survived. No spelling can evade it, because
+  // it never reads the source.
+
+  it("hands a spawned reviewer no lane-scope variable at all", async () => {
+    const { tmpDir } = await setupRepo()
+    try {
+      const envPath = path.join(tmpDir, "reviewer-env.json")
+      const result = await runBtrain(needsReviewArgs(tmpDir), tmpDir, {
+        REVIEWER_ENV_PATH: envPath,
+        REVIEWER_ACTION: "resolve",
+      })
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+
+      const raw = await fs.readFile(envPath, "utf8").catch(() => "")
+      assert.ok(raw, "the reviewer must have been spawned for this guard to mean anything")
+      const reviewerEnv = JSON.parse(raw)
+
+      // Only what buildLoopRunnerEnv actually injects or changes. The harness
+      // sets BRAIN_TRAIN_HOME, BTRAIN_CLI and BTRAIN_NO_REVIEW_DISPATCH itself
+      // and they are inherited, not injected -- BTRAIN_NO_REVIEW_DISPATCH is
+      // set by withoutLaneScope, so stripping it would break the harness.
+      const parentEnv = dispatchEnv(tmpDir, { REVIEWER_ENV_PATH: envPath, REVIEWER_ACTION: "resolve" })
+      const injected = Object.keys(reviewerEnv)
+        .filter((k) => /^(?:BTRAIN|BRAIN_TRAIN)_/.test(k))
+        .filter((k) => reviewerEnv[k] !== parentEnv[k])
+
+      assert.ok(
+        injected.includes("BTRAIN_LOOP_ACTIVE"),
+        `the runner env must inject the variable this branch exists for; got ${injected.sort().join(", ")}`,
+      )
+
+      const keys = laneScopeKeys()
+      const uncovered = injected.filter((k) => !keys.includes(k))
+      // The whole invariant: anything buildLoopRunnerEnv injects, by any
+      // spelling, must be in the strip list. A new variable added to the runner
+      // env and not to LANE_SCOPE_KEYS fails here, by name.
+      assert.deepEqual(
+        uncovered,
+        [],
+        `the runner env injects ${uncovered.join(", ")}, which withoutLaneScope does not strip. `
+        + "Add them to LANE_SCOPE_KEYS in test/helpers/runner-scope.mjs and to the env -u lists in package.json.",
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
+  it("strips BTRAIN_LOOP_ACTIVE so a dispatched run still exercises dispatch", () => {
+    const clean = withoutLaneScope({ ...process.env, BTRAIN_LOOP_ACTIVE: "1" })
+    assert.equal(clean.BTRAIN_LOOP_ACTIVE, undefined)
+  })
+
+  it("keeps the npm scripts in step with the helper", async () => {
+    // npm test unsets these with `env -u`; a var missing there fails the same
+    // way for anyone running the full suite under a dispatch.
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../package.json")
+    const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"))
+    for (const name of ["test", "test:e2e", "test:formal"]) {
+      const script = pkg.scripts[name]
+      assert.ok(script, `${name} script must exist`)
+      // Derived from the helper, not pinned to one variable: adding a seventh
+      // to both buildLoopRunnerEnv and LANE_SCOPE_KEYS while forgetting
+      // package.json used to pass every guard while npm test broke under a
+      // dispatch exactly as before.
+      for (const key of laneScopeKeys()) {
+        assert.match(
+          script,
+          new RegExp(`-u ${key}\\b`),
+          `${name} must unset ${key} or the full suite fails under a dispatch`,
+        )
+      }
     }
   })
 })
