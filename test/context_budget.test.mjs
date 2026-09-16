@@ -134,6 +134,31 @@ describe("context budget measurement", () => {
     }
   })
 
+  it("counts API responses, not transcript records", async () => {
+    // Claude Code writes one record per content block -- thinking, text, each
+    // tool_use -- and all of them repeat the same `usage`. Counting records
+    // overcounted turns by 2.1x on this repo's real transcripts, and the number
+    // is printed to the user next to a claim that cost scales with turn count.
+    const dir = await makeTranscriptDir()
+    try {
+      const withId = (id, cacheRead) => JSON.stringify({
+        type: "assistant",
+        requestId: id,
+        message: { role: "assistant", id: `msg_${id}`, usage: { cache_read_input_tokens: cacheRead } },
+      })
+      const file = await writeTranscript(dir, "blocks", [
+        withId("req_1", 100),   // thinking block
+        withId("req_1", 100),   // text block, same API response
+        withId("req_1", 100),   // tool_use block, same API response
+        withId("req_2", 200),
+      ])
+      const reading = await readLatestContextTokens(file)
+      assert.equal(reading.turns, 2, "four records, two API responses")
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it("returns null for a transcript with no usage record yet", async () => {
     const dir = await makeTranscriptDir()
     try {
@@ -192,43 +217,68 @@ describe("context budget session attribution", () => {
     }
   })
 
-  it("infers the session when exactly one transcript is live", async () => {
+  it("reads CLAUDE_CODE_SESSION_ID, which names the transcript exactly", async () => {
+    // The finding that restructured this module. An earlier version asserted
+    // "nothing in the environment reliably names that session", having checked
+    // only CLAUDE_CODE_HOST_SESSION_ID (prefixed `local_`, genuinely not a
+    // transcript name) and generalized. Claude Code also exports
+    // CLAUDE_CODE_SESSION_ID, whose value IS the transcript basename, so an
+    // in-session call needs no heuristic at all.
     const dir = await makeTranscriptDir()
     try {
-      const now = Date.now()
-      await writeTranscript(dir, "live", [turn({ cacheRead: 10 })], now)
-      await writeTranscript(dir, "stale", [turn({ cacheRead: 10 })], now - 60 * 60 * 1000)
+      await writeTranscript(dir, "env-named", [turn({ cacheRead: 10 })])
       const located = await locateSessionTranscript("/repo", {
-        env: { BTRAIN_TRANSCRIPT_DIR: dir },
-        now,
+        env: { BTRAIN_TRANSCRIPT_DIR: dir, CLAUDE_CODE_SESSION_ID: "env-named" },
       })
-      assert.equal(located.source, "inferred")
-      assert.match(located.transcriptPath, /live\.jsonl$/)
-      assert.equal(located.candidates, 1)
+      assert.equal(located.source, "explicit", "the env var must give an exact attribution")
+      assert.match(located.transcriptPath, /env-named\.jsonl$/)
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
   })
 
-  it("reports ambiguity rather than picking the newest of several live sessions", async () => {
-    // Multi-lane work is btrain's normal mode: several agents, one repo, several
-    // live transcripts. Picking the newest would charge one lane's context to
-    // another and could block a lane that is nowhere near its ceiling.
+  it("prefers an explicitly passed session id over the environment", async () => {
     const dir = await makeTranscriptDir()
     try {
-      const now = Date.now()
-      await writeTranscript(dir, "lane-a", [turn({ cacheRead: 10 })], now - 1000)
-      await writeTranscript(dir, "lane-b", [turn({ cacheRead: 10 })], now)
+      await writeTranscript(dir, "from-arg", [turn({ cacheRead: 10 })])
+      await writeTranscript(dir, "from-env", [turn({ cacheRead: 10 })])
       const located = await locateSessionTranscript("/repo", {
-        env: { BTRAIN_TRANSCRIPT_DIR: dir },
-        now,
+        env: { BTRAIN_TRANSCRIPT_DIR: dir, CLAUDE_CODE_SESSION_ID: "from-env" },
+        sessionId: "from-arg",
       })
-      assert.equal(located.source, "ambiguous")
-      assert.equal(located.candidates, 2)
-      assert.match(located.reason, /2 sessions are live/)
+      assert.match(located.transcriptPath, /from-arg\.jsonl$/)
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
+  })
+
+  it("reports the newest session as inferred when no session id is set", async () => {
+    // btrain run from a human shell or the launchd history agent. The newest
+    // transcript is reliably the most recently active session, but that session
+    // is not the caller, so this is information and never a gate.
+    const dir = await makeTranscriptDir()
+    try {
+      const now = Date.now()
+      await writeTranscript(dir, "older", [turn({ cacheRead: 10 })], now - 60_000)
+      await writeTranscript(dir, "newest", [turn({ cacheRead: 10 })], now)
+      const located = await locateSessionTranscript("/repo", {
+        env: { BTRAIN_TRANSCRIPT_DIR: dir },
+      })
+      assert.equal(located.source, "inferred")
+      assert.match(located.transcriptPath, /newest\.jsonl$/)
+      assert.match(located.reason, /not running inside an agent session/)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a session id that could escape the transcript directory", async () => {
+    const located = await locateSessionTranscript("/repo", {
+      env: { BTRAIN_TRANSCRIPT_DIR: "/tmp" },
+      sessionId: "../../../../etc/hosts",
+    })
+    assert.equal(located.source, "unavailable")
+    assert.match(located.reason, /not a plain transcript name/)
   })
 
   it("reports unavailable when the transcript directory does not exist", async () => {
@@ -269,6 +319,52 @@ describe("context budget configuration", () => {
     const budget = getContextBudgetConfig({ context_budget: { soft_ceiling: "lots", hard_ceiling: -1 } })
     assert.equal(budget.softCeiling, DEFAULT_SOFT_CEILING)
     assert.equal(budget.hardCeiling, DEFAULT_HARD_CEILING)
+  })
+
+  it("does not read a blank or empty ceiling as zero, which would disable the block", () => {
+    // Found by review. `Number("")`, `Number(" ")`, `Number(false)`,
+    // `Number([])` and `Number(null)` are all 0, and this module reads 0 as
+    // "ceiling disabled". An earlier version accepted every one of them, so
+    // `hard_ceiling = ""` in project.toml silently switched the hard block off
+    // while reading as a deliberate setting. The original test only tried
+    // "lots" and -1, both of which are NaN/negative and were already rejected.
+    for (const bad of ["", " ", "\t", false, [], null]) {
+      const budget = getContextBudgetConfig({ context_budget: { hard_ceiling: bad } })
+      assert.equal(
+        budget.hardCeiling,
+        DEFAULT_HARD_CEILING,
+        `hard_ceiling=${JSON.stringify(bad)} must fall back to the default, not to 0`,
+      )
+      assert.notEqual(budget.hardCeiling, 0)
+    }
+  })
+
+  it("accepts TOML's underscore integer form instead of silently dropping it", () => {
+    // `hard_ceiling = 350_000` is the natural thing to write -- the module
+    // itself uses that form in JS. It arrives as the string "350_000",
+    // `Number()` returns NaN, and an earlier version fell through to the
+    // default. The setting read as applied and was not, and the bug was
+    // invisible whenever the intended value happened to be the default.
+    const budget = getContextBudgetConfig({ context_budget: { hard_ceiling: "350_000" } })
+    assert.equal(budget.hardCeiling, 350_000)
+    assert.equal(budget.invalid.length, 0)
+  })
+
+  it("reports a rejected config value instead of swallowing it", () => {
+    const budget = getContextBudgetConfig({ context_budget: { hard_ceiling: "lots" } })
+    assert.equal(budget.hardCeiling, DEFAULT_HARD_CEILING)
+    assert.ok(
+      budget.invalid.some((entry) => entry.includes("hard_ceiling")),
+      "a value that could not be parsed must be reported, not silently defaulted",
+    )
+  })
+
+  it("honours a lane-level enabled override, not just the repo one", () => {
+    // Every other key honoured the lane override; `enabled` was read from the
+    // repo table alone, so the documented rollback was repo-wide only.
+    const config = { context_budget: { lanes: { a: { enabled: false } } } }
+    assert.equal(getContextBudgetConfig(config, "a").enabled, false)
+    assert.equal(getContextBudgetConfig(config, "b").enabled, true)
   })
 })
 
@@ -315,28 +411,53 @@ describe("context budget gate", () => {
     assert.equal(verdict.level, "block")
     assert.equal(verdict.blockable, true)
     assert.match(verdict.message, /450,000 tokens/)
-    assert.match(verdict.message, /override/, "a block must name its escape hatch")
+    // The escape hatch must be a real one. An earlier version pointed at
+    // `btrain override grant --action context-budget`, which is not in
+    // VALID_OVERRIDE_ACTIONS, so every blocked user followed the printed
+    // instruction into a hard error. Asserting the word "override" appeared was
+    // what let that ship.
+    assert.match(verdict.message, /hard_ceiling/, "a block must name a real escape hatch")
+    assert.match(verdict.message, /project\.toml/)
+    assert.doesNotMatch(
+      verdict.message,
+      /override grant/,
+      "must not name an override action btrain does not accept",
+    )
   })
 
-  it("warns but does not block when the reading cannot be attributed to one lane", async () => {
-    // The safety property. An ambiguous reading over the hard ceiling must not
-    // stop a lane, because the tokens may belong to a different session
-    // entirely. Blocking on a guess would be worse than not gating at all.
-    const ambiguousDir = await makeTranscriptDir()
+  it("warns but never blocks when no session id names the caller", async () => {
+    // The safety property, restated for the corrected model. Without a session
+    // id btrain is not running inside an agent session, so the newest
+    // transcript belongs to somebody else. Blocking a lane on another
+    // session's context would be worse than not gating at all.
+    const looseDir = await makeTranscriptDir()
     try {
-      const now = Date.now()
-      await writeTranscript(ambiguousDir, "one", [turn({ cacheRead: 900_000 })], now)
-      await writeTranscript(ambiguousDir, "two", [turn({ cacheRead: 5_000 })], now - 500)
+      await writeTranscript(looseDir, "someone-else", [turn({ cacheRead: 900_000 })])
       const verdict = await evaluateContextBudget("/repo", {}, {
-        env: { BTRAIN_TRANSCRIPT_DIR: ambiguousDir },
-        now,
+        env: { BTRAIN_TRANSCRIPT_DIR: looseDir },
       })
-      assert.equal(verdict.source, "ambiguous")
-      assert.equal(verdict.level, "warn", "an unattributable reading must never block")
+      assert.equal(verdict.source, "inferred")
+      assert.equal(verdict.level, "warn", "an unattributed reading must never block")
       assert.equal(verdict.blockable, false)
       assert.match(verdict.message, /Not blocking/)
     } finally {
-      await fs.rm(ambiguousDir, { recursive: true, force: true })
+      await fs.rm(looseDir, { recursive: true, force: true })
+    }
+  })
+
+  it("names the attribution in a soft-ceiling warning that is not exact", async () => {
+    // Otherwise an informational reading is indistinguishable from the
+    // caller's own, which is the whole point of tracking the source.
+    const looseDir = await makeTranscriptDir()
+    try {
+      await writeTranscript(looseDir, "other", [turn({ cacheRead: 250_000 })])
+      const verdict = await evaluateContextBudget("/repo", {}, {
+        env: { BTRAIN_TRANSCRIPT_DIR: looseDir },
+      })
+      assert.equal(verdict.level, "warn")
+      assert.match(verdict.message, /not running inside an agent session/)
+    } finally {
+      await fs.rm(looseDir, { recursive: true, force: true })
     }
   })
 

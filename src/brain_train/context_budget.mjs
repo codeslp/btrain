@@ -8,23 +8,33 @@
  * stopping points; the transcripts show they do not. btrain enforces its review
  * gates mechanically, and it can enforce this the same way.
  *
- * ## The attribution problem, and why this module is careful about it
+ * ## Identifying the session
  *
- * btrain runs as a CLI *inside* an agent session, and nothing in the environment
- * reliably names that session. `CLAUDE_CODE_HOST_SESSION_ID` exists but does not
- * match the transcript filename. So the session has to be identified, and a
- * wrong identification would block a lane on some other session's context.
+ * Claude Code exports `CLAUDE_CODE_SESSION_ID` into the environment of every
+ * tool call, and its value is exactly the transcript basename. btrain runs
+ * inside that environment, so an in-session invocation can name its own
+ * transcript with certainty and no guessing is required.
  *
- * This module therefore reports **how** it identified the session, and the
- * caller is expected to act on that. Only an unambiguous attribution may block:
+ * An earlier version of this module asserted the opposite -- that "nothing in
+ * the environment reliably names that session" -- and built a freshness window,
+ * an `ambiguous` state, and a warn-only downgrade on top of that premise. The
+ * assertion came from checking `CLAUDE_CODE_HOST_SESSION_ID` (which is prefixed
+ * `local_` and is genuinely not a transcript name) and generalizing from one
+ * variable. Review found the right one. The heuristic machinery that mistake
+ * justified is gone.
  *
- *   - `explicit`   the caller named the session. Trusted.
- *   - `inferred`   exactly one transcript was written recently enough to be a
- *                  live session. Trusted.
- *   - `ambiguous`  several sessions are live in this repo, which is the normal
- *                  state for multi-lane work. Warn, never block: we cannot tell
- *                  which one is asking.
- *   - `unavailable` no transcripts, or none recent. Say nothing.
+ * What remains is the case the environment variable cannot cover: a caller that
+ * is not an agent session at all -- a human shell, or the handoff-history
+ * launchd agent. There, the newest transcript is reliably the most recently
+ * active session, but that session is not the caller, so its context must not
+ * gate the caller's lane.
+ *
+ *   - `explicit`    the environment or the caller named the session. Exact.
+ *                   May warn and may block.
+ *   - `inferred`    no session id; the most recently written transcript is
+ *                   reported so an operator can see it. Warn only, never block,
+ *                   because the caller is probably not that session.
+ *   - `unavailable` no transcripts at all. Say nothing.
  *
  * Absence of a reading is not a reading of zero. An unavailable measurement
  * produces `level: "ok"` with a stated reason, never a silent pass that looks
@@ -47,8 +57,12 @@ const DEFAULT_HARD_CEILING = 400_000
  */
 const DEFAULT_FRESHNESS_MS = 15 * 60 * 1000
 
-/** Attribution confidence levels that may drive a hard block. */
-const BLOCKING_SOURCES = Object.freeze(["explicit", "inferred"])
+/**
+ * Attribution confidence levels that may drive a hard block. Only an exactly
+ * named session qualifies: an inferred one is the most recently active session,
+ * which is not the same claim as "the session calling btrain".
+ */
+const BLOCKING_SOURCES = Object.freeze(["explicit"])
 
 /**
  * Claude Code stores transcripts under a directory named for the repo path,
@@ -74,7 +88,11 @@ function resolveTranscriptDir(repoRoot, env = process.env) {
  * so they sum to its size. Output tokens are not context and are excluded.
  */
 function turnContextTokens(usage) {
-  if (!usage || typeof usage !== "object") return 0
+  // No `typeof usage !== "object"` guard: `Number(undefined) || 0` is already 0
+  // for every non-object, so the guard changed no input and no test could tell
+  // it apart from its own absence. A null check is still needed for property
+  // access.
+  if (!usage) return 0
   const input = Number(usage.input_tokens) || 0
   const cacheWrite = Number(usage.cache_creation_input_tokens) || 0
   const cacheRead = Number(usage.cache_read_input_tokens) || 0
@@ -99,7 +117,13 @@ async function readLatestContextTokens(transcriptPath) {
 
   let latest = null
   let peak = 0
-  let turns = 0
+  // Claude Code writes one record per content block -- thinking, text, each
+  // tool_use -- and every one of them repeats the same `usage` object. Counting
+  // records overcounts turns by about 2.1x on this repo's transcripts, and the
+  // figure is printed to the user beside a claim that cost scales with turns.
+  // Count distinct API responses instead.
+  const responseIds = new Set()
+  let usageRecords = 0
   for (const line of raw.split("\n")) {
     if (!line || line.charCodeAt(0) !== 123 /* { */) continue
     let record
@@ -112,7 +136,8 @@ async function readLatestContextTokens(transcriptPath) {
     }
     const usage = record?.message?.usage
     if (!usage) continue
-    turns += 1
+    usageRecords += 1
+    responseIds.add(record.requestId || record.message?.id || `record:${usageRecords}`)
     const tokens = turnContextTokens(usage)
     // The LAST record, not the largest. The question this module answers is
     // "how much context is this session carrying now", and the answer has to
@@ -126,37 +151,52 @@ async function readLatestContextTokens(transcriptPath) {
     latest = tokens
     if (tokens > peak) peak = tokens
   }
-  return latest === null ? null : { tokens: latest, peak, turns }
+  return latest === null ? null : { tokens: latest, peak, turns: responseIds.size }
 }
 
 /**
  * Find the transcript for the session asking the question.
  *
- * Returns `{ source, transcriptPath, candidates, reason }`. See the module
+ * Returns `{ source, transcriptPath, sessionId, reason }`. See the module
  * header for what each `source` licenses the caller to do.
  */
 async function locateSessionTranscript(repoRoot, opts = {}) {
   const env = opts.env || process.env
   const dir = resolveTranscriptDir(repoRoot, env)
-  const freshnessMs = Number.isFinite(opts.freshnessMs) ? opts.freshnessMs : DEFAULT_FRESHNESS_MS
-  const now = Number.isFinite(opts.now) ? opts.now : Date.now()
 
-  const sessionId = opts.sessionId || env.BTRAIN_SESSION_ID || ""
-  if (sessionId) {
-    const explicitPath = path.join(dir, `${sessionId}.jsonl`)
+  // Claude Code sets CLAUDE_CODE_SESSION_ID to the transcript basename for
+  // every tool call, so an in-session invocation takes this path and never
+  // guesses. BTRAIN_SESSION_ID lets an out-of-session caller be explicit too.
+  const named = opts.sessionId || env.BTRAIN_SESSION_ID || env.CLAUDE_CODE_SESSION_ID || ""
+  if (named) {
+    // The id becomes a path segment, so reject anything that could escape the
+    // transcript directory. Self-inflicted and read-only, but free to prevent.
+    if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
+      return {
+        source: "unavailable",
+        transcriptPath: "",
+        sessionId: "",
+        reason: `session id ${JSON.stringify(named)} is not a plain transcript name`,
+      }
+    }
+    const explicitPath = path.join(dir, `${named}.jsonl`)
     try {
       await fs.stat(explicitPath)
-      return { source: "explicit", transcriptPath: explicitPath, candidates: 1, reason: "" }
+      return { source: "explicit", transcriptPath: explicitPath, sessionId: named, reason: "" }
     } catch {
       return {
         source: "unavailable",
         transcriptPath: "",
-        candidates: 0,
-        reason: `no transcript for session ${sessionId} under ${dir}`,
+        sessionId: "",
+        reason: `no transcript for session ${named} under ${dir}`,
       }
     }
   }
 
+  // No session id: btrain is being run from outside an agent session. The
+  // newest transcript identifies the most recently active session reliably,
+  // but that session is not the caller, so this reading informs and never
+  // gates. No freshness window -- staleness is not what makes it untrustworthy.
   let names
   try {
     names = await fs.readdir(dir)
@@ -164,45 +204,42 @@ async function locateSessionTranscript(repoRoot, opts = {}) {
     return {
       source: "unavailable",
       transcriptPath: "",
-      candidates: 0,
+      sessionId: "",
       reason: `no transcript directory at ${dir}`,
     }
   }
 
-  const fresh = []
+  let newest = null
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue
     const full = path.join(dir, name)
     try {
       const stat = await fs.stat(full)
-      if (now - stat.mtimeMs <= freshnessMs) fresh.push({ full, mtimeMs: stat.mtimeMs })
+      if (!newest || stat.mtimeMs > newest.mtimeMs) {
+        newest = { full, mtimeMs: stat.mtimeMs, id: name.slice(0, -6) }
+      }
     } catch {
-      // Raced with a delete. Not a live session.
+      // Raced with a delete.
     }
   }
 
-  if (fresh.length === 0) {
+  if (!newest) {
     return {
       source: "unavailable",
       transcriptPath: "",
-      candidates: 0,
-      reason: `no session transcript in ${dir} written in the last ${Math.round(freshnessMs / 60000)} minutes`,
+      sessionId: "",
+      reason: `no session transcript in ${dir}`,
     }
   }
 
-  fresh.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  if (fresh.length > 1) {
-    // Normal for multi-lane work: several agents, one repo. Picking the newest
-    // would attribute one lane's context to another, so say so instead.
-    return {
-      source: "ambiguous",
-      transcriptPath: fresh[0].full,
-      candidates: fresh.length,
-      reason: `${fresh.length} sessions are live in this repo, so the reading cannot be attributed to one lane`,
-    }
+  return {
+    source: "inferred",
+    transcriptPath: newest.full,
+    sessionId: newest.id,
+    reason:
+      "CLAUDE_CODE_SESSION_ID is not set, so btrain is not running inside an agent session. "
+      + `Reporting the most recently active session (${newest.id.slice(0, 8)}) for information only.`,
   }
-
-  return { source: "inferred", transcriptPath: fresh[0].full, candidates: 1, reason: "" }
 }
 
 /**
@@ -213,18 +250,42 @@ async function locateSessionTranscript(repoRoot, opts = {}) {
 function getContextBudgetConfig(config, laneId = "") {
   const repo = config?.context_budget || {}
   const lane = laneId ? repo?.lanes?.[laneId] || {} : {}
+  const invalid = []
+
+  // `Number()` is too permissive to use directly here. It maps "", " ", false,
+  // [] and null all to 0, and this module reads 0 as "ceiling disabled" -- so a
+  // blank or mistyped value silently switched the hard block off. It also
+  // returns NaN for TOML's underscore integer form (`hard_ceiling = 350_000`),
+  // which fell through to the default, so a deliberate setting read as applied
+  // and was not. Parse strictly, and report anything rejected rather than
+  // quietly substituting a default.
+  const parseCeiling = (raw) => {
+    if (typeof raw === "number") return Number.isFinite(raw) && raw >= 0 ? raw : null
+    if (typeof raw !== "string") return null
+    const trimmed = raw.trim().replace(/_/g, "")
+    if (!/^\d+$/.test(trimmed)) return null
+    const value = Number(trimmed)
+    return Number.isFinite(value) ? value : null
+  }
+
   const pick = (key, fallback) => {
     for (const source of [lane, repo]) {
-      const value = Number(source?.[key])
-      if (Number.isFinite(value) && value >= 0) return value
+      if (source?.[key] === undefined || source?.[key] === null) continue
+      const value = parseCeiling(source[key])
+      if (value !== null) return value
+      invalid.push(`${key}=${JSON.stringify(source[key])}`)
     }
     return fallback
   }
+
   return {
-    enabled: repo?.enabled !== false,
+    // Lane overrides everything else, as with the ceilings. Reading `enabled`
+    // from the repo table alone made the documented rollback repo-wide only.
+    enabled: lane?.enabled !== undefined ? lane.enabled !== false : repo?.enabled !== false,
     softCeiling: pick("soft_ceiling", DEFAULT_SOFT_CEILING),
     hardCeiling: pick("hard_ceiling", DEFAULT_HARD_CEILING),
     freshnessMs: pick("freshness_ms", DEFAULT_FRESHNESS_MS),
+    invalid,
   }
 }
 
@@ -264,14 +325,18 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
     blockable: false,
   }
 
-  if (!budget.enabled) return { ...base, reason: "context budget disabled in config" }
+  const configNote = budget.invalid.length > 0
+    ? ` Ignored unparseable config: ${budget.invalid.join(", ")}.`
+    : ""
+
+  if (!budget.enabled) return { ...base, reason: "context budget disabled in config" + configNote }
 
   const located = await locateSessionTranscript(repoRoot, {
     ...opts,
     freshnessMs: budget.freshnessMs,
   })
   if (!located.transcriptPath) {
-    return { ...base, source: located.source, reason: located.reason }
+    return { ...base, source: located.source, reason: located.reason + configNote }
   }
 
   const reading = await readLatestContextTokens(located.transcriptPath)
@@ -290,7 +355,7 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
     peak: reading.peak,
     turns: reading.turns,
     source: located.source,
-    reason: located.reason,
+    reason: located.reason + configNote,
     blockable,
   }
 
@@ -304,7 +369,8 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
       message:
         `context is ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling. `
         + "Write the current state to MEMORY.md, clear context, and resume. "
-        + "To proceed anyway: btrain override grant --action context-budget.",
+        + "To proceed without clearing, raise or zero `hard_ceiling` under [context_budget] "
+        + "in .btrain/project.toml.",
     }
   }
 
@@ -316,7 +382,7 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
       level: "warn",
       message:
         `a session in this repo is at ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling, `
-        + `but ${located.reason}. Not blocking. Clear context if this is your session.`,
+        + `but ${located.reason} Not blocking. Clear context if this is your session.`,
     }
   }
 
@@ -327,7 +393,7 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
       message:
         `context is ${formatTokens(reading.tokens)} tokens over ${reading.turns} turns, past the ${formatTokens(budget.softCeiling)} soft ceiling. `
         + "Cache reads scale with context multiplied by turns. Write state to MEMORY.md and clear at the next stopping point."
-        + (located.source === "ambiguous" ? ` (${located.reason})` : ""),
+        + (located.source === "explicit" ? "" : ` (${located.reason})`),
     }
   }
 
