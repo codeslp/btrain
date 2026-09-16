@@ -4158,12 +4158,6 @@ function buildResolvedCgraphAdvisoryEntry(activeEntry) {
 }
 
 /**
- * @param {Set<string>} [opts.unprovenKinds] Advisory kinds this run could not
- *   determine. Their active entries are carried forward untouched instead of
- *   being read as resolved. Absence of evidence is not evidence of resolution:
- *   an inconclusive blast-radius cannot show that a lock overlap ended.
- */
-/**
  * Advisory kinds this lane currently holds in persisted state.
  *
  * Reconciliation retires any active entry the current run did not surface, so
@@ -4181,6 +4175,13 @@ async function listActiveCgraphAdvisoryKinds(repoRoot, laneId) {
   }
 }
 
+/**
+ * @param {Set<string>|null} [opts.unprovenKinds] Advisory kinds this run could
+ *   not determine. Their active entries are carried forward untouched instead
+ *   of being read as resolved. Absence of evidence is not evidence of
+ *   resolution: an inconclusive blast-radius cannot show that a lock overlap
+ *   ended. Ignored when `clearLane` is set, which retires the lane outright.
+ */
 async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false, unprovenKinds = null } = {}) {
   const now = new Date().toISOString()
   const current = dedupeCgraphAdvisories(advisories)
@@ -4380,6 +4381,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   // directly beside the degraded warning, and in the skipped cases under a
   // plain "cgraph: ok".
   delete metadata.blast_radius
+
   if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
     const locks = await listLocks(repoRoot)
     const blastRadius =
@@ -4398,7 +4400,6 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       // cgraph ran and returned a valid payload with no entities behind it.
       // Recording "0 overlaps" here would report a collision check that never
       // had anything to check. Degrade instead, and keep cgraph's own reason.
-      //
       if (metadata.status === "ok") {
         metadata.status = "degraded"
         metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
@@ -4423,18 +4424,27 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
           detail: `${Number(blastRadius.payload.summary.lock_overlaps)} overlapping lane${Number(blastRadius.payload.summary.lock_overlaps) === 1 ? "" : "s"} detected for the claimed lock set.`,
         }))
       }
-    } else if (!blastRadius.ok) {
-      // Unavailable or timed out. Same absence of evidence as an inconclusive
-      // answer, and far more common, so reconciliation must not retire a
-      // collision advisory it never got the chance to re-observe.
-      if (metadata.status === "ok") {
-        metadata.status = "degraded"
-        metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
-      }
+    } else if (metadata.status === "ok") {
+      // Everything else: unavailable, timed out, or `ok` with a payload this
+      // build cannot read. All three are the same absence of evidence as an
+      // inconclusive answer, and far more common, so reconciliation must not
+      // retire a collision advisory it never got the chance to re-observe.
+      //
+      // This stays a catch-all deliberately. An earlier revision narrowed it to
+      // `!blastRadius.ok`, which let an `ok` result carrying no summary match no
+      // branch at all: nothing degraded, nothing was recorded, and the lane
+      // rendered with no collision check behind it.
+      metadata.status = "degraded"
+      metadata.degraded_reason = blastRadius.timed_out
+        ? "blast-radius timed out"
+        : blastRadius.ok
+          ? "blast-radius returned a payload with no summary"
+          : "blast-radius unavailable"
     }
   }
 
   delete metadata.drift
+
   if (lockedFiles.length > 0 && adapter.supports("drift-check")) {
     const driftResult =
       await runCachedCgraphProducer(
@@ -4473,12 +4483,16 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
           changedNodeIds: driftResult.payload.changed_node_ids || driftResult.payload.drifted_node_ids || [],
         }))
       }
-    } else if (!driftResult.ok) {
-      // No drift evidence this run, so an active drift advisory stands.
-      if (metadata.status === "ok") {
-        metadata.status = "degraded"
-        metadata.degraded_reason = driftResult.timed_out ? "drift-check timed out" : "drift-check unavailable"
-      }
+    } else if (metadata.status === "ok") {
+      // No drift evidence this run, so an active drift advisory stands. Same
+      // catch-all as blast-radius above, and for the same reason: an `ok`
+      // result with no payload proves nothing and must not read as healthy.
+      metadata.status = "degraded"
+      metadata.degraded_reason = driftResult.timed_out
+        ? "drift-check timed out"
+        : driftResult.ok
+          ? "drift-check returned no payload"
+          : "drift-check unavailable"
     }
   }
 

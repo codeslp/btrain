@@ -564,6 +564,28 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
     )
   })
 
+  it("degrades when blast-radius returns ok with a payload it cannot read", async () => {
+    // Narrowing the failure branch from `else if (metadata.status === "ok")` to
+    // `else if (!blastRadius.ok)` opened a hole: an `ok` result whose payload
+    // carries no summary now matches no branch at all. Nothing degrades and no
+    // blast_radius is recorded, so `cgraph: ok` prints with no collision check
+    // behind it -- the same silent-clean failure this lane exists to remove,
+    // reintroduced by the fix for it.
+    await fs.writeFile(statePath, "3", "utf8")
+    const malformed = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.doesNotMatch(
+      malformed.stdout,
+      /cgraph: ok/,
+      "a payload btrain cannot read must not render as a healthy cgraph",
+    )
+    assert.match(
+      malformed.stdout,
+      /cgraph: degraded/,
+      "an unreadable blast-radius payload must degrade, not pass silently",
+    )
+  })
+
   it("does not retire an advisory kind btrain does not produce itself", async () => {
     // cgraph also emits `truncated`, `invalid_locks_json` and `no_graph`, and
     // normalizePayloadAdvisories preserves the kind, so any of them can become a
