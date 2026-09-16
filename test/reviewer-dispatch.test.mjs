@@ -87,6 +87,9 @@ const action = process.env.REVIEWER_ACTION || "resolve"
 if (process.env.REVIEWER_SPAWN_MARK) {
   fs.writeFileSync(process.env.REVIEWER_SPAWN_MARK, "spawned\\n")
 }
+if (process.env.REVIEWER_ENV_PATH) {
+  fs.writeFileSync(process.env.REVIEWER_ENV_PATH, JSON.stringify(process.env), "utf8")
+}
 if (process.env.REVIEWER_ARGV_PATH) {
   fs.writeFileSync(process.env.REVIEWER_ARGV_PATH, JSON.stringify(process.argv), "utf8")
 }
@@ -438,112 +441,73 @@ process.exit(1);`,
   })
 })
 
-let sourceOfCore = ""
-
-async function readRunnerEnvBody() {
-  const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/brain_train/core.mjs")
-  sourceOfCore = await fs.readFile(corePath, "utf8")
-  const start = sourceOfCore.indexOf("function buildLoopRunnerEnv(")
-  assert.ok(start !== -1, "buildLoopRunnerEnv must still exist for these guards to mean anything")
-  const end = sourceOfCore.indexOf("\n}\n", start)
-  // Without this, `indexOf` returning -1 makes `slice(start, -1)` read to EOF.
-  // Review confirmed that over-read yields the same six names and zero
-  // unresolvable keys -- a silent pass that scans 368 KB and reports success.
-  assert.ok(end !== -1, "could not find the end of buildLoopRunnerEnv; the guard would read to EOF")
-  return { body: sourceOfCore.slice(start, end), start, end }
-}
-
 describe("lane-scope stripping keeps pace with the runner env", () => {
-  // Lane d. The reviewer-dispatch suite failed for six consecutive codex review
-  // rounds and passed in every direct run. Cause: `buildLoopRunnerEnv` injects
-  // BTRAIN_LOOP_ACTIVE=1 into a spawned runner, a dispatched reviewer runs the
-  // suite as a child of that runner, and `withoutLaneScope` did not strip it.
-  // `dispatchNeedsReviewReviewer` then took its nested-dispatch guard and
-  // returned "skipped", so every test asserting a spawn failed while the two
-  // asserting no spawn passed — and the handoff update still exited 0, which
-  // made it look like a product bug instead of a leaked variable.
+  // Lane d. test/reviewer-dispatch.test.mjs failed in six consecutive review
+  // rounds and passed in every direct run, because buildLoopRunnerEnv injects
+  // BTRAIN_LOOP_ACTIVE=1 into a spawned runner and withoutLaneScope did not
+  // strip it, so dispatchNeedsReviewReviewer took its nested-dispatch guard and
+  // returned "skipped" instead of spawning.
+  //
+  // Three earlier versions of this guard derived the variable list by regexing
+  // core.mjs. Each was defeated by a spelling it did not anticipate -- a const
+  // not suffixed `_ENV`, a missing prefix, a spread, a template-literal key, a
+  // concatenated key, Object.assign, `env["X"] = v`, a parenthesized spread, a
+  // key built by a call expression -- and each fix added false positives on
+  // legitimate edits. Three rounds of that on a six-element list is the signal
+  // that the derivation was the defect.
+  //
+  // So this observes behaviour instead of syntax: spawn a real reviewer through
+  // the real dispatch path, have it write the environment it was handed, and
+  // assert that nothing lane-scoped survived. No spelling can evade it, because
+  // it never reads the source.
+
+  it("hands a spawned reviewer no lane-scope variable at all", async () => {
+    const { tmpDir } = await setupRepo()
+    try {
+      const envPath = path.join(tmpDir, "reviewer-env.json")
+      const result = await runBtrain(needsReviewArgs(tmpDir), tmpDir, {
+        REVIEWER_ENV_PATH: envPath,
+        REVIEWER_ACTION: "resolve",
+      })
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+
+      const raw = await fs.readFile(envPath, "utf8").catch(() => "")
+      assert.ok(raw, "the reviewer must have been spawned for this guard to mean anything")
+      const reviewerEnv = JSON.parse(raw)
+
+      // Only what buildLoopRunnerEnv actually injects or changes. The harness
+      // sets BRAIN_TRAIN_HOME, BTRAIN_CLI and BTRAIN_NO_REVIEW_DISPATCH itself
+      // and they are inherited, not injected -- BTRAIN_NO_REVIEW_DISPATCH is
+      // set by withoutLaneScope, so stripping it would break the harness.
+      const parentEnv = dispatchEnv(tmpDir, { REVIEWER_ENV_PATH: envPath, REVIEWER_ACTION: "resolve" })
+      const injected = Object.keys(reviewerEnv)
+        .filter((k) => /^(?:BTRAIN|BRAIN_TRAIN)_/.test(k))
+        .filter((k) => reviewerEnv[k] !== parentEnv[k])
+
+      assert.ok(
+        injected.includes("BTRAIN_LOOP_ACTIVE"),
+        `the runner env must inject the variable this branch exists for; got ${injected.sort().join(", ")}`,
+      )
+
+      const keys = laneScopeKeys()
+      const uncovered = injected.filter((k) => !keys.includes(k))
+      // The whole invariant: anything buildLoopRunnerEnv injects, by any
+      // spelling, must be in the strip list. A new variable added to the runner
+      // env and not to LANE_SCOPE_KEYS fails here, by name.
+      assert.deepEqual(
+        uncovered,
+        [],
+        `the runner env injects ${uncovered.join(", ")}, which withoutLaneScope does not strip. `
+        + "Add them to LANE_SCOPE_KEYS in test/helpers/runner-scope.mjs and to the env -u lists in package.json.",
+      )
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
 
   it("strips BTRAIN_LOOP_ACTIVE so a dispatched run still exercises dispatch", () => {
     const clean = withoutLaneScope({ ...process.env, BTRAIN_LOOP_ACTIVE: "1" })
     assert.equal(clean.BTRAIN_LOOP_ACTIVE, undefined)
-  })
-
-  it("strips every environment variable buildLoopRunnerEnv injects", async () => {
-    // This guard does not parse core.mjs. It recognises the four spellings
-    // buildLoopRunnerEnv currently uses, and — see the next test — fails loudly
-    // if the function starts using one it does not recognise. That is the
-    // honest description: "derived from the source" would overstate it, and an
-    // earlier version of this comment did. The real cure is the follow-up this
-    // PR names: export one shared constant from core.mjs and delete the
-    // derivation entirely.
-    const { body } = await readRunnerEnvBody()
-
-    const ENV_NAME = /^(?:BTRAIN|BRAIN_TRAIN)_[A-Z0-9_]+$/
-    const injected = new Set()
-
-    for (const m of body.matchAll(/(?:^\s*|env\.)([A-Z][A-Z0-9_]*)\s*[:=][^=]/gm)) {
-      if (ENV_NAME.test(m[1])) injected.add(m[1])
-    }
-    for (const m of body.matchAll(/\[([A-Za-z_$][A-Za-z0-9_$]*)\]\s*:/g)) {
-      // Anchored to a declaration line so a shadowed const cannot resolve to
-      // the wrong one, and escaped because a name may contain `$`.
-      const escaped = m[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-      const decl = body.match(new RegExp(`^\\s*const ${escaped} = ["']([A-Z][A-Z0-9_]*)["']`, "m"))
-        || sourceOfCore.match(new RegExp(`^const ${escaped} = ["']([A-Z][A-Z0-9_]*)["']`, "m"))
-      // A const key that resolves to something outside the lane-scope
-      // namespace is a legitimate edit (NODE_NO_WARNINGS, say) and must not
-      // fail this test. Only an unresolvable name is a problem.
-      if (decl && ENV_NAME.test(decl[1])) injected.add(decl[1])
-    }
-    for (const m of body.matchAll(/delete\s+env\.([A-Z][A-Z0-9_]*)/g)) {
-      if (ENV_NAME.test(m[1])) injected.add(m[1])
-    }
-
-    for (const expected of [
-      "BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LOOP_ACTIVE",
-      "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO",
-    ]) {
-      assert.ok(injected.has(expected), `${expected} must be derivable from buildLoopRunnerEnv; found ${[...injected].sort()}`)
-    }
-
-    const stripped = withoutLaneScope({
-      ...Object.fromEntries([...injected].map((k) => [k, "1"])),
-    })
-    assert.deepEqual(
-      [...injected].filter((k) => stripped[k] !== undefined),
-      [],
-      "withoutLaneScope must strip every variable buildLoopRunnerEnv injects",
-    )
-  })
-
-  it("fails loudly if buildLoopRunnerEnv uses a spelling the guard cannot read", async () => {
-    // The fourth hole, found by review after the first three were closed. The
-    // guard reads four syntactic forms. Five ordinary alternatives — a spread,
-    // a template-literal key, a concatenated key, Object.assign, and
-    // `env["X"] = v` — each injected a variable that was never stripped and
-    // still passed the suite. A regex cannot be made to cover every spelling,
-    // so instead of pretending otherwise, refuse to run against a body that
-    // uses one. A loud failure on an unrecognised spelling is the property
-    // that matters; a silent miss is the failure this whole PR is about.
-    const { body } = await readRunnerEnvBody()
-
-    const unreadable = [
-      // `...process.env` is the base the function builds on and is expected.
-      // Any other spread could carry variables this guard never sees.
-      [/\.\.\.(?!process\.env\b)[A-Za-z_$]/, "a spread of something other than process.env"],
-      [/Object\.assign/, "Object.assign"],
-      [/env\s*\[/, "bracket assignment (`env[\"X\"] = v`)"],
-      [/\[\s*`/, "a template-literal computed key"],
-      [/\[\s*["'][^"']*["']\s*\+/, "a concatenated computed key"],
-    ]
-    const found = unreadable.filter(([re]) => re.test(body)).map(([, label]) => label)
-    assert.deepEqual(
-      found,
-      [],
-      `buildLoopRunnerEnv now uses ${found.join(", ")}, which this guard cannot read. `
-      + "Either teach the guard that spelling, or export the variable list from core.mjs "
-      + "and have runner-scope.mjs import it instead of deriving it.",
-    )
   })
 
   it("keeps the npm scripts in step with the helper", async () => {
