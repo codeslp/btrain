@@ -367,6 +367,14 @@ function buildCgraphSummaryLines(cgraph, indent = "") {
     || cgraph.review_packet
     || cgraph.audit
     || cgraph.degraded_reason
+    || cgraph.drift
+    // A recorded advisory is the most substantive thing this block can carry:
+    // it is a collision or a drift someone has to act on. It was missing here,
+    // so a lane with an active advisory and no other content printed nothing
+    // at all. The preserved-advisory fix in core worked around this by forcing
+    // a degraded_reason; that made the preserved case visible and left the
+    // conclusive case -- a real advisory from a healthy run -- still silent.
+    || (Array.isArray(cgraph.advisories) && cgraph.advisories.length > 0)
     || (Array.isArray(cgraph.fresh_advisories) && cgraph.fresh_advisories.length > 0)
     || (Array.isArray(cgraph.resolved_advisories) && cgraph.resolved_advisories.length > 0)
 

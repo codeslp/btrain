@@ -519,6 +519,112 @@ describe("cgraph_adapter", () => {
     })
   })
 
+  // Spec 020 WS1, corrected after review. cgraph matches entity paths EXACTLY
+  // and never expands directories, so nodes_in_scope==0 has several causes and
+  // the payload cannot tell them apart. btrain therefore does not diagnose the
+  // cause; it only refuses to read "0 overlaps" off an answer with no nodes.
+  describe("blastRadius inconclusive answers", () => {
+    let tmpDir
+
+    before(async () => { tmpDir = await makeTmpDir() })
+    after(async () => { await rmDir(tmpDir) })
+
+    async function adapterReporting(summary, name, payloadExtra = {}) {
+      const dir = path.join(tmpDir, name)
+      await fs.mkdir(dir, { recursive: true })
+      const binPath = path.join(dir, "kkg")
+      const payload = {
+        ok: true, kind: "blast_radius", schema_version: "1.0",
+        files: ["src/brain_train/core.mjs"],
+        nodes_in_scope: [], transitive_callers: [], transitive_callees: [],
+        lock_overlaps: [], advisories: [], cross_module_impact: [],
+        summary,
+        ...payloadExtra,
+      }
+      const script = [
+        "#!/usr/bin/env node",
+        `const args = process.argv.slice(2);`,
+        `if (args[0] === "manifest") {`,
+        `  process.stdout.write(JSON.stringify(${JSON.stringify(fakeManifestWithCommands())}));`,
+        `} else {`,
+        `  process.stdout.write(JSON.stringify(${JSON.stringify(payload)}));`,
+        `}`,
+      ].join("\n")
+      await fs.writeFile(binPath, script)
+      await fs.chmod(binPath, 0o755)
+      return createAdapter(dir, { cgraph: { bin_path: binPath } })
+    }
+
+    it("flags an answer with no entities as inconclusive", async () => {
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "empty",
+      )
+      const result = await adapter.blastRadius(["src/brain_train/core.mjs"], "a")
+
+      assert.equal(result.blast_radius_inconclusive, true)
+      assert.match(result.inconclusive_reason, /matched no code entities/)
+      // ok and unavailable keep their own meanings: the call ran, the binary was
+      // there. Asserting those alone would be vacuous -- execCommand sets them
+      // on every successful call -- so they are checked beside the real signal.
+      assert.equal(result.ok, true)
+      assert.equal(result.unavailable, false)
+    })
+
+    it("flags entities-without-edges, which is the state a fresh index produces", async () => {
+      // cgraph derives lock_overlaps solely from the transitive caller/callee
+      // lists, which come from CALLS edges; nodes_in_scope is a separate node
+      // query. So entities present with no edges yields "0 overlaps" computed
+      // from nothing. btrain has exactly this graph today, and adding a
+      // tsconfig.json makes it MORE likely by moving the repo from no entities
+      // to entities-with-few-edges. An earlier test asserted this case was
+      // conclusive, which encoded the bug.
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 42, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "nodesnoedges",
+      )
+      const result = await adapter.blastRadius(["src/brain_train/core.mjs"], "a")
+
+      assert.equal(result.blast_radius_inconclusive, true)
+      assert.match(result.inconclusive_reason, /no call edges/)
+    })
+
+    it("accepts an answer whose call traversal produced something", async () => {
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 12, lock_overlaps: 0, transitive_callers: 4, transitive_callees: 2 },
+        "withedges",
+      )
+      const result = await adapter.blastRadius(["src/brain_train/leaf.mjs"], "a")
+
+      assert.notEqual(result.blast_radius_inconclusive, true, "callers and callees are real evidence")
+      assert.equal(result.ok, true)
+    })
+
+    it("accepts cross_module_impact as independent evidence of a populated graph", async () => {
+      // cross_module_impact comes from IMPORTS edges, a different edge type, so
+      // it witnesses that the graph holds relationships even when this file has
+      // no callers of its own.
+      const adapter = await adapterReporting(
+        { files_requested: 1, nodes_in_scope: 12, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "crossmod",
+        { cross_module_impact: [{ module: "other" }] },
+      )
+      const result = await adapter.blastRadius(["src/brain_train/leaf.mjs"], "a")
+
+      assert.notEqual(result.blast_radius_inconclusive, true)
+    })
+
+    it("does not flag an empty request", async () => {
+      const adapter = await adapterReporting(
+        { files_requested: 0, nodes_in_scope: 0, lock_overlaps: 0, transitive_callers: 0, transitive_callees: 0 },
+        "nofiles",
+      )
+      const result = await adapter.blastRadius([], "a")
+
+      assert.notEqual(result.blast_radius_inconclusive, true)
+    })
+  })
+
   describe("timeout constants", () => {
     it("all timeout values are positive integers", () => {
       for (const [key, value] of Object.entries(TIMEOUTS)) {

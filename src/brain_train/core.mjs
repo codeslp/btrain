@@ -58,6 +58,14 @@ const FILE_LOCK_TIMEOUT_MS = 5000
 const CGRAPH_ADVISORY_LOCK_TIMEOUT_MS = 500
 const CGRAPH_STATUS_CACHE_TTL_MS = 2000
 const DEFAULT_CGRAPH_GRAPH_MODE = "shared-working"
+
+// Which cgraph capability produces each advisory kind. Used to say which
+// capability went missing when an advisory has to be carried forward because
+// nothing could re-check it. Kinds absent here are named as themselves.
+const CGRAPH_ADVISORY_PRODUCERS = {
+  lock_overlap: "blast-radius",
+  drift: "drift-check",
+}
 const DEFAULT_CGRAPH_ADVISE_ON = ["lock_overlap", "drift", "packet_truncated"]
 const cgraphProducerCache = new Map()
 
@@ -3883,10 +3891,91 @@ function createUnavailableCgraphAdapterResult(kind, reason = "") {
   }
 }
 
-function createDegradedCgraphMetadata(reason, graphMode = DEFAULT_CGRAPH_GRAPH_MODE) {
+/**
+ * A degraded block for a failure that happened before any producer ran.
+ *
+ * `producer` decides whether a later run may clear this. Omit it only when the
+ * live path can genuinely re-establish the same fact. The needs-review callers
+ * must pass one: their degradation is recorded on an event the live path never
+ * re-runs, so without a producer `clearCgraphRunState` wipes it and a healthy
+ * blast-radius reports "cgraph: ok" over a packet or audit that never ran.
+ */
+// What counts as a producer having actually answered.
+//
+// Presence of the block is not enough, and assuming it was is how the sixth
+// instance of this defect was found: a producer returning `{ok:true,kind:cmd}`
+// still yields a review_packet with `source: "unknown"` and zero touched nodes,
+// and an audit with zero standards evaluated. Both are blocks built from an
+// empty payload. An audit that evaluated nothing is not a clean audit.
+//
+// blast_radius and drift are already gated on substance before they are set
+// (an inconclusive blast-radius and a drift payload with no evidence fields
+// both degrade upstream), so their presence is meaningful.
+const CGRAPH_EVIDENCE = {
+  blast_radius: (value) => Boolean(value),
+  drift: (value) => Boolean(value),
+  audit: (value) => Boolean(value) && Number(value.standards_evaluated) > 0,
+  review_packet: (value) => Boolean(value) && Boolean(value.source) && value.source !== "unknown",
+}
+
+// Which field carries a producer's own answer. A later event holding
+// substantive evidence in one of these has re-run that producer, and so can
+// speak to a degradation blamed on it. Nothing else can: another producer's
+// success says nothing about this one.
+const CGRAPH_PRODUCER_EVIDENCE_FIELD = {
+  "blast-radius": "blast_radius",
+  "drift-check": "drift",
+  audit: "audit",
+  "review-packet": "review_packet",
+}
+
+function cgraphEventRanProducer(metadata, producer) {
+  const field = CGRAPH_PRODUCER_EVIDENCE_FIELD[producer]
+  if (!field) {
+    return false
+  }
+  return CGRAPH_EVIDENCE[field](metadata?.[field])
+}
+
+/**
+ * The one place `status: "ok"` is allowed to leave a producer.
+ *
+ * Review found this same defect in five separate paths, each time after the
+ * previous one was fixed: an empty graph, a contentless drift payload, a
+ * preserved advisory with no live producer, an unreadable blast-radius answer
+ * on the claim event, and a review-packet that exited non-zero. They are not
+ * five bugs. They are one missing invariant -- "ok means something was
+ * checked" -- enforced nowhere, so every new path had to remember it
+ * independently and none of them did.
+ *
+ * Every function that produces cgraph metadata returns through here. A block
+ * that claims ok while carrying no evidence is degraded instead, whatever path
+ * built it and whatever new producer is added later.
+ */
+function sealCgraphMetadata(metadata, origin = "cgraph") {
+  if (!metadata || metadata.status !== "ok") {
+    return metadata
+  }
+  const hasEvidence =
+    Object.entries(CGRAPH_EVIDENCE).some(([field, isSubstantive]) => isSubstantive(metadata[field]))
+    || ["advisories", "fresh_advisories", "resolved_advisories"]
+      .some((field) => Array.isArray(metadata[field]) && metadata[field].length > 0)
+  if (hasEvidence) {
+    return metadata
+  }
+  return {
+    ...metadata,
+    status: "degraded",
+    degraded_reason: metadata.degraded_reason || "no cgraph producer returned a usable answer",
+    degraded_producer: metadata.degraded_producer || origin,
+  }
+}
+
+function createDegradedCgraphMetadata(reason, graphMode = DEFAULT_CGRAPH_GRAPH_MODE, producer = "") {
   return {
     status: "degraded",
     degraded_reason: reason,
+    ...(producer ? { degraded_producer: producer } : {}),
     graph_mode: graphMode,
     latency_ms: {},
   }
@@ -3947,6 +4036,51 @@ function extractLatestClaimTimestamp(events) {
   return ""
 }
 
+// Everything a previous run measured or concluded describes a graph this run
+// has not looked at. Drop all of it up front: each field below is
+// re-established from this run's own producers, so a copy carried forward can
+// only contradict them. Two paths proved that the hard way. A binary that
+// stopped answering returned early with the persisted block intact, so the CLI
+// printed last run's "7 in scope, 3 overlaps" directly beside "cgraph
+// unavailable". And because every branch that degrades is guarded by
+// `status === "ok"`, a lane that degraded on an empty graph kept reporting
+// "matched no code entities" after a re-index, underneath the fresh blast
+// radius that disproved it.
+//
+// Advisories are the deliberate exception and are not touched here. A collision
+// this run could not re-observe is not a collision that went away;
+// reconcileCgraphAdvisories decides those.
+// Producers the live path re-runs on every `handoff`/`status`. Only a
+// degradation these can re-establish may be cleared here.
+const LIVE_REFRESHED_CGRAPH_PRODUCERS = new Set(["blast-radius", "drift-check"])
+
+function clearCgraphRunState(metadata) {
+  if (!metadata) {
+    return metadata
+  }
+  const {
+    blast_radius: _blastRadius,
+    drift: _drift,
+    degraded_reason: degradedReason,
+    degraded_producer: degradedProducer,
+    ...rest
+  } = metadata
+
+  // A degradation from a producer this run does not re-run cannot be
+  // disproved by this run. `review-packet` and `audit` execute only on the
+  // needs-review transition, so wiping their degradation here made a healthy
+  // blast-radius report "cgraph: ok" and hide that the reviewer packet or the
+  // audit never completed.
+  //
+  // Absence of `degraded_producer` means the degradation predates this field
+  // or came from a path that does not name one; clearing stays the default
+  // there, because that is what the stale-figure fixes above depend on.
+  if (degradedProducer && !LIVE_REFRESHED_CGRAPH_PRODUCERS.has(degradedProducer)) {
+    return { ...rest, status: "degraded", degraded_reason: degradedReason, degraded_producer: degradedProducer }
+  }
+  return { ...rest, status: "ok" }
+}
+
 function mergeCgraphMetadata(base, next) {
   if (!base) {
     return next || null
@@ -3969,6 +4103,19 @@ function mergeCgraphMetadata(base, next) {
       ...(Array.isArray(base.advisories) ? base.advisories : []),
       ...(Array.isArray(next.advisories) ? next.advisories : []),
     ])
+  }
+
+  // A healthy event simply omits `degraded_reason`, so the spread above cannot
+  // drop an older one: the marker survives, and `clearCgraphRunState` then
+  // re-degrades every later run forever on the strength of a failure that has
+  // since been retried successfully. Clear it only on the blamed producer's
+  // own evidence -- the mirror of the guard in `clearCgraphRunState`, which
+  // refuses to clear a degradation whose producer this run never re-ran.
+  if (base.degraded_producer && !next.degraded_reason
+      && cgraphEventRanProducer(next, base.degraded_producer)) {
+    delete merged.degraded_reason
+    delete merged.degraded_producer
+    merged.status = next.status || "ok"
   }
 
   return merged
@@ -4157,7 +4304,32 @@ function buildResolvedCgraphAdvisoryEntry(activeEntry) {
   })
 }
 
-async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false } = {}) {
+/**
+ * Advisory kinds this lane currently holds in persisted state.
+ *
+ * Reconciliation retires any active entry the current run did not surface, so
+ * every kind already on record has to be considered before that happens --
+ * including kinds this btrain build does not produce itself.
+ */
+async function listActiveCgraphAdvisoryKinds(repoRoot, laneId) {
+  try {
+    const entries = await readJsonLinesSnapshot(getCgraphAdvisoryStatePath(repoRoot))
+    return new Set(
+      entries.filter((entry) => entry?.lane === laneId && entry?.kind).map((entry) => entry.kind),
+    )
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * @param {Set<string>|null} [opts.unprovenKinds] Advisory kinds this run could
+ *   not determine. Their active entries are carried forward untouched instead
+ *   of being read as resolved. Absence of evidence is not evidence of
+ *   resolution: an inconclusive blast-radius cannot show that a lock overlap
+ *   ended. Ignored when `clearLane` is set, which retires the lane outright.
+ */
+async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseOnResolution = false, clearLane = false, unprovenKinds = null } = {}) {
   const now = new Date().toISOString()
   const current = dedupeCgraphAdvisories(advisories)
 
@@ -4168,6 +4340,7 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
       const nextActiveEntries = []
       const surfaced = []
       const resolved = []
+      const preserved = []
       const telemetryRows = []
       const seenCurrentKeys = new Set()
 
@@ -4220,6 +4393,13 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
           continue
         }
 
+        // This run produced no evidence about the kind, so it cannot retire it.
+        if (!clearLane && unprovenKinds && unprovenKinds.has(activeEntry.kind)) {
+          nextActiveEntries.push(activeEntry)
+          preserved.push(activeEntry)
+          continue
+        }
+
         const key = `${activeEntry.lane}\u0000${activeEntry.kind}\u0000${activeEntry.context_hash}`
         if (!clearLane && seenCurrentKeys.has(key)) {
           continue
@@ -4242,12 +4422,13 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
 
       await writeJsonLinesSnapshot(statePath, nextActiveEntries)
       await appendCgraphTelemetryRows(repoRoot, telemetryRows)
-      return { surfaced, resolved }
+      return { surfaced, resolved, preserved }
     })
   } catch {
     return {
       surfaced: current,
       resolved: [],
+      preserved: [],
     }
   }
 }
@@ -4313,14 +4494,14 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   const adapter = await getCgraphAdapter(repoRoot, config)
   if (!adapter) {
     return mergeCgraphMetadata(
-      persisted,
+      clearCgraphRunState(persisted),
       createDegradedCgraphMetadata("cgraph unavailable", persisted?.graph_mode || DEFAULT_CGRAPH_GRAPH_MODE),
     )
   }
 
   const metadata = persisted
     ? {
-        ...persisted,
+        ...clearCgraphRunState(persisted),
         latency_ms: { ...(persisted.latency_ms || {}) },
       }
     : {
@@ -4331,6 +4512,22 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   const claimTimestamp = extractLatestClaimTimestamp(events)
   const adviseKinds = getConfiguredCgraphAdviceKinds(config, laneId)
   const liveAdvisories = []
+  // Advisory kinds whose state this run could not establish. Reconciliation
+  // must not retire them just because nothing was surfaced.
+  //
+  // Default to unproven and clear a kind only on a conclusive observation.
+  // Marking failures individually kept missing paths: a producer the adapter
+  // does not support, an `ok` result with no summary, and kinds filtered out of
+  // advise_on all reach reconciliation having surfaced nothing, and each would
+  // have retired a real advisory. Proving is the exception; not knowing is the
+  // default.
+  const unprovenAdvisoryKinds = new Set(["lock_overlap", "drift"])
+  // Kinds whose producer DID return a usable answer this run. Absence of
+  // evidence is not evidence of resolution, but a conclusive run that reports
+  // no overlap is evidence, and has to be allowed to retire the advisory.
+  // Without this, seeding every persisted kind as unproven below made
+  // advisories immortal and suppressed every resolution notice.
+  const conclusiveAdvisoryKinds = new Set()
 
   if (lockedFiles.length > 0 && adapter.supports("blast-radius")) {
     const locks = await listLocks(repoRoot)
@@ -4346,7 +4543,15 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       )
     metadata.latency_ms.blast_radius = blastRadius.latency_ms
 
-    if (blastRadius.ok && blastRadius.payload?.summary) {
+    if (blastRadius.ok && blastRadius.blast_radius_inconclusive) {
+      // cgraph ran and returned a valid payload with no entities behind it.
+      // Recording "0 overlaps" here would report a collision check that never
+      // had anything to check. Degrade instead, and keep cgraph's own reason.
+      if (metadata.status === "ok") {
+        metadata.status = "degraded"
+        metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
+      }
+    } else if (blastRadius.ok && blastRadius.payload?.summary) {
       metadata.blast_radius = {
         nodes_in_scope: blastRadius.payload.summary.nodes_in_scope || 0,
         transitive_callers: blastRadius.payload.summary.transitive_callers || 0,
@@ -4354,6 +4559,9 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
         lock_overlaps: blastRadius.payload.summary.lock_overlaps || 0,
       }
 
+      // A real summary is the only thing that licenses retiring a lock_overlap.
+      unprovenAdvisoryKinds.delete("lock_overlap")
+      conclusiveAdvisoryKinds.add("lock_overlap")
       liveAdvisories.push(...normalizePayloadAdvisories(blastRadius.payload, "lock_overlap"))
       if (
         liveAdvisories.filter((entry) => entry.kind === "lock_overlap").length === 0
@@ -4365,8 +4573,21 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
         }))
       }
     } else if (metadata.status === "ok") {
+      // Everything else: unavailable, timed out, or `ok` with a payload this
+      // build cannot read. All three are the same absence of evidence as an
+      // inconclusive answer, and far more common, so reconciliation must not
+      // retire a collision advisory it never got the chance to re-observe.
+      //
+      // This stays a catch-all deliberately. An earlier revision narrowed it to
+      // `!blastRadius.ok`, which let an `ok` result carrying no summary match no
+      // branch at all: nothing degraded, nothing was recorded, and the lane
+      // rendered with no collision check behind it.
       metadata.status = "degraded"
-      metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
+      metadata.degraded_reason = blastRadius.timed_out
+        ? "blast-radius timed out"
+        : blastRadius.ok
+          ? "blast-radius returned a payload with no summary"
+          : "blast-radius unavailable"
     }
   }
 
@@ -4383,7 +4604,25 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       )
     metadata.latency_ms.drift_check = driftResult.latency_ms
 
-    if (driftResult.ok && driftResult.payload) {
+    // The same conclusiveness question blast-radius asks, asked here too. An
+    // `ok` payload of `{ok: true, kind: "drift_check"}` carries no drift
+    // evidence at all, yet the old test (`ok && payload`) accepted it, wrote
+    // "0 changed nodes, 0 neighbor files", and -- once this lane added
+    // `conclusiveAdvisoryKinds` -- licensed retirement of a real drift
+    // advisory. That is the precise bug this branch exists to remove, left
+    // live in the second of the two producers.
+    //
+    // Presence, not count, is the test: a genuine clean answer sends
+    // `drifted: []`, an empty field, while a contentless answer sends no
+    // field. Requiring a positive count would make a real "nothing drifted"
+    // result permanently inconclusive, which is the alarm-fatigue failure.
+    const driftIsConclusive =
+      Array.isArray(driftResult.payload?.drifted)
+      || Array.isArray(driftResult.payload?.changed_node_ids)
+      || Array.isArray(driftResult.payload?.drifted_node_ids)
+      || Array.isArray(driftResult.payload?.neighbor_files)
+
+    if (driftResult.ok && driftResult.payload && driftIsConclusive) {
       const driftedNodes =
         Array.isArray(driftResult.payload.drifted)
           ? driftResult.payload.drifted.length
@@ -4397,6 +4636,8 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
         neighbor_files: neighborFiles,
       }
 
+      unprovenAdvisoryKinds.delete("drift")
+      conclusiveAdvisoryKinds.add("drift")
       liveAdvisories.push(...normalizePayloadAdvisories(driftResult.payload, "drift"))
       if (liveAdvisories.filter((entry) => entry.kind === "drift").length === 0 && driftedNodes > 0) {
         liveAdvisories.push(buildCgraphAdvisoryEntry({
@@ -4408,8 +4649,34 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
         }))
       }
     } else if (metadata.status === "ok") {
+      // No drift evidence this run, so an active drift advisory stands. Same
+      // catch-all as blast-radius above, and for the same reason: an `ok`
+      // result with no payload proves nothing and must not read as healthy.
       metadata.status = "degraded"
-      metadata.degraded_reason = driftResult.timed_out ? "drift-check timed out" : "drift-check unavailable"
+      metadata.degraded_reason = driftResult.timed_out
+        ? "drift-check timed out"
+        : !driftResult.ok
+          ? "drift-check unavailable"
+          : driftResult.payload
+            ? "drift-check returned a payload with no drift fields"
+            : "drift-check returned no payload"
+    }
+  }
+
+  // Everything the lane currently has an active advisory for is unproven unless
+  // this run surfaced it. Seeding from the two producer kinds was not enough:
+  // cgraph also emits `truncated`, `invalid_locks_json` and `no_graph`, and
+  // normalizePayloadAdvisories preserves those kinds, so any of them can become
+  // a persisted entry once advise_on lists it. The earlier loop spread
+  // unprovenAdvisoryKinds over itself, so it could only re-add kinds already
+  // present -- dead code that read as general coverage.
+  for (const kind of await listActiveCgraphAdvisoryKinds(repoRoot, laneId || "repo")) {
+    // A producer that answered conclusively speaks for its own kind. If it ran
+    // and did not report the overlap, the overlap is gone, and reconciliation
+    // must be allowed to retire the entry and emit the resolution notice.
+    if (conclusiveAdvisoryKinds.has(kind)) continue
+    if (!liveAdvisories.some((advisory) => advisory.kind === kind)) {
+      unprovenAdvisoryKinds.add(kind)
     }
   }
 
@@ -4441,14 +4708,54 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   }
 
   const laneKey = laneId || "repo"
-  const { surfaced, resolved } = await reconcileCgraphAdvisories(repoRoot, laneKey, currentAdvisories, {
+  const { surfaced, resolved, preserved } = await reconcileCgraphAdvisories(repoRoot, laneKey, currentAdvisories, {
     adviseOnResolution: config?.cgraph?.advise_on_resolution === true || getCgraphLaneConfig(config, laneId).advise_on_resolution === true,
+    unprovenKinds: unprovenAdvisoryKinds,
   })
 
-  if (currentAdvisories.length > 0) {
-    metadata.advisories = currentAdvisories
+  // Entries carried forward because this run could not re-observe them. They
+  // belong in the rendered set: keeping a known collision in the sidecar while
+  // the CLI shows only "degraded" hides it from the agent at the one moment it
+  // cannot be re-verified, which is no better than retiring it outright. They
+  // are not marked fresh, so they raise no new-advisory notice.
+  const visibleAdvisories = dedupeCgraphAdvisories([
+    ...currentAdvisories,
+    ...(preserved || [])
+      .filter((entry) => adviseKinds.has(entry.kind))
+      .map((entry) => buildCgraphAdvisoryEntry({
+        kind: entry.kind,
+        lane: entry.lane,
+        detail: entry.detail || "",
+        suggestion: entry.suggestion || "",
+        advisory_id: entry.advisory_id || "",
+        contextHash: entry.context_hash,
+      })),
+  ])
+
+  if (visibleAdvisories.length > 0) {
+    metadata.advisories = visibleAdvisories
   } else {
     delete metadata.advisories
+  }
+
+  // A preserved advisory whose producer never ran this pass leaves the metadata
+  // looking healthy: the producer guards are skipped entirely when the adapter
+  // stops advertising the capability, so nothing sets `degraded_reason`, and a
+  // carried-forward collision alone did not make the CLI print anything. The
+  // result was a known, unverifiable overlap rendering as silence -- the same
+  // failure as the empty graph reading clean, reached by a third path.
+  //
+  // Any advisory carried forward is by definition one this run could not
+  // re-observe, so the run is not clean whatever the producers did or did not
+  // report.
+  if ((preserved || []).some((entry) => adviseKinds.has(entry.kind)) && metadata.status === "ok") {
+    const kinds = [...new Set(preserved.filter((e) => adviseKinds.has(e.kind)).map((e) => e.kind))].sort()
+    const unsupported = kinds.filter((kind) => !adapter.supports(CGRAPH_ADVISORY_PRODUCERS[kind] || kind))
+    metadata.status = "degraded"
+    metadata.degraded_reason = unsupported.length > 0
+      ? `${unsupported.join(", ")} advisory preserved but cgraph no longer supports ${
+        unsupported.map((kind) => CGRAPH_ADVISORY_PRODUCERS[kind] || kind).join(", ")}`
+      : `${kinds.join(", ")} advisory preserved without a conclusive check this run`
   }
   if (surfaced.length > 0) {
     metadata.fresh_advisories = surfaced
@@ -4461,7 +4768,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
     delete metadata.resolved_advisories
   }
 
-  return metadata
+  return sealCgraphMetadata(metadata, "live")
 }
 
 async function attachLatestCgraphMetadataToState(repoRoot, config, state, laneId = "") {
@@ -4517,7 +4824,11 @@ async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files =
     metadata.status = "degraded"
     metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
   }
-  return metadata
+  // The `ok && inconclusive` case is not repeated here: buildEventMetadata
+  // already sets the same status and the same `inconclusive_reason` for it
+  // (cgraph_adapter.mjs). A duplicate branch here was unreachable by any
+  // behavioral test, since deleting it changed nothing an assertion could see.
+  return sealCgraphMetadata(metadata, "claim")
 }
 
 function buildAuditGateError(auditPayload) {
@@ -4551,7 +4862,7 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
   const adapter = await getCgraphAdapter(repoRoot, config)
   if (!adapter) {
     return hasCgraphConfig(config)
-      ? createDegradedCgraphMetadata("cgraph unavailable", DEFAULT_CGRAPH_GRAPH_MODE)
+      ? createDegradedCgraphMetadata("cgraph unavailable", DEFAULT_CGRAPH_GRAPH_MODE, "needs-review")
       : null
   }
 
@@ -4590,11 +4901,11 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
 
   if (Object.keys(results).length === 0) {
     return hasCgraphConfig(config)
-      ? createDegradedCgraphMetadata("no supported cgraph commands detected", DEFAULT_CGRAPH_GRAPH_MODE)
+      ? createDegradedCgraphMetadata("no supported cgraph commands detected", DEFAULT_CGRAPH_GRAPH_MODE, "needs-review")
       : null
   }
 
-  return adapter.buildEventMetadata(results, DEFAULT_CGRAPH_GRAPH_MODE)
+  return sealCgraphMetadata(adapter.buildEventMetadata(results, DEFAULT_CGRAPH_GRAPH_MODE), "needs-review")
 }
 
 async function getDoctorCgraphSummary(repoRoot, config) {

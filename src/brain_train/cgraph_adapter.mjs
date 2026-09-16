@@ -291,7 +291,7 @@ class CgraphAdapter {
     const args = ["blast-radius", "--files", files.join(",")]
     if (laneId) args.push("--lane", laneId)
     if (locksJson) args.push("--locks-json", JSON.stringify(locksJson))
-    return this._exec(args, "blast_radius")
+    return flagInconclusiveBlastRadius(await this._exec(args, "blast_radius"))
   }
 
   async reviewPacket(opts = {}) {
@@ -395,7 +395,20 @@ class CgraphAdapter {
       if (r.unavailable || r.timed_out) {
         meta.status = "degraded"
         meta.degraded_reason = r.timed_out ? "review-packet timed out" : "review-packet unavailable"
-      } else if (r.ok && r.payload) {
+        meta.degraded_producer = "review-packet"
+      } else if (!r.ok || !r.payload) {
+        // Everything else the command can do. `unavailable` is set only for
+        // ENOENT/EACCES, so the most ordinary failure -- a non-zero exit, or
+        // stdout that does not parse -- landed here with status still "ok" and
+        // no packet produced. The reviewer was told cgraph was healthy while
+        // the packet they were sent to read did not exist.
+        if (meta.status === "ok") {
+          meta.status = "degraded"
+          meta.degraded_reason = "review-packet produced no readable packet"
+          meta.degraded_producer = "review-packet"
+        }
+      }
+      if (r.ok && r.payload) {
         meta.review_packet = {
           path: results.reviewPacketArtifact || "",
           source: r.payload.source || "unknown",
@@ -416,22 +429,48 @@ class CgraphAdapter {
           hard: a.payload.counts?.hard || 0,
           standards_evaluated: a.payload.standards_evaluated || 0,
         }
-      } else if (!a.ok && meta.status === "ok") {
+      } else if (meta.status === "ok") {
+        // `!a.ok` was the only degrade branch, so an `ok` result carrying no
+        // payload fell through as healthy.
         meta.status = "degraded"
-        meta.degraded_reason = a.timed_out ? "audit timed out" : "audit failed"
+        meta.degraded_reason = a.timed_out
+          ? "audit timed out"
+          : a.ok
+            ? "audit returned no payload"
+            : "audit failed"
+        meta.degraded_producer = "audit"
       }
       meta.latency_ms.audit = a.latency_ms
     }
 
     if (results.blastRadius) {
       const b = results.blastRadius
-      if (b.ok && b.payload?.summary) {
+      if (b.ok && b.blast_radius_inconclusive) {
+        // No entities matched, so the summary's zeros describe nothing. Publishing
+        // them as a blast_radius block is what made an unchecked lock look clean.
+        meta.status = "degraded"
+        meta.degraded_reason = b.inconclusive_reason || "blast-radius inconclusive"
+        meta.degraded_producer = "blast-radius"
+      } else if (b.ok && b.payload?.summary) {
         meta.blast_radius = {
           nodes_in_scope: b.payload.summary.nodes_in_scope || 0,
           transitive_callers: b.payload.summary.transitive_callers || 0,
           transitive_callees: b.payload.summary.transitive_callees || 0,
           lock_overlaps: b.payload.summary.lock_overlaps || 0,
         }
+      } else if (meta.status === "ok") {
+        // The claim path's only producer of persisted metadata. Without this an
+        // unreadable blast-radius answer persisted `{"status":"ok"}` on the
+        // claim event -- the pre-lock collision check this branch exists to
+        // repair, reading as clean off an answer btrain could not parse. The
+        // live path grew this catch-all; the persisted path did not.
+        meta.status = "degraded"
+        meta.degraded_reason = b.timed_out
+          ? "blast-radius timed out"
+          : b.ok
+            ? "blast-radius returned a payload with no summary"
+            : "blast-radius unavailable"
+        meta.degraded_producer = "blast-radius"
       }
       meta.latency_ms.blast_radius = b.latency_ms
     }
@@ -601,9 +640,77 @@ async function failOpen(fn) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Exports
-// ---------------------------------------------------------------------------
+/**
+ * Mark a blast-radius answer that tells btrain nothing about lane collisions.
+ *
+ * cgraph's blast-radius matches code-entity nodes (Function, Class, Variable,
+ * ...) by EXACT path: `WHERE n.path IN [...]`. It never queries File nodes and
+ * never expands a directory to its descendants. So `nodes_in_scope: 0` happens
+ * for several unrelated reasons:
+ *
+ *   - the graph has never indexed those files;
+ *   - the lock names a directory (`src/`), which no entity path equals;
+ *   - the files hold only imports, comments, or constructs cgraph does not model.
+ *
+ * We deliberately do NOT try to tell these apart, because the payload cannot.
+ * The single fact worth acting on is that cgraph returned nothing to reason
+ * about, so the collision check is inconclusive rather than clean. btrain must
+ * not read "0 overlaps" off an answer with no nodes behind it.
+ *
+ * The command still ran and the payload is still valid, so `ok` and
+ * `unavailable` are left alone: those mean "the call worked" and "the binary
+ * was missing". This is a third state, and it gets its own flag.
+ *
+ * @param {AdapterResult|null} result
+ * @returns {AdapterResult|null}
+ */
+function flagInconclusiveBlastRadius(result) {
+  const summary = result?.payload?.summary
+  if (!result?.ok || !summary) return result
+
+  const requested = summary.files_requested || 0
+  if (requested === 0) return result
+
+  const inScope = summary.nodes_in_scope || 0
+  const callers = summary.transitive_callers || 0
+  const callees = summary.transitive_callees || 0
+  const overlaps = summary.lock_overlaps || 0
+  const crossModule = Array.isArray(result.payload.cross_module_impact)
+    ? result.payload.cross_module_impact.length
+    : 0
+
+  // cgraph computes `lock_overlaps` purely from the transitive caller and callee
+  // lists (`_detect_lock_overlaps(callers, callees, locks, lane)`), which come
+  // from CALLS edges. `nodes_in_scope` comes from a separate query over entity
+  // nodes. Node presence therefore says nothing about whether the overlap
+  // computation had any edges to work with.
+  //
+  // An earlier version of this guard used `nodes_in_scope > 0` as the
+  // conclusiveness test, which is the wrong field: a graph holding entities but
+  // no CALLS edges -- exactly what btrain has today -- answered "0 overlaps" and
+  // read as conclusive. Adding tsconfig.json makes that state MORE likely, not
+  // less, by moving the repo from "no entities" to "entities, few edges".
+  //
+  // Require positive evidence that the traversal produced something: any caller,
+  // callee or overlap, or cross-module impact, which cgraph derives from IMPORTS
+  // edges and is thus an independent witness that relationships exist at all.
+  if (callers > 0 || callees > 0 || overlaps > 0 || crossModule > 0) return result
+
+  const detail = inScope > 0
+    ? `cgraph matched ${inScope} entit${inScope === 1 ? "y" : "ies"} for the ${requested} locked path(s) `
+      + "but produced no call edges, so its overlap count was computed from nothing. "
+      + "A genuine leaf file is indistinguishable from an unindexed one here."
+    : `cgraph matched no code entities for the ${requested} locked path(s). `
+      + "It matches entity paths exactly and does not expand directories, so this "
+      + "is not evidence that the paths are collision-free."
+
+  return {
+    ...result,
+    blast_radius_inconclusive: true,
+    inconclusive_reason:
+      detail + " Re-index, or lock files rather than directories, before trusting a clean result.",
+  }
+}
 
 export {
   CgraphAdapter,

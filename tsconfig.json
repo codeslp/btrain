@@ -1,0 +1,19 @@
+{
+  // Not a TypeScript build. btrain is Node ESM JavaScript and emits nothing.
+  //
+  // This file exists so `scip-typescript` can index the repo, which is what
+  // gives cgraph its CALLS edges (spec 020 WS1). Without it scip-typescript
+  // reports "no files got indexed", cgraph builds a graph with zero call
+  // relationships, and `blast-radius` answers every lane-collision check with
+  // an empty result. `--infer-tsconfig` does not cover .mjs, and a
+  // jsconfig.json is ignored by scip-typescript. Only this file works.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "module": "esnext",
+    "target": "esnext",
+    "moduleResolution": "bundler"
+  },
+  "include": ["src/**/*.mjs", "test/**/*.mjs"]
+}
