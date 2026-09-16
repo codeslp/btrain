@@ -675,9 +675,16 @@ graph of this file invents cycles that do not exist and misses the ones that do.
 > existed. It is kept because the *reasoning* is the method that produced the
 > final assignment, but do not implement from it: the actual relocations are in
 > *How the membership was derived*, and they are not these ten. One row is
-> simply wrong — `getLoopActorForState` has zero callers and zero callees, so it
-> closes no cycle anywhere. Cycles are a property of a grouping, not of the
-> code; the function call graph itself is acyclic.
+> the actual relocations are in *How the membership was derived*, and they are
+> not these ten. Cycles are a property of a grouping, not of the code; the
+> function call graph itself is acyclic.
+>
+> A revision of this section claimed one row here was wrong outright, on the
+> grounds that `getLoopActorForState` had no callers and no callees. That was an
+> artifact of the truncated-span defect described under the stage table:
+> `runLoop` was being read as 9 lines, so its calls were attributed to nobody.
+> `runLoop` does call `getLoopActorForState`, and this row's destination
+> (`loop`) is where the final assignment puts it. The seed was right.
 
 Each one, left where it is, closes a cycle. Relocating them is part of the
 stage that moves their destination, not a separate change.
@@ -849,9 +856,13 @@ topological order over functions always exists. So the relocation table is a
 consequence of the grouping, not a constraint on it, and it must be re-derived
 whenever the grouping changes.
 
-One row does not survive contact with the graph: `getLoopActorForState` has
-zero callers and zero callees inside `core.mjs`, so it closes no cycle
-anywhere and moving it to `loop` is a naming decision, not a structural one.
+This section once ended by claiming `getLoopActorForState` had no callers and no
+callees and therefore closed no cycle. That was wrong, for an instructive
+reason: the span scanner was truncating `runLoop` to 9 lines, so none of its
+call sites were attributed to it. `runLoop` calls `getLoopActorForState`.
+Acyclicity itself is unaffected — it holds on the corrected 886-edge graph as it
+did on the 786-edge one — but a conclusion drawn about one function from a
+broken graph did not survive fixing it.
 
 ##### Re-export mechanics
 
@@ -881,16 +892,29 @@ holding a mutable structure is `cgraphProducerCache` (a `Map`), read and written
 by exactly one function, `runCachedCgraphProducer`; both move together at stage
 9. There is no memoized adapter, no config singleton, no lazy global.
 
-Eleven constants have readers in more than one target module. None blocks a
-split — each is an immutable scalar, string or never-mutated literal, and each
-becomes an export from the lowest module in the graph that needs it. The two
-that constrain staging: `DEFAULT_LOOP_TIMEOUT_MS` and
-`DEFAULT_LOOP_POLL_INTERVAL_MS` export from `loop` (stage 11);
-`DEFAULT_HISTORY_KEEP` from `handoff-history` (stage 4). `DEFAULT_CURRENT` is
-spread-copied at all nine of its use sites and never mutated, so sharing it from
-`handoff-doc` (stage 5) is safe. Re-check these against the assignment file
-after any regrouping — the constant list was written against the earlier stage
-numbering and only the four named here have been re-derived.
+Nine module-level constants have readers in more than one target module, out of
+58 at module level. An earlier draft said eleven without listing them; these are
+derived from the assignment and the call graph, so stage 1 can begin without
+fresh dependency analysis. Each is an immutable scalar, string or never-mutated
+literal, so none blocks a split. The home is the lowest-numbered stage that
+reads it; every other reader imports from there.
+
+| Constant | Exports from | Read by |
+|---|---|---|
+| `DEFAULT_LANES_PER_AGENT` | 2 `config` | config, lane-state, templates |
+| `HANDOFF_NOTES_DIRNAME` | 2 `config` | config, handoff-doc |
+| `LOCKS_FILENAME` | 2 `config` | config, lane-state |
+| `DEFAULT_CURRENT` | 5 `handoff-doc` | handoff-doc, lane-state, handoff-read, status |
+| `DEFAULT_HISTORY_KEEP` | 6 `lane-state` | lane-state, status |
+| `MANAGED_START` | 7 `templates` | templates, status |
+| `DEFAULT_LOOP_TIMEOUT_MS` | 10 `handoff-read` | handoff-read, loop, handoff-write |
+| `DEFAULT_LOOP_POLL_INTERVAL_MS` | 10 `handoff-read` | handoff-read, loop, handoff-write |
+| `SUPPORTED_REVIEW_MODES` | 11 `loop` | loop, status |
+
+The two `DEFAULT_LOOP_*` constants are the ones to watch: their earliest reader
+is `handoff-read` at stage 10, not `loop` at stage 11, so they export from a
+module whose name does not suggest them. `DEFAULT_CURRENT` is spread-copied at
+all nine of its use sites and never mutated, so sharing it from stage 5 is safe.
 
 ##### Formal impact
 
@@ -920,13 +944,15 @@ The 9,729 lines inside top-level functions plus 424 lines of module-level
 constants distribute with `handoff-write` largest at 1,825 and `loop` next at
 1,417. With an import header the biggest file lands near 1,870, about 6 percent
 under the 2,000-line ceiling. That is real clearance but it is thin, and
-`handoff-write` is the one module a single addition could push over. The
-earlier draft's "biggest file lands near 1,500" was optimistic because it
-assumed `loop` was the largest module; it is not. Two honest caveats: the ceiling is a line
-count, not a complexity measure, and `patchHandoff` is still one 579-line
-function afterwards; and `loop` is the one module a future addition could push
-over, with a clean internal seam at runner-execution versus orchestration if it
-ever needs one.
+`handoff-write` is the one module a single addition could push over — not
+`loop`, which an earlier draft named. The draft's "biggest file lands near
+1,500" followed from assuming `loop` was largest; it is second at 1,417.
+
+Two honest caveats: the ceiling is a line count, not a complexity measure, and
+`patchHandoff` is still one 579-line function afterwards. And if 6 percent is
+judged too thin, the seam to cut is inside `handoff-write` — the five handoff
+mutators are 1,305 of its 1,825 lines, so validation and hashing could split
+out — rather than inside `loop`.
 
 ##### `cli.mjs` splits differently
 
@@ -937,10 +963,12 @@ subprocess, so the public-surface constraint that dominates `core.mjs` is
 absent here.
 
 It does not split along the same seams. `run` is a single function of 1,162
-lines — 43.5 percent of the file — holding about 61 command branches, and 32
-`format*`/`print*`/`build*Lines` functions total 1,010 lines. One extraction
-clears the ceiling: move the presentation functions to `cli/format.mjs` and
-`cli.mjs` drops to roughly 1,600. They are pure string builders over result
+lines — 43.5 percent of the file — holding 53 `command ===` comparisons across
+26 top-level branches, and 27 `format*`/`print*`/`build*Lines` functions total
+1,075 lines. An earlier draft said "about 61" branches and 32 functions at 1,010
+lines; all three are measured here with
+`scripts/decomposition_inventory.mjs`. One extraction clears the ceiling: move
+the presentation functions to `cli/format.mjs` and `cli.mjs` drops to 1,594. They are pure string builders over result
 objects, they call nothing upward, and the edge is one-directional.
 
 That satisfies the criterion without fixing the file. The real problem is `run`,
