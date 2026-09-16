@@ -788,3 +788,182 @@ describe("cgraph audit hard-violation gate", () => {
     assert.doesNotMatch(combined, /gate_on_hard/)
   })
 })
+
+describe("cgraph contentless drift-check", () => {
+  // Third review round on PR #63. The branch fixed "an empty answer reads as
+  // clean" for blast-radius and left it live in the other producer: the drift
+  // gate was `driftResult.ok && driftResult.payload`, so a payload of
+  // `{ok: true, kind: "drift_check"}` -- no drifted, no changed_node_ids, no
+  // neighbor_files -- passed, printed "0 changed nodes, 0 neighbor files", and
+  // (because this same branch added conclusiveAdvisoryKinds) licensed
+  // retirement of a real drift advisory it had not disproved.
+  let tmpDir, statePath
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    statePath = path.join(tmpDir, "kkg-phase")
+    const binPath = path.join(tmpDir, "kkg")
+
+    const script = [
+      "#!/usr/bin/env node",
+      "const fs = require('fs')",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const statePath = ${JSON.stringify(statePath)}`,
+      "let phase = '1'",
+      "try { phase = fs.readFileSync(statePath, 'utf8').trim() } catch {}",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      // Blast-radius stays healthy and conclusive throughout, so anything that
+      // changes between phases is the drift producer's doing alone.
+      "else if (cmd === 'blast-radius') {",
+      "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 0 }",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: healthy }))",
+      "}",
+      "else if (cmd === 'drift-check') {",
+      "  if (phase === '1') {",
+      "    process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: ['n1','n2'], neighbor_files: ['src/other.js'] }))",
+      "  } else if (phase === '2') {",
+      // The contentless answer: ok, right kind, no evidence fields at all.
+      "    process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check' }))",
+      "  } else {",
+      // A genuine clean answer: the field is present and empty.
+      "    process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] }))",
+      "  }",
+      "} else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await fs.writeFile(statePath, "1", "utf8")
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("does not retire a drift advisory on a payload carrying no drift fields", async () => {
+    const advisoryState = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Record a real drift advisory",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    const withDrift = await fs.readFile(advisoryState, "utf8").catch(() => "")
+    assert.match(withDrift, /drift/, "phase 1 should record a drift advisory")
+
+    // Phase 2: the contentless payload. It proves nothing, so the advisory stands.
+    await fs.writeFile(statePath, "2", "utf8")
+    const afterEmpty = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    const stillThere = await fs.readFile(advisoryState, "utf8").catch(() => "")
+
+    assert.match(
+      stillThere,
+      /drift/,
+      "a drift-check with no drift fields must not retire an advisory it cannot disprove",
+    )
+    assert.doesNotMatch(
+      afterEmpty.stdout,
+      /0 changed nodes/,
+      "a contentless payload must not be printed as a zero reading",
+    )
+    assert.match(afterEmpty.stdout, /cgraph: degraded/)
+  })
+
+  it("still retires the advisory when drift-check answers with an empty list", async () => {
+    // The other half: presence, not count, is the conclusiveness test. A real
+    // "nothing drifted" answer sends the field empty and must still retire, or
+    // the gate degrades permanently and nobody reads it.
+    const advisoryState = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    await fs.writeFile(statePath, "1", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(await fs.readFile(advisoryState, "utf8").catch(() => ""), /drift/)
+
+    await fs.writeFile(statePath, "3", "utf8")
+    const afterClean = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    const retired = await fs.readFile(advisoryState, "utf8").catch(() => "")
+
+    assert.doesNotMatch(
+      retired,
+      /"kind":"drift"/,
+      "a conclusive empty answer must be allowed to retire the advisory",
+    )
+    assert.match(afterClean.stdout, /cgraph: ok/, "a conclusive clean run is not degraded")
+  })
+})
+
+describe("cgraph claim event on an inconclusive graph", () => {
+  // Third review round on PR #63. The path in the PR title -- the pre-lock
+  // claim check -- had no test at all: both inconclusive handlers
+  // (cgraph_adapter.mjs buildEventMetadata and core.mjs buildClaimCgraphMetadata)
+  // could be deleted with 46 tests still passing. Every existing regression
+  // drives the live `handoff` render path; none asserted what the claim event
+  // persists.
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    const binPath = path.join(tmpDir, "kkg")
+    const script = [
+      "#!/usr/bin/env node",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      // Entities matched, but no call edges: exactly btrain's own state, and
+      // the one the old nodes_in_scope test read as a clean zero-overlap check.
+      "else if (cmd === 'blast-radius') {",
+      "  const noEdges = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0 }",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: noEdges }))",
+      "}",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("persists degraded with no blast_radius block when the claim check is inconclusive", async () => {
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Claim against a graph with no call edges",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+    const claimed = events.filter((event) => event?.details?.cgraph).pop()
+    assert.ok(claimed, "the claim event should carry a cgraph block")
+
+    assert.equal(claimed.details.cgraph.status, "degraded", "an inconclusive claim check is not healthy")
+    assert.equal(
+      claimed.details.cgraph.blast_radius,
+      undefined,
+      "a zero-overlap figure computed from no edges must not be persisted as a collision check",
+    )
+    assert.match(String(claimed.details.cgraph.degraded_reason || ""), /inconclusive|no call edges|not evidence/i)
+  })
+})

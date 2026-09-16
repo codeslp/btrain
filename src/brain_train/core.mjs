@@ -4479,7 +4479,25 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       )
     metadata.latency_ms.drift_check = driftResult.latency_ms
 
-    if (driftResult.ok && driftResult.payload) {
+    // The same conclusiveness question blast-radius asks, asked here too. An
+    // `ok` payload of `{ok: true, kind: "drift_check"}` carries no drift
+    // evidence at all, yet the old test (`ok && payload`) accepted it, wrote
+    // "0 changed nodes, 0 neighbor files", and -- once this lane added
+    // `conclusiveAdvisoryKinds` -- licensed retirement of a real drift
+    // advisory. That is the precise bug this branch exists to remove, left
+    // live in the second of the two producers.
+    //
+    // Presence, not count, is the test: a genuine clean answer sends
+    // `drifted: []`, an empty field, while a contentless answer sends no
+    // field. Requiring a positive count would make a real "nothing drifted"
+    // result permanently inconclusive, which is the alarm-fatigue failure.
+    const driftIsConclusive =
+      Array.isArray(driftResult.payload?.drifted)
+      || Array.isArray(driftResult.payload?.changed_node_ids)
+      || Array.isArray(driftResult.payload?.drifted_node_ids)
+      || Array.isArray(driftResult.payload?.neighbor_files)
+
+    if (driftResult.ok && driftResult.payload && driftIsConclusive) {
       const driftedNodes =
         Array.isArray(driftResult.payload.drifted)
           ? driftResult.payload.drifted.length
@@ -4512,9 +4530,11 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       metadata.status = "degraded"
       metadata.degraded_reason = driftResult.timed_out
         ? "drift-check timed out"
-        : driftResult.ok
-          ? "drift-check returned no payload"
-          : "drift-check unavailable"
+        : !driftResult.ok
+          ? "drift-check unavailable"
+          : driftResult.payload
+            ? "drift-check returned a payload with no drift fields"
+            : "drift-check returned no payload"
     }
   }
 
@@ -4658,10 +4678,11 @@ async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files =
   if (!blastRadius.ok) {
     metadata.status = "degraded"
     metadata.degraded_reason = blastRadius.timed_out ? "blast-radius timed out" : "blast-radius unavailable"
-  } else if (blastRadius.blast_radius_inconclusive) {
-    metadata.status = "degraded"
-    metadata.degraded_reason = blastRadius.inconclusive_reason || "blast-radius inconclusive"
   }
+  // The `ok && inconclusive` case is not repeated here: buildEventMetadata
+  // already sets the same status and the same `inconclusive_reason` for it
+  // (cgraph_adapter.mjs). A duplicate branch here was unreachable by any
+  // behavioral test, since deleting it changed nothing an assertion could see.
   return metadata
 }
 
