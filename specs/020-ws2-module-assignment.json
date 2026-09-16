@@ -18,9 +18,9 @@
   ],
   "nonFunctionExports": {
     "BtrainError": "fsx",
-    "DEFAULT_LOCK_TTL_MS": "lane-state",
-    "DEFAULT_SPILL_NEXT_CHARS": "handoff-doc",
-    "HANDOFF_NOTES_DIRNAME": "handoff-doc",
+    "DEFAULT_LOCK_TTL_MS": "config",
+    "DEFAULT_SPILL_NEXT_CHARS": "config",
+    "HANDOFF_NOTES_DIRNAME": "config",
     "TASK_ARTIFACT_ENVELOPE_VERSION": "(re-export from harness/task-envelope.mjs)",
     "buildTaskArtifactEnvelope": "(re-export from harness/task-envelope.mjs)",
     "createEmptyTaskArtifactEnvelope": "(re-export from harness/task-envelope.mjs)",
@@ -405,5 +405,6 @@
       "summarizeStartupLane",
       "summarizeWatchdogRepair"
     ]
-  }
+  },
+  "nonFunctionExportRule": "Home is the lowest-numbered stage that reads the binding, the same rule the shared constants use. An earlier revision placed DEFAULT_LOCK_TTL_MS in lane-state and DEFAULT_SPILL_NEXT_CHARS and HANDOFF_NOTES_DIRNAME in handoff-doc by guessing from their names; all three are read by config, which is stage 2. Several are also read at module-evaluation time, so their home must precede every reader, not merely the first function that uses them."
 }

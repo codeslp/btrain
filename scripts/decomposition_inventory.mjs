@@ -149,6 +149,29 @@ function main() {
   const args = process.argv.slice(2)
   const { spans, fileLines } = readFunctionSpans(target)
 
+  if (args.includes("--cli")) {
+    // The cli.mjs half of the workstream. Generated for the same reason the
+    // core table is: the prose figures for this file were wrong twice.
+    const cliPath = path.join(repoRoot, "src", "brain_train", "cli.mjs")
+    const { spans: cliSpans, fileLines: cliLines } = readFunctionSpans(cliPath)
+    const run = cliSpans.find((f) => f.name === "run")
+    // Exactly the set the prose names: format*, print*, and build*Lines.
+    const presentation = cliSpans.filter((f) =>
+      /^format/.test(f.name) || /^print/.test(f.name) || /^build.*Lines$/.test(f.name))
+    const presentationLines = presentation.reduce((a, f) => a + f.lines, 0)
+    const body = fs.readFileSync(cliPath, "utf8").split("\n").slice(run.start - 1, run.end)
+    const comparisons = body.filter((l) => /command ===/.test(l)).length
+    const branches = body.filter((l) => /^ {2}(\} )?else if \(|^ {2}if \(/.test(l)).length
+
+    console.log(`src/brain_train/cli.mjs: ${cliLines} lines`)
+    console.log(`  top-level functions:     ${cliSpans.length}`)
+    console.log(`  run:                     ${run.lines} lines (${(run.lines / cliLines * 100).toFixed(1)}% of file)`)
+    console.log(`  command === comparisons: ${comparisons} across ${branches} top-level branches`)
+    console.log(`  format*/print*/build*Lines: ${presentation.length} fns, ${presentationLines} lines`)
+    console.log(`  after extracting them:   ${cliLines - presentationLines} lines`)
+    return
+  }
+
   const named = args.indexOf("--fns")
   if (named !== -1) {
     const want = args.slice(named + 1)
