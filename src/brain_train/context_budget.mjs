@@ -50,14 +50,6 @@ const DEFAULT_SOFT_CEILING = 200_000
 /** Tokens of context above which a lane may not advance to `needs-review`. */
 const DEFAULT_HARD_CEILING = 400_000
 /**
- * How recently a transcript must have been written to count as a live session.
- * Generous on purpose: a slow turn, a long tool call, or a user reading the
- * screen can all leave a real session idle for minutes, and treating it as dead
- * would silently drop the measurement.
- */
-const DEFAULT_FRESHNESS_MS = 15 * 60 * 1000
-
-/**
  * Attribution confidence levels that may drive a hard block. Only an exactly
  * named session qualifies: an inferred one is the most recently active session,
  * which is not the same claim as "the session calling btrain".
@@ -284,7 +276,6 @@ function getContextBudgetConfig(config, laneId = "") {
     enabled: lane?.enabled !== undefined ? lane.enabled !== false : repo?.enabled !== false,
     softCeiling: pick("soft_ceiling", DEFAULT_SOFT_CEILING),
     hardCeiling: pick("hard_ceiling", DEFAULT_HARD_CEILING),
-    freshnessMs: pick("freshness_ms", DEFAULT_FRESHNESS_MS),
     invalid,
   }
 }
@@ -331,10 +322,7 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
 
   if (!budget.enabled) return { ...base, reason: "context budget disabled in config" + configNote }
 
-  const located = await locateSessionTranscript(repoRoot, {
-    ...opts,
-    freshnessMs: budget.freshnessMs,
-  })
+  const located = await locateSessionTranscript(repoRoot, opts)
   if (!located.transcriptPath) {
     return { ...base, source: located.source, reason: located.reason + configNote }
   }
@@ -409,5 +397,4 @@ export {
   resolveTranscriptDir,
   DEFAULT_SOFT_CEILING,
   DEFAULT_HARD_CEILING,
-  DEFAULT_FRESHNESS_MS,
 }
