@@ -771,18 +771,26 @@ describe("context budget gate", () => {
     assert.equal(verdict.level, "block")
     assert.equal(verdict.blockable, true)
     assert.match(verdict.message, /450,000 tokens/)
-    // The escape hatch must be a real one. An earlier version pointed at
+    // Two ways this message has been wrong. It once pointed at
     // `btrain override grant --action context-budget`, which is not in
     // VALID_OVERRIDE_ACTIONS, so every blocked user followed the printed
-    // instruction into a hard error. Asserting the word "override" appeared was
-    // what let that ship.
-    assert.match(verdict.message, /hard_ceiling/, "a block must name a real escape hatch")
-    assert.match(verdict.message, /project\.toml/)
+    // instruction into a hard error. It was then changed to advertise raising
+    // or zeroing `hard_ceiling` in project.toml -- truthful, but that disables
+    // the gate for the whole repo, permanently, with no audit record, which is
+    // the opposite of the per-event override the spec asks for. Telling the
+    // user how to switch off a safety gate is not an escape hatch.
     assert.doesNotMatch(
       verdict.message,
       /override grant/,
       "must not name an override action btrain does not accept",
     )
+    assert.doesNotMatch(
+      verdict.message,
+      /hard_ceiling|project\.toml/,
+      "must not steer the user into disabling the gate repo-wide",
+    )
+    assert.match(verdict.message, /MEMORY\.md/, "a block must name the action that clears it")
+    assert.match(verdict.message, /no per-event override/, "and must say no override exists yet")
   })
 
   it("warns but never blocks when no session id names the caller", async () => {
@@ -854,5 +862,69 @@ describe("context budget gate", () => {
       config: { context_budget: { soft_ceiling: 0 } },
     })
     assert.equal(softOff.level, "ok", "a zero soft ceiling must silence the warning")
+  })
+})
+
+describe("context budget, guards the earlier rounds left unpinned", () => {
+  // Round-3 mutation testing found these three alive. Each is a guard the
+  // module's own comments call load-bearing, so each gets a test that fails
+  // when the guard is reverted.
+
+  it("prefers a timestamped record over an untimed one regardless of file order", async () => {
+    // M5. A missing timestamp sorts to -Infinity so a timestamped record always
+    // wins. The existing "falls back to file order" test cannot detect a flip
+    // to +Infinity, because when every record is untimed both sides compare
+    // equal. This fixture is mixed, which is the case that separates them.
+    const dir = await makeTranscriptDir()
+    await writeTranscript(dir, "mixed", [
+      turn({ cacheRead: 500_000, timestamp: "2026-09-15T10:00:00.000Z" }),
+      turn({ cacheRead: 111_000 }), // no timestamp, and last in file order
+    ])
+
+    const reading = await readLatestContextTokens(path.join(dir, "mixed.jsonl"))
+    assert.equal(reading.tokens, 500_000, "the timestamped record is the reading")
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it("rejects the underscore forms TOML itself rejects", async () => {
+    // M18. The parser comment names _5, 5_ and 05 as the forms that must be
+    // refused; loosening it to strip-then-test survived the suite. Number("")
+    // is 0 and this module reads 0 as "ceiling disabled", so a malformed
+    // setting that parses silently turns the gate off.
+    for (const bad of ["_5", "5_", "05", "5__0", ""]) {
+      const config = getContextBudgetConfig({ context_budget: { hard_ceiling: bad } })
+      assert.ok(
+        config.invalid.some((entry) => entry.includes("hard_ceiling")),
+        `${JSON.stringify(bad)} must be reported as invalid, not coerced`,
+      )
+      assert.equal(config.hardCeiling, DEFAULT_HARD_CEILING, "a rejected value falls back to the default")
+    }
+    // The forms TOML does accept still parse.
+    const ok = getContextBudgetConfig({ context_budget: { hard_ceiling: "350_000" } })
+    assert.equal(ok.hardCeiling, 350_000)
+    assert.deepEqual(ok.invalid, [])
+  })
+
+  it("does not present another session's reading as the caller's own", async () => {
+    // M23. The soft-ceiling subject switches on attribution. Mutating it back
+    // to the flat "context is" survived, because the existing test asserted
+    // only that located.reason was appended somewhere in the message.
+    const dir = await makeTranscriptDir()
+    await writeTranscript(dir, "somebody-else", [turn({ cacheRead: 250_000 })])
+
+    const inferred = await evaluateContextBudget(
+      "/Users/x/btrain",
+      { enabled: true, softCeiling: 200_000, hardCeiling: 900_000, invalid: [], notes: [] },
+      { env: { BTRAIN_TRANSCRIPT_DIR: dir } }, // no session id -> inferred
+    )
+    assert.equal(inferred.source, "inferred")
+    assert.equal(inferred.level, "warn")
+    assert.doesNotMatch(
+      inferred.message,
+      /^context is/,
+      "an inferred reading must not be stated as the caller's own context",
+    )
+    assert.match(inferred.message, /a session in this repo/)
+    await fs.rm(dir, { recursive: true, force: true })
   })
 })

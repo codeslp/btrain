@@ -206,9 +206,21 @@ async function readLatestContextTokens(transcriptPath) {
     // forever, and blocked it hardest immediately after doing the right thing.
     //
     // Latest by time, not by file position. A resumed or forked session
-    // replays older records into the tail; one transcript here jumps 7.6 hours
-    // backwards mid-file, from 997,512 tokens to 63,638. Records with no
-    // timestamp all compare equal, so a file without them keeps file order.
+    // replays older records into the tail: 7 of the 233 transcripts on this
+    // machine jump backwards mid-file, one of them by 7.6 hours.
+    //
+    // This ordering is defensive, not a fix for an observed miscount. An
+    // earlier version of this comment claimed the 7.6-hour file would
+    // otherwise report a stale 63,638 against a real 997,512. It would not:
+    // the records after the jump climb back past it, so file-last and
+    // timestamp-max are the same record there. Measured across all 233
+    // transcripts, the number of files where the two disagree is zero.
+    //
+    // It is kept because the failure it guards against is the one this
+    // function was just fixed for -- a tail that never climbs back would make
+    // file-last report an abandoned branch's figure -- and because the cost is
+    // one comparison. Records with no timestamp all compare equal, so a file
+    // without them keeps file order.
     const stamped = Date.parse(record.timestamp || "")
     const order = Number.isFinite(stamped) ? stamped : -Infinity
     if (latest === null || order >= latest.order) latest = { tokens, order }
@@ -349,7 +361,10 @@ function getContextBudgetConfig(config, laneId = "") {
     // trailing comments, so `400000  # raised` arrives whole and is refused
     // here rather than silently becoming the default.
     const trimmed = raw.trim()
-    if (!/^\d+(_\d+)*$/.test(trimmed)) return null
+    // TOML integers have no leading zeros: `05` is a parse error, not 5. The
+    // earlier pattern allowed them, so the comment below promised a rejection
+    // the regex did not perform.
+    if (!/^(0|[1-9]\d*)(_\d+)*$/.test(trimmed)) return null
     const value = Number(trimmed.replace(/_/g, ""))
     return Number.isFinite(value) ? value : null
   }
@@ -455,10 +470,16 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
 
   const reading = await readLatestContextTokens(located.transcriptPath)
   if (!reading) {
+    // "yet" would be wrong: a transcript whose only usage records are API
+    // errors holds none and never will. Both the attribution and the config
+    // note have to survive this path -- it is the one where the user most
+    // needs to know why no figure appeared.
+    const why = `transcript ${path.basename(located.transcriptPath)} holds no usable usage record`
     return {
       ...base,
       source: located.source,
-      reason: `transcript ${path.basename(located.transcriptPath)} holds no usage record yet`,
+      reason: `${why}. ${located.reason}${configNote}`.trim(),
+      message: configNote ? why + configNote : "",
     }
   }
 
@@ -483,8 +504,13 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
       message:
         `context is ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling. `
         + "Write the current state to MEMORY.md, clear context, and resume. "
-        + "To proceed without clearing, raise or zero `hard_ceiling` under [context_budget] "
-        + "in .btrain/project.toml."
+        // Deliberately not advertising the config edit here. Raising or
+        // zeroing `hard_ceiling` disables the gate for the whole repo,
+        // permanently and without an audit record, which is the opposite of
+        // the per-event override the spec asks for. The override action does
+        // not exist yet (`context-budget` is not in VALID_OVERRIDE_ACTIONS),
+        // and it belongs to the lane that wires this in.
+        + "There is no per-event override for this gate yet."
         + configNote,
     }
   }
@@ -496,8 +522,9 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
       ...result,
       level: "warn",
       message:
-        `a session in this repo is at ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling, `
-        + `but ${located.reason} Not blocking. Clear context if this is your session.`
+        `a session in this repo is at ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling. `
+        + `Not blocking, and it may not be your session: ${located.reason} `
+        + "Clear context if it is."
         + configNote,
     }
   }
