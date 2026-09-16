@@ -423,6 +423,29 @@ tracked separately.
 
 ---
 
+## Token Tooling
+
+**btrain does not measure token spend, and it does not manage context size.**
+Nothing in `src/` reads usage data or enforces a context budget. This section
+points at two external tools, and at the measurement that says which lever is
+worth pulling.
+
+Cache reads are roughly 70% of measured cost and scale with context size
+multiplied by turn count, so the levers are smaller payloads and fewer turns. A
+payload is billed as fresh input only on the turn it arrives and is re-read on
+every turn after, so shrinking what enters context helps twice.
+
+- `npx ccusage@latest session` — spend per session across claude, codex, and gemini
+- `ast-grep` — structural search, for when a regex would be fragile
+
+Neither is a btrain dependency; both are run by hand. A context budget inside
+btrain is spec 020 workstream 3, which is **not implemented**.
+
+See [docs/token-tooling.md](docs/token-tooling.md) for when each tool helps, and
+[spec 020](specs/020-token-spend-and-decomposition.md) for the measurement, the
+date it was taken, and its scope — the figures are Claude-session only and they
+drift.
+
 ## Feedback Tracking
 
 btrain scaffolds a `.claude/collab/FEEDBACK_LOG.md` during init and monitors it via `btrain doctor`.
