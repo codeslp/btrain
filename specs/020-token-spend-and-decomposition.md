@@ -120,8 +120,11 @@ Five sessions produce 83.8 percent of all cache reads:
 | 37a4e562 | 551 | 191,271,769 | 347,135 |
 
 The median session runs at 30,202 tokens of context per turn. The top three run
-between 373,000 and 519,000, and session 628702f4 held a near-full 1M window for
-over a thousand turns across eight hours.
+between 373,000 and 519,000. Session 628702f4 is the heaviest at a **519,018**
+token mean over 1,347 turns — roughly half of a 1M window, sustained, not the
+"near-full 1M" an earlier revision claimed. The mean is what the table measures;
+individual turns at the top of that session may have run higher, and this spec
+does not measure the peak.
 
 Output splits as follows, by assistant content-block type:
 
@@ -346,8 +349,8 @@ an isolated `HOME` and its own KuzuDB, so the working 0.4.2 install and the
 
 | Metric | kkg 0.4.2 (fork) | upstream 0.6.13 |
 |---|---:|---:|
-| **CALLS edges** | **0** | **22,979** |
-| Function nodes | — | 3,988 |
+| **CALLS edges** | **0** | **22,979** (indexer summary — see below) |
+| Function nodes | — | 3,988 (indexer summary) |
 | Class nodes | — | 249 |
 | Files scanned | 226 | 294 (`.mjs` 51, `.py` 52, `.js` 8) |
 | Index wall time | 47 s | **1,612 s (26.9 min)** |
@@ -355,13 +358,48 @@ an isolated `HOME` and its own KuzuDB, so the working 0.4.2 install and the
 The call graph is real on upstream. The 47-second fork index was fast because it
 did no call resolution at all.
 
+**The two edge counts in this spec are not a contradiction, and the larger one is
+not the one to quote.** The row above reports what the indexer *printed*. The
+merged-build section further down reports **11,531**, which came from querying
+the persisted database directly:
+
+```
+MATCH ()-[r:CALLS]->() RETURN count(r)   -- 11,531
+```
+
+Broken down by endpoint type, that is 6,931 `Function`→`Function`, 4,400
+`File`→`Function`, 198 `Function`→`Class`, and 2 `File`→`Class`. The parts sum to
+11,531.
+
+The indexer's summary counter over-reports persisted edges by roughly 2x: on the
+run that produced the surviving database it printed 22,985 CALLS edges and 3,988
+function nodes, while the database holds 11,531 and 4,040. The 22,979 above is a
+summary figure from a sibling run and carries the same inflation. **Treat any
+CALLS figure that came from the summary table as an upper bound**, and query the
+database when the number matters. That discrepancy is itself a defect worth a
+line in the merge spec; it is not diagnosed here.
+
 Two consequences:
 
-1. **The merge is justified.** It is 847 upstream commits against 56 fork-only
-   commits, and a trial merge produced 45 conflicts — 22 in `docs/` and
-   `website/`, 6 in tests, and **15 in real source**, including
-   `tools/graph_builder.py` and `tools/indexing/persistence/writer.py`. That is a
-   real merge, not a rebase, and it needs its own spec.
+1. **The merge is justified.** It is 847 upstream commits against 78 fork-only
+   commits. Recount the conflict set at any time with:
+
+   ```
+   git merge-tree --write-tree --name-only 35645cd8 2ef71b05
+   ```
+
+   That reports **84 conflicted paths**: 57 under `docs/` and `website/`, 7 root
+   and infrastructure files, 6 in tests, and **14 in real source**, including
+   `tools/graph_builder.py` and `tools/indexing/persistence/writer.py`. The four
+   counts sum to 84. `codegraphcontext_ext/` conflicts on **zero** paths, which
+   is why it is the right seam. That is a real merge, not a rebase, and it needs
+   its own spec.
+
+   An earlier revision of this spec reported 45 conflicts with a breakdown that
+   summed to 43, and a second passage reported the same 45 with an incompatible
+   breakdown. Both described a trial merge run against the *other* fork
+   (`codeslp/keplerkg`) before the fork divergence was understood. The figures
+   above replace them and come from the commit pair that was actually merged.
 2. **`TIMEOUTS.index` is wrong.** `cgraph_adapter.mjs:30` budgets 30 seconds for
    an index. The measured index is 27 minutes. Any btrain path that triggers
    indexing through the adapter will time out. Raise the budget, or keep indexing
@@ -385,10 +423,25 @@ Tasks:
 3. **Done.** `javascript` added to `SCIP_LANGUAGES`.
 4. Reinstall kkg with the embeddings extra. `kkg search` currently raises
    `ModuleNotFoundError: No module named 'sentence_transformers'` and exits.
-5. Clear the cgraph registry. It holds 43 entries. 33 are throwaway fixtures
-   under `/private/tmp/cgc_test/`. Four are individual btrain files registered
-   as projects. Register the btrain root as one project.
-6. **Done.** `.cgcignore` added to `.gitignore`.
+5. Clear the cgraph registry. **Re-measured 2026-09-15**, after the cleanup
+   commands were run: `~/.codegraphcontext/config.yaml` holds **26** contexts,
+   and **all 26 are throwaway test fixtures** (`journey_cgc_test_unit_*` and one
+   `journey_tmp.*`) pointing into per-run temporary directories. Not one of
+   those repository paths still exists on disk, so every entry is an orphan. The
+   four stray btrain file-level entries an earlier revision reported are gone.
+   What remains is to delete the 26 orphans and register the btrain root as one
+   project. Recount with:
+
+   ```
+   ls ~/.codegraphcontext/contexts | wc -l
+   ```
+6. **Partly done, and the earlier claim was wrong.** `.cgcignore` exists at the
+   repository root and carries the `agentchattr/.venv/` pattern from task 7.
+   It is **not** in `.gitignore` — `grep cgcignore .gitignore` returns nothing,
+   and `git status` still lists the file as untracked. An earlier revision
+   marked this "Done"; that was not verified. Decide whether the file should be
+   committed or ignored, and land that in the WS1 branch, which owns
+   `.gitignore`. This documentation branch does not.
 7. Add `agentchattr/.venv/` to `.cgcignore` so language detection stops counting
    vendored Python. This does not help on 0.4.2, which ignores `.cgcignore`
    during detection, but it is correct for the merged version.
@@ -651,6 +704,11 @@ Measured on btrain, against the fork's 0 CALLS edges:
 | `.mjs` functions | 0 | 919 |
 | `core.mjs` functions | 0 | 353 |
 
+Every figure in this table was read from the persisted KuzuDB database, not from
+the indexer's summary output. The indexer printed 22,985 edges for this same run.
+See the reconciliation note under the 2026-09-14 table for why the database
+figure is the one to trust.
+
 An independent `grep` counts 352 top-level functions in `core.mjs`, which is the
 strongest evidence that the graph models the JavaScript correctly.
 
@@ -717,13 +775,15 @@ fork-only alias.
 ### Plan
 
 1. Cherry-pick keplerkg's three fixes into `codeslp/cgraph`.
-2. Merge upstream 0.6.13 into `codeslp/cgraph`. The trial merge on the other
-   fork showed the shape: 45 conflicts, of which 37 are upstream's own
-   `docs/`, `website/`, and `tests/` and resolve to upstream wholesale. The
-   btrain command surface lives entirely in `codegraphcontext_ext/`, which
-   upstream does not have, so it merges with **zero** conflicts. Only three
+2. **Done.** Merge upstream 0.6.13 into `codeslp/cgraph`. The real merge
+   (`35645cd8` against `2ef71b05`, landed as `76a4e443`) conflicts on 84 paths:
+   63 are upstream's own `docs/`, `website/`, and `tests/` and resolve to
+   upstream wholesale, 7 are root and infrastructure files, and 14 are real
+   source. The btrain command surface lives entirely in `codegraphcontext_ext/`,
+   which upstream does not have, so it merges with **zero** conflicts. Three
    files carry `codegraphcontext_ext` wiring and need hand-resolution:
-   `cli/main.py`, `cli/cli_helpers.py`, and `server.py`.
+   `cli/main.py`, `cli/cli_helpers.py`, and `server.py`. See the conflict
+   breakdown above for the command that reproduces these counts.
 3. Pick one CLI name and keep the others as deprecated aliases, so the adapter's
    four-name probe can shrink.
 4. Archive `codeslp/keplerkg` once its three fixes have landed.
@@ -736,9 +796,10 @@ This is its own spec. It is not part of spec 020's budget.
 Caveman and similar skills compress agent output by constraining style. This
 spec rejects them for btrain, on measured grounds rather than taste.
 
-Output is about 16 percent of cost, and the Evidence section breaks it down by
-content-block type: `tool_use` inputs are 83.7 percent of output characters and
-prose is 11.2 percent.
+Output is 15 percent of cost, and the Evidence section breaks it down by
+content-block type: `tool_use` inputs are 83.6 percent of output characters and
+prose is 11.5 percent. (These are the 2026-09-15 21:30Z figures. An earlier
+revision quoted 83.7 and 11.2 from a prior run and did not update them here.)
 
 Prose is therefore roughly 2 percent of total spend. A style skill that cut prose
 by 65 percent would save around 1 percent of total spend, and it would not touch
@@ -799,8 +860,14 @@ changes.
 Workstream 1 carries a correctness finding that does not depend on the token
 work. Confirm two points before implementation starts:
 
-1. Does the fail-open adapter treat an empty graph as a clean pre-lock collision
-   check today, in the judgment of the reviewer? This spec states that it does.
+1. Confirm the scope of the WS1 finding as this spec now states it: the adapter
+   **would** report an empty graph as a clean pre-lock collision check, but it
+   does not do so today, because `.btrain/project.toml` has no `[cgraph]`
+   section and `isCgraphEnabled()` returns false. The bug is latent. It becomes
+   live the moment anyone enables `[cgraph]`, which is what this workstream
+   exists to make safe. (An earlier draft of this gate asked the reviewer to
+   confirm the live reading; the spec retracted that above and this item is
+   corrected to match.)
 2. Who owns the merged fork branch, and does it get its own spec? The work
    itself is done and verified on `merge/upstream-0.6.13` in `codeslp/cgraph`.
    What remains is a human decision: whether to install it over the working

@@ -88,26 +88,46 @@ agcount() { ast-grep run --lang js --pattern "$1" --json=compact "${@:2}" \
 grep -h "failOpen" src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs | wc -l
 agcount 'failOpen($$$)' src/brain_train/core.mjs src/brain_train/cgraph_adapter.mjs
 
-# 2. Common word - grep over-matches comments, strings and unrelated code
-grep -c "status" src/brain_train/core.mjs
+# 2. Common word
+grep -c "status" src/brain_train/core.mjs                          # naive
+grep -cE 'metadata\.status[[:space:]]*=[^=]' src/brain_train/core.mjs   # targeted
 agcount 'metadata.status = $_' src/brain_train/core.mjs
 
-# 3. Structural - grep cannot express this at all
-grep -c "catch" src/brain_train/core.mjs
+# 3. Structural
+grep -c "catch" src/brain_train/core.mjs                           # naive
+grep -A1 "catch" src/brain_train/core.mjs | grep -c "return null"  # targeted
 agcount 'try { $$$ } catch { return null }' src/brain_train/core.mjs
 ```
 
-| Query | grep raw occurrences | ast-grep true matches |
-|---|---:|---:|
-| 1. Call sites of a rare name (`failOpen`) | 16 lines | 13 |
-| 2. Occurrences of a common word (`status`) | 326 lines | **3** |
-| 3. `catch` blocks that return null | 42 `catch` lines | **2** |
+Measured 2026-09-15 against `main`:
 
-Row 1 is close, and grep is the simpler tool there. Rows 2 and 3 are where
-ast-grep earns its place: `status` appears on 326 lines but is assigned in 3
-places, and the swallowed-error question cannot be written as a text pattern at
-all, so grep leaves 42 `catch` occurrences for an agent to read in order to find
-2.
+| Query | naive grep | **targeted grep** | ast-grep |
+|---|---:|---:|---:|
+| 1. Call sites of a rare name (`failOpen`) | 16 | 14 | 13 |
+| 2. Assignments to `metadata.status` | 326 | **3** | **3** |
+| 3. `catch` blocks that return null | 42 | **2** | **2** |
+
+**Read the middle column before believing the case for ast-grep.** An earlier
+revision of this file showed only the outer two columns and reported row 2 as
+"326 lines against 3". That is true but not like-for-like: 326 is what you get
+searching for the bare word `status`, which is not the query. Against a grep
+that actually expresses the same question, ast-grep wins row 2 by nothing, row 3
+by nothing, and row 1 by one line.
+
+So the honest case for ast-grep is **not** a smaller result set. It is:
+
+1. The targeted grep needs you to know the exact textual form in advance —
+   `metadata.status = x` and `metadata . status = x` need different regexes;
+   ast-grep matches the syntax either way.
+2. The row 3 targeted grep is right here by luck. `grep -A1` inspects one line
+   after `catch`, so it finds a `return null` on the next line and misses one
+   three lines down. The pattern does not generalize; the ast-grep query does.
+3. Row 1's two extra grep lines are the definition and the export, which is
+   exactly the noise a call-site query should drop.
+
+That is a real but modest gain, and it is a *correctness* gain rather than a
+token gain. Adopt ast-grep for structural queries where a regex would be
+fragile. Do not expect it to cut search output by two orders of magnitude.
 
 These counts move as `core.mjs` changes. Treat the *pattern* as the finding, not
 the exact numbers.
@@ -128,10 +148,14 @@ without capturing it.
 ## What is deliberately not here
 
 - **Payload compression proxies.** Not because compression is pointless — a
-  smaller payload is re-read on every later turn, so it does help. They are
-  rejected because `rtk` already shapes tool output *before* it enters context,
-  and because a proxy in the model path puts the existing 98%+ cache hit ratio
-  at risk for a gain rtk largely already captures. Full reasoning in
+  smaller payload is re-read on every later turn, so it does help, and the
+  research doc is explicit that headroom is *additive* to `rtk`, not redundant
+  with it. The rejection rests on one thing only: a proxy in the model path puts
+  the existing 98%+ cache hit ratio at risk, and a lost cache hit costs more than
+  the compression saves. `rtk` covers "the cheap, safe half of the same problem
+  with no model-path interposition", which is why it is the current answer — not
+  because it captures most of the available gain. Revisit when headroom ships a
+  no-proxy mode. Full reasoning and the three revisit conditions in
   [research/ponytail-headroom-evaluation.md](../research/ponytail-headroom-evaluation.md).
 - **Output-style compression.** Most output is tool-call payload rather than
   prose, so restyling prose moves almost nothing. Spec 020 has the breakdown.
