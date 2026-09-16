@@ -3891,10 +3891,20 @@ function createUnavailableCgraphAdapterResult(kind, reason = "") {
   }
 }
 
-function createDegradedCgraphMetadata(reason, graphMode = DEFAULT_CGRAPH_GRAPH_MODE) {
+/**
+ * A degraded block for a failure that happened before any producer ran.
+ *
+ * `producer` decides whether a later run may clear this. Omit it only when the
+ * live path can genuinely re-establish the same fact. The needs-review callers
+ * must pass one: their degradation is recorded on an event the live path never
+ * re-runs, so without a producer `clearCgraphRunState` wipes it and a healthy
+ * blast-radius reports "cgraph: ok" over a packet or audit that never ran.
+ */
+function createDegradedCgraphMetadata(reason, graphMode = DEFAULT_CGRAPH_GRAPH_MODE, producer = "") {
   return {
     status: "degraded",
     degraded_reason: reason,
+    ...(producer ? { degraded_producer: producer } : {}),
     graph_mode: graphMode,
     latency_ms: {},
   }
@@ -4768,7 +4778,7 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
   const adapter = await getCgraphAdapter(repoRoot, config)
   if (!adapter) {
     return hasCgraphConfig(config)
-      ? createDegradedCgraphMetadata("cgraph unavailable", DEFAULT_CGRAPH_GRAPH_MODE)
+      ? createDegradedCgraphMetadata("cgraph unavailable", DEFAULT_CGRAPH_GRAPH_MODE, "needs-review")
       : null
   }
 
@@ -4807,7 +4817,7 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
 
   if (Object.keys(results).length === 0) {
     return hasCgraphConfig(config)
-      ? createDegradedCgraphMetadata("no supported cgraph commands detected", DEFAULT_CGRAPH_GRAPH_MODE)
+      ? createDegradedCgraphMetadata("no supported cgraph commands detected", DEFAULT_CGRAPH_GRAPH_MODE, "needs-review")
       : null
   }
 

@@ -482,7 +482,17 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       "  if (phase === '3') { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius' })) }",
       "  else if (phase === '4') { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: clean })) }",
       "  else { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: phase === '1' ? healthy : empty })) }",
-      "} else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+      "}",
+      // drift-check answers conclusively and cleanly in every phase. The
+      // catch-all below returns `{ok:true,kind:cmd}`, which for drift-check is
+      // a payload with no drift fields -- inconclusive, and enough to degrade
+      // the run on its own. That masked every blast-radius assertion in this
+      // suite: `cgraph: degraded` was satisfiable by drift alone, so narrowing
+      // the blast-radius catch-all survived all 51 tests.
+      "else if (cmd === 'drift-check') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] }))",
+      "}",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
     ].join("\n")
     await fs.writeFile(binPath, script)
     await fs.chmod(binPath, 0o755)
@@ -1144,5 +1154,246 @@ describe("cgraph degradation from a producer the live path does not re-run", () 
     )
     assert.match(later.stdout, /cgraph: degraded/)
     assert.match(later.stdout, /audit/, "the degradation should still name the audit")
+  })
+})
+
+describe("cgraph live blast-radius with nothing else to degrade the run", () => {
+  // The catch-all in buildLiveCgraphMetadata had no test that could fail.
+  // Review found that narrowing it to `!blastRadius.ok` survived all 51 tests,
+  // because every suite exercising it degraded for another reason first: the
+  // stale-blast-radius stub answered drift-check contentlessly, and once that
+  // was fixed the preserved-advisory path took over as a second mask.
+  //
+  // This lane has neither. drift-check answers conclusively and cleanly, and
+  // there is no prior advisory to preserve, so the ONLY thing that can degrade
+  // the run is blast-radius returning `ok` with a payload carrying no summary.
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    const binPath = path.join(tmpDir, "kkg")
+    const script = [
+      "#!/usr/bin/env node",
+      "const cmd = process.argv[2] || ''",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      // ok, right kind, no summary: a build that answered but said nothing.
+      "else if (cmd === 'blast-radius') { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius' })) }",
+      "else if (cmd === 'drift-check') { process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] })) }",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("persists degraded on the claim event, not just in the live render", async () => {
+    // buildEventMetadata is the only producer of persisted metadata for claim
+    // and needs-review. Its blast-radius branch had no terminal else, so an
+    // unreadable answer persisted {"status":"ok"} on the claim event -- the
+    // pre-lock check reading as clean off something btrain could not parse.
+    const fresh = await bootstrapRepo()
+    try {
+      const bin = path.join(tmpDir, "kkg")
+      await fs.copyFile(bin, path.join(fresh, "kkg"))
+      await fs.chmod(path.join(fresh, "kkg"), 0o755)
+      await appendCgraphConfig(fresh, path.join(fresh, "kkg"))
+      await fs.mkdir(path.join(fresh, "src"), { recursive: true })
+      await fs.writeFile(path.join(fresh, "src", "f.js"), "export const a = 1\n", "utf8")
+
+      const claim = await runCli(
+        ["handoff", "claim", "--repo", fresh, "--lane", "a", "--task", "claim against an unreadable graph",
+         "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+        fresh, { BTRAIN_AGENT: "codex" },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+
+      const events = await readJsonLines(path.join(fresh, ".btrain", "events", "lane-a.jsonl"))
+      const claimed = events.filter((e) => e?.details?.cgraph).pop()
+      assert.ok(claimed, "the claim event should carry a cgraph block")
+      assert.equal(claimed.details.cgraph.status, "degraded")
+      assert.equal(claimed.details.cgraph.degraded_producer, "blast-radius")
+      assert.equal(claimed.details.cgraph.blast_radius, undefined)
+    } finally {
+      await rmDir(fresh)
+    }
+  })
+
+  it("degrades on an unreadable payload with no advisory and no drift to carry it", async () => {
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Unreadable blast-radius from the start",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const advisoryState = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+    const recorded = await fs.readFile(advisoryState, "utf8").catch(() => "")
+    assert.doesNotMatch(recorded, /lock_overlap/, "no advisory may exist, or it would mask the assertion")
+
+    const out = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(out.stdout, /cgraph: degraded/, "an unreadable answer is not a clean check")
+    assert.match(out.stdout, /no summary|unavailable|inconclusive/i)
+    assert.doesNotMatch(out.stdout, /cgraph: ok/)
+  })
+})
+
+describe("cgraph failures that are not ENOENT", () => {
+  // Review finding 5b and the createDegradedCgraphMetadata gap. `unavailable`
+  // is set only for ENOENT/EACCES, so the most ordinary failures -- a non-zero
+  // exit, unparseable stdout, a binary that answers but says nothing -- all
+  // fell through as healthy.
+  async function repoWith(script) {
+    const dir = await bootstrapRepo()
+    const bin = path.join(dir, "kkg")
+    await fs.writeFile(bin, script)
+    await fs.chmod(bin, 0o755)
+    await appendCgraphConfig(dir, bin)
+    await fs.mkdir(path.join(dir, "src"), { recursive: true })
+    await fs.writeFile(path.join(dir, "src", "f.js"), "export const a = 1\n", "utf8")
+    return dir
+  }
+
+  const manifest = (commands) => JSON.stringify({
+    ok: true, kind: "manifest", schema_version: "1.0",
+    commands: commands.map((name) => ({ name })), total_commands: commands.length,
+  })
+
+  it("degrades when review-packet exits non-zero during needs-review", async () => {
+    const dir = await repoWith([
+      "#!/usr/bin/env node",
+      "const cmd = process.argv[2] || ''",
+      `if (cmd === 'manifest') { process.stdout.write(${JSON.stringify(manifest(["review-packet", "audit", "blast-radius", "advise", "drift-check", "sync-check", "health"]))}) }`,
+      // Not ENOENT: the binary runs and fails. This is the common case.
+      "else if (cmd === 'review-packet') { process.exit(4) }",
+      "else if (cmd === 'blast-radius') { process.stdout.write(JSON.stringify({ok:true,kind:'blast_radius',summary:{files_requested:1,nodes_in_scope:7,transitive_callers:4,transitive_callees:2,lock_overlaps:0}})) }",
+      "else if (cmd === 'drift-check') { process.stdout.write(JSON.stringify({ok:true,kind:'drift_check',changed_node_ids:[],neighbor_files:[]})) }",
+      "else { process.stdout.write(JSON.stringify({ok:true,kind:cmd})) }",
+    ].join("\n"))
+    try {
+      await runCli(["handoff", "claim", "--repo", dir, "--lane", "a", "--task", "t", "--owner", "codex",
+        "--reviewer", "claude", "--files", "src/"], dir, { BTRAIN_AGENT: "codex" })
+      await fs.writeFile(path.join(dir, "src", "f.js"), "export const a = 2\n", "utf8")
+      await runCli(["handoff", "update", "--repo", dir, "--lane", "a", "--status", "needs-review",
+        "--actor", "codex", "--base", "main", "--preflight", "p", "--changed", "c", "--verification", "v",
+        "--gap", "none", "--why", "w", "--review-ask", "r", "--no-dispatch"], dir, { BTRAIN_AGENT: "codex" })
+
+      const events = await readJsonLines(path.join(dir, ".btrain", "events", "lane-a.jsonl"))
+      const nr = events.filter((e) => e?.details?.cgraph && e.after?.status === "needs-review").pop()
+      assert.ok(nr, "the needs-review transition must have happened")
+      assert.equal(nr.details.cgraph.status, "degraded", "a failed review-packet is not a healthy run")
+      assert.equal(nr.details.cgraph.degraded_producer, "review-packet")
+      assert.equal(nr.details.cgraph.review_packet, undefined)
+    } finally { await rmDir(dir) }
+  })
+
+  it("keeps a needs-review degradation when cgraph itself was missing then returns", async () => {
+    // createDegradedCgraphMetadata recorded "cgraph unavailable" with no
+    // producer, so clearCgraphRunState wiped it and the next healthy run
+    // reported ok over a needs-review that never had a packet or an audit.
+    const dir = await repoWith([
+      "#!/usr/bin/env node",
+      "const fs = require('fs')",
+      "const cmd = process.argv[2] || ''",
+      "let phase = '1'",
+      "try { phase = fs.readFileSync(process.env.KKG_PHASE, 'utf8').trim() } catch {}",
+      // Phase 1: the manifest probe fails, which is how a missing or broken
+      // cgraph presents itself at the needs-review moment.
+      "if (cmd === 'manifest') { if (phase === '1') process.exit(1)",
+      `  process.stdout.write(${JSON.stringify(manifest(["review-packet", "audit", "blast-radius", "advise", "drift-check", "sync-check", "health"]))}) }`,
+      "else if (cmd === 'blast-radius') { process.stdout.write(JSON.stringify({ok:true,kind:'blast_radius',summary:{files_requested:1,nodes_in_scope:7,transitive_callers:4,transitive_callees:2,lock_overlaps:0}})) }",
+      "else if (cmd === 'drift-check') { process.stdout.write(JSON.stringify({ok:true,kind:'drift_check',changed_node_ids:[],neighbor_files:[]})) }",
+      "else { process.stdout.write(JSON.stringify({ok:true,kind:cmd})) }",
+    ].join("\n"))
+    const phaseFile = path.join(dir, "phase")
+    await fs.writeFile(phaseFile, "1", "utf8")
+    const env = { BTRAIN_AGENT: "codex", KKG_PHASE: phaseFile }
+    try {
+      await runCli(["handoff", "claim", "--repo", dir, "--lane", "a", "--task", "t", "--owner", "codex",
+        "--reviewer", "claude", "--files", "src/"], dir, env)
+      await fs.writeFile(path.join(dir, "src", "f.js"), "export const a = 2\n", "utf8")
+      await runCli(["handoff", "update", "--repo", dir, "--lane", "a", "--status", "needs-review",
+        "--actor", "codex", "--base", "main", "--preflight", "p", "--changed", "c", "--verification", "v",
+        "--gap", "none", "--why", "w", "--review-ask", "r", "--no-dispatch"], dir, env)
+
+      // Phase 2: cgraph is healthy again. It cannot re-run the packet or audit.
+      await fs.writeFile(phaseFile, "2", "utf8")
+      const later = await runCli(["handoff", "--repo", dir], dir, env)
+      assert.doesNotMatch(later.stdout, /cgraph: ok/,
+        "a healthy graph must not clear a needs-review that ran without cgraph")
+      assert.match(later.stdout, /cgraph: degraded/)
+    } finally { await rmDir(dir) }
+  })
+
+  it("renders a drift advisory from a build with no blast-radius at all", async () => {
+    // Review finding 5c. buildCgraphSummaryLines gated on blast_radius,
+    // review_packet, audit, degraded_reason or fresh/resolved advisories, so a
+    // conclusive drift advisory with none of those printed nothing at all.
+    const dir = await repoWith([
+      "#!/usr/bin/env node",
+      "const cmd = process.argv[2] || ''",
+      `if (cmd === 'manifest') { process.stdout.write(${JSON.stringify(manifest(["advise", "drift-check", "sync-check", "health"]))}) }`,
+      "else if (cmd === 'drift-check') { process.stdout.write(JSON.stringify({ok:true,kind:'drift_check',changed_node_ids:['n1','n2'],neighbor_files:['src/other.js']})) }",
+      "else { process.stdout.write(JSON.stringify({ok:true,kind:cmd})) }",
+    ].join("\n"))
+    try {
+      await runCli(["handoff", "claim", "--repo", dir, "--lane", "a", "--task", "t", "--owner", "codex",
+        "--reviewer", "claude", "--files", "src/"], dir, { BTRAIN_AGENT: "codex" })
+      const out = await runCli(["handoff", "--repo", dir], dir, { BTRAIN_AGENT: "codex" })
+      assert.match(out.stdout, /cgraph:/, "a recorded drift must not render as silence")
+      assert.match(out.stdout, /drift|neighbor/i)
+    } finally { await rmDir(dir) }
+  })
+})
+
+describe("cgraph drift reading with nothing else to carry it", () => {
+  // Pins `cgraph.drift` in hasSubstantiveContent on its own. The drift-advisory
+  // test above also produces an advisory, so the advisories clause covers it
+  // there and mutating the drift clause survived. A conclusive drift reading
+  // with nothing drifted produces a drift block and no advisory at all, and it
+  // is still a real answer worth showing rather than silence.
+  it("renders a clean conclusive drift reading with no advisory and no blast-radius", async () => {
+    const dir = await bootstrapRepo()
+    try {
+      const bin = path.join(dir, "kkg")
+      await fs.writeFile(bin, [
+        "#!/usr/bin/env node",
+        "const cmd = process.argv[2] || ''",
+        `if (cmd === 'manifest') { process.stdout.write(${JSON.stringify(JSON.stringify({
+          ok: true, kind: "manifest", schema_version: "1.0",
+          commands: [{ name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" }],
+          total_commands: 4,
+        }))}) }`,
+        // Conclusive and clean: the field is present and empty, so no advisory
+        // is created and nothing degrades.
+        "else if (cmd === 'drift-check') { process.stdout.write(JSON.stringify({ok:true,kind:'drift_check',changed_node_ids:[],neighbor_files:[]})) }",
+        "else { process.stdout.write(JSON.stringify({ok:true,kind:cmd})) }",
+      ].join("\n"))
+      await fs.chmod(bin, 0o755)
+      await appendCgraphConfig(dir, bin)
+      await fs.mkdir(path.join(dir, "src"), { recursive: true })
+      await fs.writeFile(path.join(dir, "src", "f.js"), "export const a = 1\n", "utf8")
+
+      await runCli(["handoff", "claim", "--repo", dir, "--lane", "a", "--task", "t", "--owner", "codex",
+        "--reviewer", "claude", "--files", "src/"], dir, { BTRAIN_AGENT: "codex" })
+      const out = await runCli(["handoff", "--repo", dir], dir, { BTRAIN_AGENT: "codex" })
+
+      const advisories = await fs.readFile(
+        path.join(dir, ".btrain", "cgraph-advisory-state.jsonl"), "utf8").catch(() => "")
+      assert.doesNotMatch(advisories, /"kind":"drift"/, "no advisory may exist, or it masks the assertion")
+      assert.match(out.stdout, /cgraph:/, "a conclusive drift reading must not render as silence")
+      assert.match(out.stdout, /drift:/)
+    } finally { await rmDir(dir) }
   })
 })

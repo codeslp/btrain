@@ -396,7 +396,19 @@ class CgraphAdapter {
         meta.status = "degraded"
         meta.degraded_reason = r.timed_out ? "review-packet timed out" : "review-packet unavailable"
         meta.degraded_producer = "review-packet"
-      } else if (r.ok && r.payload) {
+      } else if (!r.ok || !r.payload) {
+        // Everything else the command can do. `unavailable` is set only for
+        // ENOENT/EACCES, so the most ordinary failure -- a non-zero exit, or
+        // stdout that does not parse -- landed here with status still "ok" and
+        // no packet produced. The reviewer was told cgraph was healthy while
+        // the packet they were sent to read did not exist.
+        if (meta.status === "ok") {
+          meta.status = "degraded"
+          meta.degraded_reason = "review-packet produced no readable packet"
+          meta.degraded_producer = "review-packet"
+        }
+      }
+      if (r.ok && r.payload) {
         meta.review_packet = {
           path: results.reviewPacketArtifact || "",
           source: r.payload.source || "unknown",
@@ -417,9 +429,15 @@ class CgraphAdapter {
           hard: a.payload.counts?.hard || 0,
           standards_evaluated: a.payload.standards_evaluated || 0,
         }
-      } else if (!a.ok && meta.status === "ok") {
+      } else if (meta.status === "ok") {
+        // `!a.ok` was the only degrade branch, so an `ok` result carrying no
+        // payload fell through as healthy.
         meta.status = "degraded"
-        meta.degraded_reason = a.timed_out ? "audit timed out" : "audit failed"
+        meta.degraded_reason = a.timed_out
+          ? "audit timed out"
+          : a.ok
+            ? "audit returned no payload"
+            : "audit failed"
         meta.degraded_producer = "audit"
       }
       meta.latency_ms.audit = a.latency_ms
@@ -440,6 +458,19 @@ class CgraphAdapter {
           transitive_callees: b.payload.summary.transitive_callees || 0,
           lock_overlaps: b.payload.summary.lock_overlaps || 0,
         }
+      } else if (meta.status === "ok") {
+        // The claim path's only producer of persisted metadata. Without this an
+        // unreadable blast-radius answer persisted `{"status":"ok"}` on the
+        // claim event -- the pre-lock collision check this branch exists to
+        // repair, reading as clean off an answer btrain could not parse. The
+        // live path grew this catch-all; the persisted path did not.
+        meta.status = "degraded"
+        meta.degraded_reason = b.timed_out
+          ? "blast-radius timed out"
+          : b.ok
+            ? "blast-radius returned a payload with no summary"
+            : "blast-radius unavailable"
+        meta.degraded_producer = "blast-radius"
       }
       meta.latency_ms.blast_radius = b.latency_ms
     }
