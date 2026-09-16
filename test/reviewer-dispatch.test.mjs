@@ -437,3 +437,64 @@ process.exit(1);`,
     }
   })
 })
+
+describe("lane-scope stripping keeps pace with the runner env", () => {
+  // Lane d. The reviewer-dispatch suite failed for six consecutive codex review
+  // rounds and passed in every direct run. Cause: `buildLoopRunnerEnv` injects
+  // BTRAIN_LOOP_ACTIVE=1 into a spawned runner, a dispatched reviewer runs the
+  // suite as a child of that runner, and `withoutLaneScope` did not strip it.
+  // `dispatchNeedsReviewReviewer` then took its nested-dispatch guard and
+  // returned "skipped", so every test asserting a spawn failed while the two
+  // asserting no spawn passed — and the handoff update still exited 0, which
+  // made it look like a product bug instead of a leaked variable.
+
+  it("strips BTRAIN_LOOP_ACTIVE so a dispatched run still exercises dispatch", () => {
+    const clean = withoutLaneScope({ ...process.env, BTRAIN_LOOP_ACTIVE: "1" })
+    assert.equal(clean.BTRAIN_LOOP_ACTIVE, undefined)
+  })
+
+  it("strips every BTRAIN_ variable buildLoopRunnerEnv injects", async () => {
+    // Derived from core.mjs rather than restated, because restating it is what
+    // drifted. buildLoopRunnerEnv is not exported, so read its source.
+    const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/brain_train/core.mjs")
+    const source = await fs.readFile(corePath, "utf8")
+    const start = source.indexOf("function buildLoopRunnerEnv(")
+    assert.ok(start !== -1, "buildLoopRunnerEnv must still exist for this guard to mean anything")
+    const body = source.slice(start, source.indexOf("\n}\n", start))
+
+    const injected = new Set()
+    for (const m of body.matchAll(/^\s*(?:env\.)?(BTRAIN_[A-Z0-9_]+)\s*[:=]/gm)) injected.add(m[1])
+    // `[BTRAIN_LOOP_ACTIVE_ENV]: "1"` is set through a constant, not a literal.
+    for (const m of body.matchAll(/\[([A-Z0-9_]+_ENV)\]\s*:/g)) {
+      const decl = source.match(new RegExp(`const ${m[1]} = "(BTRAIN_[A-Z0-9_]+)"`))
+      if (decl) injected.add(decl[1])
+    }
+    assert.ok(injected.size >= 5, `expected to find the injected vars, found ${[...injected]}`)
+
+    const stripped = withoutLaneScope({
+      ...Object.fromEntries([...injected].map((k) => [k, "1"])),
+    })
+    const leaked = [...injected].filter((k) => stripped[k] !== undefined)
+    assert.deepEqual(
+      leaked,
+      [],
+      `withoutLaneScope must strip every variable buildLoopRunnerEnv injects; leaked: ${leaked.join(", ")}`,
+    )
+  })
+
+  it("keeps the npm scripts in step with the helper", async () => {
+    // npm test unsets these with `env -u`; a var missing there fails the same
+    // way for anyone running the full suite under a dispatch.
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../package.json")
+    const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"))
+    for (const name of ["test", "test:e2e", "test:formal"]) {
+      const script = pkg.scripts[name]
+      assert.ok(script, `${name} script must exist`)
+      assert.match(
+        script,
+        /-u BTRAIN_LOOP_ACTIVE\b/,
+        `${name} must unset BTRAIN_LOOP_ACTIVE or the full suite fails under a dispatch`,
+      )
+    }
+  })
+})
