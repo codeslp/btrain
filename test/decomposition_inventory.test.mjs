@@ -87,16 +87,24 @@ describe("decomposition inventory, function spans", () => {
     })
   })
 
-  it("counts the real core.mjs at its established figures", async () => {
-    // A guard on the numbers the spec quotes, so a future change to the
-    // scanner cannot silently move them.
+  it("measures the real core.mjs correctly", async () => {
+    // Anchors, not coordinates. An earlier version pinned fileLines to 10,754
+    // and the function count to 352, which broke the moment another lane added
+    // a function to core.mjs -- the file is the most-edited in the repo, so a
+    // test asserting its exact size fails for every unrelated change and says
+    // nothing about whether the scanner works.
+    //
+    // These two functions are large, stable, and named in the plan; if the
+    // scanner regresses they move dramatically (runLoop read as 9 lines under
+    // the "starts with }" bug). That is the property worth pinning.
     const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
     const { spans, fileLines } = readFunctionSpans(core)
-    assert.equal(fileLines, 10_754)
-    assert.equal(spans.length, 352)
-    assert.equal(spans.reduce((a, f) => a + f.lines, 0), 9_729)
     assert.equal(spans.find((f) => f.name === "patchHandoff").lines, 579)
     assert.equal(spans.find((f) => f.name === "runLoop").lines, 422)
+    assert.ok(spans.length >= 352, `expected at least the 352 functions the plan measured, got ${spans.length}`)
+    const inFunctions = spans.reduce((a, f) => a + f.lines, 0)
+    assert.ok(inFunctions > fileLines * 0.8, "most of the file should be inside top-level functions")
+    assert.ok(inFunctions < fileLines, "function lines cannot exceed the file")
   })
 })
 
@@ -188,9 +196,11 @@ describe("decomposition inventory, module-evaluation calls", () => {
       [...calls.keys()].sort(),
       ["claudeBashPermissions", "renderPreCommitHook", "renderPrePushHook"],
     )
-    assert.deepEqual(calls.get("claudeBashPermissions"), [286, 322, 326, 330])
-    assert.deepEqual(calls.get("renderPreCommitHook"), [1955])
-    assert.deepEqual(calls.get("renderPrePushHook"), [1956])
+    // Counts, not line numbers: the lines shift for any edit above them, which
+    // told us nothing about whether the detection works.
+    assert.equal(calls.get("claudeBashPermissions").length, 4)
+    assert.equal(calls.get("renderPreCommitHook").length, 1)
+    assert.equal(calls.get("renderPrePushHook").length, 1)
   })
 
   it("does not count comments, strings, the export block or deferred callbacks", async () => {

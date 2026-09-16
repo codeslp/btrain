@@ -246,6 +246,7 @@
       "normalizePayloadAdvisories",
       "reconcileCgraphAdvisories",
       "runCachedCgraphProducer",
+      "sealCgraphMetadata",
       "shouldAttachCgraphMetadata",
       "withCgraphAdvisoryLock"
     ],
@@ -425,7 +426,8 @@
     "note": "Functions that do not exist on main yet but will once the named PR merges. The stage validator accepts them as absent and validates them normally once they appear, so the assignment is correct against both trees and nobody has to remember to revisit it.",
     "PR #63 (lane a, spec 020 WS1)": [
       "clearCgraphRunState",
-      "listActiveCgraphAdvisoryKinds"
+      "listActiveCgraphAdvisoryKinds",
+      "sealCgraphMetadata"
     ]
   }
 }
