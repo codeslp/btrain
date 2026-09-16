@@ -3918,6 +3918,25 @@ const CGRAPH_EVIDENCE = {
   review_packet: (value) => Boolean(value) && Boolean(value.source) && value.source !== "unknown",
 }
 
+// Which field carries a producer's own answer. A later event holding
+// substantive evidence in one of these has re-run that producer, and so can
+// speak to a degradation blamed on it. Nothing else can: another producer's
+// success says nothing about this one.
+const CGRAPH_PRODUCER_EVIDENCE_FIELD = {
+  "blast-radius": "blast_radius",
+  "drift-check": "drift",
+  audit: "audit",
+  "review-packet": "review_packet",
+}
+
+function cgraphEventRanProducer(metadata, producer) {
+  const field = CGRAPH_PRODUCER_EVIDENCE_FIELD[producer]
+  if (!field) {
+    return false
+  }
+  return CGRAPH_EVIDENCE[field](metadata?.[field])
+}
+
 /**
  * The one place `status: "ok"` is allowed to leave a producer.
  *
@@ -4084,6 +4103,19 @@ function mergeCgraphMetadata(base, next) {
       ...(Array.isArray(base.advisories) ? base.advisories : []),
       ...(Array.isArray(next.advisories) ? next.advisories : []),
     ])
+  }
+
+  // A healthy event simply omits `degraded_reason`, so the spread above cannot
+  // drop an older one: the marker survives, and `clearCgraphRunState` then
+  // re-degrades every later run forever on the strength of a failure that has
+  // since been retried successfully. Clear it only on the blamed producer's
+  // own evidence -- the mirror of the guard in `clearCgraphRunState`, which
+  // refuses to clear a degradation whose producer this run never re-ran.
+  if (base.degraded_producer && !next.degraded_reason
+      && cgraphEventRanProducer(next, base.degraded_producer)) {
+    delete merged.degraded_reason
+    delete merged.degraded_producer
+    merged.status = next.status || "ok"
   }
 
   return merged

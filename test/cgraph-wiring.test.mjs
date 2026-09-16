@@ -1526,3 +1526,201 @@ describe("cgraph build that advertises neither collision producer", () => {
     }
   })
 })
+
+describe("cgraph degradation from a producer that later succeeds", () => {
+  let tmpDir
+  let statePath
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    statePath = path.join(tmpDir, "kkg-phase")
+    const binPath = path.join(tmpDir, "kkg")
+
+    const script = [
+      "#!/usr/bin/env node",
+      "const fs = require('fs')",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const statePath = ${JSON.stringify(statePath)}`,
+      "let phase = '1'",
+      "try { phase = fs.readFileSync(statePath, 'utf8').trim() } catch {}",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      // The whole point of the fixture: audit fails on the first needs-review
+      // transition and succeeds on the retry. Everything else is healthy and
+      // constant, so the audit is the only thing that can move the verdict.
+      "else if (cmd === 'audit') {",
+      "  if (phase === '1') { process.exit(3) }",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'audit',",
+      "    counts: { warn: 0, hard: 0 }, standards_evaluated: 12, advisories: [],",
+      "    scope_source: 'explicit_files', files_requested: 1 }))",
+      "}",
+      "else if (cmd === 'review-packet') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'review_packet',",
+      "    source: 'graph', touched_nodes: [], advisories: [], truncated: false }))",
+      "}",
+      "else if (cmd === 'blast-radius') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: {",
+      "    files_requested: 1, nodes_in_scope: 7, transitive_callers: 4,",
+      "    transitive_callees: 2, lock_overlaps: 0 } }))",
+      "}",
+      "else if (cmd === 'drift-check') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] }))",
+      "}",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await fs.writeFile(statePath, "1", "utf8")
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("lets a successful rerun of the same producer clear its earlier degradation", async () => {
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Audit fails once, then succeeds",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    const toNeedsReview = async () => runCli(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "codex",
+       "--base", "main", "--preflight", "p", "--changed", "src/feature.js", "--verification", "v",
+       "--gap", "none", "--why", "w", "--review-ask", "r", "--no-dispatch"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = 2\n", "utf8")
+    await toNeedsReview()
+
+    const firstEvents = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+    const failed = firstEvents.filter((e) => e?.details?.cgraph && e.after?.status === "needs-review").pop()
+    assert.ok(failed, "the first needs-review transition must have happened")
+    assert.equal(failed.details.cgraph.degraded_producer, "audit",
+      "the fixture is only meaningful if the first audit really did degrade the lane")
+
+    // The audit now works. Put the lane back in progress and re-run the same
+    // transition, so the very producer that was blamed answers conclusively.
+    await fs.writeFile(statePath, "2", "utf8")
+    await runCli(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "in-progress", "--actor", "codex",
+       "--note", "retrying"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = 3\n", "utf8")
+    const retry = await toNeedsReview()
+    assert.equal(retry.code, 0, retry.stderr)
+
+    const retryEvents = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+    const healthy = retryEvents.filter((e) => e?.details?.cgraph && e.after?.status === "needs-review").pop()
+    assert.equal(healthy.details.cgraph.status, "ok",
+      "the retry's own event must be healthy, or this test proves nothing about the merge")
+
+    const later = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.doesNotMatch(
+      later.stdout,
+      /cgraph: degraded/,
+      "an audit that has since completed must not keep the lane degraded forever",
+    )
+    assert.match(later.stdout, /cgraph: ok/)
+  })
+})
+
+describe("cgraph degradation a later event says nothing about", () => {
+  let tmpDir
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    const binPath = path.join(tmpDir, "kkg")
+    const script = [
+      "#!/usr/bin/env node",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      "else if (cmd === 'audit') { process.exit(3) }",
+      "else if (cmd === 'review-packet') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'review_packet',",
+      "    source: 'graph', touched_nodes: [], advisories: [], truncated: false }))",
+      "}",
+      "else if (cmd === 'blast-radius') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: {",
+      "    files_requested: 1, nodes_in_scope: 7, transitive_callers: 4,",
+      "    transitive_callees: 2, lock_overlaps: 0 } }))",
+      "}",
+      "else if (cmd === 'drift-check') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] }))",
+      "}",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("keeps the degradation when the later event never re-ran the blamed producer", async () => {
+    // The mirror of the retry case, and the reason clearing is gated on the
+    // blamed producer's own evidence rather than on the mere absence of a
+    // reason. A later event can be perfectly healthy and still say nothing
+    // about the audit: a claim runs blast-radius and nothing else.
+    await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Audit never completes",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = 2\n", "utf8")
+    await runCli(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "codex",
+       "--base", "main", "--preflight", "p", "--changed", "src/feature.js", "--verification", "v",
+       "--gap", "none", "--why", "w", "--review-ask", "r", "--no-dispatch"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+
+    const eventsPath = path.join(tmpDir, ".btrain", "events", "lane-a.jsonl")
+    const events = await readJsonLines(eventsPath)
+    const degraded = events.find((e) => e?.details?.cgraph?.degraded_producer === "audit")
+    assert.ok(degraded, "the fixture must contain the failed audit")
+
+    const healthyElsewhere = JSON.parse(JSON.stringify(degraded))
+    healthyElsewhere.recordedAt = "2099-01-01T00:00:00.000Z"
+    healthyElsewhere.details.cgraph = {
+      status: "ok",
+      graph_mode: degraded.details.cgraph.graph_mode,
+      blast_radius: {
+        files_requested: 1, nodes_in_scope: 7, transitive_callers: 4,
+        transitive_callees: 2, lock_overlaps: 0,
+      },
+    }
+    await fs.appendFile(eventsPath, `${JSON.stringify(healthyElsewhere)}\n`, "utf8")
+
+    const later = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(
+      later.stdout,
+      /cgraph: degraded/,
+      "a healthy blast-radius says nothing about an audit that never completed",
+    )
+    assert.match(later.stdout, /audit/)
+  })
+})
