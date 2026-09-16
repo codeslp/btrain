@@ -476,7 +476,9 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       "else if (cmd === 'blast-radius') {",
       "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 3 }",
       "  const empty   = { files_requested: 1, nodes_in_scope: 0, transitive_callers: 0, transitive_callees: 0, lock_overlaps: 0 }",
+      "  const clean   = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 0 }",
       "  if (phase === '3') { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius' })) }",
+      "  else if (phase === '4') { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: clean })) }",
       "  else { process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: phase === '1' ? healthy : empty })) }",
       "} else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
     ].join("\n")
@@ -583,6 +585,69 @@ describe("cgraph stale blast-radius after the graph goes empty", () => {
       malformed.stdout,
       /cgraph: degraded/,
       "an unreadable blast-radius payload must degrade, not pass silently",
+    )
+  })
+
+  it("still shows a preserved collision while the check is inconclusive", async () => {
+    // Preserving the advisory in the sidecar is only half the job. The CLI
+    // renders `metadata.advisories`, which is built from the live run, so an
+    // inconclusive check deleted the field and the agent saw only "degraded" --
+    // the known collision with another lane became invisible at exactly the
+    // moment it could not be re-verified. Carrying it forward silently is not
+    // better than retiring it: either way the agent is not told.
+    const statePath2 = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    await fs.writeFile(statePath, "1", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(
+      await fs.readFile(statePath2, "utf8").catch(() => ""),
+      /lock_overlap/,
+      "phase 1 should record a lock_overlap advisory",
+    )
+
+    await fs.writeFile(statePath, "2", "utf8")
+    const inconclusive = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.match(
+      inconclusive.stdout,
+      /lock_overlap|overlap/i,
+      "a preserved collision advisory must stay visible, not just stay in the sidecar",
+    )
+  })
+
+  it("retires an advisory once a conclusive run stops reporting it", async () => {
+    // The over-correction. Seeding every persisted kind as unproven made
+    // advisories immortal: a conclusive run that no longer reports the overlap
+    // deletes the kind from the unproven set, and then the persisted-kinds loop
+    // adds it straight back because it is absent from liveAdvisories. Absence
+    // of evidence is not evidence of resolution, but a CONCLUSIVE run reporting
+    // no overlap IS evidence, and has to be allowed to retire it.
+    const statePath2 = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    // Phase 1: healthy graph WITH overlaps -> advisory recorded.
+    await fs.writeFile(statePath, "1", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(
+      await fs.readFile(statePath2, "utf8").catch(() => ""),
+      /lock_overlap/,
+      "phase 1 should record a lock_overlap advisory",
+    )
+
+    // Phase 4: healthy graph, real call edges, but zero overlaps. Conclusive.
+    await fs.writeFile(statePath, "4", "utf8")
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    const after = await fs.readFile(statePath2, "utf8").catch(() => "")
+    const activeOverlaps = after
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => { try { return JSON.parse(line) } catch { return null } })
+      .filter((entry) => entry?.lane === "a" && entry?.kind === "lock_overlap")
+
+    assert.equal(
+      activeOverlaps.length,
+      0,
+      "a conclusive run reporting no overlap must retire the advisory, not preserve it forever",
     )
   })
 

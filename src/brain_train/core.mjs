@@ -4193,6 +4193,7 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
       const nextActiveEntries = []
       const surfaced = []
       const resolved = []
+      const preserved = []
       const telemetryRows = []
       const seenCurrentKeys = new Set()
 
@@ -4248,6 +4249,7 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
         // This run produced no evidence about the kind, so it cannot retire it.
         if (!clearLane && unprovenKinds && unprovenKinds.has(activeEntry.kind)) {
           nextActiveEntries.push(activeEntry)
+          preserved.push(activeEntry)
           continue
         }
 
@@ -4273,12 +4275,13 @@ async function reconcileCgraphAdvisories(repoRoot, laneId, advisories, { adviseO
 
       await writeJsonLinesSnapshot(statePath, nextActiveEntries)
       await appendCgraphTelemetryRows(repoRoot, telemetryRows)
-      return { surfaced, resolved }
+      return { surfaced, resolved, preserved }
     })
   } catch {
     return {
       surfaced: current,
       resolved: [],
+      preserved: [],
     }
   }
 }
@@ -4372,6 +4375,12 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   // have retired a real advisory. Proving is the exception; not knowing is the
   // default.
   const unprovenAdvisoryKinds = new Set(["lock_overlap", "drift"])
+  // Kinds whose producer DID return a usable answer this run. Absence of
+  // evidence is not evidence of resolution, but a conclusive run that reports
+  // no overlap is evidence, and has to be allowed to retire the advisory.
+  // Without this, seeding every persisted kind as unproven below made
+  // advisories immortal and suppressed every resolution notice.
+  const conclusiveAdvisoryKinds = new Set()
 
   // Any persisted blast_radius describes a previous run's graph. Drop it before
   // this run decides anything: only a conclusive answer below reinstalls it.
@@ -4414,6 +4423,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
 
       // A real summary is the only thing that licenses retiring a lock_overlap.
       unprovenAdvisoryKinds.delete("lock_overlap")
+      conclusiveAdvisoryKinds.add("lock_overlap")
       liveAdvisories.push(...normalizePayloadAdvisories(blastRadius.payload, "lock_overlap"))
       if (
         liveAdvisories.filter((entry) => entry.kind === "lock_overlap").length === 0
@@ -4473,6 +4483,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
       }
 
       unprovenAdvisoryKinds.delete("drift")
+      conclusiveAdvisoryKinds.add("drift")
       liveAdvisories.push(...normalizePayloadAdvisories(driftResult.payload, "drift"))
       if (liveAdvisories.filter((entry) => entry.kind === "drift").length === 0 && driftedNodes > 0) {
         liveAdvisories.push(buildCgraphAdvisoryEntry({
@@ -4504,6 +4515,10 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   // unprovenAdvisoryKinds over itself, so it could only re-add kinds already
   // present -- dead code that read as general coverage.
   for (const kind of await listActiveCgraphAdvisoryKinds(repoRoot, laneId || "repo")) {
+    // A producer that answered conclusively speaks for its own kind. If it ran
+    // and did not report the overlap, the overlap is gone, and reconciliation
+    // must be allowed to retire the entry and emit the resolution notice.
+    if (conclusiveAdvisoryKinds.has(kind)) continue
     if (!liveAdvisories.some((advisory) => advisory.kind === kind)) {
       unprovenAdvisoryKinds.add(kind)
     }
@@ -4537,13 +4552,32 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
   }
 
   const laneKey = laneId || "repo"
-  const { surfaced, resolved } = await reconcileCgraphAdvisories(repoRoot, laneKey, currentAdvisories, {
+  const { surfaced, resolved, preserved } = await reconcileCgraphAdvisories(repoRoot, laneKey, currentAdvisories, {
     adviseOnResolution: config?.cgraph?.advise_on_resolution === true || getCgraphLaneConfig(config, laneId).advise_on_resolution === true,
     unprovenKinds: unprovenAdvisoryKinds,
   })
 
-  if (currentAdvisories.length > 0) {
-    metadata.advisories = currentAdvisories
+  // Entries carried forward because this run could not re-observe them. They
+  // belong in the rendered set: keeping a known collision in the sidecar while
+  // the CLI shows only "degraded" hides it from the agent at the one moment it
+  // cannot be re-verified, which is no better than retiring it outright. They
+  // are not marked fresh, so they raise no new-advisory notice.
+  const visibleAdvisories = dedupeCgraphAdvisories([
+    ...currentAdvisories,
+    ...(preserved || [])
+      .filter((entry) => adviseKinds.has(entry.kind))
+      .map((entry) => buildCgraphAdvisoryEntry({
+        kind: entry.kind,
+        lane: entry.lane,
+        detail: entry.detail || "",
+        suggestion: entry.suggestion || "",
+        advisory_id: entry.advisory_id || "",
+        contextHash: entry.context_hash,
+      })),
+  ])
+
+  if (visibleAdvisories.length > 0) {
+    metadata.advisories = visibleAdvisories
   } else {
     delete metadata.advisories
   }
