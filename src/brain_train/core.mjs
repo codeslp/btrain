@@ -3900,6 +3900,58 @@ function createUnavailableCgraphAdapterResult(kind, reason = "") {
  * re-runs, so without a producer `clearCgraphRunState` wipes it and a healthy
  * blast-radius reports "cgraph: ok" over a packet or audit that never ran.
  */
+// What counts as a producer having actually answered.
+//
+// Presence of the block is not enough, and assuming it was is how the sixth
+// instance of this defect was found: a producer returning `{ok:true,kind:cmd}`
+// still yields a review_packet with `source: "unknown"` and zero touched nodes,
+// and an audit with zero standards evaluated. Both are blocks built from an
+// empty payload. An audit that evaluated nothing is not a clean audit.
+//
+// blast_radius and drift are already gated on substance before they are set
+// (an inconclusive blast-radius and a drift payload with no evidence fields
+// both degrade upstream), so their presence is meaningful.
+const CGRAPH_EVIDENCE = {
+  blast_radius: (value) => Boolean(value),
+  drift: (value) => Boolean(value),
+  audit: (value) => Boolean(value) && Number(value.standards_evaluated) > 0,
+  review_packet: (value) => Boolean(value) && Boolean(value.source) && value.source !== "unknown",
+}
+
+/**
+ * The one place `status: "ok"` is allowed to leave a producer.
+ *
+ * Review found this same defect in five separate paths, each time after the
+ * previous one was fixed: an empty graph, a contentless drift payload, a
+ * preserved advisory with no live producer, an unreadable blast-radius answer
+ * on the claim event, and a review-packet that exited non-zero. They are not
+ * five bugs. They are one missing invariant -- "ok means something was
+ * checked" -- enforced nowhere, so every new path had to remember it
+ * independently and none of them did.
+ *
+ * Every function that produces cgraph metadata returns through here. A block
+ * that claims ok while carrying no evidence is degraded instead, whatever path
+ * built it and whatever new producer is added later.
+ */
+function sealCgraphMetadata(metadata, origin = "cgraph") {
+  if (!metadata || metadata.status !== "ok") {
+    return metadata
+  }
+  const hasEvidence =
+    Object.entries(CGRAPH_EVIDENCE).some(([field, isSubstantive]) => isSubstantive(metadata[field]))
+    || ["advisories", "fresh_advisories", "resolved_advisories"]
+      .some((field) => Array.isArray(metadata[field]) && metadata[field].length > 0)
+  if (hasEvidence) {
+    return metadata
+  }
+  return {
+    ...metadata,
+    status: "degraded",
+    degraded_reason: metadata.degraded_reason || "no cgraph producer returned a usable answer",
+    degraded_producer: metadata.degraded_producer || origin,
+  }
+}
+
 function createDegradedCgraphMetadata(reason, graphMode = DEFAULT_CGRAPH_GRAPH_MODE, producer = "") {
   return {
     status: "degraded",
@@ -4684,7 +4736,7 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
     delete metadata.resolved_advisories
   }
 
-  return metadata
+  return sealCgraphMetadata(metadata, "live")
 }
 
 async function attachLatestCgraphMetadataToState(repoRoot, config, state, laneId = "") {
@@ -4744,7 +4796,7 @@ async function buildClaimCgraphMetadata(repoRoot, config, { laneId = "", files =
   // already sets the same status and the same `inconclusive_reason` for it
   // (cgraph_adapter.mjs). A duplicate branch here was unreachable by any
   // behavioral test, since deleting it changed nothing an assertion could see.
-  return metadata
+  return sealCgraphMetadata(metadata, "claim")
 }
 
 function buildAuditGateError(auditPayload) {
@@ -4821,7 +4873,7 @@ async function buildNeedsReviewCgraphMetadata(repoRoot, config, {
       : null
   }
 
-  return adapter.buildEventMetadata(results, DEFAULT_CGRAPH_GRAPH_MODE)
+  return sealCgraphMetadata(adapter.buildEventMetadata(results, DEFAULT_CGRAPH_GRAPH_MODE), "needs-review")
 }
 
 async function getDoctorCgraphSummary(repoRoot, config) {

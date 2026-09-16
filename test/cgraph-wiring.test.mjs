@@ -1397,3 +1397,132 @@ describe("cgraph drift reading with nothing else to carry it", () => {
     } finally { await rmDir(dir) }
   })
 })
+
+describe("cgraph invariant: ok means something was checked", () => {
+  // The chokepoint. Review found the same defect in five separate paths, each
+  // after the previous was fixed -- an empty graph, a contentless drift
+  // payload, a preserved advisory with no live producer, an unreadable
+  // blast-radius answer on the claim event, and a review-packet that exited
+  // non-zero. They are one missing invariant, not five bugs.
+  //
+  // These tests assert the invariant across every entry point rather than
+  // adding a sixth instance, so a new producer added later cannot reintroduce
+  // it by forgetting a catch-all.
+  const SILENT = [
+    ["a binary that answers nothing readable", "process.stdout.write(JSON.stringify({ok:true,kind:cmd}))"],
+    ["a binary that exits non-zero", "process.exit(3)"],
+    ["a binary that writes garbage", "process.stdout.write('not json')"],
+  ]
+
+  for (const [label, behaviour] of SILENT) {
+    it(`never reports ok from ${label}`, async () => {
+      const tmpDir = await bootstrapRepo()
+      try {
+        const bin = path.join(tmpDir, "kkg")
+        await fs.writeFile(bin, [
+          "#!/usr/bin/env node",
+          "const cmd = process.argv[2] || ''",
+          `const manifest = ${JSON.stringify({
+            ok: true, kind: "manifest", schema_version: "1.0",
+            commands: [
+              { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+              { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+            ],
+            total_commands: 7,
+          })}`,
+          "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+          `else { ${behaviour} }`,
+        ].join("\n"))
+        await fs.chmod(bin, 0o755)
+        await appendCgraphConfig(tmpDir, bin)
+        await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+        await fs.writeFile(path.join(tmpDir, "src", "f.js"), "export const a = 1\n", "utf8")
+
+        // Claim path.
+        const claim = await runCli(
+          ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "t", "--owner", "codex",
+           "--reviewer", "claude", "--files", "src/"],
+          tmpDir, { BTRAIN_AGENT: "codex" },
+        )
+        assert.equal(claim.code, 0, claim.stderr)
+        const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+        const claimed = events.filter((e) => e?.details?.cgraph).pop()
+        if (claimed) {
+          assert.notEqual(claimed.details.cgraph.status, "ok",
+            `claim event reported ok with no evidence: ${JSON.stringify(claimed.details.cgraph)}`)
+        }
+
+        // Live render path.
+        const live = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+        assert.doesNotMatch(live.stdout, /cgraph: ok/,
+          "the live path reported ok from a producer that answered nothing")
+
+        // needs-review path.
+        await fs.writeFile(path.join(tmpDir, "src", "f.js"), "export const a = 2\n", "utf8")
+        await runCli(
+          ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review",
+           "--actor", "codex", "--base", "main", "--preflight", "p", "--changed", "c",
+           "--verification", "v", "--gap", "none", "--why", "w", "--review-ask", "r", "--no-dispatch"],
+          tmpDir, { BTRAIN_AGENT: "codex" },
+        )
+        const after = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+        const nr = after.filter((e) => e?.details?.cgraph && e.after?.status === "needs-review").pop()
+        if (nr) {
+          assert.notEqual(nr.details.cgraph.status, "ok",
+            `needs-review event reported ok with no evidence: ${JSON.stringify(nr.details.cgraph)}`)
+        }
+      } finally {
+        await rmDir(tmpDir)
+      }
+    })
+  }
+})
+
+describe("cgraph build that advertises neither collision producer", () => {
+  // The case the upstream catch-alls cannot reach: blast-radius and drift-check
+  // are both absent from the manifest, so neither producer block runs at all
+  // and nothing upstream has an opportunity to degrade. Only the seal is left.
+  // A build like this answers `advise` and `health` and checks nothing that
+  // bears on locks.
+  it("does not report ok when no producer that checks anything is available", async () => {
+    const tmpDir = await bootstrapRepo()
+    try {
+      const bin = path.join(tmpDir, "kkg")
+      await fs.writeFile(bin, [
+        "#!/usr/bin/env node",
+        "const cmd = process.argv[2] || ''",
+        `const manifest = ${JSON.stringify({
+          ok: true, kind: "manifest", schema_version: "1.0",
+          commands: [{ name: "advise" }, { name: "sync-check" }, { name: "health" }],
+          total_commands: 3,
+        })}`,
+        "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+        "else { process.stdout.write(JSON.stringify({ok:true,kind:cmd})) }",
+      ].join("\n"))
+      await fs.chmod(bin, 0o755)
+      await appendCgraphConfig(tmpDir, bin)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, "src", "f.js"), "export const a = 1\n", "utf8")
+
+      const claim = await runCli(
+        ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "t", "--owner", "codex",
+         "--reviewer", "claude", "--files", "src/"],
+        tmpDir, { BTRAIN_AGENT: "codex" },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+
+      const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+      const claimed = events.filter((e) => e?.details?.cgraph).pop()
+      if (claimed) {
+        assert.notEqual(claimed.details.cgraph.status, "ok",
+          `claim event reported ok with no producer that checks anything: ${JSON.stringify(claimed.details.cgraph)}`)
+      }
+
+      const live = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+      assert.doesNotMatch(live.stdout, /cgraph: ok/,
+        "the live path reported ok from a build with no collision producer at all")
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
