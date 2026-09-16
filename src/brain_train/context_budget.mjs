@@ -58,11 +58,20 @@ const BLOCKING_SOURCES = Object.freeze(["explicit"])
 
 /**
  * Claude Code stores transcripts under a directory named for the repo path,
- * with every separator replaced by a hyphen and a leading hyphen for the root.
- * `/Users/x/btrain` becomes `-Users-x-btrain`.
+ * with every character outside `[A-Za-z0-9]` replaced by a hyphen and a leading
+ * hyphen for the root. `/Users/x/btrain` becomes `-Users-x-btrain`.
+ *
+ * Replacing only `/` was wrong, and wrong in the one place it had to be right:
+ * btrain's lane worktrees live under `<repo>/.claude/worktrees/<name>`, so the
+ * dot produced a directory that does not exist, the lookup returned
+ * `unavailable`, and the gate silently never fired on the layout it is built
+ * for. Checked against the real directories under `~/.claude/projects`:
+ * `/Users/bfaris96/job_search` is stored as `-Users-bfaris96-job-search`, and
+ * `/Users/bfaris96/btrain/.claude/worktrees/jolly-moser-9f6967` as
+ * `-Users-bfaris96-btrain--claude-worktrees-jolly-moser-9f6967`.
  */
 function encodeRepoPath(repoRoot) {
-  return "-" + path.resolve(repoRoot).replace(/^\/+/, "").replace(/\//g, "-")
+  return "-" + path.resolve(repoRoot).replace(/^\/+/, "").replace(/[^A-Za-z0-9]/g, "-")
 }
 
 function resolveTranscriptDir(repoRoot, env = process.env) {
@@ -107,6 +116,8 @@ async function readLatestContextTokens(transcriptPath) {
     return null
   }
 
+  // The latest reading, as { tokens, order }. `order` is the record's timestamp
+  // in milliseconds, or -Infinity when it has none.
   let latest = null
   let peak = 0
   // Claude Code writes one record per content block -- thinking, text, each
@@ -128,10 +139,22 @@ async function readLatestContextTokens(transcriptPath) {
     }
     const usage = record?.message?.usage
     if (!usage) continue
+    const tokens = turnContextTokens(usage)
+    // A `usage` object with every field zero is not a measurement of zero
+    // context. Claude Code writes exactly that shape for a failed API call
+    // (`isApiErrorMessage`, `apiErrorStatus: 401`) and for a synthetic
+    // "No response requested." turn -- and no real prompt is zero tokens, so
+    // there is nothing to confuse it with.
+    //
+    // Taking it as a reading was the module's own stated failure mode, arriving
+    // through the transcript rather than through a missing file: a session
+    // carrying 300,000 tokens read as 0 and passed silently, and the hard block
+    // cleared itself on the next auth blip. Three transcripts on this machine
+    // read 0 permanently that way, one of them at 303,843 real tokens.
+    if (tokens === 0) continue
     usageRecords += 1
     responseIds.add(record.requestId || record.message?.id || `record:${usageRecords}`)
-    const tokens = turnContextTokens(usage)
-    // The LAST record, not the largest. The question this module answers is
+    // The LATEST record, not the largest. The question this module answers is
     // "how much context is this session carrying now", and the answer has to
     // fall when the session compacts or clears.
     //
@@ -140,10 +163,17 @@ async function readLatestContextTokens(transcriptPath) {
     // compacted correctly still reported its pre-compaction peak, because that
     // record never leaves the file. The gate would have blocked the session
     // forever, and blocked it hardest immediately after doing the right thing.
-    latest = tokens
+    //
+    // Latest by time, not by file position. A resumed or forked session
+    // replays older records into the tail; one transcript here jumps 7.6 hours
+    // backwards mid-file, from 997,512 tokens to 63,638. Records with no
+    // timestamp all compare equal, so a file without them keeps file order.
+    const stamped = Date.parse(record.timestamp || "")
+    const order = Number.isFinite(stamped) ? stamped : -Infinity
+    if (latest === null || order >= latest.order) latest = { tokens, order }
     if (tokens > peak) peak = tokens
   }
-  return latest === null ? null : { tokens: latest, peak, turns: responseIds.size }
+  return latest === null ? null : { tokens: latest.tokens, peak, turns: responseIds.size }
 }
 
 /**
@@ -254,9 +284,14 @@ function getContextBudgetConfig(config, laneId = "") {
   const parseCeiling = (raw) => {
     if (typeof raw === "number") return Number.isFinite(raw) && raw >= 0 ? raw : null
     if (typeof raw !== "string") return null
-    const trimmed = raw.trim().replace(/_/g, "")
-    if (!/^\d+$/.test(trimmed)) return null
-    const value = Number(trimmed)
+    // TOML puts underscores between digits, so accept that form and nothing
+    // looser. Stripping first and then testing let `_5`, `5_` and `05` through,
+    // all of which TOML itself rejects. btrain's parser also does not strip
+    // trailing comments, so `400000  # raised` arrives whole and is refused
+    // here rather than silently becoming the default.
+    const trimmed = raw.trim()
+    if (!/^\d+(_\d+)*$/.test(trimmed)) return null
+    const value = Number(trimmed.replace(/_/g, ""))
     return Number.isFinite(value) ? value : null
   }
 
@@ -270,14 +305,41 @@ function getContextBudgetConfig(config, laneId = "") {
     return fallback
   }
 
-  return {
-    // Lane overrides everything else, as with the ceilings. Reading `enabled`
-    // from the repo table alone made the documented rollback repo-wide only.
-    enabled: lane?.enabled !== undefined ? lane.enabled !== false : repo?.enabled !== false,
-    softCeiling: pick("soft_ceiling", DEFAULT_SOFT_CEILING),
-    hardCeiling: pick("hard_ceiling", DEFAULT_HARD_CEILING),
-    invalid,
+  // `enabled` is the documented rollback, so it must fail loudly rather than
+  // quietly. btrain's TOML parser returns a string for anything it does not
+  // recognise as a literal, and `"false" !== false`, so the original
+  // `enabled !== false` test left a quoted value with the gate fully armed and
+  // said nothing -- the exact shape of the ceiling bug, on the one key the
+  // ceiling fix did not cover. Guessing that a non-boolean means "off" would be
+  // worse: a typo would disable a safety gate. Refuse it and report it.
+  const pickEnabled = () => {
+    for (const source of [lane, repo]) {
+      if (source?.enabled === undefined || source?.enabled === null) continue
+      if (typeof source.enabled === "boolean") return source.enabled
+      invalid.push(`enabled=${JSON.stringify(source.enabled)}`)
+    }
+    return true
   }
+
+  // Lane overrides everything else, as with the ceilings. Reading `enabled`
+  // from the repo table alone made the documented rollback repo-wide only.
+  const enabled = pickEnabled()
+  const softCeiling = pick("soft_ceiling", DEFAULT_SOFT_CEILING)
+  const hardCeiling = pick("hard_ceiling", DEFAULT_HARD_CEILING)
+
+  // Legal to write and the block still wins, but the warning can never fire, so
+  // the documented "warn first, then block" behaviour disappears with no
+  // diagnostic. Both values are applied as written; only the contradiction is
+  // reported.
+  const notes = []
+  if (softCeiling > 0 && hardCeiling > 0 && softCeiling > hardCeiling) {
+    notes.push(
+      `soft_ceiling (${softCeiling}) is above hard_ceiling (${hardCeiling}), `
+      + "so the warning can never fire before the block",
+    )
+  }
+
+  return { enabled, softCeiling, hardCeiling, invalid, notes }
 }
 
 function formatTokens(tokens) {
@@ -316,11 +378,16 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
     blockable: false,
   }
 
-  const configNote = budget.invalid.length > 0
-    ? ` Ignored unparseable config: ${budget.invalid.join(", ")}.`
-    : ""
+  // Appended to `reason` AND to every message. It reached `reason` alone, which
+  // neither the warn nor the block path prints, so a user whose ceiling btrain
+  // had thrown away got no sign of it at the one moment it mattered.
+  const configNote =
+    (budget.invalid.length > 0 ? ` Ignored unparseable config: ${budget.invalid.join(", ")}.` : "")
+    + (budget.notes.length > 0 ? ` Note: ${budget.notes.join("; ")}.` : "")
 
-  if (!budget.enabled) return { ...base, reason: "context budget disabled in config" + configNote }
+  if (!budget.enabled) {
+    return { ...base, reason: "context budget disabled in config" + configNote, message: configNote.trim() }
+  }
 
   const located = await locateSessionTranscript(repoRoot, opts)
   if (!located.transcriptPath) {
@@ -358,7 +425,8 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
         `context is ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling. `
         + "Write the current state to MEMORY.md, clear context, and resume. "
         + "To proceed without clearing, raise or zero `hard_ceiling` under [context_budget] "
-        + "in .btrain/project.toml.",
+        + "in .btrain/project.toml."
+        + configNote,
     }
   }
 
@@ -370,18 +438,25 @@ async function evaluateContextBudget(repoRoot, config, opts = {}) {
       level: "warn",
       message:
         `a session in this repo is at ${formatTokens(reading.tokens)} tokens, over the ${formatTokens(budget.hardCeiling)} hard ceiling, `
-        + `but ${located.reason} Not blocking. Clear context if this is your session.`,
+        + `but ${located.reason} Not blocking. Clear context if this is your session.`
+        + configNote,
     }
   }
 
   if (overSoft) {
+    // An inferred reading belongs to the most recently active session, which is
+    // probably not the caller. The hard-ceiling warning already hedges for that
+    // ("a session in this repo is at..."); this one said "context is ..." and
+    // presented somebody else's session as the caller's own.
+    const subject = located.source === "explicit" ? "context is" : "a session in this repo is at"
     return {
       ...result,
       level: "warn",
       message:
-        `context is ${formatTokens(reading.tokens)} tokens over ${reading.turns} turns, past the ${formatTokens(budget.softCeiling)} soft ceiling. `
+        `${subject} ${formatTokens(reading.tokens)} tokens over ${reading.turns} turns, past the ${formatTokens(budget.softCeiling)} soft ceiling. `
         + "Cache reads scale with context multiplied by turns. Write state to MEMORY.md and clear at the next stopping point."
-        + (located.source === "explicit" ? "" : ` (${located.reason})`),
+        + (located.source === "explicit" ? "" : ` (${located.reason})`)
+        + configNote,
     }
   }
 
