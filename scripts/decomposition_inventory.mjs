@@ -254,9 +254,133 @@ export function findModuleEvaluationCalls(spans) {
   return calls
 }
 
+/**
+ * Module-level constants: where each belongs, and which ones an extraction
+ * would break.
+ *
+ * Three things the function-level checks structurally cannot see, each of which
+ * shipped in this plan as a wrong or missing claim:
+ *
+ * 1. A constant whose initializer CALLS a function. That is a module-evaluation
+ *    edge between the constant's home and the callee's home, and it appears in
+ *    no function-to-function graph.
+ * 2. A constant derived from `import.meta.url`. Its value depends on the file's
+ *    own depth on disk, so moving it to `internal/` silently changes it. This
+ *    is the one hazard that makes an extraction not a pure move.
+ * 3. A constant read by functions in more than one target module, which needs a
+ *    home low enough for every reader.
+ */
+export function analyseConstants(spans, assignment) {
+  const raw = fs.readFileSync(target, "utf8").split("\n")
+  const inFunction = new Array(raw.length + 2).fill(false)
+  for (const s of spans) for (let i = s.start; i <= s.end; i++) inFunction[i] = true
+  const blockStart = raw.findIndex((l) => /^export\s*\{/.test(l))
+
+  const home = new Map()
+  for (const [mod, fns] of Object.entries(assignment.modules)) for (const fn of fns) home.set(fn, mod)
+  const stageOf = (mod) => assignment.order.indexOf(mod) + 1
+  const fnNames = new Set(spans.map((f) => f.name))
+
+  // Declarations at column 0, with their initializer text.
+  const consts = []
+  for (let i = 0; i < raw.length; i++) {
+    const m = raw[i].match(/^(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/)
+    if (!m) continue
+    let text = raw[i], j = i
+    // A multi-line initializer runs until a line closing at column 0.
+    while (j + 1 < raw.length && !/^[)}\]]/.test(raw[j + 1]) && /^\s/.test(raw[j + 1] || "")) {
+      j += 1
+      text += "\n" + raw[j]
+    }
+    if (j + 1 < raw.length && /^[)}\]]/.test(raw[j + 1])) text += "\n" + raw[j + 1]
+    consts.push({ name: m[1], line: i + 1, text })
+  }
+
+  const rows = consts.map((c) => {
+    const readers = new Set()
+    const re = new RegExp(`\\b${c.name}\\b`)
+    for (let i = 1; i <= raw.length; i++) {
+      if (i === c.line || (blockStart !== -1 && i > blockStart)) continue
+      if (!inFunction[i]) continue
+      if (re.test(raw[i - 1])) {
+        const owner = spans.find((f) => i >= f.start && i <= f.end)
+        if (owner && home.has(owner.name)) readers.add(home.get(owner.name))
+      }
+    }
+    // Calls made while building the value.
+    const calls = new Set()
+    for (const m of c.text.matchAll(/([A-Za-z0-9_$]+)\s*\(/g)) if (fnNames.has(m[1])) calls.add(m[1])
+    return {
+      name: c.name,
+      line: c.line,
+      readers: [...readers].sort((a, b) => stageOf(a) - stageOf(b)),
+      calls: [...calls].sort(),
+      pathDerived: /import\.meta\.url/.test(c.text),
+    }
+  })
+
+  // A constant derived from another path-derived constant inherits the hazard.
+  const derived = new Set(rows.filter((r) => r.pathDerived).map((r) => r.name))
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const r of rows) {
+      if (derived.has(r.name)) continue
+      if ([...derived].some((d) => new RegExp(`\\b${d}\\b`).test(r.text || "") || new RegExp(`\\b${d}\\b`).test(
+        consts.find((c) => c.name === r.name)?.text || ""))) {
+        derived.add(r.name); grew = true
+      }
+    }
+  }
+  for (const r of rows) r.pathDerived = derived.has(r.name)
+
+  const shared = rows.filter((r) => r.readers.length > 1)
+  const orphaned = rows.filter((r) => r.readers.length === 0)
+  const initializerEdges = []
+  for (const r of rows) {
+    if (!r.calls.length) continue
+    const constHome = r.readers[0] || null
+    for (const callee of r.calls) {
+      const calleeHome = home.get(callee)
+      if (!constHome || !calleeHome || constHome === calleeHome) continue
+      initializerEdges.push({ constant: r.name, from: constHome, to: calleeHome, callee })
+    }
+  }
+  return { rows, shared, orphaned, initializerEdges, pathDerived: rows.filter((r) => r.pathDerived), stageOf }
+}
+
 function main() {
   const args = process.argv.slice(2)
   const { spans, fileLines } = readFunctionSpans(target)
+
+  if (args.includes("--constants")) {
+    const { spans } = readFunctionSpans(target)
+    const assignment = JSON.parse(fs.readFileSync(
+      path.join(repoRoot, "specs", "020-ws2-module-assignment.json"), "utf8"))
+    const { rows, shared, orphaned, initializerEdges, pathDerived, stageOf } = analyseConstants(spans, assignment)
+
+    console.log(`module-level constants: ${rows.length}`)
+    console.log(`\nread by functions in more than one module: ${shared.length}`)
+    for (const r of shared) {
+      console.log(`  ${r.name.padEnd(34)} home ${String(stageOf(r.readers[0])).padStart(2)} ${r.readers[0].padEnd(15)} read by ${r.readers.join(", ")}`)
+    }
+    console.log(`\nno function reader at all: ${orphaned.length}`)
+    for (const r of orphaned) console.log(`  ${r.name} (line ${r.line})`)
+
+    console.log(`\npath-derived (value depends on the file's own depth on disk): ${pathDerived.length}`)
+    for (const r of pathDerived) console.log(`  ${r.name} (line ${r.line})`)
+    if (pathDerived.length) {
+      console.log("  -> moving any of these into a subdirectory changes its value silently.")
+      process.exitCode = 1
+    }
+
+    console.log(`\nmodule-evaluation edges from constant initializers: ${initializerEdges.length}`)
+    for (const e of initializerEdges) {
+      console.log(`  ${e.constant}: ${e.from}(${stageOf(e.from)}) -> ${e.to}(${stageOf(e.to)}) via ${e.callee}`)
+      if (stageOf(e.to) >= stageOf(e.from)) process.exitCode = 1
+    }
+    return
+  }
 
   if (args.includes("--module-level")) {
     const { spans } = readFunctionSpans(target)

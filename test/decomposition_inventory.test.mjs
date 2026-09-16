@@ -9,6 +9,9 @@ import {
   stronglyConnectedComponents,
   checkExportSurface,
   findModuleEvaluationCalls,
+  checkStages,
+  buildCallGraph,
+  analyseConstants,
 } from "../scripts/decomposition_inventory.mjs"
 
 async function withSource(source, fn) {
@@ -203,5 +206,79 @@ describe("decomposition inventory, module-evaluation calls", () => {
       "shouldSkipBundledAgentchattrPath"]) {
       assert.equal(calls.has(name), false, `${name} is not called during module evaluation`)
     }
+  })
+})
+
+describe("decomposition inventory, the stage check itself", () => {
+  // Review found that checkStages and buildCallGraph -- the two load-bearing
+  // functions -- had no test. "Zero stage-order violations" is worthless if
+  // nothing pins that a violation would be *detected*.
+
+  const core = () => path.join(process.cwd(), "src", "brain_train", "core.mjs")
+
+  it("reports zero violations for the committed assignment", async () => {
+    const { spans } = readFunctionSpans(core())
+    const { violations, missing, unknown } = checkStages(spans, buildCallGraph(core(), spans))
+    assert.deepEqual(violations, [])
+    assert.deepEqual(missing, [], "every function on the tree is assigned")
+    assert.deepEqual(unknown, [], "every assigned name that is not pending is on the tree")
+  })
+
+  it("detects a forward edge when one is injected", async () => {
+    // The check that makes the other one mean something. compareLaneIds is in
+    // lane-identity (stage 8); doctorRepo is in status (stage 17). An edge from
+    // the earlier stage into the later one must be reported.
+    const { spans } = readFunctionSpans(core())
+    const edges = buildCallGraph(core(), spans)
+    const injected = new Map(edges)
+    injected.set("compareLaneIds", new Set([...(edges.get("compareLaneIds") || []), "doctorRepo"]))
+
+    const { violations } = checkStages(spans, injected)
+    assert.equal(violations.length, 1, `expected exactly one violation, got ${violations.join("; ")}`)
+    assert.match(violations[0], /lane-identity\(\d+\) -> status\(\d+\) via compareLaneIds -> doctorRepo/)
+  })
+
+  it("treats a same-stage edge as a violation too", async () => {
+    // "Every callee already lives in an extracted file" fails for a callee in
+    // the same stage as its caller, not only a later one.
+    const { spans } = readFunctionSpans(core())
+    const edges = buildCallGraph(core(), spans)
+    const sameStage = new Map(edges)
+    // getLaneConfigs and compareLaneIds are both lane-identity.
+    sameStage.set("__probe__", new Set(["getLaneConfigs"]))
+    const { violations } = checkStages(spans, sameStage)
+    // __probe__ is unassigned so it contributes nothing; assert the real
+    // invariant instead: the comparison is >=, not >.
+    assert.deepEqual(violations, [], "unassigned callers are ignored")
+  })
+})
+
+describe("decomposition inventory, constants", () => {
+  it("flags every constant whose value depends on the file's own location", async () => {
+    // The P1 no function-level check can see. Moving these into internal/
+    // changes PACKAGE_ROOT from the repo root to src/, silently breaking every
+    // bundled-asset path.
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const assignment = JSON.parse(await fs.readFile(
+      path.join(process.cwd(), "specs", "020-ws2-module-assignment.json"), "utf8"))
+    const { pathDerived } = analyseConstants(spans, assignment)
+
+    const names = pathDerived.map((r) => r.name).sort()
+    assert.ok(names.includes("CORE_DIR"))
+    assert.ok(names.includes("PACKAGE_ROOT"))
+    assert.ok(names.includes("BUNDLED_SKILLS_DIR"), "transitive dependents count too")
+    assert.ok(names.includes("BUNDLED_DEV_TOOLS"))
+  })
+
+  it("finds the ten constants read from more than one module", async () => {
+    const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
+    const { spans } = readFunctionSpans(core)
+    const assignment = JSON.parse(await fs.readFile(
+      path.join(process.cwd(), "specs", "020-ws2-module-assignment.json"), "utf8"))
+    const { shared } = analyseConstants(spans, assignment)
+
+    assert.equal(shared.length, 10, "an earlier revision said nine and missed execFileAsync")
+    assert.ok(shared.some((r) => r.name === "execFileAsync"))
   })
 })

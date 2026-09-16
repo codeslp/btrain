@@ -736,22 +736,33 @@ exits non-zero if any stage calls into a later one. Do not hand-edit the table.
 | # | Module | Fns | ~Lines | Imports |
 |---:|---|---:|---:|---|
 | 1 | `internal/fsx.mjs` | 45 | 620 | — |
-| 2 | `internal/config.mjs` | 33 | 494 | 1 |
-| 3 | `internal/agents.mjs` | 19 | 410 | 1,2 |
-| 4 | `internal/handoff-history.mjs` | 11 | 121 | 1,2,3 |
-| 5 | `internal/handoff-doc.mjs` | 42 | 862 | 1,2,4 |
-| 6 | `internal/lane-state.mjs` | 47 | 840 | 1,2,3,4,5 |
-| 7 | `internal/templates.mjs` | 31 | 789 | 1,2,3,5,6 |
-| 8 | `internal/repos.mjs` | 7 | 304 | 1,2,3,6,7 |
-| 9 | `internal/cgraph-advisories.mjs` | 30 | 676 | 1,4,6 |
-| 10 | `internal/handoff-read.mjs` | 8 | 446 | 1,2,3,5,6,9 |
-| 11 | `internal/loop.mjs` | 41 | 1,417 | 1,2,3,5,6,10 |
-| 12 | `internal/handoff-write.mjs` | 22 | 1,825 | 1,2,3,4,5,6,7,9,10,11 |
-| 13 | `internal/status.mjs` | 16 | 925 | 1,2,3,4,5,6,7,9,10,11,12 |
+| 2 | `internal/toml.mjs` | 10 | 152 | 1 |
+| 3 | `internal/config.mjs` | 16 | 249 | 1,2 |
+| 4 | `internal/registry.mjs` | 7 | 93 | 1 |
+| 5 | `internal/agents.mjs` | 19 | 410 | 1,2,3 |
+| 6 | `internal/handoff-history.mjs` | 11 | 121 | 1,3,5 |
+| 7 | `internal/handoff-doc.mjs` | 42 | 862 | 1,3,6 |
+| 8 | `internal/lane-identity.mjs` | 11 | 144 | 1,2,3,5,7 |
+| 9 | `internal/lane-overrides.mjs` | 9 | 230 | 1,3,5,6,8 |
+| 10 | `internal/lane-locks.mjs` | 27 | 466 | 1,3,6,7,8,9 |
+| 11 | `internal/templates.mjs` | 30 | 786 | 1,2,3,4,5,7,8 |
+| 12 | `internal/repos.mjs` | 7 | 304 | 1,2,3,4,5,8,10,11 |
+| 13 | `internal/cgraph-advisories.mjs` | 30 | 676 | 1,6,10 |
+| 14 | `internal/handoff-read.mjs` | 8 | 446 | 1,3,4,5,7,8,9,10,13 |
+| 15 | `internal/loop.mjs` | 42 | 1,420 | 1,3,4,5,7,8,14 |
+| 16 | `internal/handoff-write.mjs` | 22 | 1,825 | 1,3,4,5,6,7,8,9,10,11,13,14,15 |
+| 17 | `internal/status.mjs` | 16 | 925 | 1,3,4,5,6,7,8,9,10,11,13,14,15,16 |
 
-352 functions, 9,729 lines, from 886 call edges. `Imports` lists the stage
-numbers a module actually calls into, derived from the call graph rather than
-intended by hand.
+352 functions, 9,729 lines, from 886 call edges, across seventeen modules.
+`Imports` lists the stage numbers a module actually calls into, derived from the
+call graph rather than intended by hand.
+
+Seventeen, not the thirteen an earlier revision proposed. Review rejected three
+of those thirteen and was right to: each merged two responsibilities to break a
+cycle that a smaller separate module breaks cleanly, which contradicts this
+section's own argument that a cycle is a property of a grouping rather than of
+the code. The three splits are set out under *Groupings that did not survive
+review*.
 
 Eight exported names are not functions and are assigned separately in the same
 file, by the same rule as the shared constants: the lowest-numbered stage that
@@ -809,6 +820,97 @@ the widest, and the merge of lane identity, the lock registry and override
 grants into one module is the grouping decision most likely to draw review
 pushback. It also owns 17 of the 69 exported names, more than any other stage.
 
+##### `import.meta.url` is the one thing that is not a pure move
+
+`core.mjs:165` derives `CORE_DIR` from `import.meta.url`, and `:166` builds
+`PACKAGE_ROOT = path.resolve(CORE_DIR, "..", "..")`. Seven constants depend on
+that, directly or transitively: `PACKAGE_ROOT`, `DEFAULT_PARALLEL_REVIEW_SCRIPT`,
+`BUNDLED_SKILLS_DIR`, `BUNDLED_AGENT_SKILLS_DIR`, `BUNDLED_AGENTCHATTR_DIR`, the
+six sources inside `BUNDLED_DEV_TOOLS`, and `CORE_DIR` itself.
+
+The new modules live at `src/brain_train/internal/`, one directory deeper than
+`core.mjs`. `path.resolve(CORE_DIR, "..", "..")` from there resolves to `src/`
+rather than the package root, so every bundled-asset path silently points
+somewhere that does not exist. Nothing throws at import time and no test that
+does not touch the filesystem notices.
+
+This is the single claim in this section that a reader should not take on
+trust, because all three function-level checks pass while it is broken: it is
+not a function, not an export, and not a call. It also falsifies the
+unqualified "all thirteen stages are pure moves with no semantic impact" that
+an earlier revision stated — moving these constants changes their value.
+
+**Resolution.** Whichever module takes them must compute the package root in a
+way that does not depend on its own depth. Two options, in order of preference:
+
+1. Resolve upward from `import.meta.url` until a directory containing
+   `package.json` is found, and export that from `fsx` (stage 1) as the single
+   definition. Depth-independent, and the seven constants then live wherever
+   their readers put them.
+2. Keep the constants in `core.mjs` and have the extracted modules import them.
+   Cheaper, but it leaves `core.mjs` holding state after stage 17, which is
+   what this workstream exists to stop.
+
+Either way this is a semantic change under spec 014, not a move, and the stage
+that performs it needs its own impact record.
+
+`node scripts/decomposition_inventory.mjs --constants` reports the seven and
+exits non-zero while any remain, so this cannot be forgotten. It also reports
+the two other things a function-level graph cannot see: constants read by
+functions in more than one module, and module-evaluation edges created by a
+constant's initializer calling a function in another module.
+
+##### Groupings that did not survive review
+
+Three of the earlier thirteen merged two responsibilities to break a cycle that
+a separate module breaks cleanly. Each is now split, and the partition is still
+acyclic with zero stage-order violations.
+
+**The registry is its own module, not part of `config`.** The `templates` and
+`repos` cycle is real — `initRepo` builds templates, `ensureTemplates` needs the
+global layout — but folding the seven registry primitives into `config` sawed a
+fourteen-function registry in half across two stages with an unrelated module
+between them, and left `repos` a seven-function shell. As
+`internal/registry.mjs` it is 7 functions and 93 lines whose only outgoing edges
+are to `fsx`, sits at stage 4, and breaks the cycle without dissolving a
+cross-repo concern into a module named for configuration.
+
+**The TOML parser is its own module, not part of `config`.** `config` at 33
+functions was a parser, a set of accessors, path resolution and the registry.
+The only edge from the accessors into the parser is
+`readProjectConfig -> parseProjectToml`: one direction, nothing back. So
+`internal/toml.mjs` is 10 functions and 152 lines at stage 2, and `config` drops
+to 16. This section's own prose already listed "the TOML parser and config
+accessors" as two separate omitted groups before an earlier revision merged
+them.
+
+**`lane-state` was three responsibilities.** At 47 functions it merged lane
+identity, the lock registry, lane state reads and override grants on the
+argument that "the dependency runs both ways". That is true of locks and state
+and false of the other two. Partitioning the 47 and running the real call graph
+across the parts: identity has zero outgoing cross-edges, a clean leaf;
+overrides points only into identity. So `lane-identity` (11 functions, 144
+lines, stage 8) and `lane-overrides` (10 functions, 245 lines, stage 9) split
+out with no relocations at all, leaving `lane-locks` at 26 functions and 451
+lines for the pair that genuinely interlocks.
+
+One function moved with them. `forceReleaseLockAudited` reads as an override
+operation but calls `forceReleaseLock` and `auditActiveLanesForRelease`; it is a
+lock operation that consults an override, and it belongs in `lane-locks`. The
+validator found it — placing it in `lane-overrides` produced the only two
+stage-order violations in the reworked partition.
+
+**`claudeBashPermissions` moved to `loop`.** It has zero function callers, so
+the call graph placed no constraint on it and it sat in `templates` by default.
+Its only four consumers are the `CLAUDE_LOOP_*_ALLOWED_TOOLS` constants, whose
+initializers call it at module-evaluation time. With the function in
+`templates` and the constants in `loop`, stage 15 would have had a
+module-evaluation-time call into stage 11 that the `Imports` column did not
+show, because that column is built from function-to-function edges only. Moving
+the function to `loop` makes the call intra-module and the edge disappears.
+`--constants` reports those four edges when the function is put back, so the
+class is now covered rather than the instance.
+
 ##### How the membership was derived
 
 `specs/020-ws2-module-assignment.json` assigns all 352 functions. It was not
@@ -849,8 +951,10 @@ Two columns from the earlier draft are gone rather than corrected.
 `Names core.mjs takes back` summed to 190 against a 69-name export surface and
 was never defined; the export ownership it was reaching for is in the
 assignment file, where 61 of the 69 names belong to a module and the remaining
-8 are listed separately. The old `~Lines` column summed to 10,117 against a
-function-line total of 9,729.
+8 are listed separately. `--exports` reports the same split as 65 assigned and
+4 re-exported, because four of those eight non-function names also have module
+homes; 61 counts function exports only. The old `~Lines` column summed to
+10,117 against a function-line total of 9,729.
 
 ##### The function call graph has no cycles
 
@@ -908,29 +1012,37 @@ holding a mutable structure is `cgraphProducerCache` (a `Map`), read and written
 by exactly one function, `runCachedCgraphProducer`; both move together at stage
 9. There is no memoized adapter, no config singleton, no lazy global.
 
-Nine module-level constants have readers in more than one target module, out of
-58 at module level. An earlier draft said eleven without listing them; these are
-derived from the assignment and the call graph, so stage 1 can begin without
-fresh dependency analysis. Each is an immutable scalar, string or never-mutated
-literal, so none blocks a split. The home is the lowest-numbered stage that
-reads it; every other reader imports from there.
+Ten module-level constants have function readers in more than one target
+module, out of 60 module-level bindings — all of them `const`, and 58 of them
+genuine constants once `execFileAsync` and the two path helpers are set aside.
+An earlier revision said nine, and missed `execFileAsync`, which is read from
+three modules. All of this is generated by
+`node scripts/decomposition_inventory.mjs --constants`; the home is the
+lowest-numbered stage that reads it.
 
 | Constant | Exports from | Read by |
 |---|---|---|
-| `DEFAULT_LANES_PER_AGENT` | 2 `config` | config, lane-state, templates |
-| `HANDOFF_NOTES_DIRNAME` | 2 `config` | config, handoff-doc |
-| `LOCKS_FILENAME` | 2 `config` | config, lane-state |
-| `DEFAULT_CURRENT` | 5 `handoff-doc` | handoff-doc, lane-state, handoff-read, status |
-| `DEFAULT_HISTORY_KEEP` | 6 `lane-state` | lane-state, status |
-| `MANAGED_START` | 7 `templates` | templates, status |
-| `DEFAULT_LOOP_TIMEOUT_MS` | 10 `handoff-read` | handoff-read, loop, handoff-write |
-| `DEFAULT_LOOP_POLL_INTERVAL_MS` | 10 `handoff-read` | handoff-read, loop, handoff-write |
-| `SUPPORTED_REVIEW_MODES` | 11 `loop` | loop, status |
+| `execFileAsync` | 1 `fsx` | fsx, config, loop |
+| `HANDOFF_NOTES_DIRNAME` | 3 `config` | config, handoff-doc |
+| `LOCKS_FILENAME` | 3 `config` | config, lane-locks |
+| `DEFAULT_LANES_PER_AGENT` | 3 `config` | config, lane-identity, templates |
+| `DEFAULT_CURRENT` | 7 `handoff-doc` | handoff-doc, lane-locks, handoff-read, status |
+| `DEFAULT_HISTORY_KEEP` | 10 `lane-locks` | lane-locks, status |
+| `MANAGED_START` | 11 `templates` | templates, status |
+| `DEFAULT_LOOP_TIMEOUT_MS` | 14 `handoff-read` | handoff-read, loop, handoff-write |
+| `DEFAULT_LOOP_POLL_INTERVAL_MS` | 14 `handoff-read` | handoff-read, loop, handoff-write |
+| `SUPPORTED_REVIEW_MODES` | 15 `loop` | loop, status |
 
-The two `DEFAULT_LOOP_*` constants are the ones to watch: their earliest reader
-is `handoff-read` at stage 10, not `loop` at stage 11, so they export from a
-module whose name does not suggest them. `DEFAULT_CURRENT` is spread-copied at
-all nine of its use sites and never mutated, so sharing it from stage 5 is safe.
+The two `DEFAULT_LOOP_*` constants are the awkward pair: their earliest reader
+is `handoff-read` at stage 14, not `loop` at 15, so they export from a module
+whose name does not suggest them.
+
+Four constants have no function reader at all, so the placement rule does not
+apply to them and each needs a decision rather than a derivation: `CORE_DIR` and
+`PACKAGE_ROOT`, which are the hazard described above; `BUNDLED_AGENTCHATTR_DIR`,
+read only at module level; and `REVIEW_CONTEXT_PLACEHOLDER_PATTERNS`
+(`core.mjs:267`, 6 lines), which has exactly one reference repo-wide — its own
+declaration. It is dead code and should be deleted rather than assigned.
 
 ##### Formal impact
 
