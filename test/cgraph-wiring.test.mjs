@@ -1058,3 +1058,91 @@ describe("cgraph preserved advisory whose producer is no longer supported", () =
     )
   })
 })
+
+describe("cgraph degradation from a producer the live path does not re-run", () => {
+  // gh-codex P1 on PR #63. The live path re-runs blast-radius and drift-check
+  // only; review-packet and audit run on the needs-review transition. A
+  // degradation those recorded is not something a later `handoff` can
+  // disprove, but clearCgraphRunState wiped it unconditionally — so a healthy
+  // blast-radius printed "cgraph: ok" over an audit that never completed.
+  let tmpDir, statePath
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    statePath = path.join(tmpDir, "kkg-phase")
+    const binPath = path.join(tmpDir, "kkg")
+
+    const script = [
+      "#!/usr/bin/env node",
+      "const fs = require('fs')",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const statePath = ${JSON.stringify(statePath)}`,
+      "let phase = '1'",
+      "try { phase = fs.readFileSync(statePath, 'utf8').trim() } catch {}",
+      `const manifest = ${JSON.stringify({
+        ok: true, kind: "manifest", schema_version: "1.0",
+        commands: [
+          { name: "review-packet" }, { name: "audit" }, { name: "blast-radius" },
+          { name: "advise" }, { name: "drift-check" }, { name: "sync-check" }, { name: "health" },
+        ],
+        total_commands: 7,
+      })}`,
+      "if (cmd === 'manifest') { process.stdout.write(JSON.stringify(manifest)) }",
+      // audit fails during the needs-review transition (phase 1) and is never
+      // consulted again, because the live path does not run it.
+      "else if (cmd === 'audit') { process.exit(3) }",
+      // blast-radius and drift-check are healthy and conclusive throughout, so
+      // the only thing that can degrade a later run is the carried audit state.
+      "else if (cmd === 'blast-radius') {",
+      "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 0 }",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: healthy }))",
+      "}",
+      "else if (cmd === 'drift-check') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] }))",
+      "}",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await fs.writeFile(statePath, "1", "utf8")
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("does not let a healthy live run clear an audit that never completed", async () => {
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Audit fails on the needs-review transition",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = 2\n", "utf8")
+    await runCli(
+      ["handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "needs-review", "--actor", "codex",
+       "--base", "main", "--preflight", "p", "--changed", "src/feature.js", "--verification", "v",
+       "--gap", "none", "--why", "w", "--review-ask", "r", "--no-dispatch"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+
+    const events = await readJsonLines(path.join(tmpDir, ".btrain", "events", "lane-a.jsonl"))
+    const needsReview = events.filter((e) => e?.details?.cgraph && e.after?.status === "needs-review").pop()
+    assert.ok(needsReview, "the needs-review transition must have happened for this test to mean anything")
+    assert.equal(needsReview.details.cgraph.degraded_producer, "audit")
+
+    // A later handoff: blast-radius and drift-check both answer healthily.
+    const later = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.doesNotMatch(
+      later.stdout,
+      /cgraph: ok/,
+      "a healthy blast-radius must not report ok over an audit that never completed",
+    )
+    assert.match(later.stdout, /cgraph: degraded/)
+    assert.match(later.stdout, /audit/, "the degradation should still name the audit")
+  })
+})

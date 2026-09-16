@@ -395,6 +395,7 @@ class CgraphAdapter {
       if (r.unavailable || r.timed_out) {
         meta.status = "degraded"
         meta.degraded_reason = r.timed_out ? "review-packet timed out" : "review-packet unavailable"
+        meta.degraded_producer = "review-packet"
       } else if (r.ok && r.payload) {
         meta.review_packet = {
           path: results.reviewPacketArtifact || "",
@@ -419,6 +420,7 @@ class CgraphAdapter {
       } else if (!a.ok && meta.status === "ok") {
         meta.status = "degraded"
         meta.degraded_reason = a.timed_out ? "audit timed out" : "audit failed"
+        meta.degraded_producer = "audit"
       }
       meta.latency_ms.audit = a.latency_ms
     }
@@ -430,6 +432,7 @@ class CgraphAdapter {
         // them as a blast_radius block is what made an unchecked lock look clean.
         meta.status = "degraded"
         meta.degraded_reason = b.inconclusive_reason || "blast-radius inconclusive"
+        meta.degraded_producer = "blast-radius"
       } else if (b.ok && b.payload?.summary) {
         meta.blast_radius = {
           nodes_in_scope: b.payload.summary.nodes_in_scope || 0,

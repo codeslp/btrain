@@ -3969,11 +3969,34 @@ function extractLatestClaimTimestamp(events) {
 // Advisories are the deliberate exception and are not touched here. A collision
 // this run could not re-observe is not a collision that went away;
 // reconcileCgraphAdvisories decides those.
+// Producers the live path re-runs on every `handoff`/`status`. Only a
+// degradation these can re-establish may be cleared here.
+const LIVE_REFRESHED_CGRAPH_PRODUCERS = new Set(["blast-radius", "drift-check"])
+
 function clearCgraphRunState(metadata) {
   if (!metadata) {
     return metadata
   }
-  const { blast_radius: _blastRadius, drift: _drift, degraded_reason: _degradedReason, ...rest } = metadata
+  const {
+    blast_radius: _blastRadius,
+    drift: _drift,
+    degraded_reason: degradedReason,
+    degraded_producer: degradedProducer,
+    ...rest
+  } = metadata
+
+  // A degradation from a producer this run does not re-run cannot be
+  // disproved by this run. `review-packet` and `audit` execute only on the
+  // needs-review transition, so wiping their degradation here made a healthy
+  // blast-radius report "cgraph: ok" and hide that the reviewer packet or the
+  // audit never completed.
+  //
+  // Absence of `degraded_producer` means the degradation predates this field
+  // or came from a path that does not name one; clearing stays the default
+  // there, because that is what the stale-figure fixes above depend on.
+  if (degradedProducer && !LIVE_REFRESHED_CGRAPH_PRODUCERS.has(degradedProducer)) {
+    return { ...rest, status: "degraded", degraded_reason: degradedReason, degraded_producer: degradedProducer }
+  }
   return { ...rest, status: "ok" }
 }
 
