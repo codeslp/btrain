@@ -721,22 +721,23 @@ exits non-zero if any stage calls into a later one. Do not hand-edit the table.
 
 | # | Module | Fns | ~Lines | Imports |
 |---:|---|---:|---:|---|
-| 1 | `internal/fsx.mjs` | 45 | 586 | — |
+| 1 | `internal/fsx.mjs` | 45 | 620 | — |
 | 2 | `internal/config.mjs` | 33 | 494 | 1 |
 | 3 | `internal/agents.mjs` | 19 | 410 | 1,2 |
 | 4 | `internal/handoff-history.mjs` | 11 | 121 | 1,2,3 |
-| 5 | `internal/handoff-doc.mjs` | 42 | 834 | 1,2,4 |
-| 6 | `internal/lane-state.mjs` | 47 | 796 | 1,2,3,4,5 |
+| 5 | `internal/handoff-doc.mjs` | 42 | 862 | 1,2,4 |
+| 6 | `internal/lane-state.mjs` | 47 | 840 | 1,2,3,4,5 |
 | 7 | `internal/templates.mjs` | 31 | 789 | 1,2,3,5,6 |
 | 8 | `internal/repos.mjs` | 7 | 304 | 1,2,3,6,7 |
-| 9 | `internal/cgraph-advisories.mjs` | 30 | 609 | 1,4,6 |
+| 9 | `internal/cgraph-advisories.mjs` | 30 | 676 | 1,4,6 |
 | 10 | `internal/handoff-read.mjs` | 8 | 446 | 1,2,3,5,6,9 |
-| 11 | `internal/loop.mjs` | 41 | 786 | 1,2,3,5,10 |
-| 12 | `internal/handoff-write.mjs` | 22 | 1,760 | 1,2,3,4,5,6,7,9,10 |
-| 13 | `internal/status.mjs` | 16 | 700 | 1,2,3,5,6,7,9,10,11 |
+| 11 | `internal/loop.mjs` | 41 | 1,417 | 1,2,3,5,6,10 |
+| 12 | `internal/handoff-write.mjs` | 22 | 1,825 | 1,2,3,4,5,6,7,9,10,11 |
+| 13 | `internal/status.mjs` | 16 | 925 | 1,2,3,4,5,6,7,9,10,11,12 |
 
-352 functions, 8,635 lines. `Imports` lists the stage numbers a module actually
-calls into, derived from the call graph rather than intended by hand.
+352 functions, 9,729 lines, from 886 call edges. `Imports` lists the stage
+numbers a module actually calls into, derived from the call graph rather than
+intended by hand.
 
 Eight exported names are not functions and are assigned separately in the same
 file: `BtrainError` to stage 1 (`normalizePositiveInteger` and
@@ -754,12 +755,20 @@ draft said 80, which is below the floor of the two parts that already exist.
 
 `Fns` and `~Lines` are measured by `scripts/decomposition_inventory.mjs`, which
 counts each top-level `function` declaration from its declaration line through
-its closing brace at column 0. Leading JSDoc and the blank line between
-functions are not counted, which is why the per-stage lines sum to less than the
-file's 10,754.
+the next line that is **exactly** `}` — nothing before it, nothing after it.
+Leading JSDoc and the blank line between functions are not counted, which is why
+the per-stage lines sum to less than the file's 10,754.
 
-**Stage 12, `handoff-write`, is the riskiest.** At 1,760 lines it is the largest
-module and more than twice the next one. Five of its 22 functions account for
+That rule is stated precisely because a looser one got it wrong. A revision of
+this section used "the line starts with `}`", which also matches `})` and
+`}, {` closing an argument list or object literal mid-body. That truncated 12
+of the 352 spans — `runLoop` read as 9 lines rather than 422 — and produced a
+file total of 8,635. It was then written into this section as a correction of
+the original 9,729. The original figure was right; 8,635 was the error.
+`test/decomposition_inventory.test.mjs` pins the distinction.
+
+**Stage 12, `handoff-write`, is the riskiest.** At 1,825 lines it is the largest
+module, ahead of `loop` at 1,417. Five of its 22 functions account for
 1,305 of those lines: `patchHandoff` 579 (the largest function in the
 repository), `resolveHandoff` 300, `claimHandoff` 198, `requestChangesHandoff`
 137, `disposeRepair` 91. An earlier draft of this table gave the stage as seven
@@ -823,7 +832,7 @@ Two columns from the earlier draft are gone rather than corrected.
 was never defined; the export ownership it was reaching for is in the
 assignment file, where 61 of the 69 names belong to a module and the remaining
 8 are listed separately. The old `~Lines` column summed to 10,117 against a
-function-line total of 8,635.
+function-line total of 9,729.
 
 ##### The function call graph has no cycles
 
@@ -907,12 +916,13 @@ spec 014. Three places where that is not automatic:
 
 ##### The ceiling is reachable
 
-The 8,635 lines inside top-level functions plus 424 lines of module-level
-constants distribute with `handoff-write` largest at 1,760. With an import
-header the biggest file lands near 1,800, about 10 percent under the 2,000-line
-ceiling — clearance, but less than the earlier draft's estimate of 1,500
-suggested, and `handoff-write` is the one module a single addition could push
-over. Two honest caveats: the ceiling is a line
+The 9,729 lines inside top-level functions plus 424 lines of module-level
+constants distribute with `handoff-write` largest at 1,825 and `loop` next at
+1,417. With an import header the biggest file lands near 1,870, about 6 percent
+under the 2,000-line ceiling. That is real clearance but it is thin, and
+`handoff-write` is the one module a single addition could push over. The
+earlier draft's "biggest file lands near 1,500" was optimistic because it
+assumed `loop` was the largest module; it is not. Two honest caveats: the ceiling is a line
 count, not a complexity measure, and `patchHandoff` is still one 579-line
 function afterwards; and `loop` is the one module a future addition could push
 over, with a clean internal seam at runner-execution versus orchestration if it

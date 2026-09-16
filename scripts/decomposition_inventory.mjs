@@ -12,8 +12,14 @@
 //
 // Measurement rule, stated because it is the thing two counts disagreed on: a
 // top-level function spans its `function` declaration line through the next
-// line that is exactly `}` at column 0. Leading JSDoc and the blank line
-// between functions are excluded.
+// line that is exactly `}` -- nothing before it, nothing after it. Leading
+// JSDoc and the blank line between functions are excluded.
+//
+// "Starts with }" is not good enough and got this wrong once. A line of `})`
+// or `}, {` at column 0 closes an argument list or an object literal in the
+// middle of a function body, not the function. Accepting those truncated 12
+// of the 352 spans, `runLoop` from 422 lines to 9, and under-counted the file
+// by 1,094 lines.
 import { execFileSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
@@ -33,7 +39,7 @@ export function readFunctionSpans(file) {
       // column-0 rule missed a closing brace; surface it rather than guess.
       if (cur) throw new Error(`unclosed function ${cur.name} at line ${cur.start}`)
       cur = { name: m[1], start: i + 1 }
-    } else if (cur && /^\}/.test(lines[i])) {
+    } else if (cur && /^\}\s*$/.test(lines[i])) {
       spans.push({ ...cur, end: i + 1, lines: i + 1 - cur.start + 1 })
       cur = null
     }
