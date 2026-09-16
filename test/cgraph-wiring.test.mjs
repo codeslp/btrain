@@ -967,3 +967,94 @@ describe("cgraph claim event on an inconclusive graph", () => {
     assert.match(String(claimed.details.cgraph.degraded_reason || ""), /inconclusive|no call edges|not evidence/i)
   })
 })
+
+describe("cgraph preserved advisory whose producer is no longer supported", () => {
+  // gh-codex P1 on PR #63, head fce5586. The producer guards are
+  // `if (lockedFiles.length > 0 && adapter.supports("blast-radius"))`. When the
+  // manifest stops advertising the capability the whole block is skipped, so
+  // nothing sets degraded_reason -- and a carried-forward advisory on its own
+  // was not substantive enough for buildCgraphSummaryLines to print anything.
+  // A known collision that cannot be re-verified rendered as silence: the same
+  // failure as an empty graph reading clean, reached by a third path.
+  let tmpDir, statePath
+
+  before(async () => {
+    tmpDir = await bootstrapRepo()
+    statePath = path.join(tmpDir, "kkg-phase")
+    const binPath = path.join(tmpDir, "kkg")
+
+    const script = [
+      "#!/usr/bin/env node",
+      "const fs = require('fs')",
+      "const args = process.argv.slice(2)",
+      "const cmd = args[0] || ''",
+      `const statePath = ${JSON.stringify(statePath)}`,
+      "let phase = '1'",
+      "try { phase = fs.readFileSync(statePath, 'utf8').trim() } catch {}",
+      "const all = [",
+      "  { name: 'review-packet' }, { name: 'audit' }, { name: 'blast-radius' },",
+      "  { name: 'advise' }, { name: 'drift-check' }, { name: 'sync-check' }, { name: 'health' },",
+      "]",
+      // Phase 2 drops blast-radius from the manifest entirely, which is how a
+      // downgraded or differently-built cgraph presents itself.
+      "if (cmd === 'manifest') {",
+      "  const commands = phase === '1' ? all : all.filter((c) => c.name !== 'blast-radius')",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'manifest', schema_version: '1.0', commands, total_commands: commands.length }))",
+      "}",
+      "else if (cmd === 'blast-radius') {",
+      "  const healthy = { files_requested: 1, nodes_in_scope: 7, transitive_callers: 4, transitive_callees: 2, lock_overlaps: 3 }",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'blast_radius', summary: healthy }))",
+      "}",
+      // drift-check answers conclusively and cleanly throughout, so it never
+      // degrades the run on its own. Without that, its degradation masks the
+      // defect under test and the assertion passes for the wrong reason.
+      "else if (cmd === 'drift-check') {",
+      "  process.stdout.write(JSON.stringify({ ok: true, kind: 'drift_check', changed_node_ids: [], neighbor_files: [] }))",
+      "}",
+      "else { process.stdout.write(JSON.stringify({ ok: true, kind: cmd })) }",
+    ].join("\n")
+    await fs.writeFile(binPath, script)
+    await fs.chmod(binPath, 0o755)
+    await fs.writeFile(statePath, "1", "utf8")
+    await appendCgraphConfig(tmpDir, binPath)
+    await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "feature.js"), "export const feature = true\n", "utf8")
+  })
+
+  after(async () => { await rmDir(tmpDir) })
+
+  it("still surfaces the collision when the capability disappears", async () => {
+    const advisoryState = path.join(tmpDir, ".btrain", "cgraph-advisory-state.jsonl")
+
+    const claim = await runCli(
+      ["handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Record a real overlap",
+       "--owner", "codex", "--reviewer", "claude", "--files", "src/"],
+      tmpDir, { BTRAIN_AGENT: "codex" },
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+
+    await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+    assert.match(
+      await fs.readFile(advisoryState, "utf8").catch(() => ""),
+      /lock_overlap/,
+      "phase 1 should record a lock_overlap advisory",
+    )
+
+    // Phase 2: cgraph no longer advertises blast-radius at all.
+    await fs.writeFile(statePath, "2", "utf8")
+    const afterDrop = await runCli(["handoff", "--repo", tmpDir], tmpDir, { BTRAIN_AGENT: "codex" })
+
+    assert.match(
+      await fs.readFile(advisoryState, "utf8").catch(() => ""),
+      /lock_overlap/,
+      "an unsupported producer cannot disprove the overlap, so it must be preserved",
+    )
+    // The bug: this printed nothing at all.
+    assert.match(afterDrop.stdout, /cgraph: degraded/, "a preserved advisory must not render as silence")
+    assert.match(
+      afterDrop.stdout,
+      /blast-radius/,
+      "the degradation should name the capability that went missing",
+    )
+  })
+})

@@ -58,6 +58,14 @@ const FILE_LOCK_TIMEOUT_MS = 5000
 const CGRAPH_ADVISORY_LOCK_TIMEOUT_MS = 500
 const CGRAPH_STATUS_CACHE_TTL_MS = 2000
 const DEFAULT_CGRAPH_GRAPH_MODE = "shared-working"
+
+// Which cgraph capability produces each advisory kind. Used to say which
+// capability went missing when an advisory has to be carried forward because
+// nothing could re-check it. Kinds absent here are named as themselves.
+const CGRAPH_ADVISORY_PRODUCERS = {
+  lock_overlap: "blast-radius",
+  drift: "drift-check",
+}
 const DEFAULT_CGRAPH_ADVISE_ON = ["lock_overlap", "drift", "packet_truncated"]
 const cgraphProducerCache = new Map()
 
@@ -4611,6 +4619,26 @@ async function buildLiveCgraphMetadata(repoRoot, config, state, laneId = "", eve
     metadata.advisories = visibleAdvisories
   } else {
     delete metadata.advisories
+  }
+
+  // A preserved advisory whose producer never ran this pass leaves the metadata
+  // looking healthy: the producer guards are skipped entirely when the adapter
+  // stops advertising the capability, so nothing sets `degraded_reason`, and a
+  // carried-forward collision alone did not make the CLI print anything. The
+  // result was a known, unverifiable overlap rendering as silence -- the same
+  // failure as the empty graph reading clean, reached by a third path.
+  //
+  // Any advisory carried forward is by definition one this run could not
+  // re-observe, so the run is not clean whatever the producers did or did not
+  // report.
+  if ((preserved || []).some((entry) => adviseKinds.has(entry.kind)) && metadata.status === "ok") {
+    const kinds = [...new Set(preserved.filter((e) => adviseKinds.has(e.kind)).map((e) => e.kind))].sort()
+    const unsupported = kinds.filter((kind) => !adapter.supports(CGRAPH_ADVISORY_PRODUCERS[kind] || kind))
+    metadata.status = "degraded"
+    metadata.degraded_reason = unsupported.length > 0
+      ? `${unsupported.join(", ")} advisory preserved but cgraph no longer supports ${
+        unsupported.map((kind) => CGRAPH_ADVISORY_PRODUCERS[kind] || kind).join(", ")}`
+      : `${kinds.join(", ")} advisory preserved without a conclusive check this run`
   }
   if (surfaced.length > 0) {
     metadata.fresh_advisories = surfaced
