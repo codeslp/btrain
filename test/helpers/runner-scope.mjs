@@ -21,6 +21,18 @@ const LANE_SCOPE_KEYS = [
   "BTRAIN_LOOP_ACTIVE",
 ]
 
+/**
+ * The variables a test subprocess must not inherit, as one source.
+ *
+ * Exported so the npm-script guard derives from the same list rather than
+ * pinning one variable: adding a seventh here and to `buildLoopRunnerEnv` while
+ * forgetting `package.json` used to pass every guard while `npm test` broke
+ * under a dispatch exactly as before.
+ */
+export function laneScopeKeys() {
+  return [...LANE_SCOPE_KEYS]
+}
+
 export function withoutLaneScope(env = process.env) {
   const clean = { ...env }
   for (const key of LANE_SCOPE_KEYS) {

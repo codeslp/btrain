@@ -1,4 +1,4 @@
-import { withoutLaneScope } from "./helpers/runner-scope.mjs"
+import { withoutLaneScope, laneScopeKeys } from "./helpers/runner-scope.mjs"
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
@@ -453,23 +453,61 @@ describe("lane-scope stripping keeps pace with the runner env", () => {
     assert.equal(clean.BTRAIN_LOOP_ACTIVE, undefined)
   })
 
-  it("strips every BTRAIN_ variable buildLoopRunnerEnv injects", async () => {
+  it("strips every environment variable buildLoopRunnerEnv injects", async () => {
     // Derived from core.mjs rather than restated, because restating it is what
     // drifted. buildLoopRunnerEnv is not exported, so read its source.
+    //
+    // An earlier version of this guard had two holes, both found by review and
+    // both silent — the worst kind, because a guard that passes by finding
+    // nothing is worse than no guard:
+    //
+    //   1. It resolved computed keys only via /\[([A-Z0-9_]+_ENV)\]/, so a
+    //      variable introduced through a const NOT suffixed `_ENV` was
+    //      invisible. BTRAIN_LOOP_ACTIVE was caught only because its const
+    //      happens to end in `_ENV`.
+    //   2. Its pattern was BTRAIN_ only, so BRAIN_TRAIN_AGENT was never in the
+    //      derived set at all, and the `>= 5` floor was a coincidence of the
+    //      current count rather than an invariant.
     const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/brain_train/core.mjs")
     const source = await fs.readFile(corePath, "utf8")
     const start = source.indexOf("function buildLoopRunnerEnv(")
     assert.ok(start !== -1, "buildLoopRunnerEnv must still exist for this guard to mean anything")
     const body = source.slice(start, source.indexOf("\n}\n", start))
 
+    const ENV_NAME = /^(?:BTRAIN|BRAIN_TRAIN)_[A-Z0-9_]+$/
     const injected = new Set()
-    for (const m of body.matchAll(/^\s*(?:env\.)?(BTRAIN_[A-Z0-9_]+)\s*[:=]/gm)) injected.add(m[1])
-    // `[BTRAIN_LOOP_ACTIVE_ENV]: "1"` is set through a constant, not a literal.
-    for (const m of body.matchAll(/\[([A-Z0-9_]+_ENV)\]\s*:/g)) {
-      const decl = source.match(new RegExp(`const ${m[1]} = "(BTRAIN_[A-Z0-9_]+)"`))
-      if (decl) injected.add(decl[1])
+
+    // Literal keys: `BTRAIN_AGENT: x`, `env.BTRAIN_LANE = y`.
+    for (const m of body.matchAll(/(?:^\s*|env\.)([A-Z][A-Z0-9_]*)\s*[:=][^=]/gm)) {
+      if (ENV_NAME.test(m[1])) injected.add(m[1])
     }
-    assert.ok(injected.size >= 5, `expected to find the injected vars, found ${[...injected]}`)
+    // Computed keys: `[ANY_CONST]: "1"`. Resolve the const by name, whatever
+    // it is called, and accept single or double quotes.
+    for (const m of body.matchAll(/\[([A-Za-z_$][A-Za-z0-9_$]*)\]\s*:/g)) {
+      const decl = source.match(new RegExp(`const ${m[1]} = ["']([A-Z][A-Z0-9_]*)["']`))
+      if (decl && ENV_NAME.test(decl[1])) injected.add(decl[1])
+      else {
+        assert.fail(
+          `computed key [${m[1]}] in buildLoopRunnerEnv could not be resolved to an environment `
+          + "variable name. Resolve it here, or this guard is silently ignoring an injected variable.",
+        )
+      }
+    }
+    // `delete env.X` marks a variable this function owns even when it is
+    // clearing it, so it belongs in the strip list too.
+    for (const m of body.matchAll(/delete\s+env\.([A-Z][A-Z0-9_]*)/g)) {
+      if (ENV_NAME.test(m[1])) injected.add(m[1])
+    }
+
+    // The floor is the full current set, not a number chosen to pass. If
+    // buildLoopRunnerEnv is restructured so these are no longer found, this
+    // fails loudly rather than passing on an empty set.
+    for (const expected of [
+      "BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LOOP_ACTIVE",
+      "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO",
+    ]) {
+      assert.ok(injected.has(expected), `${expected} must be derivable from buildLoopRunnerEnv; found ${[...injected].sort()}`)
+    }
 
     const stripped = withoutLaneScope({
       ...Object.fromEntries([...injected].map((k) => [k, "1"])),
@@ -490,11 +528,17 @@ describe("lane-scope stripping keeps pace with the runner env", () => {
     for (const name of ["test", "test:e2e", "test:formal"]) {
       const script = pkg.scripts[name]
       assert.ok(script, `${name} script must exist`)
-      assert.match(
-        script,
-        /-u BTRAIN_LOOP_ACTIVE\b/,
-        `${name} must unset BTRAIN_LOOP_ACTIVE or the full suite fails under a dispatch`,
-      )
+      // Derived from the helper, not pinned to one variable: adding a seventh
+      // to both buildLoopRunnerEnv and LANE_SCOPE_KEYS while forgetting
+      // package.json used to pass every guard while npm test broke under a
+      // dispatch exactly as before.
+      for (const key of laneScopeKeys()) {
+        assert.match(
+          script,
+          new RegExp(`-u ${key}\\b`),
+          `${name} must unset ${key} or the full suite fails under a dispatch`,
+        )
+      }
     }
   })
 })
