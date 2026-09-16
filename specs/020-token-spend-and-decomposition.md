@@ -435,13 +435,11 @@ Tasks:
    ```
    ls ~/.codegraphcontext/contexts | wc -l
    ```
-6. **Partly done, and the earlier claim was wrong.** `.cgcignore` exists at the
+6. **Pending on this branch**, for the same reason as task 1. `.gitignore` gains
+   the `.cgcignore` entry on the WS1 branch, which lands with PR #63.
+   `grep cgcignore .gitignore` returns nothing at this commit, so treat it as
+   unmet until #63 merges. The `.cgcignore` file itself already exists at the
    repository root and carries the `agentchattr/.venv/` pattern from task 7.
-   It is **not** in `.gitignore` — `grep cgcignore .gitignore` returns nothing,
-   and `git status` still lists the file as untracked. An earlier revision
-   marked this "Done"; that was not verified. Decide whether the file should be
-   committed or ignored, and land that in the WS1 branch, which owns
-   `.gitignore`. This documentation branch does not.
 7. Add `agentchattr/.venv/` to `.cgcignore` so language detection stops counting
    vendored Python. This does not help on 0.4.2, which ignores `.cgcignore`
    during detection, but it is correct for the merged version.
