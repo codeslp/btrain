@@ -233,7 +233,16 @@ Measured on btrain with kkg 0.4.2 on 2026-09-14:
 | `kkg index . --code-only` (226 files) | 47.3 s | 0 CALLS edges |
 | `scip-typescript` with a `tsconfig.json` | 0.95 s | 4.7 MB, 10,770 references |
 
-Indexing is not slow. The graph is empty for a different reason.
+**These timings do not generalize, and an earlier revision drew the wrong
+conclusion from them.** It read "indexing is not slow" off the 47-second fork
+run. The fork was fast because it did no call resolution at all — that is the
+same defect as the 0 CALLS edges beside it, not an independent result. The real
+call-resolving index on upstream takes **1,612 seconds (26.9 minutes)**,
+measured below, which is over 30x the figure here and is why `TIMEOUTS.index`
+at 30 seconds is wrong by two orders of magnitude.
+
+Read this table as evidence that the fork produces no call graph. Do not size
+indexing from it.
 
 ## Context receipt
 
@@ -280,6 +289,16 @@ Indexing is not slow. The graph is empty for a different reason.
 ## Workstreams
 
 ### Workstream 1: Repair cgraph on btrain
+
+> **Code status: pending on this branch.** This section describes the adapter
+> and `core.mjs` changes in the past tense because they are written and
+> reviewed, but they land on **PR #63**, not here. In the tree you are reading,
+> `cgraph_adapter.mjs` still publishes a `blast_radius` block for any `ok`
+> response carrying a summary, including an all-zero one, and `core.mjs` does
+> the same on its live path. Do not enable `[cgraph]` in `.btrain/project.toml`
+> until #63 merges: the false-clean-result bug described below is still present
+> and enabling cgraph is exactly what makes it live.
+
 
 cgraph produces zero CALLS edges on btrain. `blast-radius`, `impact`,
 `execution-flow`, and `drift-check` return empty results. Three separate causes
@@ -498,8 +517,14 @@ clean.
 ### Workstream 2: Decompose `core.mjs`
 
 `src/brain_train/core.mjs` holds 10,754 lines and 368,903 characters, which is
-about 92,000 tokens. It defines 352 top-level functions behind 2 exports. It is
-56 percent of the source tree.
+about 92,000 tokens. It is 56 percent of the source tree.
+
+It defines 352 top-level functions and exports **68 names** through two `export`
+statements. An earlier revision said "behind 2 exports", which counted the
+statements and read as though the file were a deep module with a narrow
+interface. It is the opposite: 68 exported names is a wide interface, and that
+is precisely what makes the split hard. Every extraction has to keep those 68
+names resolvable from `core.mjs`, so each stage re-exports what it moves.
 
 An agent that reads this file spends about half of a 200,000-token window. The
 file then stays in context, and btrain pays for it again as cache reads on every
@@ -577,9 +602,18 @@ Tasks:
 3. Run `npm test` after each extraction.
 4. Record the Spec 014 formal impact for each extraction. A pure move has no
    semantic impact. Any guard change has semantic impact.
+5. Split `src/brain_train/cli.mjs` as well. At 2,669 lines it is already over
+   the acceptance ceiling, so tasks 1-4 could all complete and still leave the
+   criterion unmet. It is a quarter the size of `core.mjs` and mostly argument
+   parsing and output formatting, so treat it as the smaller, later half of the
+   same workstream rather than a separate one. Take it after `core.mjs` is
+   under the ceiling, since several of its command handlers will move with the
+   functions they call.
 
-Acceptance: no file in `src/brain_train/` exceeds 2,000 lines. `npm test`
-passes. The public export surface does not change.
+Acceptance: no file in `src/brain_train/` exceeds 2,000 lines — which today
+means both `core.mjs` (10,754 in this tree, 10,854 once PR #63 merges) and
+`cli.mjs` (2,669), not `core.mjs` alone.
+`npm test` passes. The public export surface does not change.
 
 ### Workstream 3: Enforce a context budget
 
