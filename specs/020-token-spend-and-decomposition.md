@@ -652,10 +652,14 @@ seams, and it accounts for roughly half the file.
 - **Reviewer dispatch is part of the loop.** `dispatchNeedsReviewReviewer` calls
   `runLoop`, which calls `pushAgentPrompt` and `finalizeLoopTrace`.
 
-The seed also omits, by size: cgraph advisory handling (36 functions), template
-and bundled-skill sync (31), repo registry and init (20), the TOML parser and
-config accessors (20), status/doctor/watchdog (22), and the split of handoff
-mutation from handoff read.
+The seed also omits, by size: cgraph advisory handling, template and
+bundled-skill sync, the repo registry, the TOML parser and config accessors,
+status/doctor/watchdog, and the split of handoff mutation from handoff read.
+Sizes for each are in the generated table below rather than here, because the
+earlier estimates in this paragraph (36, 31, 20, 20, 22) were written before the
+membership existed and three of the five do not match it — cgraph is 30, the
+registry splits into 7 commands plus 7 primitives that land in `config`, and
+status is 16.
 
 **A method warning, because it changes the answer.** A call graph built from
 word-boundary regex over function bodies reports `doctor` with 11 callers and
@@ -665,7 +669,15 @@ from call expressions — `ast-grep` with `$F($$$A)` — plus a sweep for functi
 values passed to `.map`/`.filter`/`.sort`/`.some`/`.find`/`.flatMap`. A regex
 graph of this file invents cycles that do not exist and misses the ones that do.
 
-##### Ten helpers sit in the wrong neighbourhood
+##### Ten helpers sit in the wrong neighbourhood — superseded
+
+> The table below was the seed's estimate, written before any membership
+> existed. It is kept because the *reasoning* is the method that produced the
+> final assignment, but do not implement from it: the actual relocations are in
+> *How the membership was derived*, and they are not these ten. One row is
+> simply wrong — `getLoopActorForState` has zero callers and zero callees, so it
+> closes no cycle anywhere. Cycles are a property of a grouping, not of the
+> code; the function call graph itself is acyclic.
 
 Each one, left where it is, closes a cycle. Relocating them is part of the
 stage that moves their destination, not a separate change.
@@ -701,23 +713,39 @@ The two calls at 1551-1552 are inside a function and do not run at module
 evaluation. That makes it a temporal-dead-zone crash, not a warning. Leaf-first is
 not riskier here; it is wrong.
 
-The thirteen stages, each independently landable with `npm test` green:
+The thirteen stages. Membership for every one of the 352 functions is in
+`specs/020-ws2-module-assignment.json`; this table is generated from it by
+`node scripts/decomposition_inventory.mjs --stages`, which re-derives the
+counts, the line totals and the `Imports` column from the live call graph and
+exits non-zero if any stage calls into a later one. Do not hand-edit the table.
 
-| # | Module | Fns | ~Lines | Imports | Names `core.mjs` takes back |
-|---:|---|---:|---:|---|---:|
-| 1 | `internal/fsx.mjs` | 46 | 677 | — | 41 |
-| 2 | `internal/config.mjs` | 20 | 270 | 1 | 15 |
-| 3 | `internal/handoff-doc.mjs` | 36 | 738 | 1,2 | 23 |
-| 4 | `internal/lane-state.mjs` | 52 | 860 | 1,2,3 | 34 |
-| 5 | `internal/templates.mjs` | 31 | 946 | 1,2,4 | 16 |
-| 6 | `internal/repos.mjs` | 20 | 631 | 1,2,4,5 | 14 |
-| 7 | `internal/cgraph-advisories.mjs` | 36 | 798 | 1,3,4 | 8 |
-| 8 | `internal/agents.mjs` | 11 | 327 | 2,4 | 7 |
-| 9 | `internal/handoff-history.mjs` | 21 | 471 | 1,2,3,4,8 | 11 |
-| 10 | `internal/loop.mjs` | 45 | 1,425 | 1,2,3,4 | 4 |
-| 11 | `internal/handoff-write.mjs` | 7 | 1,133 | nine | 6 |
-| 12 | `internal/handoff-read.mjs` | 5 | 709 | eight | 4 |
-| 13 | `internal/status.mjs` | 22 | 1,132 | eleven | 7 |
+| # | Module | Fns | ~Lines | Imports |
+|---:|---|---:|---:|---|
+| 1 | `internal/fsx.mjs` | 45 | 586 | — |
+| 2 | `internal/config.mjs` | 33 | 494 | 1 |
+| 3 | `internal/agents.mjs` | 19 | 410 | 1,2 |
+| 4 | `internal/handoff-history.mjs` | 11 | 121 | 1,2,3 |
+| 5 | `internal/handoff-doc.mjs` | 42 | 834 | 1,2,4 |
+| 6 | `internal/lane-state.mjs` | 47 | 796 | 1,2,3,4,5 |
+| 7 | `internal/templates.mjs` | 31 | 789 | 1,2,3,5,6 |
+| 8 | `internal/repos.mjs` | 7 | 304 | 1,2,3,6,7 |
+| 9 | `internal/cgraph-advisories.mjs` | 30 | 609 | 1,4,6 |
+| 10 | `internal/handoff-read.mjs` | 8 | 446 | 1,2,3,5,6,9 |
+| 11 | `internal/loop.mjs` | 41 | 786 | 1,2,3,5,10 |
+| 12 | `internal/handoff-write.mjs` | 22 | 1,760 | 1,2,3,4,5,6,7,9,10 |
+| 13 | `internal/status.mjs` | 16 | 700 | 1,2,3,5,6,7,9,10,11 |
+
+352 functions, 8,635 lines. `Imports` lists the stage numbers a module actually
+calls into, derived from the call graph rather than intended by hand.
+
+Eight exported names are not functions and are assigned separately in the same
+file: `BtrainError` to stage 1 (`normalizePositiveInteger` and
+`normalizePositiveDuration` throw it and land there), `DEFAULT_LOCK_TTL_MS` to
+stage 6, `DEFAULT_SPILL_NEXT_CHARS` and `HANDOFF_NOTES_DIRNAME` to stage 5, and
+the four `TASK_ARTIFACT_ENVELOPE_*` names stay re-exports from
+`harness/task-envelope.mjs`. `BtrainError` is the one to get right: it is a
+class, so it appears in no function inventory, and it is instantiated at 80
+sites inside `core.mjs`.
 
 After stage 13 `core.mjs` is a facade of roughly 130 lines: the export block is
 70 lines on its own (10,685-10,754), the existing sibling import header is 49
@@ -730,14 +758,14 @@ its closing brace at column 0. Leading JSDoc and the blank line between
 functions are not counted, which is why the per-stage lines sum to less than the
 file's 10,754.
 
-**Stage 11 is the riskiest.** Its five named functions measure 1,305 lines on
-their own — `patchHandoff` 579 (the largest function in the repository),
-`resolveHandoff` 300, `claimHandoff` 198, `requestChangesHandoff` 137,
-`disposeRepair` 91. An earlier draft gave the whole seven-function stage as
-1,133, which is less than those five; the `~Lines` column is therefore wrong
-here and the stage total is not yet established, because the two remaining
-members of the stage are not named anywhere in this plan. See the open item
-under *Per-stage membership* below.
+**Stage 12, `handoff-write`, is the riskiest.** At 1,760 lines it is the largest
+module and more than twice the next one. Five of its 22 functions account for
+1,305 of those lines: `patchHandoff` 579 (the largest function in the
+repository), `resolveHandoff` 300, `claimHandoff` 198, `requestChangesHandoff`
+137, `disposeRepair` 91. An earlier draft of this table gave the stage as seven
+functions and 1,133 lines, which is less than those five alone — the kind of
+error a generated table cannot make.
+
 It depends on nine already-extracted modules, so a missed import is a runtime
 `ReferenceError`, not a parse error. It is also the stage the formal harness
 watches most closely: `test/formal/lane-lock-harness.test.mjs` imports
@@ -749,33 +777,53 @@ and **not** `npm test`. The harness gates itself on `BTRAIN_FORMAL=1`
 sets, so running it any other way passes silently without checking a single
 invariant.
 
-Stage 4 is second, for a different reason: 34 names cross the boundary, and the
-merge of lanes, locks and overrides is the grouping decision most likely to draw
-review pushback.
+Stage 6, `lane-state`, is second, for a different reason: at 47 functions it is
+the widest, and the merge of lane identity, the lock registry and override
+grants into one module is the grouping decision most likely to draw review
+pushback. It also owns 17 of the 69 exported names, more than any other stage.
 
-##### Per-stage membership — the open item
+##### How the membership was derived
 
-This plan gives each stage a count but never says **which** functions it
-contains, and there is no inventory file to point at. An implementer cannot
-start stage 1 from this table: it says `fsx` takes 46 functions without naming
-one of the 46. Nor can a reviewer audit the `Imports` column, because the claim
-"at stage *k* every callee already lives in an extracted file" is only checkable
-against a membership list. The same gap is why stage 11's line total went
-uncorrected for a draft: with no membership, nothing cross-checks the column
-against the functions it claims to cover.
+`specs/020-ws2-module-assignment.json` assigns all 352 functions. It was not
+produced by reading names alone. The procedure, which is repeatable:
 
-Until the membership lands, treat `Fns`, `~Lines`, `Imports` and
-`Names core.mjs takes back` as unverified. The `~Lines` column sums to 10,117,
-which matches neither the 8,635 lines inside top-level functions nor
-8,635 + 424 = 9,059 with module-level constants, so at least one row is wrong
-independently of stage 11. `Names core.mjs takes back` sums to 190 against a
-69-name export surface, and the column is never defined.
+1. Assign by responsibility, using the seed groups above and the function names.
+2. Build the module graph from the real call graph and look for any edge from a
+   stage into an equal or later stage. Each violation names the exact function
+   pair that causes it, so it is actionable rather than a warning.
+3. Relocate the offending function, or reorder the stages, and repeat until
+   there are no violations.
 
-Producing it is mechanical now that `scripts/decomposition_inventory.mjs`
-exists: assign each of the 352 functions to one of the thirteen modules, commit
-the assignment, and let the script derive the counts, the line totals and the
-module-level import direction from the call graph. The assignment itself is a
-judgement call and belongs to whoever owns the extraction.
+The first pass produced 15 violations, the second 5, the third none. The
+relocations that fell out of it are the same *kind* of move as the seed's ten
+helpers, but they are not the same ten — they are whatever this grouping and
+this order require:
+
+| Function | Moved to | Violation it fixed |
+|---|---|---|
+| `extractResolvableRef` | `fsx` | `listDiffPathsFromBase` reached forward into `handoff-doc` |
+| `resolveGitHooksDir` | `config` | it read `gitHooksDisabledByConfig` |
+| `normalizeReviewMode` | `config` | `getReviewConfig` reached forward into `agents` |
+| `isLanesEnabled`, `getConfiguredLaneSectionIds` | `lane-state` | both read lane identity |
+| `readCurrentState`, `getStateUpdatedDate`, `getMostRecentlyUpdatedState`, `defaultNextActionForStatus`, `buildLaneSections` | `handoff-doc` | five modules called into `handoff-read` |
+| `computeHandoffStateHash`, `pickHashFieldsFromCurrent` | `handoff-doc` | `checkHandoff` reached forward into `handoff-write` |
+| `resolveCurrentStateFromWorkflowEvents` | `handoff-doc` | it read `getStateUpdatedDate` |
+| `compactHandoffHistory`, `compactLaneHandoffHistory` | `lane-state` | both read `getLaneConfigs` |
+| `syncActiveAgents` | `repos` | it called `initRepo` |
+| the seven registry primitives (`loadRegistry`, `saveRegistry`, `getRegisteredRepos`, `findRegistryRepo`, `upsertRepoEntry`, `normalizeRepoName`, `ensureGlobalLayout`) | `config` | `templates` and `repos` each needed the other |
+
+That last one is the only split of a seed group: the registry *primitives* sit
+in `config`, the registry *commands* (`initRepo`, `registerRepo`, `removeRepo`,
+`pruneRepos`, `setRepoEnabled`, `listRepos`) stay in `repos`. Without it
+`templates` and `repos` are a genuine two-module cycle — `initRepo` builds
+templates, and `ensureTemplates` needs the global layout.
+
+Two columns from the earlier draft are gone rather than corrected.
+`Names core.mjs takes back` summed to 190 against a 69-name export surface and
+was never defined; the export ownership it was reaching for is in the
+assignment file, where 61 of the 69 names belong to a module and the remaining
+8 are listed separately. The old `~Lines` column summed to 10,117 against a
+function-line total of 8,635.
 
 ##### The function call graph has no cycles
 
@@ -822,29 +870,31 @@ This is why the refactor is tractable. `core.mjs` has **zero module-level `let`
 or `var` bindings**. All 60 module-level bindings are `const`. The only one
 holding a mutable structure is `cgraphProducerCache` (a `Map`), read and written
 by exactly one function, `runCachedCgraphProducer`; both move together at stage
-7. There is no memoized adapter, no config singleton, no lazy global.
+9. There is no memoized adapter, no config singleton, no lazy global.
 
 Eleven constants have readers in more than one target module. None blocks a
 split — each is an immutable scalar, string or never-mutated literal, and each
 becomes an export from the lowest module in the graph that needs it. The two
 that constrain staging: `DEFAULT_LOOP_TIMEOUT_MS` and
-`DEFAULT_LOOP_POLL_INTERVAL_MS` are read by stages 11 and 12, so they must
-export from stage 10; `DEFAULT_HISTORY_KEEP` is read by stage 13 and exports
-from stage 9. `DEFAULT_CURRENT` is spread-copied at all nine of its use sites
-and never mutated, so sharing it from stage 3 is safe.
+`DEFAULT_LOOP_POLL_INTERVAL_MS` export from `loop` (stage 11);
+`DEFAULT_HISTORY_KEEP` from `handoff-history` (stage 4). `DEFAULT_CURRENT` is
+spread-copied at all nine of its use sites and never mutated, so sharing it from
+`handoff-doc` (stage 5) is safe. Re-check these against the assignment file
+after any regrouping — the constant list was written against the earlier stage
+numbering and only the four named here have been re-derived.
 
 ##### Formal impact
 
 All thirteen stages are designed as pure moves with no semantic impact under
 spec 014. Three places where that is not automatic:
 
-1. **Stage 7 collides with PR #63**, which changes the same cgraph functions
+1. **Stage 9 collides with PR #63**, which changes the same cgraph functions
    (`buildLiveCgraphMetadata`, `reconcileCgraphAdvisories`,
    `getDoctorCgraphSummary`) with real semantic impact. Land #63 first, or take
-   stage 7 last. Doing both at once produces a diff in which the move and the
+   stage 9 last. Doing both at once produces a diff in which the move and the
    behaviour change cannot be told apart, and neither impact can be recorded
    honestly.
-2. **Do not tidy `patchHandoff` at stage 11.** Every guard reorder is semantic
+2. **Do not tidy `patchHandoff` at stage 12.** Every guard reorder is semantic
    impact on the lane-lock state machine the TLA harness models. Move it
    unchanged; simplify separately with its own impact record.
 3. **Dead-export removal is a surface change, not a move.** Eight exported names
@@ -858,9 +908,11 @@ spec 014. Three places where that is not automatic:
 ##### The ceiling is reachable
 
 The 8,635 lines inside top-level functions plus 424 lines of module-level
-constants distribute with `loop` largest at about 1,425. With import headers the
-biggest file lands near 1,500, roughly 25 percent under the 2,000-line ceiling,
-and no group is irreducibly larger. Two honest caveats: the ceiling is a line
+constants distribute with `handoff-write` largest at 1,760. With an import
+header the biggest file lands near 1,800, about 10 percent under the 2,000-line
+ceiling — clearance, but less than the earlier draft's estimate of 1,500
+suggested, and `handoff-write` is the one module a single addition could push
+over. Two honest caveats: the ceiling is a line
 count, not a complexity measure, and `patchHandoff` is still one 579-line
 function afterwards; and `loop` is the one module a future addition could push
 over, with a clean internal seam at runner-execution versus orchestration if it

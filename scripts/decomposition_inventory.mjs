@@ -98,6 +98,47 @@ export function stronglyConnectedComponents(nodes, edges) {
   return out
 }
 
+// Validate the committed stage assignment against the live call graph. The
+// plan's whole staging rule is "at stage k every callee already lives in an
+// extracted file", which is checkable only against a membership list.
+export function checkStages(spans, edges) {
+  const assignmentPath = path.join(repoRoot, "specs", "020-ws2-module-assignment.json")
+  const doc = JSON.parse(fs.readFileSync(assignmentPath, "utf8"))
+  const stage = new Map()
+  for (const [mod, fns] of Object.entries(doc.modules)) {
+    for (const fn of fns) stage.set(fn, { mod, n: doc.order.indexOf(mod) + 1 })
+  }
+
+  const missing = spans.filter((f) => !stage.has(f.name)).map((f) => f.name)
+  const unknown = [...stage.keys()].filter((n) => !spans.some((f) => f.name === n))
+
+  const lines = new Map(spans.map((f) => [f.name, f.lines]))
+  const deps = new Map(), violations = []
+  for (const [from, tos] of edges) {
+    const a = stage.get(from)
+    for (const to of tos) {
+      const b = stage.get(to)
+      if (!a || !b || a.mod === b.mod) continue
+      if (!deps.has(a.mod)) deps.set(a.mod, new Set())
+      deps.get(a.mod).add(b.n)
+      // A stage may only call into earlier stages.
+      if (b.n >= a.n) violations.push(`${a.mod}(${a.n}) -> ${b.mod}(${b.n}) via ${from} -> ${to}`)
+    }
+  }
+
+  const rows = doc.order.map((mod, i) => {
+    const fns = doc.modules[mod]
+    return {
+      n: i + 1,
+      mod,
+      fns: fns.length,
+      lines: fns.reduce((a, f) => a + (lines.get(f) || 0), 0),
+      imports: [...(deps.get(mod) || [])].sort((x, y) => x - y),
+    }
+  })
+  return { rows, violations, missing, unknown }
+}
+
 function main() {
   const args = process.argv.slice(2)
   const { spans, fileLines } = readFunctionSpans(target)
@@ -112,6 +153,26 @@ function main() {
       total += f?.lines || 0
     }
     console.log("TOTAL".padEnd(30), total)
+    return
+  }
+
+  if (args.includes("--stages")) {
+    const { rows, violations, missing, unknown } = checkStages(spans, buildCallGraph(target, spans))
+    console.log("| # | Module | Fns | ~Lines | Imports |")
+    console.log("|---:|---|---:|---:|---|")
+    for (const r of rows) {
+      console.log(`| ${r.n} | \`internal/${r.mod}.mjs\` | ${r.fns} | ${r.lines.toLocaleString("en-US")} | ${r.imports.join(",") || "—"} |`)
+    }
+    const totF = rows.reduce((a, r) => a + r.fns, 0)
+    const totL = rows.reduce((a, r) => a + r.lines, 0)
+    console.log(`\ntotals: ${totF} functions, ${totL.toLocaleString("en-US")} lines`)
+    const biggest = [...rows].sort((a, b) => b.lines - a.lines)[0]
+    console.log(`largest module: ${biggest.mod} at ${biggest.lines.toLocaleString("en-US")} lines`)
+    if (missing.length) console.log(`\nUNASSIGNED (${missing.length}): ${missing.join(", ")}`)
+    if (unknown.length) console.log(`\nASSIGNED BUT ABSENT (${unknown.length}): ${unknown.join(", ")}`)
+    console.log(`\nstage-order violations: ${violations.length}`)
+    for (const v of violations) console.log("  " + v)
+    if (violations.length || missing.length || unknown.length) process.exitCode = 1
     return
   }
 
