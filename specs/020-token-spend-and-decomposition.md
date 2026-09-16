@@ -674,10 +674,9 @@ graph of this file invents cycles that do not exist and misses the ones that do.
 > The table below was the seed's estimate, written before any membership
 > existed. It is kept because the *reasoning* is the method that produced the
 > final assignment, but do not implement from it: the actual relocations are in
-> *How the membership was derived*, and they are not these ten. One row is
-> the actual relocations are in *How the membership was derived*, and they are
-> not these ten. Cycles are a property of a grouping, not of the code; the
-> function call graph itself is acyclic.
+> *How the membership was derived*, and they are not these ten. Cycles are a
+> property of a grouping, not of the code; the function call graph itself is
+> acyclic.
 >
 > A revision of this section claimed one row here was wrong outright, on the
 > grounds that `getLoopActorForState` had no callers and no callees. That was an

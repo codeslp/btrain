@@ -116,7 +116,15 @@ export function checkStages(spans, edges) {
   }
 
   const missing = spans.filter((f) => !stage.has(f.name)).map((f) => f.name)
-  const unknown = [...stage.keys()].filter((n) => !spans.some((f) => f.name === n))
+  // A name assigned but absent is normally an error. The exception is a
+  // function that lands with an unmerged PR: the assignment has to be correct
+  // against the tree extraction will start from, not only against main, and
+  // making that wait for a merge means someone has to remember to come back.
+  const pending = new Set(Object.entries(doc.pending || {})
+    .filter(([k]) => k !== "note").flatMap(([, v]) => v))
+  const absent = [...stage.keys()].filter((n) => !spans.some((f) => f.name === n))
+  const unknown = absent.filter((n) => !pending.has(n))
+  const notYetLanded = absent.filter((n) => pending.has(n))
 
   const lines = new Map(spans.map((f) => [f.name, f.lines]))
   const deps = new Map(), violations = []
@@ -132,17 +140,21 @@ export function checkStages(spans, edges) {
     }
   }
 
+  // Count what is on this tree. A pending function has no span here, so
+  // including it would report a total the tree cannot substantiate.
+  const onTree = new Set(spans.map((f) => f.name))
   const rows = doc.order.map((mod, i) => {
-    const fns = doc.modules[mod]
+    const fns = doc.modules[mod].filter((f) => onTree.has(f))
     return {
       n: i + 1,
       mod,
       fns: fns.length,
       lines: fns.reduce((a, f) => a + (lines.get(f) || 0), 0),
+      pending: doc.modules[mod].filter((f) => !onTree.has(f)).length,
       imports: [...(deps.get(mod) || [])].sort((x, y) => x - y),
     }
   })
-  return { rows, violations, missing, unknown }
+  return { rows, violations, missing, unknown, notYetLanded }
 }
 
 /**
@@ -332,7 +344,7 @@ function main() {
   }
 
   if (args.includes("--stages")) {
-    const { rows, violations, missing, unknown } = checkStages(spans, buildCallGraph(target, spans))
+    const { rows, violations, missing, unknown, notYetLanded } = checkStages(spans, buildCallGraph(target, spans))
     console.log("| # | Module | Fns | ~Lines | Imports |")
     console.log("|---:|---|---:|---:|---|")
     for (const r of rows) {
@@ -343,6 +355,7 @@ function main() {
     console.log(`\ntotals: ${totF} functions, ${totL.toLocaleString("en-US")} lines`)
     const biggest = [...rows].sort((a, b) => b.lines - a.lines)[0]
     console.log(`largest module: ${biggest.mod} at ${biggest.lines.toLocaleString("en-US")} lines`)
+    if (notYetLanded.length) console.log(`\npending, not on this tree yet (${notYetLanded.length}): ${notYetLanded.join(", ")}`)
     if (missing.length) console.log(`\nUNASSIGNED (${missing.length}): ${missing.join(", ")}`)
     if (unknown.length) console.log(`\nASSIGNED BUT ABSENT (${unknown.length}): ${unknown.join(", ")}`)
     console.log(`\nstage-order violations: ${violations.length}`)

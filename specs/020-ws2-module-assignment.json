@@ -289,6 +289,7 @@
       "buildLiveCgraphMetadata",
       "buildNeedsReviewCgraphMetadata",
       "buildResolvedCgraphAdvisoryEntry",
+      "clearCgraphRunState",
       "createDegradedCgraphMetadata",
       "createUnavailableCgraphAdapterResult",
       "dedupeCgraphAdvisories",
@@ -302,6 +303,7 @@
       "hasCgraphConfig",
       "hashCgraphAdvisoryContext",
       "isCgraphEnabled",
+      "listActiveCgraphAdvisoryKinds",
       "mergeCgraphMetadata",
       "normalizeCgraphStringList",
       "normalizePayloadAdvisories",
@@ -406,5 +408,12 @@
       "summarizeWatchdogRepair"
     ]
   },
-  "nonFunctionExportRule": "Home is the lowest-numbered stage that reads the binding, the same rule the shared constants use. An earlier revision placed DEFAULT_LOCK_TTL_MS in lane-state and DEFAULT_SPILL_NEXT_CHARS and HANDOFF_NOTES_DIRNAME in handoff-doc by guessing from their names; all three are read by config, which is stage 2. Several are also read at module-evaluation time, so their home must precede every reader, not merely the first function that uses them."
+  "nonFunctionExportRule": "Home is the lowest-numbered stage that reads the binding, the same rule the shared constants use. An earlier revision placed DEFAULT_LOCK_TTL_MS in lane-state and DEFAULT_SPILL_NEXT_CHARS and HANDOFF_NOTES_DIRNAME in handoff-doc by guessing from their names; all three are read by config, which is stage 2. Several are also read at module-evaluation time, so their home must precede every reader, not merely the first function that uses them.",
+  "pending": {
+    "note": "Functions that do not exist on main yet but will once the named PR merges. The stage validator accepts them as absent and validates them normally once they appear, so the assignment is correct against both trees and nobody has to remember to revisit it.",
+    "PR #63 (lane a, spec 020 WS1)": [
+      "clearCgraphRunState",
+      "listActiveCgraphAdvisoryKinds"
+    ]
+  }
 }
