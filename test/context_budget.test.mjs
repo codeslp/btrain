@@ -24,8 +24,8 @@ async function makeTranscriptDir() {
 }
 
 /** One assistant turn, in the shape Claude Code writes. */
-function turn({ input = 0, cacheWrite = 0, cacheRead = 0, output = 0 }) {
-  return JSON.stringify({
+function turn({ input = 0, cacheWrite = 0, cacheRead = 0, output = 0, timestamp = "" }) {
+  const record = {
     type: "assistant",
     message: {
       role: "assistant",
@@ -36,7 +36,35 @@ function turn({ input = 0, cacheWrite = 0, cacheRead = 0, output = 0 }) {
         output_tokens: output,
       },
     },
-  })
+  }
+  if (timestamp) record.timestamp = timestamp
+  return JSON.stringify(record)
+}
+
+/**
+ * A record Claude Code writes when the API call itself failed, or a synthetic
+ * "No response requested." turn. Both carry a full `usage` object with every
+ * field zero. Verified on this repo's own transcripts: an `apiErrorStatus: 401`
+ * record and a synthetic record, both all-zero.
+ */
+function errorTurn({ timestamp = "" } = {}) {
+  const record = {
+    type: "assistant",
+    isApiErrorMessage: true,
+    apiErrorStatus: 401,
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Failed to authenticate. API Error: 401" }],
+      usage: {
+        input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 0,
+      },
+    },
+  }
+  if (timestamp) record.timestamp = timestamp
+  return JSON.stringify(record)
 }
 
 async function writeTranscript(dir, sessionId, lines, mtimeMs = Date.now()) {
@@ -174,6 +202,77 @@ describe("context budget measurement", () => {
   })
 })
 
+describe("context budget measurement, records that are not measurements", () => {
+  it("does not read an API error record as zero context", async () => {
+    // Claude Code writes a full `usage` object with every field zero for a
+    // failed API call (401, 429) and for a synthetic "No response requested."
+    // turn. Taking the last usage record unconditionally read that as "this
+    // session is carrying 0 tokens" -- a silent pass at any context size, and a
+    // hard block that clears itself on the next auth blip. Reproduced on this
+    // repo's own transcript: truncated at its 401 record it returned
+    // {tokens: 0, peak: 771183} against a real 187,000 tokens.
+    const dir = await makeTranscriptDir()
+    try {
+      const file = await writeTranscript(dir, "errored", [
+        turn({ cacheRead: 300_000 }),
+        errorTurn(),
+      ])
+      const reading = await readLatestContextTokens(file)
+      assert.equal(
+        reading.tokens,
+        300_000,
+        "an error record proves nothing about context and must not overwrite the last real reading",
+      )
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("reports no reading at all when every record is an error record", async () => {
+    // The honest degradation. Absence of a reading is not a reading of zero,
+    // so this must reach the caller as "no measurement", not as a healthy 0.
+    const dir = await makeTranscriptDir()
+    try {
+      const file = await writeTranscript(dir, "all-errors", [errorTurn(), errorTurn()])
+      assert.equal(await readLatestContextTokens(file), null)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("takes the latest turn by time, not by position in the file", async () => {
+    // A resumed or forked session replays older records into the tail of the
+    // file. One real transcript on this machine jumps 7.6 hours backwards
+    // mid-file, from 997,512 tokens to 63,638. Reading the last line would
+    // report the stale, much smaller figure as current.
+    const dir = await makeTranscriptDir()
+    try {
+      const file = await writeTranscript(dir, "resumed", [
+        turn({ cacheRead: 100_000, timestamp: "2026-09-15T10:00:00.000Z" }),
+        turn({ cacheRead: 450_000, timestamp: "2026-09-15T18:00:00.000Z" }),
+        turn({ cacheRead: 60_000, timestamp: "2026-09-15T10:30:00.000Z" }),
+      ])
+      const reading = await readLatestContextTokens(file)
+      assert.equal(reading.tokens, 450_000, "the newest turn by timestamp is the current reading")
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("falls back to file order when no record carries a timestamp", async () => {
+    const dir = await makeTranscriptDir()
+    try {
+      const file = await writeTranscript(dir, "untimed", [
+        turn({ cacheRead: 400_000 }),
+        turn({ cacheRead: 90_000 }),
+      ])
+      assert.equal((await readLatestContextTokens(file)).tokens, 90_000)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 // ──────────────────────────────────────────────
 // Attribution
 // ──────────────────────────────────────────────
@@ -182,6 +281,22 @@ describe("context budget session attribution", () => {
   it("encodes the repo path the way Claude Code names its transcript directory", () => {
     const dir = resolveTranscriptDir("/Users/x/btrain", { CLAUDE_CONFIG_DIR: "/cfg" })
     assert.equal(dir, path.join("/cfg", "projects", "-Users-x-btrain"))
+  })
+
+  it("replaces every non-alphanumeric character, not just the separators", () => {
+    // The original only replaced "/". Claude Code replaces every character
+    // outside [A-Za-z0-9]. Checked against real directories under
+    // ~/.claude/projects: /Users/bfaris96/job_search resolves to
+    // -Users-bfaris96-job-search, and a path with a dot doubles the hyphen.
+    //
+    // The btrain case is the one that matters: lane worktrees live under
+    // <repo>/.claude/worktrees/<name>, so the "/"-only encoder pointed at a
+    // directory that does not exist, returned "unavailable", and the gate
+    // silently never fired on exactly the layout it is built for.
+    const at = (repo) => path.basename(resolveTranscriptDir(repo, { CLAUDE_CONFIG_DIR: "/cfg" }))
+    assert.equal(at("/Users/x/job_search"), "-Users-x-job-search", "underscore")
+    assert.equal(at("/Users/x/btrain/.claude/worktrees/lane-c"), "-Users-x-btrain--claude-worktrees-lane-c", "dot")
+    assert.equal(at("/Users/x/Claude Code/app"), "-Users-x-Claude-Code-app", "space")
   })
 
   it("trusts an explicitly named session", async () => {
@@ -406,6 +521,80 @@ describe("context budget gate", () => {
     assert.match(verdict.message, /200,000 soft ceiling/)
   })
 
+  it("prints the real turn count in the warning, not just in the return value", async () => {
+    // The turn count was fixed because it is printed to the user beside the
+    // claim that cost scales with turns. Only the internal counter was
+    // asserted, so replacing the printed value with 0 passed every test.
+    await writeTranscript(dir, "turns", [
+      turn({ cacheRead: 250_000, timestamp: "2026-09-15T10:00:00.000Z" }),
+      turn({ cacheRead: 250_000, timestamp: "2026-09-15T10:01:00.000Z" }),
+      turn({ cacheRead: 250_000, timestamp: "2026-09-15T10:02:00.000Z" }),
+    ])
+    const verdict = await evaluateContextBudget("/repo", {}, {
+      env: { BTRAIN_TRANSCRIPT_DIR: dir },
+      sessionId: "turns",
+    })
+    assert.equal(verdict.turns, 3)
+    assert.match(verdict.message, /over 3 turns/, "the printed count must be the measured one")
+  })
+
+  it("applies a lane ceiling through the gate, not only through the config reader", async () => {
+    // The lane override was tested one level down, at getContextBudgetConfig.
+    // Nothing passed a laneId to evaluateContextBudget, so the wire between
+    // them was unpinned: dropping `opts.laneId` entirely still passed.
+    const config = { context_budget: { lanes: { c: { soft_ceiling: 100_000 } } } }
+    const verdict = await evaluate("laned", 150_000, { config, laneId: "c" })
+    assert.equal(verdict.level, "warn", "the lane's lower soft ceiling must apply")
+    assert.equal(verdict.softCeiling, 100_000)
+
+    const other = await evaluate("unlaned", 150_000, { config, laneId: "d" })
+    assert.equal(other.level, "ok", "a lane with no override keeps the default")
+  })
+
+  it("reports exactly at a ceiling as under it, consistently for both", async () => {
+    // Nothing tested equality, so flipping both comparisons to >= passed. The
+    // choice matters at a round number a user is likely to configure.
+    assert.equal((await evaluate("at-soft", 200_000)).level, "ok")
+    assert.equal((await evaluate("at-hard", 400_000)).level, "warn")
+    assert.equal((await evaluate("over-hard", 400_001)).level, "block")
+  })
+
+  it("tells the user in the message, not only in the reason, that a setting was ignored", async () => {
+    // btrain's TOML parser does not strip trailing comments, so
+    // `hard_ceiling = 400000  # raised` arrives as one string and is rejected.
+    // The note reached `reason` alone, which the warn and block paths do not
+    // print, so a user whose ceiling was thrown away saw no sign of it.
+    const verdict = await evaluate("noted", 250_000, {
+      config: { context_budget: { soft_ceiling: "200000 # tuned" } },
+    })
+    assert.match(verdict.message, /Ignored unparseable config/, "the message is what the user reads")
+    assert.match(verdict.message, /soft_ceiling/)
+  })
+
+  it("does not silently arm the gate when `enabled` is not a boolean", async () => {
+    // The documented rollback is `enabled = false`. btrain's TOML parser
+    // returns a string for anything it does not recognise as a literal, and
+    // `"false" !== false`, so a quoted value left the gate fully armed and said
+    // nothing. Refusing the value and saying so is the only honest option:
+    // guessing the user meant off would disable a safety gate on a typo.
+    const verdict = await evaluate("stringly", 450_000, {
+      config: { context_budget: { enabled: "false" } },
+    })
+    assert.equal(verdict.level, "block", "a value btrain cannot read must not be taken as off")
+    assert.match(verdict.message, /enabled/, "and the user must be told it was rejected")
+  })
+
+  it("says so when the soft ceiling sits above the hard one", async () => {
+    // Legal to write, and the block still wins, but the warn step can never
+    // fire -- so the documented "warn first, then block" contract disappears
+    // with no diagnostic at all.
+    const verdict = await evaluate("inverted", 450_000, {
+      config: { context_budget: { soft_ceiling: 500_000, hard_ceiling: 400_000 } },
+    })
+    assert.equal(verdict.level, "block")
+    assert.match(verdict.message, /soft_ceiling/, "the inverted pair must be called out")
+  })
+
   it("blocks above the hard ceiling when the session is known", async () => {
     const verdict = await evaluate("hard", 450_000)
     assert.equal(verdict.level, "block")
@@ -487,5 +676,12 @@ describe("context budget gate", () => {
     })
     assert.equal(verdict.level, "warn", "the soft ceiling still applies")
     assert.notEqual(verdict.level, "block")
+
+    // The other half of the documented rollback, and it was unpinned: deleting
+    // the soft-ceiling zero check passed every test.
+    const softOff = await evaluate("soft-zeroed", 250_000, {
+      config: { context_budget: { soft_ceiling: 0 } },
+    })
+    assert.equal(softOff.level, "ok", "a zero soft ceiling must silence the warning")
   })
 })
