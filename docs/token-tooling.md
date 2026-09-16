@@ -64,8 +64,13 @@ taken:
 
 ```bash
 git log -1 --format=%h -- src/brain_train/core.mjs           # 9150811
-git log -1 --format=%h -- src/brain_train/cgraph_adapter.mjs
+git log -1 --format=%h -- src/brain_train/cgraph_adapter.mjs  # 55d8212
 ```
+
+Both commands must print the hash beside them. A command with no expected
+value only tells you which revision last touched the file, not whether it has
+moved since the counts were taken, so an adapter-only change would leave row 1
+stale with nothing to catch it.
 
 Pinning every file a count depends on, rather than the commit that wrote this
 doc, means the reference survives a rebase and catches drift in either input. The two tools count

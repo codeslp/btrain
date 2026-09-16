@@ -435,14 +435,26 @@ Tasks:
    ```
    ls ~/.codegraphcontext/contexts | wc -l
    ```
-6. **Pending on this branch**, for the same reason as task 1. `.gitignore` gains
-   the `.cgcignore` entry on the WS1 branch, which lands with PR #63.
-   `grep cgcignore .gitignore` returns nothing at this commit, so treat it as
-   unmet until #63 merges. The `.cgcignore` file itself already exists at the
-   repository root and carries the `agentchattr/.venv/` pattern from task 7.
-7. Add `agentchattr/.venv/` to `.cgcignore` so language detection stops counting
-   vendored Python. This does not help on 0.4.2, which ignores `.cgcignore`
-   during detection, but it is correct for the merged version.
+6. **Withdrawn. Adding `.cgcignore` to `.gitignore` is the wrong change**, and
+   it blocks task 7. Established after two corrections, both from review:
+
+   - The repository tracks two `.cgcignore` files, `src/brain_train/.cgcignore`
+     and `test/.cgcignore`. Both are KeplerKG boilerplate and neither carries
+     `agentchattr/.venv/`.
+   - A **root** `.cgcignore` exists on the machine this spec was written on and
+     does carry that pattern, but it is untracked. `git ls-tree -r HEAD` does
+     not list it, so a fresh clone gets nothing. An earlier revision of this
+     task said the file "already exists at the repository root", which was true
+     only of one working tree.
+
+   Ignoring `.cgcignore` would make the root file permanently uncommittable, so
+   the pattern task 7 needs could never reach another checkout. The root file is
+   repository configuration and belongs in version control. PR #63 drops the
+   `.gitignore` entry and commits the root file instead.
+7. Add `agentchattr/.venv/` to the root `.cgcignore` so language detection stops
+   counting vendored Python, and commit it, per task 6. This does not help on
+   0.4.2, which ignores `.cgcignore` during detection, but it is correct for the
+   merged version.
 
 **Correctness fix.** Two facts, both established after the first draft of this
 spec and both correcting it.
