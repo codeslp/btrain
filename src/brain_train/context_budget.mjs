@@ -81,6 +81,47 @@ function resolveTranscriptDir(repoRoot, env = process.env) {
 }
 
 /**
+ * The directory holding every project's transcript directory.
+ *
+ * `null` when BTRAIN_TRANSCRIPT_DIR pins a single directory, because then the
+ * caller has named the only place to look and a wider search would ignore them.
+ */
+function resolveProjectsRoot(env = process.env) {
+  if (env.BTRAIN_TRANSCRIPT_DIR) return null
+  const home = env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude")
+  return path.join(home, "projects")
+}
+
+/**
+ * Find `<sessionId>.jsonl` under any project directory.
+ *
+ * `repoRoot` is btrain's idea of the repo; the transcript directory is named
+ * after the directory the Claude session was launched in. Those disagree
+ * whenever btrain runs with `--repo` pointed elsewhere, or from a lane
+ * worktree, which is the normal case for this project. A session id is
+ * globally unique, so the id is the reliable key and the directory is not.
+ */
+async function findTranscriptBySessionId(projectsRoot, sessionId) {
+  if (!projectsRoot) return ""
+  let entries
+  try {
+    entries = await fs.readdir(projectsRoot)
+  } catch {
+    return ""
+  }
+  for (const entry of entries) {
+    const candidate = path.join(projectsRoot, entry, `${sessionId}.jsonl`)
+    try {
+      const stat = await fs.stat(candidate)
+      if (stat.isFile()) return candidate
+    } catch {
+      // Not this project, or raced with a delete.
+    }
+  }
+  return ""
+}
+
+/**
  * Context carried by a single turn.
  *
  * All three input buckets are context: `cache_read_input_tokens` is the part
@@ -184,7 +225,16 @@ async function readLatestContextTokens(transcriptPath) {
  */
 async function locateSessionTranscript(repoRoot, opts = {}) {
   const env = opts.env || process.env
-  const dir = resolveTranscriptDir(repoRoot, env)
+  // Claude Code records the real path, so a symlinked spelling of the repo
+  // (`/tmp/x` for `/private/tmp/x`) encodes to a directory that does not
+  // exist. btrain accepts a symlinked `--repo`, so resolve before encoding.
+  let realRoot = repoRoot
+  try {
+    realRoot = await fs.realpath(repoRoot)
+  } catch {
+    // Missing or unreadable; encode the path as given.
+  }
+  const dir = resolveTranscriptDir(realRoot, env)
 
   // Claude Code sets CLAUDE_CODE_SESSION_ID to the transcript basename for
   // every tool call, so an in-session invocation takes this path and never
@@ -206,11 +256,20 @@ async function locateSessionTranscript(repoRoot, opts = {}) {
       await fs.stat(explicitPath)
       return { source: "explicit", transcriptPath: explicitPath, sessionId: named, reason: "" }
     } catch {
+      // The session is named and unique, so a miss here means the transcript
+      // directory is not the one this session writes to -- not that the
+      // session has no transcript. Look for the id itself before giving up;
+      // reporting `unavailable` would read as `ok` to the caller and silently
+      // disarm the gate, which is the failure this module exists to prevent.
+      const found = await findTranscriptBySessionId(resolveProjectsRoot(env), named)
+      if (found) {
+        return { source: "explicit", transcriptPath: found, sessionId: named, reason: "" }
+      }
       return {
         source: "unavailable",
         transcriptPath: "",
         sessionId: "",
-        reason: `no transcript for session ${named} under ${dir}`,
+        reason: `no transcript for session ${named} under ${dir} or any sibling project directory`,
       }
     }
   }

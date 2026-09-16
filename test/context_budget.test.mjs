@@ -409,6 +409,177 @@ describe("context budget session attribution", () => {
 // Configuration
 // ──────────────────────────────────────────────
 
+describe("context budget session attribution across project directories", () => {
+  // Round-2 P1. The session id is globally unique; the transcript directory is
+  // named after the directory the Claude session was launched in. btrain's
+  // repoRoot and that directory disagree whenever btrain runs with --repo
+  // pointed elsewhere or from a lane worktree, which is this project's normal
+  // case. Before the fix the named lookup missed, returned "unavailable", and
+  // evaluateContextBudget reported level "ok" with blockable false -- a silent
+  // pass indistinguishable from a healthy session.
+
+  let projects
+  before(async () => {
+    projects = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-ctx-projects-"))
+  })
+  after(async () => {
+    await fs.rm(projects, { recursive: true, force: true })
+  })
+
+  it("finds the session under a sibling project directory when repoRoot disagrees", async () => {
+    const launched = path.join(projects, "projects", "-Users-x-btrain")
+    await fs.mkdir(launched, { recursive: true })
+    await writeTranscript(launched, "sess-cross", [turn({ cacheRead: 500_000 })])
+
+    // repoRoot points at a worktree, which encodes to a different directory.
+    const located = await locateSessionTranscript("/Users/x/btrain/.claude/worktrees/lane-c", {
+      env: { CLAUDE_CONFIG_DIR: projects, CLAUDE_CODE_SESSION_ID: "sess-cross" },
+    })
+    assert.equal(located.source, "explicit", "a named session must stay explicit")
+    assert.equal(located.sessionId, "sess-cross")
+    assert.equal(located.transcriptPath, path.join(launched, "sess-cross.jsonl"))
+  })
+
+  it("keeps the gate armed for a session found in a sibling directory", async () => {
+    const launched = path.join(projects, "projects", "-Users-x-btrain")
+    await fs.mkdir(launched, { recursive: true })
+    await writeTranscript(launched, "sess-armed", [turn({ cacheRead: 500_000 })])
+
+    const result = await evaluateContextBudget(
+      "/Users/x/btrain/.claude/worktrees/lane-c",
+      { enabled: true, softCeiling: 100_000, hardCeiling: 400_000, invalid: [], notes: [] },
+      { env: { CLAUDE_CONFIG_DIR: projects, CLAUDE_CODE_SESSION_ID: "sess-armed" } },
+    )
+    // The bug reported level "ok", tokens null, blockable false here.
+    assert.equal(result.source, "explicit")
+    assert.equal(result.tokens, 500_000)
+    assert.equal(result.level, "block")
+    assert.equal(result.blockable, true)
+  })
+
+  it("still reports unavailable when the session exists nowhere", async () => {
+    await fs.mkdir(path.join(projects, "projects", "-Users-x-other"), { recursive: true })
+    const located = await locateSessionTranscript("/Users/x/btrain", {
+      env: { CLAUDE_CONFIG_DIR: projects, CLAUDE_CODE_SESSION_ID: "sess-absent" },
+    })
+    assert.equal(located.source, "unavailable")
+    assert.match(located.reason, /sibling project director/)
+  })
+
+  it("does not widen the search when BTRAIN_TRANSCRIPT_DIR pins one directory", async () => {
+    // The caller named the only place to look. Searching elsewhere would
+    // ignore them and could report a session from an unrelated repo.
+    const pinned = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-ctx-pinned-"))
+    const elsewhere = path.join(projects, "projects", "-Users-x-elsewhere")
+    await fs.mkdir(elsewhere, { recursive: true })
+    await writeTranscript(elsewhere, "sess-pinned", [turn({ cacheRead: 1_000 })])
+
+    const located = await locateSessionTranscript("/Users/x/btrain", {
+      env: {
+        CLAUDE_CONFIG_DIR: projects,
+        BTRAIN_TRANSCRIPT_DIR: pinned,
+        CLAUDE_CODE_SESSION_ID: "sess-pinned",
+      },
+    })
+    assert.equal(located.source, "unavailable", "a pinned directory must not fall back")
+    await fs.rm(pinned, { recursive: true, force: true })
+  })
+
+  it("resolves a symlinked repo spelling before encoding it", async () => {
+    // Round-2 P2-1. Claude Code records the real path. btrain accepts a
+    // symlinked --repo, and on macOS /tmp is a symlink to /private/tmp, so
+    // the unresolved spelling encoded to a directory that does not exist.
+    //
+    // Exercised through the inferred path deliberately: the named path now
+    // falls back to a cross-directory search, which would mask the encoding
+    // bug rather than expose it. Here the encoded directory is the only
+    // thing consulted.
+    const real = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-ctx-real-"))
+    const link = path.join(projects, "link-to-real")
+    await fs.symlink(real, link)
+
+    const resolved = await fs.realpath(real)
+    const launched = path.join(
+      projects,
+      "projects",
+      "-" + resolved.replace(/^\/+/, "").replace(/[^A-Za-z0-9]/g, "-"),
+    )
+    await fs.mkdir(launched, { recursive: true })
+    await writeTranscript(launched, "sess-link", [turn({ cacheRead: 7_000 })])
+
+    const located = await locateSessionTranscript(link, {
+      env: { CLAUDE_CONFIG_DIR: projects },
+    })
+    assert.equal(located.source, "inferred", "the symlinked spelling must still find the directory")
+    assert.equal(located.sessionId, "sess-link")
+    assert.equal(located.transcriptPath, path.join(launched, "sess-link.jsonl"))
+    await fs.rm(real, { recursive: true, force: true })
+    await fs.rm(link, { force: true })
+  })
+
+  it("honours BTRAIN_SESSION_ID for an out-of-session caller", async () => {
+    // M14: the variable is documented in the module header and was untested,
+    // so removing it survived the suite.
+    const launched = path.join(projects, "projects", "-Users-x-btrain")
+    await fs.mkdir(launched, { recursive: true })
+    await writeTranscript(launched, "sess-btrain-var", [turn({ cacheRead: 9_000 })])
+
+    const located = await locateSessionTranscript("/Users/x/btrain", {
+      env: { CLAUDE_CONFIG_DIR: projects, BTRAIN_SESSION_ID: "sess-btrain-var" },
+    })
+    assert.equal(located.source, "explicit")
+    assert.equal(located.sessionId, "sess-btrain-var")
+  })
+
+  it("ignores a non-jsonl entry that is newer than every transcript", async () => {
+    // M26: dropping the ".jsonl" filter survived the suite, but the filter is
+    // load-bearing on real data -- 19 of 53 real project directories have a
+    // subdirectory (usually memory/) as their newest entry by mtime. Without
+    // it the inferred path selects a directory and readFile throws EISDIR.
+    const dir = await makeTranscriptDir()
+    await writeTranscript(dir, "real-session", [turn({ cacheRead: 11_000 })], Date.now() - 60_000)
+    const decoy = path.join(dir, "memory")
+    await fs.mkdir(decoy)
+    const now = new Date()
+    await fs.utimes(decoy, now, now)
+
+    const located = await locateSessionTranscript("/Users/x/btrain", {
+      env: { BTRAIN_TRANSCRIPT_DIR: dir },
+    })
+    assert.equal(located.source, "inferred")
+    assert.equal(located.sessionId, "real-session")
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe("context budget, absence of a reading is not a reading of zero", () => {
+  // M22: replacing the "no reading" branch with a dead one survived all 42
+  // tests. The module's headline invariant had no end-to-end test -- the only
+  // "no measurement" case used a nonexistent directory, which returns two
+  // branches earlier and never reaches this code.
+
+  it("passes without a figure when a named transcript holds only error turns", async () => {
+    const dir = await makeTranscriptDir()
+    await writeTranscript(dir, "all-errors", [errorTurn(), errorTurn()])
+
+    const result = await evaluateContextBudget(
+      "/Users/x/btrain",
+      { enabled: true, softCeiling: 1, hardCeiling: 2, invalid: [], notes: [] },
+      { env: { BTRAIN_TRANSCRIPT_DIR: dir, CLAUDE_CODE_SESSION_ID: "all-errors" } },
+    )
+    // Located explicitly, so the ceilings are as low as they can be -- if a
+    // missing reading were ever read as 0 this would still say "ok", but if it
+    // were read as a real figure it would block. The distinguishing assertion
+    // is that there is no figure at all and nothing is blockable.
+    assert.equal(result.source, "explicit")
+    assert.equal(result.tokens, null, "no reading must not become a reading")
+    assert.equal(result.level, "ok")
+    assert.equal(result.blockable, false)
+    assert.match(result.message + result.reason, /usage record/)
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+})
+
 describe("context budget configuration", () => {
   it("defaults to the spec's ceilings", () => {
     const budget = getContextBudgetConfig({})
