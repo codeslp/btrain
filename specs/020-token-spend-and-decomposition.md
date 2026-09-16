@@ -533,7 +533,10 @@ carries 68 names, and `buildReviewArtifactId` is declared `export function`
 inline at line 7,677. An extraction that edits the block alone drops it from
 the public surface without any syntax error. `BtrainError` is a second trap for
 the same reason: it is a `class`, so it appears in no function inventory, and it
-is the single most widely imported name in the file.
+is the most-used name in the file: 80 `new BtrainError(...)` sites inside
+`core.mjs`. By *imports* it is second — across `git ls-files '*.mjs'` outside
+`core.mjs`, `readProjectConfig` appears in 6 files, `BtrainError` and
+`checkHandoff` in 5 each.
 
 An agent that reads this file spends about half of a 200,000-token window. The
 file then stays in context, and btrain pays for it again as cache reads on every
@@ -608,7 +611,9 @@ Tasks:
    the seed: lane state, locks, handoff rendering, transitions, events,
    reviewer dispatch.
 2. Extract one group per change. Keep every public export stable.
-3. Run `npm test` after each extraction.
+3. Run `npm test` and `npm run test:formal` after each extraction. The second
+   is not optional: the formal harness is the only thing asserting the lock
+   invariants, and it does not run under `npm test`.
 4. Record the Spec 014 formal impact for each extraction. A pure move has no
    semantic impact. Any guard change has semantic impact.
 5. Split `src/brain_train/cli.mjs` as well. At 2,669 lines it is already over
@@ -635,7 +640,8 @@ seams, and it accounts for roughly half the file.
   exists, at 294 lines, and `core.mjs` imports it.
 - **Locks and lane state are one module.** `findAvailableLane` calls
   `classifyRepurposeReady`; `auditActiveLanesForRelease` and
-  `buildLaneLockState` call `readLaneState` and `isLaneActiveStatus`. The
+  `buildLaneLockState` both call `isLaneActiveStatus`, and
+  `auditActiveLanesForRelease` also calls `readLaneState`. The
   dependency runs both ways. Overrides join them for the same reason:
   `consumeForceReleaseOverride` calls `consumeOverride`, and `grantOverride`
   calls `getLaneConfigs`. Lane identity, the lock registry and override grants
@@ -687,10 +693,12 @@ One direction at every stage.
 Pulling `status` or `doctor` out first, because they look like leaves, makes
 `status.mjs` import about 40 names from `core.mjs` while `core.mjs` re-exports
 four back. Node tolerates that only while nothing reads across the cycle during
-module evaluation — and `core.mjs` has four module-level call sites that do:
-`claudeBashPermissions()` feeding the `CLAUDE_LOOP_*_ALLOWED_TOOLS` arrays, and
-`renderPreCommitHook()`/`renderPrePushHook()` inside the `TEMPLATE_DEFAULTS`
-literal. That makes it a temporal-dead-zone crash, not a warning. Leaf-first is
+module evaluation — and `core.mjs` has six module-level call sites that do:
+four `claudeBashPermissions()` calls feeding the `CLAUDE_LOOP_*_ALLOWED_TOOLS`
+arrays (lines 286, 322, 326, 330), and `renderPreCommitHook()` and
+`renderPrePushHook()` inside the `TEMPLATE_DEFAULTS` literal (1955, 1956).
+The two calls at 1551-1552 are inside a function and do not run at module
+evaluation. That makes it a temporal-dead-zone crash, not a warning. Leaf-first is
 not riskier here; it is wrong.
 
 The thirteen stages, each independently landable with `npm test` green:
@@ -711,21 +719,82 @@ The thirteen stages, each independently landable with `npm test` green:
 | 12 | `internal/handoff-read.mjs` | 5 | 709 | eight | 4 |
 | 13 | `internal/status.mjs` | 22 | 1,132 | eleven | 7 |
 
-After stage 13 `core.mjs` is a facade of roughly 80 lines: its existing sibling
-imports, thirteen new ones, and the export block.
+After stage 13 `core.mjs` is a facade of roughly 130 lines: the export block is
+70 lines on its own (10,685-10,754), the existing sibling import header is 49
+(lines 1-49, mostly multi-line), and thirteen new imports go on top. An earlier
+draft said 80, which is below the floor of the two parts that already exist.
 
-**Stage 11 is the riskiest.** It moves only seven functions but 1,133 lines,
-including `patchHandoff` at 579 lines — the largest function in the repository.
+`Fns` and `~Lines` are measured by `scripts/decomposition_inventory.mjs`, which
+counts each top-level `function` declaration from its declaration line through
+its closing brace at column 0. Leading JSDoc and the blank line between
+functions are not counted, which is why the per-stage lines sum to less than the
+file's 10,754.
+
+**Stage 11 is the riskiest.** Its five named functions measure 1,305 lines on
+their own — `patchHandoff` 579 (the largest function in the repository),
+`resolveHandoff` 300, `claimHandoff` 198, `requestChangesHandoff` 137,
+`disposeRepair` 91. An earlier draft gave the whole seven-function stage as
+1,133, which is less than those five; the `~Lines` column is therefore wrong
+here and the stage total is not yet established, because the two remaining
+members of the stage are not named anywhere in this plan. See the open item
+under *Per-stage membership* below.
 It depends on nine already-extracted modules, so a missed import is a runtime
 `ReferenceError`, not a parse error. It is also the stage the formal harness
 watches most closely: `test/formal/lane-lock-harness.test.mjs` imports
 `claimHandoff`, `patchHandoff`, `requestChangesHandoff`, `resolveHandoff` and
-`disposeRepair` directly and asserts lock invariants across them. Run that file
-alone before the full suite.
+`disposeRepair` directly and asserts lock invariants across them. Run
+`npm run test:formal` before the full suite — **not** `node --test` on that file
+and **not** `npm test`. The harness gates itself on `BTRAIN_FORMAL=1`
+(`test/formal/lane-lock-harness.test.mjs:46`), which only `npm run test:formal`
+sets, so running it any other way passes silently without checking a single
+invariant.
 
 Stage 4 is second, for a different reason: 34 names cross the boundary, and the
 merge of lanes, locks and overrides is the grouping decision most likely to draw
 review pushback.
+
+##### Per-stage membership — the open item
+
+This plan gives each stage a count but never says **which** functions it
+contains, and there is no inventory file to point at. An implementer cannot
+start stage 1 from this table: it says `fsx` takes 46 functions without naming
+one of the 46. Nor can a reviewer audit the `Imports` column, because the claim
+"at stage *k* every callee already lives in an extracted file" is only checkable
+against a membership list. The same gap is why stage 11's line total went
+uncorrected for a draft: with no membership, nothing cross-checks the column
+against the functions it claims to cover.
+
+Until the membership lands, treat `Fns`, `~Lines`, `Imports` and
+`Names core.mjs takes back` as unverified. The `~Lines` column sums to 10,117,
+which matches neither the 8,635 lines inside top-level functions nor
+8,635 + 424 = 9,059 with module-level constants, so at least one row is wrong
+independently of stage 11. `Names core.mjs takes back` sums to 190 against a
+69-name export surface, and the column is never defined.
+
+Producing it is mechanical now that `scripts/decomposition_inventory.mjs`
+exists: assign each of the 352 functions to one of the thirteen modules, commit
+the assignment, and let the script derive the counts, the line totals and the
+module-level import direction from the call graph. The assignment itself is a
+judgement call and belongs to whoever owns the extraction.
+
+##### The function call graph has no cycles
+
+Checked, not assumed: `scripts/decomposition_inventory.mjs` runs Tarjan over
+the 786 call edges between the 352 functions and finds **352 strongly connected
+components, none larger than one**. `core.mjs` contains no mutual recursion and
+no call cycle of any length.
+
+This matters for how the rest of this section reads. Every cycle named here —
+the four merges, the ten relocated helpers, "a single 20-module cycle" without
+them — is a cycle in the *module* graph, created by a grouping choice, not a
+property of the code. A different partition produces different cycles, and a
+topological order over functions always exists. So the relocation table is a
+consequence of the grouping, not a constraint on it, and it must be re-derived
+whenever the grouping changes.
+
+One row does not survive contact with the graph: `getLoopActorForState` has
+zero callers and zero callees inside `core.mjs`, so it closes no cycle
+anywhere and moving it to `loop` is a naming decision, not a structural one.
 
 ##### Re-export mechanics
 
@@ -735,11 +804,13 @@ Use `import` plus the existing `export { }` block, not
 in the final block.
 
 The reason is concrete. `export ... from` re-exports without creating a local
-binding, and **33 of the 69 exported names are called from inside `core.mjs`** —
-including `readProjectConfig` (26 internal callers), `getLaneConfigs` (18),
-`getRepoPaths` (13), `withFileLock` (7), `listLocks` (7). For those the bare
-form breaks compilation as soon as a still-unextracted function calls them. The
-other 36 would work, but two patterns for one job is worse than one.
+binding, and **34 of the 69 exported names are used from inside `core.mjs`** —
+33 called as functions, including `readProjectConfig` (26 internal callers),
+`getLaneConfigs` (18), `getRepoPaths` (13), `withFileLock` (7), `listLocks` (7),
+plus `BtrainError`, which is not called but is instantiated at 80 sites. For
+those the bare form breaks compilation as soon as a still-unextracted function
+uses them. The other 35 would work, but two patterns for one job is worse than
+one.
 
 Verify the surface mechanically after every stage: `Object.keys()` on the
 imported module must return the same 69 names, sorted, as the baseline. Do not
@@ -779,12 +850,14 @@ spec 014. Three places where that is not automatic:
 3. **Dead-export removal is a surface change, not a move.** Eight exported names
    are imported nowhere (`pushAgentPrompt`, `findRepoRoot`, `forceReleaseLock`,
    `getRepoPaths`, `installPreCommitHook`, `installPrePushHook`,
-   `isLanesEnabled`, `releaseLocks`), and `listStagedPaths` has no callers at
-   all. Keep all of it out of these thirteen stages.
+   `isLanesEnabled`, `releaseLocks`). Separately, `listStagedPaths`
+   (`core.mjs:3440`) has no callers anywhere in the repo, but it is a plain
+   `async function` and is not exported — it is dead code, not a dead export.
+   Keep all of it out of these thirteen stages.
 
 ##### The ceiling is reachable
 
-The 9,729 lines inside top-level functions plus 424 lines of module-level
+The 8,635 lines inside top-level functions plus 424 lines of module-level
 constants distribute with `loop` largest at about 1,425. With import headers the
 biggest file lands near 1,500, roughly 25 percent under the 2,000-line ceiling,
 and no group is irreducibly larger. Two honest caveats: the ceiling is a line
@@ -815,9 +888,11 @@ separate decision rather than smuggling it into this workstream.
 
 ##### Before stage 1
 
-Record the `npm test` baseline pass count first. Every stage's gate is "the same
-result as baseline", not "no failures". Confirm `core.mjs` is still 10,754 lines,
-and confirm no lane holds a lock on `src/brain_train/`.
+Record the baseline pass counts for both `npm test` and `npm run test:formal`
+first. Every stage's gate is both commands at "the same result as baseline", not
+"no failures" — `npm test` alone never executes the lock invariants. Confirm
+`core.mjs` is still 10,754 lines, and confirm no lane holds a lock on
+`src/brain_train/`.
 
 ### Workstream 3: Enforce a context budget
 
