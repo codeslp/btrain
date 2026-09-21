@@ -92,7 +92,7 @@ function endpointIssue(value) {
   try {
     const parsed = new URL(value)
     if (parsed.protocol === "https:") return ""
-    if (parsed.protocol === "http:" && new Set(["127.0.0.1", "localhost", "::1"]).has(parsed.hostname)) return ""
+    if (parsed.protocol === "http:" && new Set(["127.0.0.1", "localhost", "[::1]"]).has(parsed.hostname)) return ""
     return "System One endpoints must use HTTPS unless they are local."
   } catch {
     return "System One endpoint is not a valid URL."

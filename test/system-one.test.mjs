@@ -193,6 +193,36 @@ describe("System One client", () => {
     assert.equal(called, false)
   })
 
+  it("allows IPv6 loopback HTTP endpoints but rejects other IPv6 hosts", async () => {
+    const request = {
+      state: "x",
+      questions: { signal: { type: "noul", instructions: "Is this a verdict?", criteria: null } },
+    }
+    for (const [host, allowed] of [
+      ["[::1]", true],
+      ["[0:0:0:0:0:0:0:1]", true],
+      ["[::]", false],
+      ["[::2]", false],
+      ["[2001:db8::1]", false],
+    ]) {
+      let calls = 0
+      const client = createSystemOneClient({
+        apiKey: "configured-test-key",
+        endpoint: `http://${host}:8080/v1/systemone`,
+        fetchImpl: async () => {
+          calls += 1
+          return new Response(JSON.stringify({ answers: { signal: { noul: 0.9 } } }))
+        },
+      })
+
+      const result = await client.decide(request)
+
+      assert.equal(result.ok, allowed, host)
+      assert.equal(calls, allowed ? 1 : 0, host)
+      if (!allowed) assert.equal(result.reason, "invalid-endpoint", host)
+    }
+  })
+
   it("rejects redirects so review text stays on the configured origin", async () => {
     let redirect
     const client = createSystemOneClient({
