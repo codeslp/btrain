@@ -129,6 +129,30 @@ describe("System One client", () => {
     assert.equal((await timeout.decide(request)).reason, "timeout")
   })
 
+  it("cancels a non-success response body before returning the HTTP error", async () => {
+    let cancelled = false
+    const stream = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("still failing"))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const client = createSystemOneClient({
+      apiKey: "configured-test-key",
+      fetchImpl: async () => new Response(stream, { status: 503 }),
+    })
+
+    const result = await client.decide({
+      state: "x",
+      questions: { signal: { type: "noul", instructions: "Is this a verdict?", criteria: null } },
+    })
+
+    assert.equal(result.reason, "http-error")
+    assert.equal(cancelled, true)
+  })
+
   it("rejects requests outside the documented question limits before transport", async () => {
     let called = false
     const client = createSystemOneClient({

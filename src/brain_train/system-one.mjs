@@ -187,6 +187,11 @@ export function createSystemOneClient({
             redirect: "error",
           })
           if (!response?.ok) {
+            try {
+              await response.body?.cancel?.("http-error")
+            } catch {
+              // Preserve the provider HTTP error when body cleanup itself fails.
+            }
             return { response, body: null }
           }
           const contentLength = Number.parseInt(response.headers?.get?.("content-length") || "", 10)
