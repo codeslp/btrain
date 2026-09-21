@@ -381,10 +381,10 @@ function semanticReviewQuestions() {
   }
 }
 
-function semanticCandidateForBot({ bot, headSha, rawComments }) {
+function semanticCandidateForBot({ bot, headSha, rawComments, baselineState }) {
   const botInline = (rawComments.reviewComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
   const currentInline = botInline.filter((comment) => commitMatches(inlineReviewedCommit(comment), headSha))
-  if (currentInline.length > 0) return null
+  if (currentInline.length > 0 && baselineState === "feedback") return null
 
   const botReviews = (rawComments.reviews || []).filter((review) => loginMatches(bot, review.user?.login))
   const currentReviews = botReviews.filter((review) => commitMatches(reviewCommit(review), headSha))
@@ -406,23 +406,17 @@ function semanticCandidateForBot({ bot, headSha, rawComments }) {
       time: positiveReactionTime(clearReaction, bot, rawComments.issueCommentReactions || {}),
     })
   }
-  const selected = activities.sort((a, b) => a.time - b.time).at(-1)
-  if (!selected) return null
-
-  if (selected.surface === "reaction") return null
-  if (selected.surface === "review") {
-    const state = String(selected.item.state || "").toUpperCase()
-    if (
-      state === "APPROVED"
-      || state === "CHANGES_REQUESTED"
-      || bodyIndicatesClear(selected.item.body)
-      || bodyIndicatesFeedback(selected.item.body)
-    ) return null
-  }
-  if (selected.surface === "issue" && (
-    bodyIndicatesClear(selected.item.body) || bodyIndicatesFeedback(selected.item.body)
-  )) return null
-  if (!String(selected.item.body || "").trim()) return null
+  // Ambiguous text tied with deterministic evidence still needs classification:
+  // validated feedback wins the tie when applied below, regardless of surface.
+  const selected = activities.map((activity) => ({
+    ...activity,
+    eligible: (activity.surface === "issue" || (
+      activity.surface === "review" && String(activity.item.state || "").toUpperCase() === "COMMENTED"
+    )) && !!String(activity.item.body || "").trim()
+      && !bodyIndicatesClear(activity.item.body)
+      && !bodyIndicatesFeedback(activity.item.body),
+  })).sort((a, b) => a.time - b.time || Number(a.eligible) - Number(b.eligible)).at(-1)
+  if (!selected?.eligible) return null
 
   return {
     botId: bot.id,
@@ -557,7 +551,10 @@ export async function classifyPrReviewStateWithSemantic(
   const headSha = baseline.pr.headSha
   const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
   const candidates = bots
-    .map((bot) => semanticCandidateForBot({ bot, headSha, rawComments }))
+    .map((bot) => semanticCandidateForBot({
+      bot, headSha, rawComments,
+      baselineState: baseline.bots.find((result) => result.id === bot.id)?.state,
+    }))
     .filter(Boolean)
 
   const decisions = await Promise.all(candidates.map(async (candidate) => {

@@ -567,6 +567,98 @@ describe("PR review flow classification", () => {
     assert.equal(status.overall, "feedback")
   })
 
+  it("classifies new feedback after an older inline finding and subsequent approval", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("The unlock happens too early.", head)
+    input.rawComments.reviewComments = [{
+      id: 200, user: { login: "chatgpt-codex-connector[bot]" },
+      body: "Earlier finding.", commit_id: head, original_commit_id: head,
+      created_at: "2026-09-20T18:00:00Z",
+    }]
+    input.rawComments.reviews = [{
+      id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+      state: "APPROVED", commit_id: head, body: "Reviewed revision.",
+      submitted_at: "2026-09-20T19:00:00Z",
+    }]
+    const client = createSystemOneClient({
+      apiKey: "configured-test-key",
+      fetchImpl: async () => new Response(JSON.stringify({ answers: {
+        signal: { choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 } },
+        hasVerdict: { noul: 1 },
+      } })),
+    })
+
+    const status = await classifyPrReviewStateWithSemantic(input, { mode: "assist", decide: client.decide })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+    assert.equal(status.bots[0].feedback[0].body, "The unlock happens too early.")
+  })
+
+  it("classifies feedback tied with a positive reaction", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("The unlock happens too early.", head)
+    input.rawComments.issueComments.push({
+      id: 202, user: { login: "author" },
+      body: `<!-- btrain-pr-review bot=codex lane=a head=${head} -->`,
+      created_at: "2026-09-20T19:00:00Z",
+    })
+    input.rawComments.issueCommentReactions = {
+      202: [{ content: "+1", user: { login: "chatgpt-codex-connector[bot]" }, created_at: "2026-09-20T20:00:00Z" }],
+    }
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({ ok: true, answers: {
+        signal: { choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 } },
+        hasVerdict: { noul: 1 },
+      } }),
+    })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+  })
+
+  it("classifies formal review feedback tied with a clear issue comment", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("No issues found.", head)
+    input.rawComments.reviews = [{
+      id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+      state: "COMMENTED", commit_id: head, body: "The unlock happens too early.",
+      submitted_at: "2026-09-20T20:00:00Z",
+    }]
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({ ok: true, answers: {
+        signal: { choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 } },
+        hasVerdict: { noul: 1 },
+      } }),
+    })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+  })
+
+  it("does not send pending or dismissed formal reviews to the semantic provider", async () => {
+    for (const state of ["PENDING", "DISMISSED"]) {
+      const head = "a".repeat(40)
+      const input = ambiguousCurrentHeadComment("The unlock happens too early.", head)
+      input.rawComments.issueComments = []
+      input.rawComments.reviews = [{
+        id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+        state, commit_id: head, body: "The unlock happens too early.",
+        submitted_at: "2026-09-20T20:00:00Z",
+      }]
+      let calls = 0
+      const status = await classifyPrReviewStateWithSemantic(input, {
+        mode: "assist",
+        decide: async () => { calls += 1; throw new Error("must not run") },
+      })
+
+      assert.equal(calls, 0, state)
+      assert.equal(status.overall, "waiting", state)
+    }
+  })
+
   it("does not call the semantic provider for terminal or draft pull requests", async () => {
     for (const pr of [
       { state: "CLOSED" },
