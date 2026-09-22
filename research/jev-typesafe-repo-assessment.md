@@ -76,11 +76,10 @@ a direct SDK call scattered through `core.mjs`.
 
 - The video names 35 GitHub repositories. A source scan found 21 with Jev, TypeSafe,
   System One, or a compatible decision-model implementation.
-- Repository metadata and source were inspected from the current default branches on
-  2026-09-19. These projects are new and can change quickly.
-- The original scan did not retain commit IDs or an evidence manifest. Its 21/14
-  relevance classification and source-level observations are provisional, not independently
-  reproducible findings. Recheck and pin the cited implementations before adoption.
+- Repository metadata and source were inspected from the default branches on 2026-09-19.
+  The evidence manifest below pins the 35 repository heads that were rechecked on 2026-09-22.
+  Follow each commit link to validate the classification and source-level observations without
+  relying on a mutable default branch. Recheck newer revisions before adoption.
 - Stars measure attention, not quality.
 - Vendor claims are not independent evidence.
 - Project-published benchmarks are useful leads. They do not replace btrain's own evals.
@@ -90,8 +89,11 @@ a direct SDK call scattered through `core.mjs`.
   coverage Noul rejected all 6 controls and retained all 23 valid cases.
   This report does not contain a direct artifact for those counts. Treat them as an
   unverified historical account, not an adoption gate or independently measured result.
-  The saved [btrain pilot artifacts](../experiments/jev-btrain/) provide reproducible
-  local evidence with the limitations described in their results report.
+  The companion btrain experiment at commit
+  [`613851a`](https://github.com/codeslp/btrain/tree/613851af91e7029f70c8ff692c92382b12ef70ea/experiments/jev-btrain)
+  provides frozen pilot artifacts. Its
+  [results report](https://github.com/codeslp/btrain/blob/613851af91e7029f70c8ff692c92382b12ef70ea/research/jev-btrain-experiment-results.md)
+  states the limits of that evidence. The companion commit is separate from this report commit.
 - TypeSafe Choice and Score confidence is derived from the answer distribution. It
   measures concentration, not correctness. A wrong answer can have high confidence.
 - Any private code, transcript, corpus, or customer content sent to a hosted provider
@@ -506,6 +508,49 @@ Before a decision family can affect behavior:
 - a human must approve the threshold and allowed action set
 
 ## Repository inventory from the video
+
+### Immutable evidence manifest
+
+The classification below was rechecked against these exact commits on 2026-09-22. The
+`Relevant` value records inclusion in the Jev-specific analysis; it is not a quality score.
+
+| Repository | Reviewed commit | Relevant |
+| --- | --- | --- |
+| `coldteadotai/abide` | [`f268382`](https://github.com/coldteadotai/abide/tree/f2683828965ced03da07abae811e78af0383040c) | yes |
+| `thruwire/foreman` | [`a7d21d1`](https://github.com/thruwire/foreman/tree/a7d21d18d306a0cb9f3e15acefbdb5663521405c) | yes |
+| `tamaratran/fast-jev-compaction` | [`e3f262a`](https://github.com/tamaratran/fast-jev-compaction/tree/e3f262a7f4d42bd8dd32ced30d26176f7cb545b0) | yes |
+| `devagrawal09/jev-review` | [`31f8960`](https://github.com/devagrawal09/jev-review/tree/31f89602797fb7bea007f8a480bf368bf564954e) | yes |
+| `NiazMorshed2007/jev-review` | [`57690af`](https://github.com/NiazMorshed2007/jev-review/tree/57690af54ef7d862c2483342c1e61c14dffcf727) | yes |
+| `lakeday-org/perch` | [`6a399b7`](https://github.com/lakeday-org/perch/tree/6a399b735b7aca43a6db9bffa679d8adbf7b28b4) | yes |
+| `superagents-lab/jev-search` | [`67027d0`](https://github.com/superagents-lab/jev-search/tree/67027d0185a9b22eb2a178f0eb15250d12ddabe6) | yes |
+| `kyotofin/tax-doc-classifier` | [`3e95a77`](https://github.com/kyotofin/tax-doc-classifier/tree/3e95a77f763c6becb78472f8b2ce2f54237f9214) | yes |
+| `realZachi/pg-jev` | [`afd11fa`](https://github.com/realZachi/pg-jev/tree/afd11fa856d7a2b831a1bfd8ee7f869ce8efcd62) | yes |
+| `TheoLeeCJ/SemIf` | [`1f2dea3`](https://github.com/TheoLeeCJ/SemIf/tree/1f2dea3e25379f9dfc98cb83c324f00ab5deda37) | yes |
+| `jaredpalmer/kev` | [`90990a5`](https://github.com/jaredpalmer/kev/tree/90990a5fac2995b9faa3190f7d437e84f2067768) | yes |
+| `NandhaKishorM/laya` | [`573e5b6`](https://github.com/NandhaKishorM/laya/tree/573e5b62696ba441230cd6be71d593331b5d23af) | yes |
+| `featherless-ai/simple-jev` | [`b02aa81`](https://github.com/featherless-ai/simple-jev/tree/b02aa81c915a8193759b3cd33fef74721d6e005b) | yes |
+| `ekzhang/openjev-sglang` | [`f3e1678`](https://github.com/ekzhang/openjev-sglang/tree/f3e1678168b2e9a298bb47639444b428b661c4b2) | yes |
+| `githubnext/localjev` | [`3f23e36`](https://github.com/githubnext/localjev/tree/3f23e36e1a3bff46c7e83e8e3781d3512bc82021) | yes |
+| `TianyuCodings/NanoJev` | [`76fdfc9`](https://github.com/TianyuCodings/NanoJev/tree/76fdfc9ecdca45a9bcef17991a07d3041a87685a) | yes |
+| `browser-use/jev-ultrafast` | [`1231850`](https://github.com/browser-use/jev-ultrafast/tree/1231850a0bf1a0c0341fe408ef1668dbbfdfac46) | yes |
+| `awlevin/typesafe-computer-use` | [`cc7b506`](https://github.com/awlevin/typesafe-computer-use/tree/cc7b5066ae1a07b5e3182e8f87a9b5b6dfdcffc1) | yes |
+| `droidrun/mobile-jev` | [`395fc22`](https://github.com/droidrun/mobile-jev/tree/395fc222beac4f059f9a0beb337d114a2b066e99) | yes |
+| `fhshaik/typesafe-mario` | [`ca22449`](https://github.com/fhshaik/typesafe-mario/tree/ca22449ed187118d19326d1f54b01b6636578aa4) | yes |
+| `jarrodwatts/jev-trader` | [`b587759`](https://github.com/jarrodwatts/jev-trader/tree/b587759e459ea049590102e54a0b07800864cdc3) | yes |
+| `MaxGramser/homeassistant_espscreen` | [`8a06c16`](https://github.com/MaxGramser/homeassistant_espscreen/tree/8a06c16b4a2ae04b63a852934ecd067014fb0e6c) | no |
+| `amap-cvlab/ABot-Recon` | [`7a10be1`](https://github.com/amap-cvlab/ABot-Recon/tree/7a10be152d0478265270f46c637f9de963e7a60e) | no |
+| `anthropics/uplifting-biomolecular-modeling` | [`f4f62fa`](https://github.com/anthropics/uplifting-biomolecular-modeling/tree/f4f62fa6592ae4938d49b1757bea0cfeff9f468e) | no |
+| `robbietilton/Compositor` | [`609dbeae`](https://github.com/robbietilton/Compositor/tree/609dbeae2ef68ef4fc82d67e4981a49852eb6e13) | no |
+| `davidmokos/expo-gpt-live` | [`9e83073`](https://github.com/davidmokos/expo-gpt-live/tree/9e83073ef5b3a986124d9141271c09443cbe8d5b) | no |
+| `dealerdefi/FLYON` | [`4ee0d71`](https://github.com/dealerdefi/FLYON/tree/4ee0d71e09a6c7ca4c9a6e565383899d2e026877) | no |
+| `dmtrKovalenko/bashka` | [`09dceab`](https://github.com/dmtrKovalenko/bashka/tree/09dceab4a34c78364ab67f070a1bcce1673b2a73) | no |
+| `eliasstravik/herdr-projects` | [`a4cdb0a`](https://github.com/eliasstravik/herdr-projects/tree/a4cdb0a69713d982d96f9062548cf885f013c442) | no |
+| `incoai/splash` | [`edb4b8f`](https://github.com/incoai/splash/tree/edb4b8fa4eee5fef624809cd7f30f0651c58a167) | no |
+| `kuhnhomeuk-cell/procedural-film` | [`ec29e23`](https://github.com/kuhnhomeuk-cell/procedural-film/tree/ec29e23474860e83ab5b4d0131bd6e6b92e12a48) | no |
+| `lidge-jun/aside-codemode` | [`0936c1c`](https://github.com/lidge-jun/aside-codemode/tree/0936c1c2f3b4a6bb77524529fb562f7baf9e9a5a) | no |
+| `mirkovicdev/HFTENGINE` | [`8d7e290`](https://github.com/mirkovicdev/HFTENGINE/tree/8d7e2904d86d40265b05a366d57e296ee0cd5d98) | no |
+| `penberg/titania` | [`d820923`](https://github.com/penberg/titania/tree/d82092341c0b856e6ea2f2b998133801965bc95b) | no |
+| `planetscale/lead` | [`bd95c7e`](https://github.com/planetscale/lead/tree/bd95c7e51b6afce81396790852ee2f2c169570ad) | no |
 
 ### Highest-value repositories for btrain
 
