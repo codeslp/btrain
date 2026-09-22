@@ -699,10 +699,11 @@ knowledge-base reliability, provider choice, and prior organizational decisions.
 - `specs/020-token-spend-and-decomposition.md`
 - `research/bth-supervisor-agentchattr-reassessment.md`
 - `research/a2a-langgraph-langsmith-evaluation.md`
-- `/Volumes/zombie/closr/ai_sales/research/2026-09-16-typesafe-jev-applications.md`
-- `/Volumes/zombie/closr/ai_sales/research/2026-09-16-jev-scoring-experiment-design.md`
-- `/Volumes/zombie/mech_ai/research/kb-reliability-research.md`
-- `/Volumes/zombie/mech_ai/research/retrieval-architecture.md`
+- [ai_sales TypeSafe and Jev applications](https://github.com/Rapid-Agency/ai_sales/blob/bc34f6e43b53f69fd13a27f9222d2b178f2d7f58/research/2026-09-16-typesafe-jev-applications.md)
+- `Rapid-Agency/ai_sales:research/2026-09-16-jev-scoring-experiment-design.md`
+  (repository-relative working-tree artifact; not published at the reviewed commit)
+- [mech_ai knowledge-base reliability research](https://github.com/Rapid-Agency/mech_ai/blob/b50a935027a4947199b7bd54c12972846f41b399/research/kb-reliability-research.md)
+- [mech_ai retrieval architecture](https://github.com/Rapid-Agency/mech_ai/blob/b50a935027a4947199b7bd54c12972846f41b399/research/retrieval-architecture.md)
 - [Rapid-Agency/zo_cal System One research](https://github.com/Rapid-Agency/zo_cal/blob/HEAD/specs/002-system-one-orchestration/research.md)
 - [Rapid-Agency/zo_cal PR #2](https://github.com/Rapid-Agency/zo_cal/pull/2)
 
@@ -725,5 +726,7 @@ knowledge-base reliability, provider choice, and prior organizational decisions.
 - TypeSafe model weights and architecture remain unpublished.
 - The best privacy posture for source code, transcripts, and customer corpora is not yet
   recorded as a cross-repo policy.
+- The ai_sales scoring experiment design is a repository-relative working-tree artifact and has
+  no published commit URL.
 
 **Durable writeback:** this document.
