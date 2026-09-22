@@ -28,6 +28,14 @@ describe("System One runtime configuration", () => {
     assert.equal(assist.reason, "missing-api-key")
   })
 
+  it("preserves an invalid mode as an operator-visible configuration failure", () => {
+    const config = readSystemOneRuntimeConfig({ BTRAIN_JEV_MODE: "asist", BTRAIN_JEV_API_KEY: "key" })
+
+    assert.equal(config.mode, "off")
+    assert.equal(config.enabled, false)
+    assert.equal(config.reason, "invalid-mode")
+  })
+
   it("bounds the configured timeout and accepts the shared JEV key name", () => {
     const config = readSystemOneRuntimeConfig({
       BTRAIN_JEV_MODE: "assist",

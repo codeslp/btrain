@@ -753,6 +753,21 @@ describe("PR review flow classification", () => {
     assert.doesNotMatch(status.bots[0].feedback[0].body, /[\u0000-\u001f\u007f-\u009f]/)
   })
 
+  it("renders the concrete provider failure reason", () => {
+    const rendered = formatPrStatusSummary({
+      overall: "waiting",
+      pr: { number: 12, title: "Test", headShort: "abc123", state: "OPEN" },
+      bots: [],
+      semantic: {
+        mode: "assist",
+        enabled: true,
+        decisions: [{ bot: "codex", outcome: "provider-failure", reason: "timeout" }],
+      },
+    })
+
+    assert.match(rendered, /provider-failure \(timeout\)/)
+  })
+
   it("does not consult semantics when deterministic current-head evidence exists", async () => {
     let calls = 0
     const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

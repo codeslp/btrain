@@ -628,7 +628,9 @@ export function formatPrStatusSummary(status) {
     const availability = status.semantic.enabled ? "enabled" : `disabled (${status.semantic.reason || "unavailable"})`
     lines.push(`semantic review signals: ${status.semantic.mode} — ${availability}`)
     for (const decision of status.semantic.decisions || []) {
-      const result = decision.prediction || decision.outcome || decision.reason || "unknown"
+      const result = decision.outcome === "provider-failure" && decision.reason
+        ? `${decision.outcome} (${decision.reason})`
+        : decision.prediction || decision.outcome || decision.reason || "unknown"
       const applied = decision.applied ? "; applied" : ""
       lines.push(`  - ${decision.bot}: ${result}${decision.model ? ` via ${decision.model}` : ""}${applied}`)
     }
@@ -756,7 +758,9 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
   })
   const input = { pr, rawComments, prFlowConfig }
   const semanticConfig = readSystemOneRuntimeConfig(process.env)
-  if (semanticConfig.mode === "off") return classifyPrReviewState(input)
+  if (semanticConfig.mode === "off" && semanticConfig.reason === "mode-off") {
+    return classifyPrReviewState(input)
+  }
   if (!semanticConfig.enabled) {
     return {
       ...classifyPrReviewState(input),
