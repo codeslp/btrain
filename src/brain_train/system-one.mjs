@@ -108,6 +108,13 @@ function failure(reason, message, startedAt) {
   }
 }
 
+function httpFailureReason(status) {
+  if (status === 401 || status === 403) return "authentication-error"
+  if (status === 429) return "rate-limit"
+  if (status >= 500 && status <= 599) return "provider-error"
+  return "http-error"
+}
+
 async function readBoundedResponseBody(response) {
   const reader = response.body?.getReader?.()
   if (!reader) return { invalid: true }
@@ -217,7 +224,13 @@ export function createSystemOneClient({
           }, boundedTimeout)
         })
         const { response, body, oversized, invalidBody } = await Promise.race([operation, deadline])
-        if (!response?.ok) return failure("http-error", `System One returned HTTP ${response?.status || "unknown"}.`, startedAt)
+        if (!response?.ok) {
+          return failure(
+            httpFailureReason(response?.status),
+            `System One returned HTTP ${response?.status || "unknown"}.`,
+            startedAt,
+          )
+        }
         if (oversized) return failure("invalid-response", "System One response exceeds the size limit.", startedAt)
         if (invalidBody) return failure("invalid-response", "System One returned an unreadable response body.", startedAt)
         if (!validResponse(body)) {

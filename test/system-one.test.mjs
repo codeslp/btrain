@@ -132,7 +132,7 @@ describe("System One client", () => {
       }),
     })
 
-    assert.equal((await provider.decide(request)).reason, "http-error")
+    assert.equal((await provider.decide(request)).reason, "authentication-error")
     assert.equal((await malformed.decide(request)).reason, "invalid-response")
     assert.equal((await timeout.decide(request)).reason, "timeout")
   })
@@ -157,7 +157,7 @@ describe("System One client", () => {
       questions: { signal: { type: "noul", instructions: "Is this a verdict?", criteria: null } },
     })
 
-    assert.equal(result.reason, "http-error")
+    assert.equal(result.reason, "provider-error")
     assert.equal(cancelled, true)
   })
 
