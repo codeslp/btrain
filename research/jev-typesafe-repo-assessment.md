@@ -90,9 +90,9 @@ a direct SDK call scattered through `core.mjs`.
   This report does not contain a direct artifact for those counts. Treat them as an
   unverified historical account, not an adoption gate or independently measured result.
   The companion btrain experiment at commit
-  [`613851a`](https://github.com/codeslp/btrain/tree/613851af91e7029f70c8ff692c92382b12ef70ea/experiments/jev-btrain)
+  [`a9c529c`](https://github.com/codeslp/btrain/tree/a9c529cc3301675b630ce26208087c0da88a78fe/experiments/jev-btrain)
   provides frozen pilot artifacts. Its
-  [results report](https://github.com/codeslp/btrain/blob/613851af91e7029f70c8ff692c92382b12ef70ea/research/jev-btrain-experiment-results.md)
+  [results report](https://github.com/codeslp/btrain/blob/a9c529cc3301675b630ce26208087c0da88a78fe/research/jev-btrain-experiment-results.md)
   states the limits of that evidence. The companion commit is separate from this report commit.
 - TypeSafe Choice and Score confidence is derived from the answer distribution. It
   measures concentration, not correctness. A wrong answer can have high confidence.
