@@ -24,7 +24,6 @@ __pycache__/
 *.tar
 *.gz
 
-# Vendored subproject, not btrain source. Excluded entirely (Brian, 2026-09-16):
-# its Python tree outvotes btrain's JS in kkg language detection and adds
-# thousands of irrelevant nodes to the graph.
-agentchattr/
+# Exclude agentchattr's local environment without hiding its implementation
+# from lock-overlap, drift, and reviewer-packet analysis.
+agentchattr/.venv/
