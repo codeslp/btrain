@@ -165,16 +165,22 @@ function perLabelMetrics(rows, labels, predictionKey) {
 }
 
 function summarize(rows, labels, predictionKey) {
-  const correct = rows.filter((row) => row.label === row[predictionKey]).length
-  const perLabel = perLabelMetrics(rows, labels, predictionKey)
+  const evaluated = rows.filter((row) => labels.includes(row[predictionKey]))
+  const correct = evaluated.filter((row) => row.label === row[predictionKey]).length
+  const perLabel = perLabelMetrics(evaluated, labels, predictionKey)
   const f1s = Object.values(perLabel).map((entry) => entry.f1)
   return {
-    count: rows.length,
+    fixtureCount: rows.length,
+    count: evaluated.length,
+    failureCount: rows.length - evaluated.length,
+    coverage: rows.length ? Number((evaluated.length / rows.length).toFixed(3)) : null,
     correct,
-    accuracy: Number((correct / rows.length).toFixed(3)),
-    macroF1: Number((f1s.reduce((sum, value) => sum + value, 0) / f1s.length).toFixed(3)),
+    accuracy: evaluated.length ? Number((correct / evaluated.length).toFixed(3)) : null,
+    macroF1: evaluated.length
+      ? Number((f1s.reduce((sum, value) => sum + value, 0) / f1s.length).toFixed(3))
+      : null,
     perLabel,
-    errors: rows.filter((row) => row.label !== row[predictionKey]).map((row) => ({
+    errors: evaluated.filter((row) => row.label !== row[predictionKey]).map((row) => ({
       id: row.id,
       expected: row.label,
       actual: row[predictionKey],
@@ -198,7 +204,6 @@ async function runDataset(filename, labels, baseline, modelClassifier) {
         Object.assign(row, await modelClassifier(item))
       } catch (error) {
         row.modelError = error.message
-        row.prediction = "uncertain"
       }
     }
     rows.push(row)

@@ -176,6 +176,11 @@ During shadow mode, record the deterministic result, Jev probabilities, model ve
 input hash, and eventual human or bot disposition. Do not record credentials or unrelated comment
 content.
 
+Provider failures have no classification prediction. The runner excludes them from accuracy,
+precision, recall, and F1, then reports them through `failureCount` and `coverage`. Deployment gates
+must evaluate the failure rate separately and must not interpret an omitted prediction as
+`uncertain` or as a correct classification.
+
 ## Reproduction
 
 Run the baseline:

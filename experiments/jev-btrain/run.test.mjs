@@ -35,8 +35,13 @@ for (const stall of ["fetch", "body"]) {
       })
       assert.equal(result.timeoutMs, 100)
       for (const experiment of Object.values(result.experiments)) {
-        assert.equal(experiment.rows[0].prediction, "uncertain")
+        assert.equal(experiment.rows[0].prediction, undefined)
         assert.match(experiment.rows[0].modelError, /timeout.*100 ms/i)
+        const summary = experiment.splits.all.model
+        assert.equal(summary.count, 0)
+        assert.equal(summary.failureCount, 1)
+        assert.equal(summary.coverage, 0)
+        assert.equal(summary.accuracy, null)
       }
     } finally {
       await fs.rm(dir, { recursive: true, force: true })

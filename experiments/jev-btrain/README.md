@@ -42,5 +42,6 @@ All predictions remain advisory and cannot approve a PR or change workflow state
 
 Each request has a 10-second deadline, including response parsing. Set
 `SYSTEM_ONE_TIMEOUT_MS` to change it within 100–60,000 ms. A timeout records a model
-error and an `uncertain` prediction, then continues to the next case.
+error with no prediction, excludes the case from classification metrics, records reduced
+coverage and a failure count, and then continues to the next case.
 Run the offline timeout regressions with `node --test experiments/jev-btrain/run.test.mjs`.
