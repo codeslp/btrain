@@ -110,7 +110,7 @@ This is the clearest payoff.
 - Jev improved held-out accuracy from 50.0% to 100.0%.
 - The input is short.
 - Latency is below the existing multi-second reviewer workflow cost.
-- Provider failure can return `uncertain` without changing lane state.
+- Provider failure remains unclassified and preserves the existing lane state.
 - btrain already has real comment logs and eventual lane outcomes for a larger dataset.
 
 The implementation must keep these checks deterministic:

@@ -34,17 +34,28 @@ function compareExperiment(leftExperiment, rightExperiment) {
       rightConfidence: rightRow.confidence,
     }
   })
-  const present = rows.filter((row) => !row.missing)
-  const test = present.filter((row) => row.split === "test")
-  const summarize = (selected) => ({
-    count: selected.length,
-    topChoiceAgreement: Number((selected.filter((row) => row.sameTopChoice).length / selected.length).toFixed(3)),
-    leftAccuracy: Number((selected.filter((row) => row.leftCorrect).length / selected.length).toFixed(3)),
-    rightAccuracy: Number((selected.filter((row) => row.rightCorrect).length / selected.length).toFixed(3)),
-    meanAbsoluteProbabilityDifference: Number((selected.reduce((sum, row) => sum + (row.meanAbsoluteProbabilityDifference || 0), 0) / selected.length).toFixed(3)),
-    disagreements: selected.filter((row) => !row.sameTopChoice).map(({ id, label, left: leftPrediction, right: rightPrediction }) => ({ id, label, left: leftPrediction, right: rightPrediction })),
-  })
-  return { all: summarize(present), test: summarize(test), rows }
+  const matched = rows.filter((row) => !row.missing)
+  const comparable = matched.filter((row) => row.left !== undefined && row.right !== undefined)
+  const summarize = (eligible, selected) => {
+    const distances = selected
+      .map((row) => row.meanAbsoluteProbabilityDifference)
+      .filter((value) => value !== null)
+    return {
+      count: selected.length,
+      excludedFailureCount: eligible.length - selected.length,
+      coverage: eligible.length ? Number((selected.length / eligible.length).toFixed(3)) : null,
+      topChoiceAgreement: selected.length ? Number((selected.filter((row) => row.sameTopChoice).length / selected.length).toFixed(3)) : null,
+      leftAccuracy: selected.length ? Number((selected.filter((row) => row.leftCorrect).length / selected.length).toFixed(3)) : null,
+      rightAccuracy: selected.length ? Number((selected.filter((row) => row.rightCorrect).length / selected.length).toFixed(3)) : null,
+      meanAbsoluteProbabilityDifference: distances.length
+        ? Number((distances.reduce((sum, value) => sum + value, 0) / distances.length).toFixed(3))
+        : null,
+      disagreements: selected.filter((row) => !row.sameTopChoice).map(({ id, label, left: leftPrediction, right: rightPrediction }) => ({ id, label, left: leftPrediction, right: rightPrediction })),
+    }
+  }
+  const matchedTest = matched.filter((row) => row.split === "test")
+  const comparableTest = comparable.filter((row) => row.split === "test")
+  return { all: summarize(matched, comparable), test: summarize(matchedTest, comparableTest), rows }
 }
 
 const comparison = {

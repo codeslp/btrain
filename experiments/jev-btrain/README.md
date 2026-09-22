@@ -35,6 +35,9 @@ Compare the two saved runs:
 node experiments/jev-btrain/compare.mjs results-kev-0.6b.json results-jev.json
 ```
 
+The comparison excludes rows where either provider has no prediction. It reports the
+excluded failure count and comparison coverage with the classification metrics.
+
 The runner writes machine-readable results beside the fixtures. A separate Noul coverage
 question reduces forced-choice errors but does not prevent them. The saved Kev
 `uncertain-request` case still predicts `clear` with a verdict probability of 0.6.

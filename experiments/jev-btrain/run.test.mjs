@@ -48,3 +48,44 @@ for (const stall of ["fetch", "body"]) {
     }
   })
 }
+
+test("comparison excludes provider failures from classification metrics", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jev-comparison-"))
+  try {
+    await fs.copyFile(new URL("./compare.mjs", import.meta.url), path.join(dir, "compare.mjs"))
+    const experiment = (rows) => ({ model: "test-model", rows })
+    const left = {
+      experiments: {
+        prSignals: experiment([
+          { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
+          { id: "failed", split: "test", label: "feedback", modelError: "timeout" },
+        ]),
+        handoffPackets: experiment([]),
+      },
+    }
+    const right = {
+      experiments: {
+        prSignals: experiment([
+          { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
+          { id: "failed", split: "test", label: "feedback", prediction: "feedback", probabilities: { feedback: 1 } },
+        ]),
+        handoffPackets: experiment([]),
+      },
+    }
+    await fs.writeFile(path.join(dir, "left.json"), JSON.stringify(left))
+    await fs.writeFile(path.join(dir, "right.json"), JSON.stringify(right))
+    const run = spawnSync(process.execPath, [path.join(dir, "compare.mjs"), "left.json", "right.json"], {
+      env: { ...process.env, COMPARISON_SLUG: "test" },
+      encoding: "utf8",
+    })
+    assert.equal(run.status, 0, run.stderr)
+    const result = JSON.parse(await fs.readFile(path.join(dir, "comparison-test.json"), "utf8"))
+    assert.equal(result.prSignals.test.count, 1)
+    assert.equal(result.prSignals.test.excludedFailureCount, 1)
+    assert.equal(result.prSignals.test.coverage, 0.5)
+    assert.equal(result.prSignals.test.leftAccuracy, 1)
+    assert.equal(result.prSignals.test.rightAccuracy, 1)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
