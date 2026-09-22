@@ -64,6 +64,7 @@ Project knowledge lives in the docs below. Read them; don't duplicate conclusion
 - Edit over create. Don't touch `.claude/settings*.json` unless asked.
 - Research-first: ground recommendations in the docs above.
 - Runtime alias: collaborator `GPT` → Codex runtime via `[agents.runners]` in `.btrain/project.toml`.
+- Manual Codex sessions must set `BTRAIN_AGENT=codex` or `BTRAIN_AGENT=codex-reviewer` before they run btrain commands. Loop-dispatched sessions set this value automatically.
 
 ## Proactivity
 
