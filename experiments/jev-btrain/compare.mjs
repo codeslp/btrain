@@ -15,6 +15,16 @@ function distributionDistance(a = {}, b = {}) {
   return keys.reduce((sum, key) => sum + Math.abs((a[key] || 0) - (b[key] || 0)), 0) / keys.length
 }
 
+function fixtureSignature(row) {
+  return JSON.stringify({
+    split: row.split,
+    label: row.label,
+    source: row.source ?? null,
+    text: row.text ?? null,
+    packet: row.packet ?? null,
+  })
+}
+
 function compareExperiment(leftExperiment, rightExperiment) {
   const leftById = new Map(leftExperiment.rows.map((row) => [row.id, row]))
   const rightById = new Map(rightExperiment.rows.map((row) => [row.id, row]))
@@ -25,13 +35,18 @@ function compareExperiment(leftExperiment, rightExperiment) {
   const ids = [...new Set([...leftById.keys(), ...rightById.keys()])]
   const validPrediction = (row) => row && !row.modelError && labels.has(row.prediction)
   const comparableIds = new Set(ids.filter((id) => (
-    validPrediction(leftById.get(id)) && validPrediction(rightById.get(id))
+    validPrediction(leftById.get(id))
+    && validPrediction(rightById.get(id))
+    && fixtureSignature(leftById.get(id)) === fixtureSignature(rightById.get(id))
   )))
   const rows = ids.map((id) => {
     const leftRow = leftById.get(id)
     const rightRow = rightById.get(id)
     if (!leftRow) return { id, split: rightRow.split, label: rightRow.label, missing: "left" }
     if (!rightRow) return { id, split: leftRow.split, label: leftRow.label, missing: "right" }
+    if (fixtureSignature(leftRow) !== fixtureSignature(rightRow)) {
+      return { id, split: leftRow.split, label: leftRow.label, mismatch: true }
+    }
     return {
       id,
       split: leftRow.split,
@@ -54,7 +69,8 @@ function compareExperiment(leftExperiment, rightExperiment) {
       .filter((value) => value !== null)
     return {
       count: selected.length,
-      excludedFailureCount: eligible.filter((row) => !row.missing).length - selected.length,
+      excludedFailureCount: eligible.filter((row) => !row.missing && !row.mismatch).length - selected.length,
+      mismatchCount: eligible.filter((row) => row.mismatch).length,
       missingCount: eligible.filter((row) => row.missing).length,
       coverage: eligible.length ? Number((selected.length / eligible.length).toFixed(3)) : null,
       topChoiceAgreement: selected.length ? Number((selected.filter((row) => row.sameTopChoice).length / selected.length).toFixed(3)) : null,

@@ -12,6 +12,7 @@
     "all": {
       "count": 28,
       "excludedFailureCount": 0,
+      "mismatchCount": 0,
       "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 1,
@@ -23,6 +24,7 @@
     "test": {
       "count": 14,
       "excludedFailureCount": 0,
+      "mismatchCount": 0,
       "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 1,
@@ -402,6 +404,7 @@
     "all": {
       "count": 18,
       "excludedFailureCount": 0,
+      "mismatchCount": 0,
       "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 0.944,
@@ -420,6 +423,7 @@
     "test": {
       "count": 9,
       "excludedFailureCount": 0,
+      "mismatchCount": 0,
       "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 1,

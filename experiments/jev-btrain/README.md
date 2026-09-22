@@ -35,8 +35,8 @@ Compare the two saved runs:
 node experiments/jev-btrain/compare.mjs results-kev-0.6b.json results-jev.json
 ```
 
-The comparison excludes missing fixtures and rows where either provider has an invalid
-prediction. It reports missing fixtures, excluded failures, and coverage with the metrics.
+The comparison excludes missing or changed fixtures and rows where either provider has an
+invalid prediction. It reports each exclusion class and coverage with the metrics.
 
 The runner writes machine-readable results beside the fixtures. A separate Noul coverage
 question reduces forced-choice errors but does not prevent them. The saved Kev
