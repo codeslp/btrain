@@ -24,5 +24,7 @@ __pycache__/
 *.tar
 *.gz
 
-# spec 020 WS1: keep vendored Python out of SCIP language detection
-agentchattr/.venv/
+# Vendored subproject, not btrain source. Excluded entirely (Brian, 2026-09-16):
+# its Python tree outvotes btrain's JS in kkg language detection and adds
+# thousands of irrelevant nodes to the graph.
+agentchattr/

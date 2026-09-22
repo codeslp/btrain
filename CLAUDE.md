@@ -21,7 +21,7 @@ This repo uses the `btrain` collaboration workflow.
 
 ### Collaboration Setup
 
-- Active collaborating agents: `claude`, `codex`, `gemini`, `app-developer`, `claude-reviewer`
+- Active collaborating agents: `codex`, `codex-reviewer`
 - Current lane target: 15 lane(s) (3 per collaborating agent): `a`, `b`, `c`, `d`, `e`, `f`, `g`, `h`, `i`, `j`, `k`, `l`, `m`, `n`, `o`
 - Change `[agents].active` or `[lanes].per_agent`, then run `btrain init`, `btrain agents set`, or `btrain agents add` to scaffold missing lanes and refresh docs.
 
