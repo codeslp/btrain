@@ -575,15 +575,20 @@ export async function classifyPrReviewStateWithSemantic(
   const semanticVerdicts = {}
   if (mode === "assist") {
     for (const decision of decisions.filter((item) => item.applied)) {
+      const source = candidates.find((candidate) => (
+        candidate.botId === decision.bot
+        && candidate.surface === decision.surface
+        && candidate.sourceId === decision.sourceId
+      ))
       semanticVerdicts[decision.bot] = {
         state: decision.prediction,
         feedback: {
           author: decision.bot,
-          body: candidateSummary(candidates.find((candidate) => candidate.botId === decision.bot)?.body),
+          body: candidateSummary(source?.body),
           file: null,
           line: null,
           commit: decision.reviewedCommit,
-          url: candidates.find((candidate) => candidate.botId === decision.bot)?.url || "",
+          url: source?.url || "",
           at: decision.at,
         },
         at: decision.at,

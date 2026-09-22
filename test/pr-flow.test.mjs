@@ -624,6 +624,7 @@ describe("PR review flow classification", () => {
     input.rawComments.reviews = [{
       id: 201, user: { login: "chatgpt-codex-connector[bot]" },
       state: "COMMENTED", commit_id: head, body: "The unlock happens too early.",
+      html_url: "https://example.test/review/201",
       submitted_at: "2026-09-20T20:00:00Z",
     }]
     const status = await classifyPrReviewStateWithSemantic(input, {
@@ -644,6 +645,7 @@ describe("PR review flow classification", () => {
     input.rawComments.reviews = [{
       id: 201, user: { login: "chatgpt-codex-connector[bot]" },
       state: "COMMENTED", commit_id: head, body: "The unlock happens too early.",
+      html_url: "https://example.test/review/201",
       submitted_at: "2026-09-20T20:00:00Z",
     }]
     input.rawComments.issueComments[0].created_at = "2026-09-20T20:00:00Z"
@@ -669,6 +671,8 @@ describe("PR review flow classification", () => {
     assert.deepEqual(bodies, ["The unlock happens too early.", input.rawComments.issueComments[0].body])
     assert.equal(status.overall, "feedback")
     assert.equal(status.semantic.appliedCount, 1)
+    assert.equal(status.bots[0].feedback[0].body, "The unlock happens too early.")
+    assert.equal(status.bots[0].feedback[0].url, "https://example.test/review/201")
   })
 
   it("does not send pending or dismissed formal reviews to the semantic provider", async () => {
