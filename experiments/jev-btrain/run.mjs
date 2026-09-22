@@ -59,7 +59,13 @@ const HANDOFF_DECISION_CONFIG = {
 
 function decisionConfigHash(labels, config, classifier) {
   return createHash("sha256")
-    .update(JSON.stringify({ labels, config, classifier: classifier.toString() }))
+    .update(JSON.stringify({
+      labels,
+      config,
+      request: postSystemOne.toString(),
+      normalizeNoul: noulValue.toString(),
+      classifier: classifier.toString(),
+    }))
     .digest("hex")
 }
 

@@ -39,6 +39,7 @@ The comparison excludes missing or changed fixtures and rows where either provid
 invalid prediction. It reports each exclusion class and coverage with the metrics.
 It also rejects runs whose decision-configuration hashes differ. Run
 `node experiments/jev-btrain/run.mjs --print-config-hashes` to inspect the current hashes.
+Probability-distance metrics report separate coverage when a run lacks a valid vector.
 
 The runner writes machine-readable results beside the fixtures. A separate Noul coverage
 question reduces forced-choice errors but does not prevent them. The saved Kev

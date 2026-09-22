@@ -9,9 +9,15 @@ const [leftName = "results-kev-0.6b.json", rightName = "results-jev.json"] = pro
 const left = JSON.parse(await fs.readFile(path.resolve(root, leftName), "utf8"))
 const right = JSON.parse(await fs.readFile(path.resolve(root, rightName), "utf8"))
 
-function distributionDistance(a = {}, b = {}) {
+function validDistribution(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length > 0
+    && Object.values(value).every((entry) => Number.isFinite(entry) && entry >= 0 && entry <= 1)
+}
+
+function distributionDistance(a, b) {
+  if (!validDistribution(a) || !validDistribution(b)) return null
   const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])]
-  if (!keys.length) return null
   return keys.reduce((sum, key) => sum + Math.abs((a[key] || 0) - (b[key] || 0)), 0) / keys.length
 }
 
@@ -49,7 +55,13 @@ function compareExperiment(leftExperiment, rightExperiment, labels) {
     if (!leftRow) return { id, split: rightRow.split, label: rightRow.label, missing: "left" }
     if (!rightRow) return { id, split: leftRow.split, label: leftRow.label, missing: "right" }
     if (fixtureSignature(leftRow) !== fixtureSignature(rightRow)) {
-      return { id, split: leftRow.split, label: leftRow.label, mismatch: true }
+      return {
+        id,
+        split: leftRow.split,
+        splits: [...new Set([leftRow.split, rightRow.split])],
+        label: leftRow.label,
+        mismatch: true,
+      }
     }
     return {
       id,
@@ -77,6 +89,8 @@ function compareExperiment(leftExperiment, rightExperiment, labels) {
       mismatchCount: eligible.filter((row) => row.mismatch).length,
       missingCount: eligible.filter((row) => row.missing).length,
       coverage: eligible.length ? Number((selected.length / eligible.length).toFixed(3)) : null,
+      probabilityCount: distances.length,
+      probabilityCoverage: selected.length ? Number((distances.length / selected.length).toFixed(3)) : null,
       topChoiceAgreement: selected.length ? Number((selected.filter((row) => row.sameTopChoice).length / selected.length).toFixed(3)) : null,
       leftAccuracy: selected.length ? Number((selected.filter((row) => row.leftCorrect).length / selected.length).toFixed(3)) : null,
       rightAccuracy: selected.length ? Number((selected.filter((row) => row.rightCorrect).length / selected.length).toFixed(3)) : null,
@@ -86,7 +100,7 @@ function compareExperiment(leftExperiment, rightExperiment, labels) {
       disagreements: selected.filter((row) => !row.sameTopChoice).map(({ id, label, left: leftPrediction, right: rightPrediction }) => ({ id, label, left: leftPrediction, right: rightPrediction })),
     }
   }
-  const testRows = rows.filter((row) => row.split === "test")
+  const testRows = rows.filter((row) => row.split === "test" || row.splits?.includes("test"))
   const comparableTest = comparable.filter((row) => row.split === "test")
   return { configurationMismatch, all: summarize(rows, comparable), test: summarize(testRows, comparableTest), rows }
 }

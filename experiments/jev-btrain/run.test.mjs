@@ -63,7 +63,9 @@ test("comparison excludes provider failures from classification metrics", async 
           { id: "null", split: "test", label: "feedback", prediction: null },
           { id: "unknown", split: "test", label: "feedback", prediction: "other" },
           { id: "mismatch", split: "test", label: "feedback", prediction: "feedback", text: "old fixture" },
+          { id: "mismatch-split", split: "calibration", label: "clear", prediction: "clear" },
           { id: "absent-class", split: "test", label: "clear", prediction: "uncertain" },
+          { id: "no-probabilities", split: "test", label: "uncertain", prediction: "uncertain" },
           { id: "left-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
         handoffPackets: experiment([
@@ -79,7 +81,9 @@ test("comparison excludes provider failures from classification metrics", async 
           { id: "null", split: "test", label: "feedback", prediction: "feedback" },
           { id: "unknown", split: "test", label: "feedback", prediction: "feedback" },
           { id: "mismatch", split: "train", label: "clear", prediction: "clear", text: "new fixture" },
+          { id: "mismatch-split", split: "test", label: "clear", prediction: "clear" },
           { id: "absent-class", split: "test", label: "clear", prediction: "uncertain" },
+          { id: "no-probabilities", split: "test", label: "uncertain", prediction: "uncertain", probabilities: { uncertain: 1 } },
           { id: "right-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
         handoffPackets: experiment([
@@ -95,13 +99,15 @@ test("comparison excludes provider failures from classification metrics", async 
     })
     assert.equal(run.status, 0, run.stderr)
     const result = JSON.parse(await fs.readFile(path.join(dir, "comparison-test.json"), "utf8"))
-    assert.equal(result.prSignals.test.count, 2)
+    assert.equal(result.prSignals.test.count, 3)
     assert.equal(result.prSignals.test.excludedFailureCount, 3)
-    assert.equal(result.prSignals.test.mismatchCount, 1)
+    assert.equal(result.prSignals.test.mismatchCount, 2)
     assert.equal(result.prSignals.test.missingCount, 2)
-    assert.equal(result.prSignals.test.coverage, 0.25)
-    assert.equal(result.prSignals.test.leftAccuracy, 0.5)
-    assert.equal(result.prSignals.test.rightAccuracy, 0.5)
+    assert.equal(result.prSignals.test.coverage, 0.3)
+    assert.equal(result.prSignals.test.leftAccuracy, 0.667)
+    assert.equal(result.prSignals.test.rightAccuracy, 0.667)
+    assert.equal(result.prSignals.test.probabilityCount, 1)
+    assert.equal(result.prSignals.test.probabilityCoverage, 0.333)
     assert.equal(result.handoffPackets.configurationMismatch, true)
     assert.equal(result.handoffPackets.test.count, 0)
     assert.equal(result.handoffPackets.test.coverage, 0)
@@ -116,10 +122,15 @@ test("decision config hashes include classifier transformations", async () => {
     const source = await fs.readFile(new URL("./run.mjs", import.meta.url), "utf8")
     const originalPath = path.join(dir, "original.mjs")
     const changedPath = path.join(dir, "changed.mjs")
+    const sharedChangedPath = path.join(dir, "shared-changed.mjs")
     await fs.writeFile(originalPath, source)
     await fs.writeFile(changedPath, source.replace(
       "{ reviewComment: item.text }",
       "{ reviewBody: item.text }",
+    ))
+    await fs.writeFile(sharedChangedPath, source.replace(
+      "const value = answer?.noul ?? answer?.probability",
+      "const value = answer?.probability ?? answer?.noul",
     ))
     const readHashes = (target) => {
       const run = spawnSync(process.execPath, [target, "--print-config-hashes"], { encoding: "utf8" })
@@ -128,9 +139,12 @@ test("decision config hashes include classifier transformations", async () => {
     }
     const original = readHashes(originalPath)
     const changed = readHashes(changedPath)
+    const sharedChanged = readHashes(sharedChangedPath)
 
     assert.notEqual(changed.prSignals, original.prSignals)
     assert.equal(changed.handoffPackets, original.handoffPackets)
+    assert.notEqual(sharedChanged.prSignals, original.prSignals)
+    assert.notEqual(sharedChanged.handoffPackets, original.handoffPackets)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
