@@ -19,6 +19,7 @@
   "experiments": {
     "prSignals": {
       "fixtures": "pr-signals.json",
+      "decisionConfigHash": "5ee3db666856979322257521287ba5f2575c19e4453068286af98d50bff806cc",
       "model": "kev-latest",
       "servedModels": [
         "kev-latest"
@@ -1112,6 +1113,7 @@
     },
     "handoffPackets": {
       "fixtures": "handoff-packets.json",
+      "decisionConfigHash": "5bc4135a51ccbc4fd2cfeaf355bf131588efdc44308adc75bfdd59f5b0356515",
       "model": "kev-latest",
       "servedModels": [
         "kev-latest"

@@ -9,6 +9,7 @@
     "model": "jev-latest"
   },
   "prSignals": {
+    "configurationMismatch": false,
     "all": {
       "count": 28,
       "excludedFailureCount": 0,
@@ -505,6 +506,7 @@
     ]
   },
   "handoffPackets": {
+    "configurationMismatch": false,
     "all": {
       "count": 18,
       "excludedFailureCount": 0,

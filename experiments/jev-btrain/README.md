@@ -37,6 +37,8 @@ node experiments/jev-btrain/compare.mjs results-kev-0.6b.json results-jev.json
 
 The comparison excludes missing or changed fixtures and rows where either provider has an
 invalid prediction. It reports each exclusion class and coverage with the metrics.
+It also rejects runs whose decision-configuration hashes differ. Run
+`node experiments/jev-btrain/run.mjs --print-config-hashes` to inspect the current hashes.
 
 The runner writes machine-readable results beside the fixtures. A separate Noul coverage
 question reduces forced-choice errors but does not prevent them. The saved Kev

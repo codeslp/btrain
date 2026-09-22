@@ -25,17 +25,21 @@ function fixtureSignature(row) {
   })
 }
 
-function compareExperiment(leftExperiment, rightExperiment) {
+function compareExperiment(leftExperiment, rightExperiment, labels) {
   const leftById = new Map(leftExperiment.rows.map((row) => [row.id, row]))
   const rightById = new Map(rightExperiment.rows.map((row) => [row.id, row]))
-  const labels = new Set([
-    ...leftExperiment.rows.map((row) => row.label),
-    ...rightExperiment.rows.map((row) => row.label),
-  ])
+  const allowedLabels = new Set(labels)
   const ids = [...new Set([...leftById.keys(), ...rightById.keys()])]
-  const validPrediction = (row) => row && !row.modelError && labels.has(row.prediction)
+  const configurationMismatch = !leftExperiment.decisionConfigHash
+    || leftExperiment.decisionConfigHash !== rightExperiment.decisionConfigHash
+  const validPrediction = (row) => row && !row.modelError && allowedLabels.has(row.prediction)
+  const invalidIds = new Set(ids.filter((id) => (
+    leftById.has(id) && rightById.has(id)
+    && (!validPrediction(leftById.get(id)) || !validPrediction(rightById.get(id)))
+  )))
   const comparableIds = new Set(ids.filter((id) => (
-    validPrediction(leftById.get(id))
+    !configurationMismatch
+    && validPrediction(leftById.get(id))
     && validPrediction(rightById.get(id))
     && fixtureSignature(leftById.get(id)) === fixtureSignature(rightById.get(id))
   )))
@@ -69,7 +73,7 @@ function compareExperiment(leftExperiment, rightExperiment) {
       .filter((value) => value !== null)
     return {
       count: selected.length,
-      excludedFailureCount: eligible.filter((row) => !row.missing && !row.mismatch).length - selected.length,
+      excludedFailureCount: eligible.filter((row) => invalidIds.has(row.id)).length,
       mismatchCount: eligible.filter((row) => row.mismatch).length,
       missingCount: eligible.filter((row) => row.missing).length,
       coverage: eligible.length ? Number((selected.length / eligible.length).toFixed(3)) : null,
@@ -84,15 +88,15 @@ function compareExperiment(leftExperiment, rightExperiment) {
   }
   const testRows = rows.filter((row) => row.split === "test")
   const comparableTest = comparable.filter((row) => row.split === "test")
-  return { all: summarize(rows, comparable), test: summarize(testRows, comparableTest), rows }
+  return { configurationMismatch, all: summarize(rows, comparable), test: summarize(testRows, comparableTest), rows }
 }
 
 const comparison = {
   schemaVersion: 1,
   left: { file: leftName, model: left.experiments.prSignals.model },
   right: { file: rightName, model: right.experiments.prSignals.model },
-  prSignals: compareExperiment(left.experiments.prSignals, right.experiments.prSignals),
-  handoffPackets: compareExperiment(left.experiments.handoffPackets, right.experiments.handoffPackets),
+  prSignals: compareExperiment(left.experiments.prSignals, right.experiments.prSignals, ["clear", "feedback", "unavailable", "uncertain"]),
+  handoffPackets: compareExperiment(left.experiments.handoffPackets, right.experiments.handoffPackets, ["accept", "repair", "uncertain"]),
 }
 
 const output = path.join(root, `comparison-${process.env.COMPARISON_SLUG || "kev-vs-jev"}.json`)

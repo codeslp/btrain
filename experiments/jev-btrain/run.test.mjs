@@ -35,6 +35,7 @@ for (const stall of ["fetch", "body"]) {
       })
       assert.equal(result.timeoutMs, 100)
       for (const experiment of Object.values(result.experiments)) {
+        assert.match(experiment.decisionConfigHash, /^[0-9a-f]{64}$/)
         assert.equal(experiment.rows[0].prediction, undefined)
         assert.match(experiment.rows[0].modelError, /timeout.*100 ms/i)
         const summary = experiment.splits.all.model
@@ -53,7 +54,7 @@ test("comparison excludes provider failures from classification metrics", async 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jev-comparison-"))
   try {
     await fs.copyFile(new URL("./compare.mjs", import.meta.url), path.join(dir, "compare.mjs"))
-    const experiment = (rows) => ({ model: "test-model", rows })
+    const experiment = (rows, decisionConfigHash = "config-v1") => ({ model: "test-model", decisionConfigHash, rows })
     const left = {
       experiments: {
         prSignals: experiment([
@@ -62,9 +63,12 @@ test("comparison excludes provider failures from classification metrics", async 
           { id: "null", split: "test", label: "feedback", prediction: null },
           { id: "unknown", split: "test", label: "feedback", prediction: "other" },
           { id: "mismatch", split: "test", label: "feedback", prediction: "feedback", text: "old fixture" },
+          { id: "absent-class", split: "test", label: "clear", prediction: "uncertain" },
           { id: "left-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
-        handoffPackets: experiment([]),
+        handoffPackets: experiment([
+          { id: "same", split: "test", label: "accept", prediction: "accept" },
+        ]),
       },
     }
     const right = {
@@ -75,9 +79,12 @@ test("comparison excludes provider failures from classification metrics", async 
           { id: "null", split: "test", label: "feedback", prediction: "feedback" },
           { id: "unknown", split: "test", label: "feedback", prediction: "feedback" },
           { id: "mismatch", split: "train", label: "clear", prediction: "clear", text: "new fixture" },
+          { id: "absent-class", split: "test", label: "clear", prediction: "uncertain" },
           { id: "right-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
-        handoffPackets: experiment([]),
+        handoffPackets: experiment([
+          { id: "same", split: "test", label: "accept", prediction: "accept" },
+        ], "config-v2"),
       },
     }
     await fs.writeFile(path.join(dir, "left.json"), JSON.stringify(left))
@@ -88,13 +95,16 @@ test("comparison excludes provider failures from classification metrics", async 
     })
     assert.equal(run.status, 0, run.stderr)
     const result = JSON.parse(await fs.readFile(path.join(dir, "comparison-test.json"), "utf8"))
-    assert.equal(result.prSignals.test.count, 1)
+    assert.equal(result.prSignals.test.count, 2)
     assert.equal(result.prSignals.test.excludedFailureCount, 3)
     assert.equal(result.prSignals.test.mismatchCount, 1)
     assert.equal(result.prSignals.test.missingCount, 2)
-    assert.equal(result.prSignals.test.coverage, 0.143)
-    assert.equal(result.prSignals.test.leftAccuracy, 1)
-    assert.equal(result.prSignals.test.rightAccuracy, 1)
+    assert.equal(result.prSignals.test.coverage, 0.25)
+    assert.equal(result.prSignals.test.leftAccuracy, 0.5)
+    assert.equal(result.prSignals.test.rightAccuracy, 0.5)
+    assert.equal(result.handoffPackets.configurationMismatch, true)
+    assert.equal(result.handoffPackets.test.count, 0)
+    assert.equal(result.handoffPackets.test.coverage, 0)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

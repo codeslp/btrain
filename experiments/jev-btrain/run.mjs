@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises"
+import { createHash } from "node:crypto"
 import path from "node:path"
 import { performance } from "node:perf_hooks"
 import { fileURLToPath } from "node:url"
@@ -18,6 +19,47 @@ const timeoutMs = Number.isFinite(configuredTimeout)
 
 const PR_LABELS = ["clear", "feedback", "unavailable", "uncertain"]
 const HANDOFF_LABELS = ["accept", "repair", "uncertain"]
+const PR_DECISION_CONFIG = {
+  verdictThreshold: 0.5,
+  questions: {
+    signal: {
+      type: "choice",
+      instructions: "What result does this text communicate about the code review?",
+      criteria: {
+        clear: "The review completed and found no changes or blockers.",
+        feedback: "The review found an actionable problem or requests a code or test change.",
+        unavailable: "The reviewer failed, timed out, lacked quota or authentication, or did not perform the review.",
+        uncertain: "The text is a request, progress update, summary without verdict, author reply, question, or social comment.",
+      },
+    },
+    hasVerdict: {
+      type: "noul",
+      instructions: "Does the text itself contain a completed code-review verdict: either clear or actionable feedback?",
+      criteria: null,
+    },
+  },
+}
+const HANDOFF_DECISION_CONFIG = {
+  questions: {
+    quality: {
+      type: "choice",
+      instructions: "Is this handoff packet ready for a peer reviewer?",
+      criteria: {
+        accept: "Specific, internally consistent, aligned with the objective, supported by relevant verification, candid about gaps, and gives an actionable review ask.",
+        repair: "Vague, contradictory, mismatched to the objective, hides a known failure, claims completion without relevant evidence, or gives no actionable review target.",
+        uncertain: "Useful evidence exists but an external result, missing artifact, incomplete reproduction, or unresolved diagnosis prevents a confident accept-or-repair verdict.",
+      },
+    },
+    objectiveAligned: { type: "noul", instructions: "Do the changed files and described change directly advance the stated objective?", criteria: null },
+    verificationSupportsClaim: { type: "noul", instructions: "Does the stated verification materially support the completion claim for this objective?", criteria: null },
+    gapsAreCandid: { type: "noul", instructions: "Does the gaps field candidly disclose limitations or accurately state that none remain?", criteria: null },
+    askIsActionable: { type: "noul", instructions: "Does the review ask tell the reviewer what specific risk, behavior, or evidence to inspect?", criteria: null },
+  },
+}
+
+function decisionConfigHash(labels, config) {
+  return createHash("sha256").update(JSON.stringify({ labels, config })).digest("hex")
+}
 
 function regexPrBaseline(text) {
   const value = String(text || "")
@@ -75,27 +117,11 @@ function noulValue(answer) {
 async function classifyPr(item) {
   const { body, wallMs } = await postSystemOne(
     { reviewComment: item.text },
-    {
-      signal: {
-        type: "choice",
-        instructions: "What result does this text communicate about the code review?",
-        criteria: {
-          clear: "The review completed and found no changes or blockers.",
-          feedback: "The review found an actionable problem or requests a code or test change.",
-          unavailable: "The reviewer failed, timed out, lacked quota or authentication, or did not perform the review.",
-          uncertain: "The text is a request, progress update, summary without verdict, author reply, question, or social comment.",
-        },
-      },
-      hasVerdict: {
-        type: "noul",
-        instructions: "Does the text itself contain a completed code-review verdict: either clear or actionable feedback?",
-        criteria: null,
-      },
-    },
+    PR_DECISION_CONFIG.questions,
   )
   const answer = body.answers.signal
   const verdictProbability = noulValue(body.answers.hasVerdict)
-  const gated = verdictProbability < 0.5 && ["clear", "feedback"].includes(answer.choice) ? "uncertain" : answer.choice
+  const gated = verdictProbability < PR_DECISION_CONFIG.verdictThreshold && ["clear", "feedback"].includes(answer.choice) ? "uncertain" : answer.choice
   return {
     servedModel: body.model,
     prediction: gated,
@@ -112,21 +138,7 @@ async function classifyPr(item) {
 async function classifyHandoff(item) {
   const { body, wallMs } = await postSystemOne(
     { delegationPacket: item.packet },
-    {
-      quality: {
-        type: "choice",
-        instructions: "Is this handoff packet ready for a peer reviewer?",
-        criteria: {
-          accept: "Specific, internally consistent, aligned with the objective, supported by relevant verification, candid about gaps, and gives an actionable review ask.",
-          repair: "Vague, contradictory, mismatched to the objective, hides a known failure, claims completion without relevant evidence, or gives no actionable review target.",
-          uncertain: "Useful evidence exists but an external result, missing artifact, incomplete reproduction, or unresolved diagnosis prevents a confident accept-or-repair verdict.",
-        },
-      },
-      objectiveAligned: { type: "noul", instructions: "Do the changed files and described change directly advance the stated objective?", criteria: null },
-      verificationSupportsClaim: { type: "noul", instructions: "Does the stated verification materially support the completion claim for this objective?", criteria: null },
-      gapsAreCandid: { type: "noul", instructions: "Does the gaps field candidly disclose limitations or accurately state that none remain?", criteria: null },
-      askIsActionable: { type: "noul", instructions: "Does the review ask tell the reviewer what specific risk, behavior, or evidence to inspect?", criteria: null },
-    },
+    HANDOFF_DECISION_CONFIG.questions,
   )
   const answer = body.answers.quality
   return {
@@ -194,7 +206,7 @@ function percentile(values, fraction) {
   return Number(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))].toFixed(1))
 }
 
-async function runDataset(filename, labels, baseline, modelClassifier) {
+async function runDataset(filename, labels, baseline, modelClassifier, configurationHash) {
   const fixtures = JSON.parse(await fs.readFile(path.join(root, filename), "utf8"))
   const rows = []
   for (const item of fixtures) {
@@ -222,6 +234,7 @@ async function runDataset(filename, labels, baseline, modelClassifier) {
   const modelRows = rows.filter((row) => Number.isFinite(row.wallMs))
   return {
     fixtures: filename,
+    decisionConfigHash: configurationHash,
     model: runModel ? requestedModel : null,
     servedModels: runModel ? [...new Set(rows.map((row) => row.servedModel).filter(Boolean))] : [],
     splits,
@@ -235,9 +248,24 @@ async function runDataset(filename, labels, baseline, modelClassifier) {
   }
 }
 
+const configHashes = {
+  prSignals: decisionConfigHash(PR_LABELS, PR_DECISION_CONFIG),
+  handoffPackets: decisionConfigHash(HANDOFF_LABELS, HANDOFF_DECISION_CONFIG),
+}
+if (args.has("--print-config-hashes")) {
+  console.log(JSON.stringify(configHashes, null, 2))
+  process.exit(0)
+}
+
 const startedAt = new Date().toISOString()
-const pr = await runDataset("pr-signals.json", PR_LABELS, regexPrBaseline, classifyPr)
-const handoff = await runDataset("handoff-packets.json", HANDOFF_LABELS, fieldPresenceBaseline, classifyHandoff)
+const pr = await runDataset(
+  "pr-signals.json", PR_LABELS, regexPrBaseline, classifyPr,
+  configHashes.prSignals,
+)
+const handoff = await runDataset(
+  "handoff-packets.json", HANDOFF_LABELS, fieldPresenceBaseline, classifyHandoff,
+  configHashes.handoffPackets,
+)
 const result = {
   schemaVersion: 1,
   producer: {
