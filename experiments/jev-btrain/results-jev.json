@@ -1,13 +1,20 @@
 {
   "schemaVersion": 1,
+  "producer": {
+    "version": "jev-btrain-prototype-v0",
+    "sourceRevision": null,
+    "timeoutMs": null,
+    "note": "Produced before the runner was committed and before its timeout guard."
+  },
   "startedAt": "2026-09-20T21:03:03.856Z",
   "finishedAt": "2026-09-20T21:03:13.519Z",
   "baseUrl": "https://api.typesafe.ai",
+  "timeoutMs": null,
   "caveats": [
     "This is a small frozen pilot, not a production-quality benchmark.",
     "Synthetic paraphrases complement real btrain artifacts and may not match deployment prevalence.",
     "Kev-0.6b is a local Jev-compatible preview model, not hosted Jev.",
-    "No model result changes btrain state; all evaluation is offline and advisory."
+    "No model result changes btrain state; all evaluation is non-production and advisory."
   ],
   "experiments": {
     "prSignals": {

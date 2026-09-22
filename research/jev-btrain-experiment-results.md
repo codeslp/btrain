@@ -1,7 +1,7 @@
 # JEV Payoff Experiments for btrain
 
 **Date:** 2026-09-20  
-**Status:** Small offline pilot. No production behavior changed.  
+**Status:** Small non-production pilot. No production behavior changed.
 **Models:** hosted `jev-1.13.0` and local `jaredpalmer/kev-0.6b`  
 **Artifacts:** [`experiments/jev-btrain/`](../experiments/jev-btrain/)
 
@@ -82,6 +82,10 @@ The pilot ran hosted Jev three times on the same 46 inputs.
 - Accuracy was unchanged across all three runs.
 
 This is a useful stability signal, not a calibration proof.
+
+The hosted runs sent the frozen evaluation inputs to `https://api.typesafe.ai`. The Kev
+run used a local server, and the baseline made no provider request. All results were advisory,
+but the hosted runs were not offline.
 
 ### Latency and estimated input cost
 
@@ -214,6 +218,14 @@ The machine-readable outputs are:
 - `comparison-kev-vs-jev.json`
 - `comparison-jev-repeat-1-2.json`
 - `comparison-jev-repeat-1-3.json`
+
+The five saved result files came from an uncommitted prototype runner before the timeout guard
+was added. Each file now records `producer.version = jev-btrain-prototype-v0`, a null source
+revision, and `timeoutMs = null`: those provider calls had no client-enforced deadline. The two
+early hosted repeats did not capture the served model identifier. Their requested model,
+endpoint, timestamps, predictions, and probabilities remain in the files. New runs use the
+committed runner's `jev-btrain-v1` producer record and capture the configured timeout. Set
+`EXPERIMENT_PRODUCER_REVISION` to the exact Git commit when producing evidence for comparison.
 
 The sample is small. Synthetic cases are intentionally balanced and do not estimate production
 prevalence. One researcher wrote the labels. No second blind annotator checked them. The experiment

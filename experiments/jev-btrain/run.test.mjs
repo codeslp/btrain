@@ -28,6 +28,12 @@ for (const stall of ["fetch", "body"]) {
       assert.equal(run.error, undefined, `runner exceeded watchdog: ${run.error}`)
       assert.equal(run.status, 0, run.stderr)
       const result = JSON.parse(await fs.readFile(path.join(dir, "results-deadline-test.json"), "utf8"))
+      assert.deepEqual(result.producer, {
+        version: "jev-btrain-v1",
+        sourceRevision: "working-tree",
+        timeoutMs: 100,
+      })
+      assert.equal(result.timeoutMs, 100)
       for (const experiment of Object.values(result.experiments)) {
         assert.equal(experiment.rows[0].prediction, "uncertain")
         assert.match(experiment.rows[0].modelError, /timeout.*100 ms/i)

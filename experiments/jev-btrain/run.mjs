@@ -235,6 +235,11 @@ const pr = await runDataset("pr-signals.json", PR_LABELS, regexPrBaseline, class
 const handoff = await runDataset("handoff-packets.json", HANDOFF_LABELS, fieldPresenceBaseline, classifyHandoff)
 const result = {
   schemaVersion: 1,
+  producer: {
+    version: "jev-btrain-v1",
+    sourceRevision: process.env.EXPERIMENT_PRODUCER_REVISION || "working-tree",
+    timeoutMs: runModel ? timeoutMs : null,
+  },
   startedAt,
   finishedAt: new Date().toISOString(),
   baseUrl: runModel ? baseUrl : null,
@@ -243,7 +248,7 @@ const result = {
     "This is a small frozen pilot, not a production-quality benchmark.",
     "Synthetic paraphrases complement real btrain artifacts and may not match deployment prevalence.",
     "Kev-0.6b is a local Jev-compatible preview model, not hosted Jev.",
-    "No model result changes btrain state; all evaluation is offline and advisory.",
+    "No model result changes btrain state; all evaluation is non-production and advisory.",
   ],
   experiments: { prSignals: pr, handoffPackets: handoff },
 }
