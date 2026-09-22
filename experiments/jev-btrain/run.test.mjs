@@ -109,3 +109,29 @@ test("comparison excludes provider failures from classification metrics", async 
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
+
+test("decision config hashes include classifier transformations", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jev-config-hash-"))
+  try {
+    const source = await fs.readFile(new URL("./run.mjs", import.meta.url), "utf8")
+    const originalPath = path.join(dir, "original.mjs")
+    const changedPath = path.join(dir, "changed.mjs")
+    await fs.writeFile(originalPath, source)
+    await fs.writeFile(changedPath, source.replace(
+      "{ reviewComment: item.text }",
+      "{ reviewBody: item.text }",
+    ))
+    const readHashes = (target) => {
+      const run = spawnSync(process.execPath, [target, "--print-config-hashes"], { encoding: "utf8" })
+      assert.equal(run.status, 0, run.stderr)
+      return JSON.parse(run.stdout)
+    }
+    const original = readHashes(originalPath)
+    const changed = readHashes(changedPath)
+
+    assert.notEqual(changed.prSignals, original.prSignals)
+    assert.equal(changed.handoffPackets, original.handoffPackets)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})

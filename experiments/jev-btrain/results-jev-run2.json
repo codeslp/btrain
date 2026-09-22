@@ -19,7 +19,7 @@
   "experiments": {
     "prSignals": {
       "fixtures": "pr-signals.json",
-      "decisionConfigHash": "5ee3db666856979322257521287ba5f2575c19e4453068286af98d50bff806cc",
+      "decisionConfigHash": "f458f590ecc5bcb1d666cc5ea731926f8392ac2601bb64c01ce48226251246e1",
       "model": "jev-latest",
       "splits": {
         "calibration": {
@@ -931,7 +931,7 @@
     },
     "handoffPackets": {
       "fixtures": "handoff-packets.json",
-      "decisionConfigHash": "5bc4135a51ccbc4fd2cfeaf355bf131588efdc44308adc75bfdd59f5b0356515",
+      "decisionConfigHash": "221a87f9b89f8a48a571187af7192158640964a1a342e0c593f5de3a29ca9a10",
       "model": "jev-latest",
       "splits": {
         "calibration": {

@@ -57,8 +57,10 @@ const HANDOFF_DECISION_CONFIG = {
   },
 }
 
-function decisionConfigHash(labels, config) {
-  return createHash("sha256").update(JSON.stringify({ labels, config })).digest("hex")
+function decisionConfigHash(labels, config, classifier) {
+  return createHash("sha256")
+    .update(JSON.stringify({ labels, config, classifier: classifier.toString() }))
+    .digest("hex")
 }
 
 function regexPrBaseline(text) {
@@ -249,8 +251,8 @@ async function runDataset(filename, labels, baseline, modelClassifier, configura
 }
 
 const configHashes = {
-  prSignals: decisionConfigHash(PR_LABELS, PR_DECISION_CONFIG),
-  handoffPackets: decisionConfigHash(HANDOFF_LABELS, HANDOFF_DECISION_CONFIG),
+  prSignals: decisionConfigHash(PR_LABELS, PR_DECISION_CONFIG, classifyPr),
+  handoffPackets: decisionConfigHash(HANDOFF_LABELS, HANDOFF_DECISION_CONFIG, classifyHandoff),
 }
 if (args.has("--print-config-hashes")) {
   console.log(JSON.stringify(configHashes, null, 2))
