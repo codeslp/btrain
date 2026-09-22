@@ -231,9 +231,11 @@ early hosted repeats did not capture the served model identifier. Their requeste
 endpoint, timestamps, predictions, and probabilities remain in the files. New runs use the
 committed runner's `jev-btrain-v1` producer record and capture the configured timeout. Set
 `EXPERIMENT_PRODUCER_REVISION` to the exact Git commit when producing evidence for comparison.
-The saved files also record the decision-configuration hashes for the prompts, criteria, label
-schemas, and verdict threshold used by the prototype. Comparisons reject different or missing
-hashes before they calculate model metrics.
+The prototype source was not committed, so the saved files do not claim a verified configuration
+hash. They share a legacy producer ID that permits comparisons only among those prototype runs.
+Current runs record hashes of the prompts, criteria, label schemas, request and response
+transformations, and verdict threshold. Comparisons reject legacy-to-current or unequal hashes
+before they calculate model metrics.
 
 The sample is small. Synthetic cases are intentionally balanced and do not estimate production
 prevalence. One researcher wrote the labels. No second blind annotator checked them. The experiment

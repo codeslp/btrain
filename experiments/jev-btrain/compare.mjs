@@ -9,16 +9,22 @@ const [leftName = "results-kev-0.6b.json", rightName = "results-jev.json"] = pro
 const left = JSON.parse(await fs.readFile(path.resolve(root, leftName), "utf8"))
 const right = JSON.parse(await fs.readFile(path.resolve(root, rightName), "utf8"))
 
-function validDistribution(value) {
+function validDistribution(value, labels) {
   return value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length > 0
+    && Object.keys(value).every((key) => labels.includes(key))
     && Object.values(value).every((entry) => Number.isFinite(entry) && entry >= 0 && entry <= 1)
 }
 
-function distributionDistance(a, b) {
-  if (!validDistribution(a) || !validDistribution(b)) return null
-  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])]
-  return keys.reduce((sum, key) => sum + Math.abs((a[key] || 0) - (b[key] || 0)), 0) / keys.length
+function distributionDistance(a, b, labels) {
+  if (!validDistribution(a, labels) || !validDistribution(b, labels)) return null
+  return labels.reduce((sum, label) => sum + Math.abs((a[label] || 0) - (b[label] || 0)), 0) / labels.length
+}
+
+function decisionConfigurationKey(experiment) {
+  if (experiment.decisionConfigHash) return `sha256:${experiment.decisionConfigHash}`
+  if (experiment.legacyDecisionConfigId) return `legacy:${experiment.legacyDecisionConfigId}`
+  return ""
 }
 
 function fixtureSignature(row) {
@@ -36,8 +42,9 @@ function compareExperiment(leftExperiment, rightExperiment, labels) {
   const rightById = new Map(rightExperiment.rows.map((row) => [row.id, row]))
   const allowedLabels = new Set(labels)
   const ids = [...new Set([...leftById.keys(), ...rightById.keys()])]
-  const configurationMismatch = !leftExperiment.decisionConfigHash
-    || leftExperiment.decisionConfigHash !== rightExperiment.decisionConfigHash
+  const leftConfiguration = decisionConfigurationKey(leftExperiment)
+  const rightConfiguration = decisionConfigurationKey(rightExperiment)
+  const configurationMismatch = !leftConfiguration || leftConfiguration !== rightConfiguration
   const validPrediction = (row) => row && !row.modelError && allowedLabels.has(row.prediction)
   const invalidIds = new Set(ids.filter((id) => (
     leftById.has(id) && rightById.has(id)
@@ -72,7 +79,7 @@ function compareExperiment(leftExperiment, rightExperiment, labels) {
       sameTopChoice: leftRow.prediction === rightRow.prediction,
       leftCorrect: leftRow.prediction === leftRow.label,
       rightCorrect: rightRow.prediction === rightRow.label,
-      meanAbsoluteProbabilityDifference: distributionDistance(leftRow.probabilities, rightRow.probabilities),
+      meanAbsoluteProbabilityDifference: distributionDistance(leftRow.probabilities, rightRow.probabilities, labels),
       leftConfidence: leftRow.confidence,
       rightConfidence: rightRow.confidence,
     }
