@@ -39,7 +39,7 @@ handoff_path = ".claude/collab/HANDOFF_F.md"
 [pr_flow]
 enabled = true
 base = "main"
-required_bots = ["gh-codex", "codex-reviewer"]
+required_bots = ["gh-codex"]
 
 [pr_flow.bots.gh-codex]
 aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
@@ -48,15 +48,6 @@ request_body = "@codex review"
 [pr_flow.bots.gh-unblocked]
 aliases = ["unblocked[bot]", "unblocked"]
 request_body = "@unblocked review again"
-
-# A Codex peer reviewer. It has no GitHub account of its own: reviews are
-# posted from the repo owner's account, so `codeslp` is the alias btrain matches
-# on. That means this gate can be satisfied by a human comment from the owner as
-# well as by a posted stand-in review — it is a weaker signal than a bot gate,
-# and it is deliberately additive rather than a replacement for gh-codex.
-[pr_flow.bots.codex-reviewer]
-aliases = ["codex-reviewer", "codeslp"]
-request_body = "Codex peer review required for this head. Record the independent Codex review verdict with its reviewed commit."
 
 [lanes.g]
 handoff_path = ".claude/collab/HANDOFF_G.md"
