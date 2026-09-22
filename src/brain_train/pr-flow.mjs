@@ -5,6 +5,7 @@
 // and keep the lane active until the PR is merged or intentionally closed.
 
 import { execFile } from "node:child_process"
+import crypto from "node:crypto"
 import { promisify } from "node:util"
 import {
   BtrainError,
@@ -24,9 +25,14 @@ import {
   parseConcatenatedJsonArrays,
   shapeComments,
 } from "./handoff/pr-comments.mjs"
+import {
+  createSystemOneClient,
+  readSystemOneRuntimeConfig,
+} from "./system-one.mjs"
 
 const execFileAsync = promisify(execFile)
 const GH_MAX_BUFFER = 16 * 1024 * 1024
+const MIN_COMMIT_PREFIX_LENGTH = 10
 
 function normalizeLogin(value) {
   return String(value || "").trim().toLowerCase().replace(/\[bot\]$/, "")
@@ -45,11 +51,12 @@ function commitMatches(left, right) {
   const a = String(left || "").trim().toLowerCase()
   const b = String(right || "").trim().toLowerCase()
   if (!a || !b) return false
+  if (a !== b && Math.min(a.length, b.length) < MIN_COMMIT_PREFIX_LENGTH) return false
   return a === b || a.startsWith(b) || b.startsWith(a)
 }
 
 function extractReviewedCommit(body) {
-  const match = /reviewed commit:\s*(?:\*\*)?\s*`?([0-9a-f]{7,40})`?/i.exec(String(body || ""))
+  const match = /reviewed commit:\s*(?:\*\*)?\s*`?([0-9a-f]{10,40})`?/i.exec(String(body || ""))
   return match ? match[1] : ""
 }
 
@@ -151,6 +158,7 @@ export function classifyBotReview({
   issueCommentReactions = {},
   reviewComments = [],
   reviews = [],
+  semanticVerdict = null,
 }) {
   const botInline = (reviewComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
   const botReviews = (reviews || []).filter((review) => loginMatches(bot, review.user?.login))
@@ -266,7 +274,23 @@ export function classifyBotReview({
     })
   }
 
-  signalCandidates.sort((a, b) => b.time - a.time)
+  if (semanticVerdict?.state === "feedback") {
+    signalCandidates.push({
+      time: itemTime({ created_at: semanticVerdict.at }),
+      priority: 1,
+      classify: () => ({
+        id: bot.id,
+        state: "feedback",
+        reviewedCommit: headSha,
+        feedbackCount: 1,
+        staleFeedbackCount: staleInline.length,
+        feedback: [semanticVerdict.feedback],
+        summary: `${bot.id} semantic review signal is feedback on the current head`,
+      }),
+    })
+  }
+
+  signalCandidates.sort((a, b) => b.time - a.time || (b.priority || 0) - (a.priority || 0))
   for (const candidate of signalCandidates) {
     const result = candidate.classify()
     if (result) {
@@ -287,7 +311,7 @@ export function classifyBotReview({
   }
 }
 
-export function classifyPrReviewState({ pr, rawComments = {}, prFlowConfig }) {
+export function classifyPrReviewState({ pr, rawComments = {}, prFlowConfig, semanticVerdicts = {} }) {
   const headSha = pr?.headRefOid || pr?.head?.sha || pr?.head_sha || ""
   const normalizedPrState = normalizePrState(pr)
   const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
@@ -298,6 +322,7 @@ export function classifyPrReviewState({ pr, rawComments = {}, prFlowConfig }) {
     issueCommentReactions: rawComments.issueCommentReactions || {},
     reviewComments: rawComments.reviewComments || [],
     reviews: rawComments.reviews || [],
+    semanticVerdict: semanticVerdicts[bot.id] || null,
   }))
 
   let overall = "waiting"
@@ -330,6 +355,267 @@ export function classifyPrReviewState({ pr, rawComments = {}, prFlowConfig }) {
   }
 }
 
+const SEMANTIC_SIGNAL_LABELS = new Set(["clear", "feedback", "unavailable", "uncertain"])
+const MIN_SEMANTIC_CONFIDENCE = 0.75
+const MIN_SEMANTIC_PROBABILITY = 0.75
+const MIN_SEMANTIC_MARGIN = 0.25
+const MIN_VERDICT_PROBABILITY = 0.75
+
+function semanticReviewQuestions() {
+  return {
+    signal: {
+      type: "choice",
+      instructions: "What result does this text communicate about the code review?",
+      criteria: {
+        clear: "The review completed and found no changes or blockers.",
+        feedback: "The review found an actionable problem or requests a code or test change.",
+        unavailable: "The reviewer failed, timed out, lacked quota or authentication, or did not perform the review.",
+        uncertain: "The text is a request, progress update, summary without verdict, author reply, question, or social comment.",
+      },
+    },
+    hasVerdict: {
+      type: "noul",
+      instructions: "Does the text itself contain a completed code-review verdict: either clear or actionable feedback?",
+      criteria: null,
+    },
+  }
+}
+
+function semanticCandidatesForBot({ bot, headSha, rawComments, baselineState }) {
+  const botInline = (rawComments.reviewComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
+  const currentInline = botInline.filter((comment) => commitMatches(inlineReviewedCommit(comment), headSha))
+  if (currentInline.length > 0 && baselineState === "feedback") return []
+
+  const botReviews = (rawComments.reviews || []).filter((review) => loginMatches(bot, review.user?.login))
+  const currentReviews = botReviews.filter((review) => commitMatches(reviewCommit(review), headSha))
+  const botIssueComments = (rawComments.issueComments || []).filter((comment) => loginMatches(bot, comment.user?.login))
+  const currentIssueComments = botIssueComments.filter((comment) => commitMatches(reviewCommit(comment), headSha))
+  const clearReaction = newest((rawComments.issueComments || []).filter((comment) => (
+    isMarkedReviewRequest(comment, bot, headSha)
+    && hasPositiveBotReaction(comment, bot, rawComments.issueCommentReactions || {})
+  )))
+
+  const activities = [
+    ...currentReviews.map((review) => ({ surface: "review", item: review, time: itemTime(review) })),
+    ...currentIssueComments.map((comment) => ({ surface: "issue", item: comment, time: itemTime(comment) })),
+  ]
+  if (clearReaction) {
+    activities.push({
+      surface: "reaction",
+      item: clearReaction,
+      time: positiveReactionTime(clearReaction, bot, rawComments.issueCommentReactions || {}),
+    })
+  }
+  // Ambiguous text tied with deterministic evidence still needs classification:
+  // validated feedback wins the tie when applied below, regardless of surface.
+  const annotated = activities.map((activity) => ({
+    ...activity,
+    eligible: (activity.surface === "issue" || (
+      activity.surface === "review" && String(activity.item.state || "").toUpperCase() === "COMMENTED"
+    )) && !!String(activity.item.body || "").trim()
+      && !bodyIndicatesClear(activity.item.body)
+      && !bodyIndicatesFeedback(activity.item.body),
+  }))
+  const latestTime = annotated.reduce((latest, activity) => Math.max(latest, activity.time), -Infinity)
+
+  return annotated
+    .filter((activity) => activity.eligible && activity.time === latestTime)
+    .map((selected) => ({
+      botId: bot.id,
+      surface: selected.surface,
+      sourceId: selected.item.id || null,
+      body: String(selected.item.body || ""),
+      url: selected.item.html_url || selected.item.url || "",
+      reviewedCommit: headSha,
+      at: selected.item.submitted_at || selected.item.created_at || selected.item.updated_at || "",
+    }))
+}
+
+function noulProbability(answer) {
+  const value = answer?.noul ?? answer?.probability
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null
+}
+
+function normalizedProbabilities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  const out = {}
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1) out[key] = raw
+  }
+  return out
+}
+
+function safeSemanticText(value, maximumLength = 128) {
+  return String(value || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, maximumLength)
+}
+
+function validChoiceEvidence(answer) {
+  const prediction = String(answer?.choice || "")
+  if (!SEMANTIC_SIGNAL_LABELS.has(prediction)) return null
+
+  const rawProbabilities = answer?.probabilities
+  if (!rawProbabilities || typeof rawProbabilities !== "object" || Array.isArray(rawProbabilities)) return null
+  const rawKeys = Object.keys(rawProbabilities)
+  if (rawKeys.length !== SEMANTIC_SIGNAL_LABELS.size || rawKeys.some((key) => !SEMANTIC_SIGNAL_LABELS.has(key))) {
+    return null
+  }
+  const probabilities = normalizedProbabilities(answer.probabilities)
+  const keys = Object.keys(probabilities)
+  if (keys.length !== SEMANTIC_SIGNAL_LABELS.size || keys.some((key) => !SEMANTIC_SIGNAL_LABELS.has(key))) {
+    return null
+  }
+  const values = [...SEMANTIC_SIGNAL_LABELS].map((label) => probabilities[label])
+  if (values.some((value) => typeof value !== "number")) return null
+  const total = values.reduce((sum, value) => sum + value, 0)
+  if (Math.abs(total - 1) > 0.01) return null
+  if (probabilities[prediction] < Math.max(...values)) return null
+
+  const confidence = answer.confidence
+  if (confidence !== undefined && (
+    typeof confidence !== "number"
+    || !Number.isFinite(confidence)
+    || confidence < 0
+    || confidence > 1
+  )) return null
+
+  return {
+    prediction,
+    probabilities,
+    confidence: confidence ?? null,
+  }
+}
+
+function interpretSemanticResult(candidate, result, mode) {
+  const common = {
+    bot: candidate.botId,
+    surface: candidate.surface,
+    sourceId: candidate.sourceId,
+    inputHash: crypto.createHash("sha256").update(candidate.body).digest("hex").slice(0, 16),
+    reviewedCommit: candidate.reviewedCommit,
+    at: candidate.at,
+    applied: false,
+  }
+  if (!result?.ok) {
+    return {
+      ...common,
+      outcome: "provider-failure",
+      reason: result?.reason || "unknown",
+      latencyMs: result?.latencyMs ?? null,
+    }
+  }
+
+  const signal = validChoiceEvidence(result.answers?.signal)
+  const verdictProbability = noulProbability(result.answers?.hasVerdict)
+  if (!signal || verdictProbability === null) {
+    return {
+      ...common,
+      outcome: "invalid-answer",
+      model: safeSemanticText(result.model),
+      latencyMs: result.latencyMs ?? null,
+    }
+  }
+
+  const rawPrediction = signal.prediction
+  const sortedProbabilities = Object.values(signal.probabilities).sort((a, b) => b - a)
+  const margin = sortedProbabilities[0] - sortedProbabilities[1]
+  const decisive = verdictProbability >= MIN_VERDICT_PROBABILITY
+    && signal.confidence !== null
+    && signal.confidence >= MIN_SEMANTIC_CONFIDENCE
+    && signal.probabilities[rawPrediction] >= MIN_SEMANTIC_PROBABILITY
+    && margin >= MIN_SEMANTIC_MARGIN
+  const prediction = ["clear", "feedback"].includes(rawPrediction) && !decisive ? "uncertain" : rawPrediction
+  return {
+    ...common,
+    outcome: "decision",
+    model: safeSemanticText(result.model),
+    rawPrediction,
+    prediction,
+    verdictProbability,
+    margin,
+    confidence: signal.confidence,
+    probabilities: signal.probabilities,
+    latencyMs: result.latencyMs ?? null,
+    // Semantic evidence may add a blocking feedback signal, but it cannot
+    // manufacture approval. A clear result remains advisory until the
+    // deterministic bot protocol supplies a clear review or reaction.
+    applied: mode === "assist" && prediction === "feedback",
+  }
+}
+
+export async function classifyPrReviewStateWithSemantic(
+  { pr, rawComments = {}, prFlowConfig },
+  { mode = "off", decide } = {},
+) {
+  const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
+  if (!["shadow", "assist"].includes(mode) || typeof decide !== "function") return baseline
+  if (["merged", "closed", "draft"].includes(baseline.overall)) return baseline
+
+  const headSha = baseline.pr.headSha
+  const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
+  const candidates = bots
+    .flatMap((bot) => semanticCandidatesForBot({
+      bot, headSha, rawComments,
+      baselineState: baseline.bots.find((result) => result.id === bot.id)?.state,
+    }))
+    .filter(Boolean)
+
+  const decisions = await Promise.all(candidates.map(async (candidate) => {
+    let result
+    try {
+      result = await decide({
+        state: { reviewComment: candidate.body },
+        questions: semanticReviewQuestions(),
+      })
+    } catch {
+      result = { ok: false, reason: "adapter-error", latencyMs: null }
+    }
+    return interpretSemanticResult(candidate, result, mode)
+  }))
+
+  const semanticVerdicts = {}
+  if (mode === "assist") {
+    for (const decision of decisions.filter((item) => item.applied)) {
+      const source = candidates.find((candidate) => (
+        candidate.botId === decision.bot
+        && candidate.surface === decision.surface
+        && candidate.sourceId === decision.sourceId
+      ))
+      semanticVerdicts[decision.bot] = {
+        state: decision.prediction,
+        feedback: {
+          author: decision.bot,
+          body: candidateSummary(source?.body),
+          file: null,
+          line: null,
+          commit: decision.reviewedCommit,
+          url: source?.url || "",
+          at: decision.at,
+        },
+        at: decision.at,
+      }
+    }
+  }
+
+  const classified = Object.keys(semanticVerdicts).length > 0
+    ? classifyPrReviewState({ pr, rawComments, prFlowConfig, semanticVerdicts })
+    : baseline
+  return {
+    ...classified,
+    semantic: {
+      mode,
+      enabled: true,
+      candidateCount: candidates.length,
+      appliedCount: decisions.filter((item) => item.applied).length,
+      decisions,
+    },
+  }
+}
+
+function candidateSummary(body) {
+  const firstLine = safeSemanticText(String(body || "").split("\n")[0].trim(), 240)
+  return firstLine.slice(0, 240) || "Semantic classifier reported actionable feedback in a current-head bot comment."
+}
+
 function formatBotLine(bot) {
   const stale = bot.staleFeedbackCount ? `; ${bot.staleFeedbackCount} stale old-head finding${bot.staleFeedbackCount === 1 ? "" : "s"}` : ""
   return `  - ${bot.id}: ${bot.state} — ${bot.summary}${stale}`
@@ -344,6 +630,18 @@ export function formatPrStatusSummary(status) {
     "required bots:",
     ...status.bots.map(formatBotLine),
   ].filter(Boolean)
+
+  if (status.semantic) {
+    const availability = status.semantic.enabled ? "enabled" : `disabled (${status.semantic.reason || "unavailable"})`
+    lines.push(`semantic review signals: ${status.semantic.mode} — ${availability}`)
+    for (const decision of status.semantic.decisions || []) {
+      const result = decision.outcome === "provider-failure" && decision.reason
+        ? `${decision.outcome} (${decision.reason})`
+        : decision.prediction || decision.outcome || decision.reason || "unknown"
+      const applied = decision.applied ? "; applied" : ""
+      lines.push(`  - ${decision.bot}: ${result}${decision.model ? ` via ${decision.model}` : ""}${applied}`)
+    }
+  }
 
   const feedback = status.bots.flatMap((bot) => bot.feedback.map((item) => ({ bot: bot.id, ...item })))
   if (feedback.length > 0) {
@@ -465,7 +763,30 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
     issueComments: rawComments.issueComments,
     cwd: repoRoot,
   })
-  return classifyPrReviewState({ pr, rawComments, prFlowConfig })
+  const input = { pr, rawComments, prFlowConfig }
+  const semanticConfig = readSystemOneRuntimeConfig(process.env)
+  if (semanticConfig.mode === "off" && semanticConfig.reason === "mode-off") {
+    return classifyPrReviewState(input)
+  }
+  if (!semanticConfig.enabled) {
+    return {
+      ...classifyPrReviewState(input),
+      semantic: {
+        mode: semanticConfig.mode,
+        enabled: false,
+        reason: semanticConfig.reason,
+        candidateCount: 0,
+        appliedCount: 0,
+        decisions: [],
+      },
+    }
+  }
+
+  const client = createSystemOneClient(semanticConfig)
+  return classifyPrReviewStateWithSemantic(input, {
+    mode: semanticConfig.mode,
+    decide: client.decide,
+  })
 }
 
 export async function runPrStatus(repoRoot, options = {}) {

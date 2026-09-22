@@ -10,6 +10,7 @@ import { promisify } from "node:util"
 import {
   applyPrStatusToHandoff,
   classifyPrReviewState,
+  classifyPrReviewStateWithSemantic,
   formatPrStatusSummary,
   remoteBranchExists,
   resolvePrBaseBranch,
@@ -23,6 +24,7 @@ import {
   initRepo,
   patchHandoff,
 } from "../src/brain_train/core.mjs"
+import { createSystemOneClient } from "../src/brain_train/system-one.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -317,6 +319,589 @@ describe("PR review request head selection", () => {
 })
 
 describe("PR review flow classification", () => {
+  const oneBotConfig = {
+    enabled: true,
+    base: "main",
+    requiredBots: ["codex"],
+    bots: { codex: prFlowConfig.bots.codex },
+  }
+
+  function ambiguousCurrentHeadComment(body, head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+    return {
+      pr: { number: 12, state: "OPEN", headRefOid: head },
+      prFlowConfig: oneBotConfig,
+      rawComments: {
+        issueComments: [{
+          id: 100,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          body: `${body}\n\n**Reviewed commit:** \`${head.slice(0, 10)}\``,
+          created_at: "2026-09-20T20:00:00Z",
+        }],
+      },
+    }
+  }
+
+  it("keeps a typed clear result advisory on otherwise ambiguous current-head bot text", async () => {
+    const input = ambiguousCurrentHeadComment("Everything checks out on this revision; it is ready to ship.")
+    assert.equal(classifyPrReviewState(input).overall, "waiting")
+
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "clear", confidence: 0.98, probabilities: { clear: 0.99, feedback: 0, unavailable: 0, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.99 },
+        },
+        latencyMs: 90,
+      }),
+    })
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.bots[0].state, "waiting")
+    assert.equal(status.semantic.decisions[0].prediction, "clear")
+    assert.equal(status.semantic.decisions[0].applied, false)
+    assert.equal(status.semantic.decisions[0].model, "jev-1.13.0")
+    assert.doesNotMatch(JSON.stringify(status.semantic), /Everything checks out/)
+  })
+
+  it("cannot manufacture approval through a caller-supplied semantic clear verdict", () => {
+    const input = ambiguousCurrentHeadComment("Review completed without a conventional verdict phrase.")
+    const status = classifyPrReviewState({
+      ...input,
+      semanticVerdicts: {
+        codex: { state: "clear", at: "2026-09-20T20:00:01Z" },
+      },
+    })
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.bots[0].state, "waiting")
+  })
+
+  it("composes the System One transport with the PR classifier", async () => {
+    const client = createSystemOneClient({
+      apiKey: "configured-test-key",
+      fetchImpl: async () => new Response(JSON.stringify({
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "feedback", confidence: 0.96, probabilities: { clear: 0.01, feedback: 0.98, unavailable: 0, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.97 },
+        },
+      }), { status: 200 }),
+    })
+
+    const status = await classifyPrReviewStateWithSemantic(
+      ambiguousCurrentHeadComment("One issue remains: the durable event is written after success is reported."),
+      { mode: "assist", decide: client.decide },
+    )
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.bots[0].feedbackCount, 1)
+    assert.equal(status.semantic.appliedCount, 1)
+  })
+
+  it("records shadow decisions without changing the deterministic result", async () => {
+    const input = ambiguousCurrentHeadComment("Everything checks out on this revision; it is ready to ship.")
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "shadow",
+      decide: async () => ({
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "clear", confidence: 0.98, probabilities: { clear: 0.99, feedback: 0, unavailable: 0, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.99 },
+        },
+        latencyMs: 90,
+      }),
+    })
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.semantic.mode, "shadow")
+    assert.equal(status.semantic.decisions[0].prediction, "clear")
+    assert.equal(status.semantic.decisions[0].applied, false)
+  })
+
+  it("keeps unavailable, uncertain, and provider failures non-terminal", async () => {
+    for (const result of [
+      { ok: false, reason: "timeout", message: "timed out", latencyMs: 10 },
+      {
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "unavailable", confidence: 0.9, probabilities: { clear: 0, feedback: 0, unavailable: 0.95, uncertain: 0.05 } },
+          hasVerdict: { type: "noul", noul: 0.04 },
+        },
+        latencyMs: 90,
+      },
+      {
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "uncertain", confidence: 0.9, probabilities: { clear: 0, feedback: 0, unavailable: 0.05, uncertain: 0.95 } },
+          hasVerdict: { type: "noul", noul: 0.04 },
+        },
+        latencyMs: 90,
+      },
+    ]) {
+      const status = await classifyPrReviewStateWithSemantic(
+        ambiguousCurrentHeadComment("The review process ended without a conventional phrase."),
+        { mode: "assist", decide: async () => result },
+      )
+      assert.equal(status.overall, "waiting")
+    }
+  })
+
+  it("rejects inconsistent provider probabilities without changing workflow state", async () => {
+    const status = await classifyPrReviewStateWithSemantic(
+      ambiguousCurrentHeadComment("One issue remains in the current revision."),
+      {
+        mode: "assist",
+        decide: async () => ({
+          ok: true,
+          model: "jev-1.13.0",
+          answers: {
+            signal: {
+              type: "choice",
+              choice: "feedback",
+              confidence: 0.99,
+              probabilities: { clear: 0.98, feedback: 0.01, unavailable: 0, uncertain: 0.01 },
+            },
+            hasVerdict: { type: "noul", noul: 0.99 },
+          },
+          latencyMs: 10,
+        }),
+      },
+    )
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.semantic.decisions[0].outcome, "invalid-answer")
+    assert.equal(status.semantic.appliedCount, 0)
+  })
+
+  it("does not apply low-confidence feedback pluralities", async () => {
+    const status = await classifyPrReviewStateWithSemantic(
+      ambiguousCurrentHeadComment("The result needs interpretation."),
+      {
+        mode: "assist",
+        decide: async () => ({
+          ok: true,
+          model: "jev-1.13.0",
+          answers: {
+            signal: {
+              type: "choice",
+              choice: "feedback",
+              confidence: 0.26,
+              probabilities: { clear: 0.25, feedback: 0.26, unavailable: 0.25, uncertain: 0.24 },
+            },
+            hasVerdict: { type: "noul", noul: 0.51 },
+          },
+          latencyMs: 10,
+        }),
+      },
+    )
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.semantic.decisions[0].prediction, "uncertain")
+    assert.equal(status.semantic.appliedCount, 0)
+  })
+
+  it("lets newer ambiguous feedback supersede an older formal approval", async () => {
+    const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    const input = ambiguousCurrentHeadComment("I found a race in lock release.", head)
+    input.rawComments.reviews = [{
+      id: 201,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: "Reviewed the current revision.",
+      state: "APPROVED",
+      commit_id: head,
+      submitted_at: "2026-09-20T19:00:00Z",
+    }]
+    let calls = 0
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => {
+        calls += 1
+        return {
+          ok: true,
+          model: "jev-1.13.0",
+          answers: {
+            signal: { type: "choice", choice: "feedback", confidence: 0.97, probabilities: { clear: 0.01, feedback: 0.97, unavailable: 0.01, uncertain: 0.01 } },
+            hasVerdict: { type: "noul", noul: 0.98 },
+          },
+          latencyMs: 10,
+        }
+      },
+    })
+
+    assert.equal(calls, 1)
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.bots[0].feedback[0].body, "I found a race in lock release.")
+  })
+
+  it("lets applied feedback win an equal-second tie with approval", async () => {
+    const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    const input = ambiguousCurrentHeadComment("I found a race in lock release.", head)
+    input.rawComments.reviews = [{
+      id: 201,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: "Reviewed the current revision.",
+      state: "APPROVED",
+      commit_id: head,
+      submitted_at: "2026-09-20T20:00:00Z",
+    }]
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "feedback", confidence: 0.97, probabilities: { clear: 0.01, feedback: 0.97, unavailable: 0.01, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.98 },
+        },
+        latencyMs: 10,
+      }),
+    })
+
+    assert.equal(status.semantic.appliedCount, 1)
+    assert.equal(status.overall, "feedback")
+  })
+
+  it("classifies new feedback after an older inline finding and subsequent approval", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("The unlock happens too early.", head)
+    input.rawComments.reviewComments = [{
+      id: 200, user: { login: "chatgpt-codex-connector[bot]" },
+      body: "Earlier finding.", commit_id: head, original_commit_id: head,
+      created_at: "2026-09-20T18:00:00Z",
+    }]
+    input.rawComments.reviews = [{
+      id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+      state: "APPROVED", commit_id: head, body: "Reviewed revision.",
+      submitted_at: "2026-09-20T19:00:00Z",
+    }]
+    const client = createSystemOneClient({
+      apiKey: "configured-test-key",
+      fetchImpl: async () => new Response(JSON.stringify({ answers: {
+        signal: { choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 } },
+        hasVerdict: { noul: 1 },
+      } })),
+    })
+
+    const status = await classifyPrReviewStateWithSemantic(input, { mode: "assist", decide: client.decide })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+    assert.equal(status.bots[0].feedback[0].body, "The unlock happens too early.")
+  })
+
+  it("classifies feedback tied with a positive reaction", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("The unlock happens too early.", head)
+    input.rawComments.issueComments.push({
+      id: 202, user: { login: "author" },
+      body: `<!-- btrain-pr-review bot=codex lane=a head=${head} -->`,
+      created_at: "2026-09-20T19:00:00Z",
+    })
+    input.rawComments.issueCommentReactions = {
+      202: [{ content: "+1", user: { login: "chatgpt-codex-connector[bot]" }, created_at: "2026-09-20T20:00:00Z" }],
+    }
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({ ok: true, answers: {
+        signal: { choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 } },
+        hasVerdict: { noul: 1 },
+      } }),
+    })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+  })
+
+  it("classifies formal review feedback tied with a clear issue comment", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("No issues found.", head)
+    input.rawComments.reviews = [{
+      id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+      state: "COMMENTED", commit_id: head, body: "The unlock happens too early.",
+      html_url: "https://example.test/review/201",
+      submitted_at: "2026-09-20T20:00:00Z",
+    }]
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({ ok: true, answers: {
+        signal: { choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 } },
+        hasVerdict: { noul: 1 },
+      } }),
+    })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+  })
+
+  it("preserves review feedback when ambiguous review and issue text share a timestamp", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("Summary of the completed review.", head)
+    input.rawComments.reviews = [{
+      id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+      state: "COMMENTED", commit_id: head, body: "The unlock happens too early.",
+      html_url: "https://example.test/review/201",
+      submitted_at: "2026-09-20T20:00:00Z",
+    }]
+    input.rawComments.issueComments[0].created_at = "2026-09-20T20:00:00Z"
+    const bodies = []
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async ({ state }) => {
+        bodies.push(state.reviewComment)
+        const feedback = state.reviewComment.includes("unlock")
+        return { ok: true, answers: {
+          signal: {
+            choice: feedback ? "feedback" : "uncertain",
+            confidence: 0.99,
+            probabilities: feedback
+              ? { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 }
+              : { clear: 0, feedback: 0, unavailable: 0, uncertain: 1 },
+          },
+          hasVerdict: { noul: feedback ? 1 : 0 },
+        } }
+      },
+    })
+
+    assert.deepEqual(bodies, ["The unlock happens too early.", input.rawComments.issueComments[0].body])
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+    assert.equal(status.bots[0].feedback[0].body, "The unlock happens too early.")
+    assert.equal(status.bots[0].feedback[0].url, "https://example.test/review/201")
+  })
+
+  it("does not send pending or dismissed formal reviews to the semantic provider", async () => {
+    for (const state of ["PENDING", "DISMISSED"]) {
+      const head = "a".repeat(40)
+      const input = ambiguousCurrentHeadComment("The unlock happens too early.", head)
+      input.rawComments.issueComments = []
+      input.rawComments.reviews = [{
+        id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+        state, commit_id: head, body: "The unlock happens too early.",
+        submitted_at: "2026-09-20T20:00:00Z",
+      }]
+      let calls = 0
+      const status = await classifyPrReviewStateWithSemantic(input, {
+        mode: "assist",
+        decide: async () => { calls += 1; throw new Error("must not run") },
+      })
+
+      assert.equal(calls, 0, state)
+      assert.equal(status.overall, "waiting", state)
+    }
+  })
+
+  it("does not call the semantic provider for terminal or draft pull requests", async () => {
+    for (const pr of [
+      { state: "CLOSED" },
+      { state: "MERGED" },
+      { state: "OPEN", isDraft: true },
+    ]) {
+      const input = ambiguousCurrentHeadComment("A summary without a conventional verdict.")
+      Object.assign(input.pr, pr)
+      let calls = 0
+      const status = await classifyPrReviewStateWithSemantic(input, {
+        mode: "assist",
+        decide: async () => {
+          calls += 1
+          throw new Error("must not run")
+        },
+      })
+
+      assert.notEqual(status.overall, "waiting")
+      assert.equal(calls, 0)
+    }
+  })
+
+  it("rejects probability maps with undeclared labels", async () => {
+    const status = await classifyPrReviewStateWithSemantic(
+      ambiguousCurrentHeadComment("One issue remains."),
+      {
+        mode: "assist",
+        decide: async () => ({
+          ok: true,
+          model: "jev-1.13.0",
+          answers: {
+            signal: {
+              type: "choice",
+              choice: "feedback",
+              confidence: 0.99,
+              probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0, injected: 1 },
+            },
+            hasVerdict: { type: "noul", noul: 0.99 },
+          },
+          latencyMs: 10,
+        }),
+      },
+    )
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.semantic.decisions[0].outcome, "invalid-answer")
+  })
+
+  it("rejects undeclared probability labels even when their value is nonnumeric", async () => {
+    const status = await classifyPrReviewStateWithSemantic(
+      ambiguousCurrentHeadComment("One issue remains."),
+      {
+        mode: "assist",
+        decide: async () => ({
+          ok: true,
+          model: "jev-1.13.0",
+          answers: {
+            signal: {
+              type: "choice",
+              choice: "feedback",
+              confidence: 0.99,
+              probabilities: { clear: 0, feedback: 1, unavailable: 0, uncertain: 0, injected: "bad" },
+            },
+            hasVerdict: { type: "noul", noul: 0.99 },
+          },
+          latencyMs: 10,
+        }),
+      },
+    )
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(status.semantic.decisions[0].outcome, "invalid-answer")
+  })
+
+  it("sanitizes adapter metadata and feedback summaries at the classifier boundary", async () => {
+    const input = ambiguousCurrentHeadComment("\u001b[31mRace in lock release.\u0007")
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({
+        ok: true,
+        model: "\u001b[31mcustom-model\u0007",
+        answers: {
+          signal: { type: "choice", choice: "feedback", confidence: 0.97, probabilities: { clear: 0.01, feedback: 0.97, unavailable: 0.01, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.98 },
+        },
+        latencyMs: 10,
+      }),
+    })
+    const rendered = formatPrStatusSummary(status)
+
+    assert.doesNotMatch(rendered, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/)
+    assert.doesNotMatch(status.bots[0].feedback[0].body, /[\u0000-\u001f\u007f-\u009f]/)
+  })
+
+  it("renders the concrete provider failure reason", () => {
+    const rendered = formatPrStatusSummary({
+      overall: "waiting",
+      pr: { number: 12, title: "Test", headShort: "abc123", state: "OPEN" },
+      bots: [],
+      semantic: {
+        mode: "assist",
+        enabled: true,
+        decisions: [{ bot: "codex", outcome: "provider-failure", reason: "timeout" }],
+      },
+    })
+
+    assert.match(rendered, /provider-failure \(timeout\)/)
+  })
+
+  it("does not consult semantics when deterministic current-head evidence exists", async () => {
+    let calls = 0
+    const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    const input = ambiguousCurrentHeadComment("A later summary without a conventional verdict.", head)
+    input.rawComments.reviewComments = [{
+      id: 200,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: "The guard allows another lane to release this lock.",
+      commit_id: head,
+      original_commit_id: head,
+      path: "src/brain_train/core.mjs",
+      line: 10,
+      created_at: "2026-09-20T19:00:00Z",
+    }]
+
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => {
+        calls += 1
+        throw new Error("must not run")
+      },
+    })
+
+    assert.equal(status.overall, "feedback")
+    assert.equal(calls, 0)
+  })
+
+  it("does not override formal approval or a marked positive reaction", async () => {
+    const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    const formal = ambiguousCurrentHeadComment("A summary without a conventional verdict.", head)
+    formal.rawComments.reviews = [{
+      id: 201,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: "Reviewed the current revision.",
+      state: "APPROVED",
+      commit_id: head,
+      submitted_at: "2026-09-20T21:00:00Z",
+    }]
+    const reaction = ambiguousCurrentHeadComment("A summary without a conventional verdict.", head)
+    reaction.rawComments.issueComments.push({
+      id: 202,
+      user: { login: "author" },
+      body: `@codex review\n\n<!-- btrain-pr-review bot=codex lane=a head=${head} -->`,
+      created_at: "2026-09-20T19:00:00Z",
+    })
+    reaction.rawComments.issueCommentReactions = {
+      202: [{ content: "+1", user: { login: "chatgpt-codex-connector[bot]" }, created_at: "2026-09-20T21:05:00Z" }],
+    }
+
+    let calls = 0
+    for (const input of [formal, reaction]) {
+      const status = await classifyPrReviewStateWithSemantic(input, {
+        mode: "assist",
+        decide: async () => {
+          calls += 1
+          throw new Error("must not run")
+        },
+      })
+      assert.equal(status.overall, "ready-to-merge")
+    }
+    assert.equal(calls, 0)
+  })
+
+  it("does not send stale-head text to the semantic provider", async () => {
+    let calls = 0
+    const input = ambiguousCurrentHeadComment("Everything checks out.")
+    input.rawComments.issueComments[0].body = "Everything checks out. Reviewed commit: `bbbbbbbbbb`"
+
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => {
+        calls += 1
+        throw new Error("must not run")
+      },
+    })
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(calls, 0)
+  })
+
+  it("does not treat a seven-character commit prefix as current-head evidence", async () => {
+    let calls = 0
+    const input = ambiguousCurrentHeadComment("A summary that needs interpretation.")
+    input.rawComments.issueComments[0].body = "A summary that needs interpretation. Reviewed commit: `aaaaaaa`"
+
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => {
+        calls += 1
+        throw new Error("must not run")
+      },
+    })
+
+    assert.equal(status.overall, "waiting")
+    assert.equal(calls, 0)
+  })
+
   it("classifies Codex current-head feedback and Unblocked stale feedback from ai_sales#143 shape", () => {
     const status = classifyPrReviewState({
       pr: {
