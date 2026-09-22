@@ -2344,6 +2344,33 @@ describe("btrain handoff agent verification", () => {
     assert.ok(stdout.includes("agent check: GPT-5 Codex"), stdout)
   })
 
+  it("prefers an exact runtime identity over a composite collaborator name", async () => {
+    const repoDir = await makeTmpDir()
+    try {
+      await runBtrain(["init", repoDir], repoDir)
+      await disableLanes(repoDir)
+      await runBtrain([
+        "agents", "set", "--repo", repoDir,
+        "--agent", "codex", "--agent", "codex-reviewer",
+      ], repoDir)
+      await setRunnerConfig(repoDir, [
+        '"codex" = "codex -m gpt-6-astra"',
+        '"codex-reviewer" = "codex -m gpt-5.6-sol"',
+      ])
+
+      const { stdout, code, stderr } = await runBtrain(
+        ["handoff", "--repo", repoDir],
+        repoDir,
+        { BTRAIN_AGENT: "", BRAIN_TRAIN_AGENT: "", CODEX_THREAD_ID: "test-thread" },
+      )
+
+      assert.equal(code, 0, stderr)
+      assert.match(stdout, /agent check: codex \(runtime hints \(codex\)\)/)
+    } finally {
+      await rmDir(repoDir)
+    }
+  })
+
   it("auto-detects the actor and rejects mismatched --actor values", async () => {
     let result = await runBtrain(
       buildNeedsReviewArgs(tmpDir),

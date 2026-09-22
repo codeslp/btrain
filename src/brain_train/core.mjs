@@ -7766,6 +7766,19 @@ function detectCurrentAgent(config, env = process.env) {
     }
   }
 
+  const exactMatches = configuredAgents.filter((agentName) => (
+    runtimeHints.includes(normalizeAgentName(agentName).toLowerCase())
+  ))
+  if (exactMatches.length === 1) {
+    return {
+      status: "verified",
+      agentName: exactMatches[0],
+      candidates: exactMatches,
+      configuredAgents,
+      sourceLabel: `runtime hints (${runtimeHints.join(", ")})`,
+    }
+  }
+
   const matches = configuredAgents.filter((agentName) => {
     const identityTokens = new Set([
       ...tokenizeAgentIdentity(agentName),

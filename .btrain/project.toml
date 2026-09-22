@@ -10,8 +10,8 @@ active = ["codex", "codex-reviewer"]
 # Keep both collaborators on Codex while pinning different model versions.
 # The reviewer also has a fixed reasoning level so review dispatches match the
 # repository's independent-review policy and the requested review profile.
-"codex" = "env BTRAIN_AGENT=codex codex -m gpt-6-astra exec --json -C {repo} {prompt}"
-"codex-reviewer" = "env BTRAIN_AGENT=codex-reviewer codex -m gpt-5.6-sol -c model_reasoning_effort=medium exec --json -C {repo} {prompt}"
+"codex" = "codex -m gpt-6-astra"
+"codex-reviewer" = "codex -m gpt-5.6-sol -c model_reasoning_effort=medium"
 
 [lanes]
 per_agent = 3
