@@ -2,18 +2,16 @@
 name = "btrain"
 
 [agents]
-reviewer_default = "codex"
-writer_default = "claude"
-active = ["claude", "codex", "gemini", "app-developer", "claude-reviewer"]
+reviewer_default = "codex-reviewer"
+writer_default = "codex"
+active = ["codex", "codex-reviewer"]
 
 [agents.runners]
-"claude" = "claude -p"
-"codex" = "codex"
-"gemini" = "gemini"
-
-"app-developer" = "notify"
-
-"claude-reviewer" = "claude -p"
+# Keep both collaborators on Codex while pinning different model versions.
+# The reviewer also has a fixed reasoning level so review dispatches match the
+# repository's independent-review policy and the requested review profile.
+"codex" = "codex -m gpt-6-astra"
+"codex-reviewer" = "codex -m gpt-5.6-sol -c model_reasoning_effort=medium"
 
 [lanes]
 per_agent = 3
@@ -41,7 +39,7 @@ handoff_path = ".claude/collab/HANDOFF_F.md"
 [pr_flow]
 enabled = true
 base = "main"
-required_bots = ["gh-codex", "claude-reviewer"]
+required_bots = ["gh-codex"]
 
 [pr_flow.bots.gh-codex]
 aliases = ["chatgpt-codex-connector[bot]", "chatgpt-codex-connector"]
@@ -50,15 +48,6 @@ request_body = "@codex review"
 [pr_flow.bots.gh-unblocked]
 aliases = ["unblocked[bot]", "unblocked"]
 request_body = "@unblocked review again"
-
-# A Claude stand-in reviewer. It has no GitHub account of its own: reviews are
-# posted from the repo owner's account, so `codeslp` is the alias btrain matches
-# on. That means this gate can be satisfied by a human comment from the owner as
-# well as by a posted stand-in review — it is a weaker signal than a bot gate,
-# and it is deliberately additive rather than a replacement for gh-codex.
-[pr_flow.bots.claude-reviewer]
-aliases = ["claude-reviewer", "codeslp"]
-request_body = "@claude-reviewer review"
 
 [lanes.g]
 handoff_path = ".claude/collab/HANDOFF_G.md"
@@ -86,3 +75,18 @@ handoff_path = ".claude/collab/HANDOFF_N.md"
 
 [lanes.o]
 handoff_path = ".claude/collab/HANDOFF_O.md"
+
+# cgraph (KeplerKG) integration. Gated off until spec 020 WS1 landed: before
+# PR #63 an empty graph was reported as a clean pre-lock collision check, so
+# enabling this made a false-clean result live. #63 merged 2026-09-16, so the
+# graph now degrades honestly when it has nothing to say.
+#
+# `bin_path` is deliberately unset: the adapter resolves cgc/cgraph/kkg/
+# codegraphcontext from PATH, which keeps this file free of machine-specific
+# paths. `source_checkout` is likewise unset -- it would have to name a local
+# fork clone, so `kkg sync-check` reports `no_source_checkout` here and the
+# upstream-drift tip stays quiet until the config loader learns to expand an
+# env var for it.
+[cgraph]
+enabled = true
+advise_on = ["lock_overlap", "drift", "packet_truncated"]

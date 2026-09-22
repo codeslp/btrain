@@ -24,5 +24,6 @@ __pycache__/
 *.tar
 *.gz
 
-# spec 020 WS1: keep vendored Python out of SCIP language detection
+# Exclude agentchattr's local environment without hiding its implementation
+# from lock-overlap, drift, and reviewer-packet analysis.
 agentchattr/.venv/
