@@ -12,6 +12,7 @@
     "all": {
       "count": 28,
       "excludedFailureCount": 0,
+      "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 0.571,
       "leftAccuracy": 0.571,
@@ -95,6 +96,7 @@
     "test": {
       "count": 14,
       "excludedFailureCount": 0,
+      "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 0.643,
       "leftAccuracy": 0.643,
@@ -504,6 +506,7 @@
     "all": {
       "count": 18,
       "excludedFailureCount": 0,
+      "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 0.5,
       "leftAccuracy": 0.333,
@@ -569,6 +572,7 @@
     "test": {
       "count": 9,
       "excludedFailureCount": 0,
+      "missingCount": 0,
       "coverage": 1,
       "topChoiceAgreement": 0.444,
       "leftAccuracy": 0.333,

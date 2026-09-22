@@ -59,6 +59,9 @@ test("comparison excludes provider failures from classification metrics", async 
         prSignals: experiment([
           { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
           { id: "failed", split: "test", label: "feedback", modelError: "timeout" },
+          { id: "null", split: "test", label: "feedback", prediction: null },
+          { id: "unknown", split: "test", label: "feedback", prediction: "other" },
+          { id: "left-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
         handoffPackets: experiment([]),
       },
@@ -68,6 +71,9 @@ test("comparison excludes provider failures from classification metrics", async 
         prSignals: experiment([
           { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
           { id: "failed", split: "test", label: "feedback", prediction: "feedback", probabilities: { feedback: 1 } },
+          { id: "null", split: "test", label: "feedback", prediction: "feedback" },
+          { id: "unknown", split: "test", label: "feedback", prediction: "feedback" },
+          { id: "right-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
         handoffPackets: experiment([]),
       },
@@ -81,8 +87,9 @@ test("comparison excludes provider failures from classification metrics", async 
     assert.equal(run.status, 0, run.stderr)
     const result = JSON.parse(await fs.readFile(path.join(dir, "comparison-test.json"), "utf8"))
     assert.equal(result.prSignals.test.count, 1)
-    assert.equal(result.prSignals.test.excludedFailureCount, 1)
-    assert.equal(result.prSignals.test.coverage, 0.5)
+    assert.equal(result.prSignals.test.excludedFailureCount, 3)
+    assert.equal(result.prSignals.test.missingCount, 2)
+    assert.equal(result.prSignals.test.coverage, 0.167)
     assert.equal(result.prSignals.test.leftAccuracy, 1)
     assert.equal(result.prSignals.test.rightAccuracy, 1)
   } finally {

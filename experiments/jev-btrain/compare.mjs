@@ -16,12 +16,24 @@ function distributionDistance(a = {}, b = {}) {
 }
 
 function compareExperiment(leftExperiment, rightExperiment) {
+  const leftById = new Map(leftExperiment.rows.map((row) => [row.id, row]))
   const rightById = new Map(rightExperiment.rows.map((row) => [row.id, row]))
-  const rows = leftExperiment.rows.map((leftRow) => {
-    const rightRow = rightById.get(leftRow.id)
-    if (!rightRow) return { id: leftRow.id, missing: "right" }
+  const labels = new Set([
+    ...leftExperiment.rows.map((row) => row.label),
+    ...rightExperiment.rows.map((row) => row.label),
+  ])
+  const ids = [...new Set([...leftById.keys(), ...rightById.keys()])]
+  const validPrediction = (row) => row && !row.modelError && labels.has(row.prediction)
+  const comparableIds = new Set(ids.filter((id) => (
+    validPrediction(leftById.get(id)) && validPrediction(rightById.get(id))
+  )))
+  const rows = ids.map((id) => {
+    const leftRow = leftById.get(id)
+    const rightRow = rightById.get(id)
+    if (!leftRow) return { id, split: rightRow.split, label: rightRow.label, missing: "left" }
+    if (!rightRow) return { id, split: leftRow.split, label: leftRow.label, missing: "right" }
     return {
-      id: leftRow.id,
+      id,
       split: leftRow.split,
       label: leftRow.label,
       left: leftRow.prediction,
@@ -35,14 +47,15 @@ function compareExperiment(leftExperiment, rightExperiment) {
     }
   })
   const matched = rows.filter((row) => !row.missing)
-  const comparable = matched.filter((row) => row.left !== undefined && row.right !== undefined)
+  const comparable = matched.filter((row) => comparableIds.has(row.id))
   const summarize = (eligible, selected) => {
     const distances = selected
       .map((row) => row.meanAbsoluteProbabilityDifference)
       .filter((value) => value !== null)
     return {
       count: selected.length,
-      excludedFailureCount: eligible.length - selected.length,
+      excludedFailureCount: eligible.filter((row) => !row.missing).length - selected.length,
+      missingCount: eligible.filter((row) => row.missing).length,
       coverage: eligible.length ? Number((selected.length / eligible.length).toFixed(3)) : null,
       topChoiceAgreement: selected.length ? Number((selected.filter((row) => row.sameTopChoice).length / selected.length).toFixed(3)) : null,
       leftAccuracy: selected.length ? Number((selected.filter((row) => row.leftCorrect).length / selected.length).toFixed(3)) : null,
@@ -53,9 +66,9 @@ function compareExperiment(leftExperiment, rightExperiment) {
       disagreements: selected.filter((row) => !row.sameTopChoice).map(({ id, label, left: leftPrediction, right: rightPrediction }) => ({ id, label, left: leftPrediction, right: rightPrediction })),
     }
   }
-  const matchedTest = matched.filter((row) => row.split === "test")
+  const testRows = rows.filter((row) => row.split === "test")
   const comparableTest = comparable.filter((row) => row.split === "test")
-  return { all: summarize(matched, comparable), test: summarize(matchedTest, comparableTest), rows }
+  return { all: summarize(rows, comparable), test: summarize(testRows, comparableTest), rows }
 }
 
 const comparison = {
