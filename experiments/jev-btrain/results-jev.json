@@ -1,0 +1,1749 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-09-20T21:03:03.856Z",
+  "finishedAt": "2026-09-20T21:03:13.519Z",
+  "baseUrl": "https://api.typesafe.ai",
+  "caveats": [
+    "This is a small frozen pilot, not a production-quality benchmark.",
+    "Synthetic paraphrases complement real btrain artifacts and may not match deployment prevalence.",
+    "Kev-0.6b is a local Jev-compatible preview model, not hosted Jev.",
+    "No model result changes btrain state; all evaluation is offline and advisory."
+  ],
+  "experiments": {
+    "prSignals": {
+      "fixtures": "pr-signals.json",
+      "model": "jev-latest",
+      "servedModels": [
+        "jev-1.13.0"
+      ],
+      "splits": {
+        "calibration": {
+          "baseline": {
+            "count": 14,
+            "correct": 8,
+            "accuracy": 0.571,
+            "macroF1": 0.542,
+            "perLabel": {
+              "clear": {
+                "support": 4,
+                "precision": 1,
+                "recall": 0.5,
+                "f1": 0.667
+              },
+              "feedback": {
+                "support": 4,
+                "precision": 0,
+                "recall": 0,
+                "f1": 0
+              },
+              "unavailable": {
+                "support": 3,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 3,
+                "precision": 0.333,
+                "recall": 1,
+                "f1": 0.5
+              }
+            },
+            "errors": [
+              {
+                "id": "clear-all-checks",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-ship-it",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "real-feedback-inline",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-concern",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-test-gap",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-formal-state",
+                "expected": "feedback",
+                "actual": "uncertain"
+              }
+            ]
+          },
+          "model": {
+            "count": 14,
+            "correct": 14,
+            "accuracy": 1,
+            "macroF1": 1,
+            "perLabel": {
+              "clear": {
+                "support": 4,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "feedback": {
+                "support": 4,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "unavailable": {
+                "support": 3,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 3,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              }
+            },
+            "errors": []
+          }
+        },
+        "test": {
+          "baseline": {
+            "count": 14,
+            "correct": 7,
+            "accuracy": 0.5,
+            "macroF1": 0.465,
+            "perLabel": {
+              "clear": {
+                "support": 4,
+                "precision": 1,
+                "recall": 0.25,
+                "f1": 0.4
+              },
+              "feedback": {
+                "support": 4,
+                "precision": 0,
+                "recall": 0,
+                "f1": 0
+              },
+              "unavailable": {
+                "support": 3,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 3,
+                "precision": 0.3,
+                "recall": 1,
+                "f1": 0.462
+              }
+            },
+            "errors": [
+              {
+                "id": "clear-no-action",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-satisfied",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-no-blockers",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "real-feedback-review-body",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-not-ready",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-security",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-subtle",
+                "expected": "feedback",
+                "actual": "uncertain"
+              }
+            ]
+          },
+          "model": {
+            "count": 14,
+            "correct": 14,
+            "accuracy": 1,
+            "macroF1": 1,
+            "perLabel": {
+              "clear": {
+                "support": 4,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "feedback": {
+                "support": 4,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "unavailable": {
+                "support": 3,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 3,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              }
+            },
+            "errors": []
+          }
+        },
+        "all": {
+          "baseline": {
+            "count": 28,
+            "correct": 15,
+            "accuracy": 0.536,
+            "macroF1": 0.506,
+            "perLabel": {
+              "clear": {
+                "support": 8,
+                "precision": 1,
+                "recall": 0.375,
+                "f1": 0.545
+              },
+              "feedback": {
+                "support": 8,
+                "precision": 0,
+                "recall": 0,
+                "f1": 0
+              },
+              "unavailable": {
+                "support": 6,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 6,
+                "precision": 0.316,
+                "recall": 1,
+                "f1": 0.48
+              }
+            },
+            "errors": [
+              {
+                "id": "clear-all-checks",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-no-action",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-ship-it",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-satisfied",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "clear-no-blockers",
+                "expected": "clear",
+                "actual": "uncertain"
+              },
+              {
+                "id": "real-feedback-inline",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "real-feedback-review-body",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-concern",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-not-ready",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-test-gap",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-security",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-formal-state",
+                "expected": "feedback",
+                "actual": "uncertain"
+              },
+              {
+                "id": "feedback-subtle",
+                "expected": "feedback",
+                "actual": "uncertain"
+              }
+            ]
+          },
+          "model": {
+            "count": 28,
+            "correct": 28,
+            "accuracy": 1,
+            "macroF1": 1,
+            "perLabel": {
+              "clear": {
+                "support": 8,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "feedback": {
+                "support": 8,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "unavailable": {
+                "support": 6,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 6,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              }
+            },
+            "errors": []
+          }
+        }
+      },
+      "latency": {
+        "p50WallMs": 170.7,
+        "p95WallMs": 384.8,
+        "p50ModelMs": null,
+        "p95ModelMs": null
+      },
+      "rows": [
+        {
+          "id": "real-clear-chefs-kiss",
+          "split": "calibration",
+          "label": "clear",
+          "source": ".btrain/pr-comments/lane-a-22.jsonl",
+          "text": "Codex Review: Didn't find any major issues. Chef's kiss. Reviewed commit: 72c7188de4",
+          "baseline": "clear",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 0,
+            "clear": 1
+          },
+          "verdictProbability": 0.88,
+          "confidence": 1,
+          "wallMs": 419.457958,
+          "inputTokens": 462
+        },
+        {
+          "id": "real-clear-breezy",
+          "split": "test",
+          "label": "clear",
+          "source": ".btrain/pr-comments/lane-a-22.jsonl",
+          "text": "Codex Review: Didn't find any major issues. Breezy! Reviewed commit: 2ec0ae36c4",
+          "baseline": "clear",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 0,
+            "clear": 1
+          },
+          "verdictProbability": 0.82,
+          "confidence": 1,
+          "wallMs": 384.7765830000001,
+          "inputTokens": 460
+        },
+        {
+          "id": "clear-all-checks",
+          "split": "calibration",
+          "label": "clear",
+          "source": "synthetic paraphrase",
+          "text": "I completed the review and all checks passed. There is nothing for the author to change.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "feedback": 0,
+            "uncertain": 0,
+            "unavailable": 0,
+            "clear": 1
+          },
+          "verdictProbability": 0.93,
+          "confidence": 1,
+          "wallMs": 167.32654200000002,
+          "inputTokens": 452
+        },
+        {
+          "id": "clear-no-action",
+          "split": "test",
+          "label": "clear",
+          "source": "synthetic paraphrase",
+          "text": "The implementation matches the contract. I have no actionable comments.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "uncertain": 0,
+            "clear": 1,
+            "unavailable": 0,
+            "feedback": 0
+          },
+          "verdictProbability": 0.91,
+          "confidence": 1,
+          "wallMs": 156.7060409999999,
+          "inputTokens": 446
+        },
+        {
+          "id": "clear-ship-it",
+          "split": "calibration",
+          "label": "clear",
+          "source": "synthetic paraphrase",
+          "text": "Everything checks out on this revision; it is ready to ship.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "clear": 1,
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 0
+          },
+          "verdictProbability": 0.95,
+          "confidence": 1,
+          "wallMs": 157.24925000000007,
+          "inputTokens": 447
+        },
+        {
+          "id": "clear-satisfied",
+          "split": "test",
+          "label": "clear",
+          "source": "synthetic paraphrase",
+          "text": "The new tests cover the failure mode and the fix is sound. I am satisfied with this head.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "clear": 1,
+            "feedback": 0,
+            "uncertain": 0,
+            "unavailable": 0
+          },
+          "verdictProbability": 0.89,
+          "confidence": 1,
+          "wallMs": 290.011833,
+          "inputTokens": 454
+        },
+        {
+          "id": "clear-formal-approved",
+          "split": "calibration",
+          "label": "clear",
+          "source": "synthetic GitHub review",
+          "text": "Review state: APPROVED. The current commit meets the requested changes.",
+          "baseline": "clear",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "clear": 1,
+            "feedback": 0
+          },
+          "verdictProbability": 0.95,
+          "confidence": 1,
+          "wallMs": 164.69045899999992,
+          "inputTokens": 449
+        },
+        {
+          "id": "clear-no-blockers",
+          "split": "test",
+          "label": "clear",
+          "source": "synthetic paraphrase",
+          "text": "No blockers remain after the latest update.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "clear",
+          "rawPrediction": "clear",
+          "probabilities": {
+            "uncertain": 0.03,
+            "unavailable": 0,
+            "clear": 0.97,
+            "feedback": 0
+          },
+          "verdictProbability": 0.79,
+          "confidence": 0.95,
+          "wallMs": 295.76045899999986,
+          "inputTokens": 442
+        },
+        {
+          "id": "real-feedback-inline",
+          "split": "calibration",
+          "label": "feedback",
+          "source": ".btrain/pr-comments/lane-a-63.jsonl",
+          "text": "P1 Preserve collision advisories on inconclusive checks. An empty graph cannot prove that the overlap ended, so this path should preserve existing collision advisories.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "uncertain": 0,
+            "clear": 0,
+            "unavailable": 0,
+            "feedback": 1
+          },
+          "verdictProbability": 0.88,
+          "confidence": 1,
+          "wallMs": 121.92383300000029,
+          "inputTokens": 469
+        },
+        {
+          "id": "real-feedback-review-body",
+          "split": "test",
+          "label": "feedback",
+          "source": ".btrain/pr-comments/lane-a-63.jsonl",
+          "text": "Codex Review. Count drifted_node_ids before resolving drift. Include drifted_node_ids.length in this count.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "clear": 0,
+            "feedback": 0.98,
+            "uncertain": 0.02,
+            "unavailable": 0
+          },
+          "verdictProbability": 0.85,
+          "confidence": 0.97,
+          "wallMs": 276.30787499999997,
+          "inputTokens": 459
+        },
+        {
+          "id": "feedback-concern",
+          "split": "calibration",
+          "label": "feedback",
+          "source": "synthetic paraphrase",
+          "text": "I found a correctness concern: the retry can release a lock owned by another lane. Please add an ownership guard and a regression test.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 1,
+            "clear": 0
+          },
+          "verdictProbability": 0.92,
+          "confidence": 1,
+          "wallMs": 191.7494999999999,
+          "inputTokens": 461
+        },
+        {
+          "id": "feedback-not-ready",
+          "split": "test",
+          "label": "feedback",
+          "source": "synthetic paraphrase",
+          "text": "This revision is not ready to merge because the failure path still drops the audit record.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 1,
+            "clear": 0
+          },
+          "verdictProbability": 0.92,
+          "confidence": 1,
+          "wallMs": 168.99495799999977,
+          "inputTokens": 451
+        },
+        {
+          "id": "feedback-test-gap",
+          "split": "calibration",
+          "label": "feedback",
+          "source": "synthetic paraphrase",
+          "text": "The happy path works, but the cross-component test is missing. Add coverage before landing this.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "clear": 0,
+            "feedback": 1
+          },
+          "verdictProbability": 0.93,
+          "confidence": 1,
+          "wallMs": 170.73120800000015,
+          "inputTokens": 453
+        },
+        {
+          "id": "feedback-security",
+          "split": "test",
+          "label": "feedback",
+          "source": "synthetic paraphrase",
+          "text": "The client-provided actor still controls authorization. Enforce the owner check on the server before accepting this change.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 1,
+            "clear": 0
+          },
+          "verdictProbability": 0.93,
+          "confidence": 1,
+          "wallMs": 128.29083300000002,
+          "inputTokens": 456
+        },
+        {
+          "id": "feedback-formal-state",
+          "split": "calibration",
+          "label": "feedback",
+          "source": "synthetic GitHub review",
+          "text": "Review state: CHANGES_REQUESTED. The current commit violates the exact-head requirement.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "clear": 0,
+            "feedback": 1
+          },
+          "verdictProbability": 0.89,
+          "confidence": 1,
+          "wallMs": 152.35533399999986,
+          "inputTokens": 453
+        },
+        {
+          "id": "feedback-subtle",
+          "split": "test",
+          "label": "feedback",
+          "source": "synthetic paraphrase",
+          "text": "One issue remains: the code reports success before the durable event is written.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "feedback",
+          "rawPrediction": "feedback",
+          "probabilities": {
+            "unavailable": 0,
+            "uncertain": 0,
+            "feedback": 1,
+            "clear": 0
+          },
+          "verdictProbability": 0.84,
+          "confidence": 1,
+          "wallMs": 188.78120899999976,
+          "inputTokens": 449
+        },
+        {
+          "id": "real-limit",
+          "split": "calibration",
+          "label": "unavailable",
+          "source": ".btrain/pr-comments/lane-a-63.jsonl",
+          "text": "You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.",
+          "baseline": "unavailable",
+          "servedModel": "jev-1.13.0",
+          "prediction": "unavailable",
+          "rawPrediction": "unavailable",
+          "probabilities": {
+            "uncertain": 0,
+            "feedback": 0,
+            "clear": 0,
+            "unavailable": 1
+          },
+          "verdictProbability": 0.05,
+          "confidence": 1,
+          "wallMs": 191.65370799999982,
+          "inputTokens": 458
+        },
+        {
+          "id": "real-unknown-error",
+          "split": "test",
+          "label": "unavailable",
+          "source": ".btrain/pr-comments/lane-b-25.jsonl",
+          "text": "Codex Review: Something went wrong. Try again later by commenting @codex review. Unknown error.",
+          "baseline": "unavailable",
+          "servedModel": "jev-1.13.0",
+          "prediction": "unavailable",
+          "rawPrediction": "unavailable",
+          "probabilities": {
+            "clear": 0,
+            "feedback": 0,
+            "uncertain": 0,
+            "unavailable": 1
+          },
+          "verdictProbability": 0.04,
+          "confidence": 1,
+          "wallMs": 215.28091600000016,
+          "inputTokens": 455
+        },
+        {
+          "id": "unavailable-timeout",
+          "split": "calibration",
+          "label": "unavailable",
+          "source": "synthetic operational response",
+          "text": "The reviewer timed out before producing a verdict. Retry the review request.",
+          "baseline": "unavailable",
+          "servedModel": "jev-1.13.0",
+          "prediction": "unavailable",
+          "rawPrediction": "unavailable",
+          "probabilities": {
+            "clear": 0,
+            "uncertain": 0,
+            "feedback": 0,
+            "unavailable": 1
+          },
+          "verdictProbability": 0.04,
+          "confidence": 1,
+          "wallMs": 171.1715839999997,
+          "inputTokens": 448
+        },
+        {
+          "id": "unavailable-quota",
+          "split": "test",
+          "label": "unavailable",
+          "source": "synthetic operational response",
+          "text": "Review was not performed because the organization has exhausted its monthly quota.",
+          "baseline": "unavailable",
+          "servedModel": "jev-1.13.0",
+          "prediction": "unavailable",
+          "rawPrediction": "unavailable",
+          "probabilities": {
+            "unavailable": 1,
+            "uncertain": 0,
+            "clear": 0,
+            "feedback": 0
+          },
+          "verdictProbability": 0.04,
+          "confidence": 1,
+          "wallMs": 159.57808399999976,
+          "inputTokens": 447
+        },
+        {
+          "id": "unavailable-auth",
+          "split": "calibration",
+          "label": "unavailable",
+          "source": "synthetic operational response",
+          "text": "Authentication failed while starting the reviewer. No code review result is available.",
+          "baseline": "unavailable",
+          "servedModel": "jev-1.13.0",
+          "prediction": "unavailable",
+          "rawPrediction": "unavailable",
+          "probabilities": {
+            "uncertain": 0,
+            "clear": 0,
+            "unavailable": 1,
+            "feedback": 0
+          },
+          "verdictProbability": 0.03,
+          "confidence": 1,
+          "wallMs": 264.2838750000001,
+          "inputTokens": 448
+        },
+        {
+          "id": "unavailable-service",
+          "split": "test",
+          "label": "unavailable",
+          "source": "synthetic operational response",
+          "text": "The review service returned 503 and did not inspect the pull request.",
+          "baseline": "unavailable",
+          "servedModel": "jev-1.13.0",
+          "prediction": "unavailable",
+          "rawPrediction": "unavailable",
+          "probabilities": {
+            "clear": 0,
+            "feedback": 0,
+            "uncertain": 0,
+            "unavailable": 1
+          },
+          "verdictProbability": 0.05,
+          "confidence": 1,
+          "wallMs": 177.5254589999995,
+          "inputTokens": 450
+        },
+        {
+          "id": "uncertain-summary",
+          "split": "calibration",
+          "label": "uncertain",
+          "source": ".btrain/pr-comments/lane-a-63.jsonl pattern",
+          "text": "Codex Review Summary. Code Review completed for commit 415be6b.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "rawPrediction": "uncertain",
+          "probabilities": {
+            "unavailable": 0,
+            "clear": 0.07,
+            "uncertain": 0.93,
+            "feedback": 0
+          },
+          "verdictProbability": 0.08,
+          "confidence": 0.91,
+          "wallMs": 179.2543340000002,
+          "inputTokens": 452
+        },
+        {
+          "id": "uncertain-request",
+          "split": "test",
+          "label": "uncertain",
+          "source": "synthetic request",
+          "text": "@codex review this pull request when you have time.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "rawPrediction": "uncertain",
+          "probabilities": {
+            "clear": 0,
+            "unavailable": 0,
+            "feedback": 0,
+            "uncertain": 1
+          },
+          "verdictProbability": 0.02,
+          "confidence": 1,
+          "wallMs": 136.2153330000001,
+          "inputTokens": 446
+        },
+        {
+          "id": "uncertain-progress",
+          "split": "calibration",
+          "label": "uncertain",
+          "source": "synthetic status",
+          "text": "The review is running. Results will appear here when complete.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "rawPrediction": "uncertain",
+          "probabilities": {
+            "unavailable": 0.18,
+            "feedback": 0,
+            "clear": 0,
+            "uncertain": 0.82
+          },
+          "verdictProbability": 0.03,
+          "confidence": 0.76,
+          "wallMs": 141.2894580000002,
+          "inputTokens": 446
+        },
+        {
+          "id": "uncertain-thanks",
+          "split": "test",
+          "label": "uncertain",
+          "source": "synthetic social comment",
+          "text": "Thanks for taking a look at this change.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "rawPrediction": "uncertain",
+          "probabilities": {
+            "feedback": 0,
+            "uncertain": 1,
+            "unavailable": 0,
+            "clear": 0
+          },
+          "verdictProbability": 0.03,
+          "confidence": 1,
+          "wallMs": 157.10316599999987,
+          "inputTokens": 443
+        },
+        {
+          "id": "uncertain-author-response",
+          "split": "calibration",
+          "label": "uncertain",
+          "source": "synthetic author response",
+          "text": "Fixed in the latest commit and added the requested regression test.",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "rawPrediction": "uncertain",
+          "probabilities": {
+            "clear": 0.45,
+            "uncertain": 0.49,
+            "feedback": 0.06,
+            "unavailable": 0
+          },
+          "verdictProbability": 0.68,
+          "confidence": 0.32,
+          "wallMs": 156.86204100000032,
+          "inputTokens": 446
+        },
+        {
+          "id": "uncertain-question",
+          "split": "test",
+          "label": "uncertain",
+          "source": "synthetic discussion",
+          "text": "Could you explain why this needs a separate event record?",
+          "baseline": "uncertain",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "rawPrediction": "uncertain",
+          "probabilities": {
+            "uncertain": 0.99,
+            "unavailable": 0,
+            "feedback": 0.01,
+            "clear": 0
+          },
+          "verdictProbability": 0.23,
+          "confidence": 0.99,
+          "wallMs": 129.70141700000022,
+          "inputTokens": 445
+        }
+      ]
+    },
+    "handoffPackets": {
+      "fixtures": "handoff-packets.json",
+      "model": "jev-latest",
+      "servedModels": [
+        "jev-1.13.0"
+      ],
+      "splits": {
+        "calibration": {
+          "baseline": {
+            "count": 9,
+            "correct": 7,
+            "accuracy": 0.778,
+            "macroF1": 0.583,
+            "perLabel": {
+              "accept": {
+                "support": 3,
+                "precision": 0.6,
+                "recall": 1,
+                "f1": 0.75
+              },
+              "repair": {
+                "support": 4,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              },
+              "uncertain": {
+                "support": 2,
+                "precision": 0,
+                "recall": 0,
+                "f1": 0
+              }
+            },
+            "errors": [
+              {
+                "id": "uncertain-no-evidence-output",
+                "expected": "uncertain",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-diffless-analysis",
+                "expected": "uncertain",
+                "actual": "accept"
+              }
+            ]
+          },
+          "model": {
+            "count": 9,
+            "correct": 7,
+            "accuracy": 0.778,
+            "macroF1": 0.758,
+            "perLabel": {
+              "accept": {
+                "support": 3,
+                "precision": 0.6,
+                "recall": 1,
+                "f1": 0.75
+              },
+              "repair": {
+                "support": 4,
+                "precision": 1,
+                "recall": 0.75,
+                "f1": 0.857
+              },
+              "uncertain": {
+                "support": 2,
+                "precision": 1,
+                "recall": 0.5,
+                "f1": 0.667
+              }
+            },
+            "errors": [
+              {
+                "id": "repair-unsupported-verification",
+                "expected": "repair",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-diffless-analysis",
+                "expected": "uncertain",
+                "actual": "accept"
+              }
+            ]
+          }
+        },
+        "test": {
+          "baseline": {
+            "count": 9,
+            "correct": 6,
+            "accuracy": 0.667,
+            "macroF1": 0.508,
+            "perLabel": {
+              "accept": {
+                "support": 3,
+                "precision": 0.5,
+                "recall": 1,
+                "f1": 0.667
+              },
+              "repair": {
+                "support": 4,
+                "precision": 1,
+                "recall": 0.75,
+                "f1": 0.857
+              },
+              "uncertain": {
+                "support": 2,
+                "precision": 0,
+                "recall": 0,
+                "f1": 0
+              }
+            },
+            "errors": [
+              {
+                "id": "repair-hidden-failure",
+                "expected": "repair",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-external-provider",
+                "expected": "uncertain",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-partial-repro",
+                "expected": "uncertain",
+                "actual": "accept"
+              }
+            ]
+          },
+          "model": {
+            "count": 9,
+            "correct": 8,
+            "accuracy": 0.889,
+            "macroF1": 0.905,
+            "perLabel": {
+              "accept": {
+                "support": 3,
+                "precision": 0.75,
+                "recall": 1,
+                "f1": 0.857
+              },
+              "repair": {
+                "support": 4,
+                "precision": 1,
+                "recall": 0.75,
+                "f1": 0.857
+              },
+              "uncertain": {
+                "support": 2,
+                "precision": 1,
+                "recall": 1,
+                "f1": 1
+              }
+            },
+            "errors": [
+              {
+                "id": "repair-no-negative-path",
+                "expected": "repair",
+                "actual": "accept"
+              }
+            ]
+          }
+        },
+        "all": {
+          "baseline": {
+            "count": 18,
+            "correct": 13,
+            "accuracy": 0.722,
+            "macroF1": 0.546,
+            "perLabel": {
+              "accept": {
+                "support": 6,
+                "precision": 0.545,
+                "recall": 1,
+                "f1": 0.706
+              },
+              "repair": {
+                "support": 8,
+                "precision": 1,
+                "recall": 0.875,
+                "f1": 0.933
+              },
+              "uncertain": {
+                "support": 4,
+                "precision": 0,
+                "recall": 0,
+                "f1": 0
+              }
+            },
+            "errors": [
+              {
+                "id": "repair-hidden-failure",
+                "expected": "repair",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-no-evidence-output",
+                "expected": "uncertain",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-external-provider",
+                "expected": "uncertain",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-diffless-analysis",
+                "expected": "uncertain",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-partial-repro",
+                "expected": "uncertain",
+                "actual": "accept"
+              }
+            ]
+          },
+          "model": {
+            "count": 18,
+            "correct": 15,
+            "accuracy": 0.833,
+            "macroF1": 0.838,
+            "perLabel": {
+              "accept": {
+                "support": 6,
+                "precision": 0.667,
+                "recall": 1,
+                "f1": 0.8
+              },
+              "repair": {
+                "support": 8,
+                "precision": 1,
+                "recall": 0.75,
+                "f1": 0.857
+              },
+              "uncertain": {
+                "support": 4,
+                "precision": 1,
+                "recall": 0.75,
+                "f1": 0.857
+              }
+            },
+            "errors": [
+              {
+                "id": "repair-unsupported-verification",
+                "expected": "repair",
+                "actual": "accept"
+              },
+              {
+                "id": "repair-no-negative-path",
+                "expected": "repair",
+                "actual": "accept"
+              },
+              {
+                "id": "uncertain-diffless-analysis",
+                "expected": "uncertain",
+                "actual": "accept"
+              }
+            ]
+          }
+        }
+      },
+      "latency": {
+        "p50WallMs": 227.6,
+        "p95WallMs": 297.7,
+        "p50ModelMs": null,
+        "p95ModelMs": null
+      },
+      "rows": [
+        {
+          "id": "accept-specific-code",
+          "split": "calibration",
+          "label": "accept",
+          "packet": {
+            "objective": "Prevent stale-head bot comments from advancing a lane.",
+            "changed": "src/brain_train/pr-flow.mjs: require the reviewed commit to match the PR head before classifying a bot as clear.",
+            "verification": "node --test test/pr-flow.test.mjs: 18 passed, 0 failed; added stale-head clear and feedback cases.",
+            "gaps": "Live GitHub reaction ordering was not exercised.",
+            "reviewAsk": "Verify that short and full SHAs compare safely and stale inline comments remain non-blocking."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "repair": 0,
+            "accept": 0.96,
+            "uncertain": 0.04
+          },
+          "confidence": 0.95,
+          "dimensions": {
+            "objectiveAligned": 0.89,
+            "verificationSupportsClaim": 0.67,
+            "gapsAreCandid": 0.89,
+            "askIsActionable": 0.91
+          },
+          "wallMs": 248.26375000000007,
+          "inputTokens": 634
+        },
+        {
+          "id": "accept-doc-research",
+          "split": "test",
+          "label": "accept",
+          "packet": {
+            "objective": "Assess JEV repositories for btrain adoption.",
+            "changed": "research/jev-typesafe-repo-assessment.md: inventoried 35 repositories and proposed a deterministic authority plus semantic decision plane.",
+            "verification": "git diff --check passed; all 35 repository URLs were cross-checked against the video index.",
+            "gaps": "No hosted Jev key was available, so performance claims remain author-reported.",
+            "reviewAsk": "Challenge the deterministic/semantic boundary and confirm every repository is analyzed or excluded."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "uncertain": 0.16,
+            "repair": 0.02,
+            "accept": 0.82
+          },
+          "confidence": 0.74,
+          "dimensions": {
+            "objectiveAligned": 0.86,
+            "verificationSupportsClaim": 0.49,
+            "gapsAreCandid": 0.91,
+            "askIsActionable": 0.8
+          },
+          "wallMs": 165.13175000000047,
+          "inputTokens": 639
+        },
+        {
+          "id": "accept-config",
+          "split": "calibration",
+          "label": "accept",
+          "packet": {
+            "objective": "Enable cgraph after its empty-graph guard shipped.",
+            "changed": ".btrain/project.toml: set cgraph.enabled to true without changing provider configuration.",
+            "verification": "btrain doctor passed; btrain handoff reported cgraph enabled and no lock overlap.",
+            "gaps": "The remote provider timeout path was not reproduced locally.",
+            "reviewAsk": "Confirm the config change does not enable a blocking gate."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "repair": 0,
+            "uncertain": 0.4,
+            "accept": 0.6
+          },
+          "confidence": 0.39,
+          "dimensions": {
+            "objectiveAligned": 0.9,
+            "verificationSupportsClaim": 0.62,
+            "gapsAreCandid": 0.89,
+            "askIsActionable": 0.82
+          },
+          "wallMs": 297.66079100000024,
+          "inputTokens": 611
+        },
+        {
+          "id": "accept-tests-only",
+          "split": "test",
+          "label": "accept",
+          "packet": {
+            "objective": "Add a composition regression for provider fallback.",
+            "changed": "test/provider-fallback.test.mjs: added a test that composes the provider, adapter, and event sink.",
+            "verification": "node --test test/provider-fallback.test.mjs: 4 passed, including the new timeout case.",
+            "gaps": "No production files changed.",
+            "reviewAsk": "Check that the test fails when the fallback event dispatch is removed."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "repair": 0.04,
+            "accept": 0.88,
+            "uncertain": 0.08
+          },
+          "confidence": 0.83,
+          "dimensions": {
+            "objectiveAligned": 0.85,
+            "verificationSupportsClaim": 0.57,
+            "gapsAreCandid": 0.8,
+            "askIsActionable": 0.92
+          },
+          "wallMs": 179.89520900000025,
+          "inputTokens": 613
+        },
+        {
+          "id": "accept-formal",
+          "split": "calibration",
+          "label": "accept",
+          "packet": {
+            "objective": "Keep TLA pin hashes synchronized with the designated prose.",
+            "changed": "specs/tla/LaneLock.tla: refreshed only the pinned hash after the corresponding prose edit.",
+            "verification": "scripts/tla_pin.py --check passed; TLC completed with all invariants satisfied.",
+            "gaps": "State-space bounds remain the existing small pilot bounds.",
+            "reviewAsk": "Confirm no actions, invariants, or bounds changed."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "accept": 0.92,
+            "repair": 0,
+            "uncertain": 0.08
+          },
+          "confidence": 0.88,
+          "dimensions": {
+            "objectiveAligned": 0.9,
+            "verificationSupportsClaim": 0.79,
+            "gapsAreCandid": 0.83,
+            "askIsActionable": 0.79
+          },
+          "wallMs": 263.6745000000001,
+          "inputTokens": 613
+        },
+        {
+          "id": "accept-fix",
+          "split": "test",
+          "label": "accept",
+          "packet": {
+            "objective": "Stop an unavailable reviewer from being treated as approval.",
+            "changed": "src/brain_train/core.mjs: classify non-zero reviewer exits as dispatch failure and retain needs-review.",
+            "verification": "The regression test failed before the change and passes after it; full core suite: 94 passed.",
+            "gaps": "The Claude CLI monthly-quota response was represented with a fixture rather than a live exhausted account.",
+            "reviewAsk": "Inspect whether every runner failure path preserves the prior lane state."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "repair": 0.01,
+            "accept": 0.91,
+            "uncertain": 0.08
+          },
+          "confidence": 0.87,
+          "dimensions": {
+            "objectiveAligned": 0.89,
+            "verificationSupportsClaim": 0.71,
+            "gapsAreCandid": 0.87,
+            "askIsActionable": 0.88
+          },
+          "wallMs": 227.55804200000057,
+          "inputTokens": 624
+        },
+        {
+          "id": "repair-placeholders",
+          "split": "calibration",
+          "label": "repair",
+          "packet": {
+            "objective": "Fix the thing.",
+            "changed": "TODO",
+            "verification": "not run",
+            "gaps": "none yet",
+            "reviewAsk": "please review"
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "repair",
+          "probabilities": {
+            "accept": 0,
+            "repair": 0.99,
+            "uncertain": 0.01
+          },
+          "confidence": 0.98,
+          "dimensions": {
+            "objectiveAligned": 0.09,
+            "verificationSupportsClaim": 0.04,
+            "gapsAreCandid": 0.61,
+            "askIsActionable": 0.04
+          },
+          "wallMs": 210.67512499999975,
+          "inputTokens": 552
+        },
+        {
+          "id": "repair-mismatch",
+          "split": "test",
+          "label": "repair",
+          "packet": {
+            "objective": "Correct stale-head PR classification.",
+            "changed": "README.md: corrected the installation command.",
+            "verification": "npm test passed.",
+            "gaps": "None.",
+            "reviewAsk": "Check the PR classifier behavior."
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "repair",
+          "probabilities": {
+            "accept": 0.2,
+            "repair": 0.65,
+            "uncertain": 0.15
+          },
+          "confidence": 0.47,
+          "dimensions": {
+            "objectiveAligned": 0.14,
+            "verificationSupportsClaim": 0.18,
+            "gapsAreCandid": 0.79,
+            "askIsActionable": 0.61
+          },
+          "wallMs": 295.2147079999995,
+          "inputTokens": 567
+        },
+        {
+          "id": "repair-unsupported-verification",
+          "split": "calibration",
+          "label": "repair",
+          "packet": {
+            "objective": "Add authentication to the mutating enrollment route.",
+            "changed": "src/api/enrollment.ts: require a manager token and tenant match.",
+            "verification": "Formatting passed.",
+            "gaps": "None.",
+            "reviewAsk": "Confirm the endpoint is secure."
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "accept": 0.47000000000000003,
+            "uncertain": 0.4,
+            "repair": 0.13
+          },
+          "confidence": 0.19,
+          "dimensions": {
+            "objectiveAligned": 0.91,
+            "verificationSupportsClaim": 0.14,
+            "gapsAreCandid": 0.67,
+            "askIsActionable": 0.37
+          },
+          "wallMs": 254.1683750000002,
+          "inputTokens": 576
+        },
+        {
+          "id": "repair-hidden-failure",
+          "split": "test",
+          "label": "repair",
+          "packet": {
+            "objective": "Repair the failing reviewer dispatch suite.",
+            "changed": "test/reviewer-dispatch.test.mjs: updated expected output.",
+            "verification": "93 tests passed and 1 test still fails intermittently.",
+            "gaps": "No remaining gaps.",
+            "reviewAsk": "Approve the completed fix."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "repair",
+          "probabilities": {
+            "accept": 0.02,
+            "repair": 0.91,
+            "uncertain": 0.07
+          },
+          "confidence": 0.88,
+          "dimensions": {
+            "objectiveAligned": 0.38,
+            "verificationSupportsClaim": 0.26,
+            "gapsAreCandid": 0.5,
+            "askIsActionable": 0.08
+          },
+          "wallMs": 227.41758300000038,
+          "inputTokens": 588
+        },
+        {
+          "id": "repair-vague-change",
+          "split": "calibration",
+          "label": "repair",
+          "packet": {
+            "objective": "Improve handoff validation.",
+            "changed": "Changed several files to make it better.",
+            "verification": "Tests pass.",
+            "gaps": "Nothing important.",
+            "reviewAsk": "Review everything."
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "repair",
+          "probabilities": {
+            "repair": 0.99,
+            "uncertain": 0.01,
+            "accept": 0
+          },
+          "confidence": 0.97,
+          "dimensions": {
+            "objectiveAligned": 0.54,
+            "verificationSupportsClaim": 0.31,
+            "gapsAreCandid": 0.39,
+            "askIsActionable": 0.05
+          },
+          "wallMs": 203.95233300000018,
+          "inputTokens": 564
+        },
+        {
+          "id": "repair-no-negative-path",
+          "split": "test",
+          "label": "repair",
+          "packet": {
+            "objective": "Reject cross-lane mutation attempts.",
+            "changed": "src/brain_train/core.mjs: added a lane-lock guard.",
+            "verification": "The allowed same-lane command succeeds.",
+            "gaps": "None.",
+            "reviewAsk": "Check the lock guard."
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "uncertain": 0.36,
+            "repair": 0.04,
+            "accept": 0.6
+          },
+          "confidence": 0.41,
+          "dimensions": {
+            "objectiveAligned": 0.88,
+            "verificationSupportsClaim": 0.41,
+            "gapsAreCandid": 0.74,
+            "askIsActionable": 0.74
+          },
+          "wallMs": 249.85416599999917,
+          "inputTokens": 577
+        },
+        {
+          "id": "repair-contradiction",
+          "split": "calibration",
+          "label": "repair",
+          "packet": {
+            "objective": "Keep review failures non-terminal.",
+            "changed": "src/brain_train/core.mjs: reviewer failures now resolve the lane so work can continue.",
+            "verification": "The lane becomes resolved after a failed reviewer process.",
+            "gaps": "None.",
+            "reviewAsk": "Confirm failures preserve needs-review."
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "repair",
+          "probabilities": {
+            "repair": 0.56,
+            "uncertain": 0.15,
+            "accept": 0.29
+          },
+          "confidence": 0.33,
+          "dimensions": {
+            "objectiveAligned": 0.8,
+            "verificationSupportsClaim": 0.53,
+            "gapsAreCandid": 0.64,
+            "askIsActionable": 0.73
+          },
+          "wallMs": 240.31541599999946,
+          "inputTokens": 584
+        },
+        {
+          "id": "repair-gap-omission",
+          "split": "test",
+          "label": "repair",
+          "packet": {
+            "objective": "Add a local semantic classifier.",
+            "changed": "experiments/classifier.mjs: call a 0.6B local model.",
+            "verification": "10 of 20 fixtures were classified correctly.",
+            "gaps": "No known gaps.",
+            "reviewAsk": "Check whether this is ready for production."
+          },
+          "baseline": "repair",
+          "servedModel": "jev-1.13.0",
+          "prediction": "repair",
+          "probabilities": {
+            "accept": 0.05,
+            "uncertain": 0.19,
+            "repair": 0.76
+          },
+          "confidence": 0.64,
+          "dimensions": {
+            "objectiveAligned": 0.89,
+            "verificationSupportsClaim": 0.22,
+            "gapsAreCandid": 0.33,
+            "askIsActionable": 0.18
+          },
+          "wallMs": 219.46099999999933,
+          "inputTokens": 589
+        },
+        {
+          "id": "uncertain-no-evidence-output",
+          "split": "calibration",
+          "label": "uncertain",
+          "packet": {
+            "objective": "Reduce token use during dispatch.",
+            "changed": "scripts/context-curator.mjs: select relevant transcript chunks.",
+            "verification": "A benchmark command was run, but its output was not retained.",
+            "gaps": "The exact savings are unknown.",
+            "reviewAsk": "Assess whether the approach is directionally useful."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "probabilities": {
+            "uncertain": 0.88,
+            "repair": 0.04,
+            "accept": 0.08
+          },
+          "confidence": 0.81,
+          "dimensions": {
+            "objectiveAligned": 0.75,
+            "verificationSupportsClaim": 0.13,
+            "gapsAreCandid": 0.91,
+            "askIsActionable": 0.25
+          },
+          "wallMs": 211.20941700000003,
+          "inputTokens": 591
+        },
+        {
+          "id": "uncertain-external-provider",
+          "split": "test",
+          "label": "uncertain",
+          "packet": {
+            "objective": "Classify review comments with a hosted decision model.",
+            "changed": "experiments/review-classifier.mjs: added an API client.",
+            "verification": "Offline fixture validation passed, but no API credentials were available.",
+            "gaps": "Latency, cost, and live response shape are unverified.",
+            "reviewAsk": "Check the offline harness while treating provider behavior as unknown."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "probabilities": {
+            "repair": 0.01,
+            "uncertain": 0.5700000000000001,
+            "accept": 0.42
+          },
+          "confidence": 0.34,
+          "dimensions": {
+            "objectiveAligned": 0.71,
+            "verificationSupportsClaim": 0.17,
+            "gapsAreCandid": 0.93,
+            "askIsActionable": 0.66
+          },
+          "wallMs": 208.35900000000038,
+          "inputTokens": 605
+        },
+        {
+          "id": "uncertain-diffless-analysis",
+          "split": "calibration",
+          "label": "uncertain",
+          "packet": {
+            "objective": "Diagnose an intermittent runner failure.",
+            "changed": "No files changed; collected five direct runs and five dispatched runs.",
+            "verification": "All direct runs passed; two dispatched runs failed before producing test output.",
+            "gaps": "The runner environment difference is not yet isolated.",
+            "reviewAsk": "Validate the evidence and recommend the next diagnostic probe."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "accept",
+          "probabilities": {
+            "accept": 0.74,
+            "repair": 0.01,
+            "uncertain": 0.25
+          },
+          "confidence": 0.62,
+          "dimensions": {
+            "objectiveAligned": 0.2,
+            "verificationSupportsClaim": 0.19,
+            "gapsAreCandid": 0.91,
+            "askIsActionable": 0.46
+          },
+          "wallMs": 245.93091699999968,
+          "inputTokens": 595
+        },
+        {
+          "id": "uncertain-partial-repro",
+          "split": "test",
+          "label": "uncertain",
+          "packet": {
+            "objective": "Determine whether a provider timeout is a product defect.",
+            "changed": "No production changes; added a local timing trace.",
+            "verification": "One timeout occurred in 30 attempts and could not be forced again.",
+            "gaps": "The upstream provider logs are unavailable.",
+            "reviewAsk": "Check whether the evidence supports a narrower follow-up rather than a fix."
+          },
+          "baseline": "accept",
+          "servedModel": "jev-1.13.0",
+          "prediction": "uncertain",
+          "probabilities": {
+            "repair": 0,
+            "accept": 0.43,
+            "uncertain": 0.57
+          },
+          "confidence": 0.35,
+          "dimensions": {
+            "objectiveAligned": 0.52,
+            "verificationSupportsClaim": 0.3,
+            "gapsAreCandid": 0.91,
+            "askIsActionable": 0.41
+          },
+          "wallMs": 189.70620899999994,
+          "inputTokens": 599
+        }
+      ]
+    }
+  }
+}

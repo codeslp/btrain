@@ -1,0 +1,198 @@
+[
+  {
+    "id": "real-clear-chefs-kiss",
+    "split": "calibration",
+    "label": "clear",
+    "source": ".btrain/pr-comments/lane-a-22.jsonl",
+    "text": "Codex Review: Didn't find any major issues. Chef's kiss. Reviewed commit: 72c7188de4"
+  },
+  {
+    "id": "real-clear-breezy",
+    "split": "test",
+    "label": "clear",
+    "source": ".btrain/pr-comments/lane-a-22.jsonl",
+    "text": "Codex Review: Didn't find any major issues. Breezy! Reviewed commit: 2ec0ae36c4"
+  },
+  {
+    "id": "clear-all-checks",
+    "split": "calibration",
+    "label": "clear",
+    "source": "synthetic paraphrase",
+    "text": "I completed the review and all checks passed. There is nothing for the author to change."
+  },
+  {
+    "id": "clear-no-action",
+    "split": "test",
+    "label": "clear",
+    "source": "synthetic paraphrase",
+    "text": "The implementation matches the contract. I have no actionable comments."
+  },
+  {
+    "id": "clear-ship-it",
+    "split": "calibration",
+    "label": "clear",
+    "source": "synthetic paraphrase",
+    "text": "Everything checks out on this revision; it is ready to ship."
+  },
+  {
+    "id": "clear-satisfied",
+    "split": "test",
+    "label": "clear",
+    "source": "synthetic paraphrase",
+    "text": "The new tests cover the failure mode and the fix is sound. I am satisfied with this head."
+  },
+  {
+    "id": "clear-formal-approved",
+    "split": "calibration",
+    "label": "clear",
+    "source": "synthetic GitHub review",
+    "text": "Review state: APPROVED. The current commit meets the requested changes."
+  },
+  {
+    "id": "clear-no-blockers",
+    "split": "test",
+    "label": "clear",
+    "source": "synthetic paraphrase",
+    "text": "No blockers remain after the latest update."
+  },
+  {
+    "id": "real-feedback-inline",
+    "split": "calibration",
+    "label": "feedback",
+    "source": ".btrain/pr-comments/lane-a-63.jsonl",
+    "text": "P1 Preserve collision advisories on inconclusive checks. An empty graph cannot prove that the overlap ended, so this path should preserve existing collision advisories."
+  },
+  {
+    "id": "real-feedback-review-body",
+    "split": "test",
+    "label": "feedback",
+    "source": ".btrain/pr-comments/lane-a-63.jsonl",
+    "text": "Codex Review. Count drifted_node_ids before resolving drift. Include drifted_node_ids.length in this count."
+  },
+  {
+    "id": "feedback-concern",
+    "split": "calibration",
+    "label": "feedback",
+    "source": "synthetic paraphrase",
+    "text": "I found a correctness concern: the retry can release a lock owned by another lane. Please add an ownership guard and a regression test."
+  },
+  {
+    "id": "feedback-not-ready",
+    "split": "test",
+    "label": "feedback",
+    "source": "synthetic paraphrase",
+    "text": "This revision is not ready to merge because the failure path still drops the audit record."
+  },
+  {
+    "id": "feedback-test-gap",
+    "split": "calibration",
+    "label": "feedback",
+    "source": "synthetic paraphrase",
+    "text": "The happy path works, but the cross-component test is missing. Add coverage before landing this."
+  },
+  {
+    "id": "feedback-security",
+    "split": "test",
+    "label": "feedback",
+    "source": "synthetic paraphrase",
+    "text": "The client-provided actor still controls authorization. Enforce the owner check on the server before accepting this change."
+  },
+  {
+    "id": "feedback-formal-state",
+    "split": "calibration",
+    "label": "feedback",
+    "source": "synthetic GitHub review",
+    "text": "Review state: CHANGES_REQUESTED. The current commit violates the exact-head requirement."
+  },
+  {
+    "id": "feedback-subtle",
+    "split": "test",
+    "label": "feedback",
+    "source": "synthetic paraphrase",
+    "text": "One issue remains: the code reports success before the durable event is written."
+  },
+  {
+    "id": "real-limit",
+    "split": "calibration",
+    "label": "unavailable",
+    "source": ".btrain/pr-comments/lane-a-63.jsonl",
+    "text": "You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard."
+  },
+  {
+    "id": "real-unknown-error",
+    "split": "test",
+    "label": "unavailable",
+    "source": ".btrain/pr-comments/lane-b-25.jsonl",
+    "text": "Codex Review: Something went wrong. Try again later by commenting @codex review. Unknown error."
+  },
+  {
+    "id": "unavailable-timeout",
+    "split": "calibration",
+    "label": "unavailable",
+    "source": "synthetic operational response",
+    "text": "The reviewer timed out before producing a verdict. Retry the review request."
+  },
+  {
+    "id": "unavailable-quota",
+    "split": "test",
+    "label": "unavailable",
+    "source": "synthetic operational response",
+    "text": "Review was not performed because the organization has exhausted its monthly quota."
+  },
+  {
+    "id": "unavailable-auth",
+    "split": "calibration",
+    "label": "unavailable",
+    "source": "synthetic operational response",
+    "text": "Authentication failed while starting the reviewer. No code review result is available."
+  },
+  {
+    "id": "unavailable-service",
+    "split": "test",
+    "label": "unavailable",
+    "source": "synthetic operational response",
+    "text": "The review service returned 503 and did not inspect the pull request."
+  },
+  {
+    "id": "uncertain-summary",
+    "split": "calibration",
+    "label": "uncertain",
+    "source": ".btrain/pr-comments/lane-a-63.jsonl pattern",
+    "text": "Codex Review Summary. Code Review completed for commit 415be6b."
+  },
+  {
+    "id": "uncertain-request",
+    "split": "test",
+    "label": "uncertain",
+    "source": "synthetic request",
+    "text": "@codex review this pull request when you have time."
+  },
+  {
+    "id": "uncertain-progress",
+    "split": "calibration",
+    "label": "uncertain",
+    "source": "synthetic status",
+    "text": "The review is running. Results will appear here when complete."
+  },
+  {
+    "id": "uncertain-thanks",
+    "split": "test",
+    "label": "uncertain",
+    "source": "synthetic social comment",
+    "text": "Thanks for taking a look at this change."
+  },
+  {
+    "id": "uncertain-author-response",
+    "split": "calibration",
+    "label": "uncertain",
+    "source": "synthetic author response",
+    "text": "Fixed in the latest commit and added the requested regression test."
+  },
+  {
+    "id": "uncertain-question",
+    "split": "test",
+    "label": "uncertain",
+    "source": "synthetic discussion",
+    "text": "Could you explain why this needs a separate event record?"
+  }
+]

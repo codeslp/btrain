@@ -1,0 +1,218 @@
+[
+  {
+    "id": "accept-specific-code",
+    "split": "calibration",
+    "label": "accept",
+    "packet": {
+      "objective": "Prevent stale-head bot comments from advancing a lane.",
+      "changed": "src/brain_train/pr-flow.mjs: require the reviewed commit to match the PR head before classifying a bot as clear.",
+      "verification": "node --test test/pr-flow.test.mjs: 18 passed, 0 failed; added stale-head clear and feedback cases.",
+      "gaps": "Live GitHub reaction ordering was not exercised.",
+      "reviewAsk": "Verify that short and full SHAs compare safely and stale inline comments remain non-blocking."
+    }
+  },
+  {
+    "id": "accept-doc-research",
+    "split": "test",
+    "label": "accept",
+    "packet": {
+      "objective": "Assess JEV repositories for btrain adoption.",
+      "changed": "research/jev-typesafe-repo-assessment.md: inventoried 35 repositories and proposed a deterministic authority plus semantic decision plane.",
+      "verification": "git diff --check passed; all 35 repository URLs were cross-checked against the video index.",
+      "gaps": "No hosted Jev key was available, so performance claims remain author-reported.",
+      "reviewAsk": "Challenge the deterministic/semantic boundary and confirm every repository is analyzed or excluded."
+    }
+  },
+  {
+    "id": "accept-config",
+    "split": "calibration",
+    "label": "accept",
+    "packet": {
+      "objective": "Enable cgraph after its empty-graph guard shipped.",
+      "changed": ".btrain/project.toml: set cgraph.enabled to true without changing provider configuration.",
+      "verification": "btrain doctor passed; btrain handoff reported cgraph enabled and no lock overlap.",
+      "gaps": "The remote provider timeout path was not reproduced locally.",
+      "reviewAsk": "Confirm the config change does not enable a blocking gate."
+    }
+  },
+  {
+    "id": "accept-tests-only",
+    "split": "test",
+    "label": "accept",
+    "packet": {
+      "objective": "Add a composition regression for provider fallback.",
+      "changed": "test/provider-fallback.test.mjs: added a test that composes the provider, adapter, and event sink.",
+      "verification": "node --test test/provider-fallback.test.mjs: 4 passed, including the new timeout case.",
+      "gaps": "No production files changed.",
+      "reviewAsk": "Check that the test fails when the fallback event dispatch is removed."
+    }
+  },
+  {
+    "id": "accept-formal",
+    "split": "calibration",
+    "label": "accept",
+    "packet": {
+      "objective": "Keep TLA pin hashes synchronized with the designated prose.",
+      "changed": "specs/tla/LaneLock.tla: refreshed only the pinned hash after the corresponding prose edit.",
+      "verification": "scripts/tla_pin.py --check passed; TLC completed with all invariants satisfied.",
+      "gaps": "State-space bounds remain the existing small pilot bounds.",
+      "reviewAsk": "Confirm no actions, invariants, or bounds changed."
+    }
+  },
+  {
+    "id": "accept-fix",
+    "split": "test",
+    "label": "accept",
+    "packet": {
+      "objective": "Stop an unavailable reviewer from being treated as approval.",
+      "changed": "src/brain_train/core.mjs: classify non-zero reviewer exits as dispatch failure and retain needs-review.",
+      "verification": "The regression test failed before the change and passes after it; full core suite: 94 passed.",
+      "gaps": "The Claude CLI monthly-quota response was represented with a fixture rather than a live exhausted account.",
+      "reviewAsk": "Inspect whether every runner failure path preserves the prior lane state."
+    }
+  },
+  {
+    "id": "repair-placeholders",
+    "split": "calibration",
+    "label": "repair",
+    "packet": {
+      "objective": "Fix the thing.",
+      "changed": "TODO",
+      "verification": "not run",
+      "gaps": "none yet",
+      "reviewAsk": "please review"
+    }
+  },
+  {
+    "id": "repair-mismatch",
+    "split": "test",
+    "label": "repair",
+    "packet": {
+      "objective": "Correct stale-head PR classification.",
+      "changed": "README.md: corrected the installation command.",
+      "verification": "npm test passed.",
+      "gaps": "None.",
+      "reviewAsk": "Check the PR classifier behavior."
+    }
+  },
+  {
+    "id": "repair-unsupported-verification",
+    "split": "calibration",
+    "label": "repair",
+    "packet": {
+      "objective": "Add authentication to the mutating enrollment route.",
+      "changed": "src/api/enrollment.ts: require a manager token and tenant match.",
+      "verification": "Formatting passed.",
+      "gaps": "None.",
+      "reviewAsk": "Confirm the endpoint is secure."
+    }
+  },
+  {
+    "id": "repair-hidden-failure",
+    "split": "test",
+    "label": "repair",
+    "packet": {
+      "objective": "Repair the failing reviewer dispatch suite.",
+      "changed": "test/reviewer-dispatch.test.mjs: updated expected output.",
+      "verification": "93 tests passed and 1 test still fails intermittently.",
+      "gaps": "No remaining gaps.",
+      "reviewAsk": "Approve the completed fix."
+    }
+  },
+  {
+    "id": "repair-vague-change",
+    "split": "calibration",
+    "label": "repair",
+    "packet": {
+      "objective": "Improve handoff validation.",
+      "changed": "Changed several files to make it better.",
+      "verification": "Tests pass.",
+      "gaps": "Nothing important.",
+      "reviewAsk": "Review everything."
+    }
+  },
+  {
+    "id": "repair-no-negative-path",
+    "split": "test",
+    "label": "repair",
+    "packet": {
+      "objective": "Reject cross-lane mutation attempts.",
+      "changed": "src/brain_train/core.mjs: added a lane-lock guard.",
+      "verification": "The allowed same-lane command succeeds.",
+      "gaps": "None.",
+      "reviewAsk": "Check the lock guard."
+    }
+  },
+  {
+    "id": "repair-contradiction",
+    "split": "calibration",
+    "label": "repair",
+    "packet": {
+      "objective": "Keep review failures non-terminal.",
+      "changed": "src/brain_train/core.mjs: reviewer failures now resolve the lane so work can continue.",
+      "verification": "The lane becomes resolved after a failed reviewer process.",
+      "gaps": "None.",
+      "reviewAsk": "Confirm failures preserve needs-review."
+    }
+  },
+  {
+    "id": "repair-gap-omission",
+    "split": "test",
+    "label": "repair",
+    "packet": {
+      "objective": "Add a local semantic classifier.",
+      "changed": "experiments/classifier.mjs: call a 0.6B local model.",
+      "verification": "10 of 20 fixtures were classified correctly.",
+      "gaps": "No known gaps.",
+      "reviewAsk": "Check whether this is ready for production."
+    }
+  },
+  {
+    "id": "uncertain-no-evidence-output",
+    "split": "calibration",
+    "label": "uncertain",
+    "packet": {
+      "objective": "Reduce token use during dispatch.",
+      "changed": "scripts/context-curator.mjs: select relevant transcript chunks.",
+      "verification": "A benchmark command was run, but its output was not retained.",
+      "gaps": "The exact savings are unknown.",
+      "reviewAsk": "Assess whether the approach is directionally useful."
+    }
+  },
+  {
+    "id": "uncertain-external-provider",
+    "split": "test",
+    "label": "uncertain",
+    "packet": {
+      "objective": "Classify review comments with a hosted decision model.",
+      "changed": "experiments/review-classifier.mjs: added an API client.",
+      "verification": "Offline fixture validation passed, but no API credentials were available.",
+      "gaps": "Latency, cost, and live response shape are unverified.",
+      "reviewAsk": "Check the offline harness while treating provider behavior as unknown."
+    }
+  },
+  {
+    "id": "uncertain-diffless-analysis",
+    "split": "calibration",
+    "label": "uncertain",
+    "packet": {
+      "objective": "Diagnose an intermittent runner failure.",
+      "changed": "No files changed; collected five direct runs and five dispatched runs.",
+      "verification": "All direct runs passed; two dispatched runs failed before producing test output.",
+      "gaps": "The runner environment difference is not yet isolated.",
+      "reviewAsk": "Validate the evidence and recommend the next diagnostic probe."
+    }
+  },
+  {
+    "id": "uncertain-partial-repro",
+    "split": "test",
+    "label": "uncertain",
+    "packet": {
+      "objective": "Determine whether a provider timeout is a product defect.",
+      "changed": "No production changes; added a local timing trace.",
+      "verification": "One timeout occurred in 30 attempts and could not be forced again.",
+      "gaps": "The upstream provider logs are unavailable.",
+      "reviewAsk": "Check whether the evidence supports a narrower follow-up rather than a fix."
+    }
+  }
+]

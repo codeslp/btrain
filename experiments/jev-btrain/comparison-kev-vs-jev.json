@@ -1,0 +1,839 @@
+{
+  "schemaVersion": 1,
+  "left": {
+    "file": "results-kev-0.6b.json",
+    "model": "kev-latest"
+  },
+  "right": {
+    "file": "results-jev.json",
+    "model": "jev-latest"
+  },
+  "prSignals": {
+    "all": {
+      "count": 28,
+      "topChoiceAgreement": 0.571,
+      "leftAccuracy": 0.571,
+      "rightAccuracy": 1,
+      "meanAbsoluteProbabilityDifference": 0.134,
+      "disagreements": [
+        {
+          "id": "clear-no-action",
+          "label": "clear",
+          "left": "uncertain",
+          "right": "clear"
+        },
+        {
+          "id": "real-feedback-inline",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "real-feedback-review-body",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-concern",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-not-ready",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-test-gap",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-formal-state",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-subtle",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "uncertain-summary",
+          "label": "uncertain",
+          "left": "clear",
+          "right": "uncertain"
+        },
+        {
+          "id": "uncertain-request",
+          "label": "uncertain",
+          "left": "clear",
+          "right": "uncertain"
+        },
+        {
+          "id": "uncertain-progress",
+          "label": "uncertain",
+          "left": "clear",
+          "right": "uncertain"
+        },
+        {
+          "id": "uncertain-author-response",
+          "label": "uncertain",
+          "left": "feedback",
+          "right": "uncertain"
+        }
+      ]
+    },
+    "test": {
+      "count": 14,
+      "topChoiceAgreement": 0.643,
+      "leftAccuracy": 0.643,
+      "rightAccuracy": 1,
+      "meanAbsoluteProbabilityDifference": 0.157,
+      "disagreements": [
+        {
+          "id": "clear-no-action",
+          "label": "clear",
+          "left": "uncertain",
+          "right": "clear"
+        },
+        {
+          "id": "real-feedback-review-body",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-not-ready",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "feedback-subtle",
+          "label": "feedback",
+          "left": "uncertain",
+          "right": "feedback"
+        },
+        {
+          "id": "uncertain-request",
+          "label": "uncertain",
+          "left": "clear",
+          "right": "uncertain"
+        }
+      ]
+    },
+    "rows": [
+      {
+        "id": "real-clear-chefs-kiss",
+        "split": "calibration",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.042499999999999996,
+        "leftConfidence": 0.88,
+        "rightConfidence": 1
+      },
+      {
+        "id": "real-clear-breezy",
+        "split": "test",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.06,
+        "leftConfidence": 0.84,
+        "rightConfidence": 1
+      },
+      {
+        "id": "clear-all-checks",
+        "split": "calibration",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0,
+        "leftConfidence": 1,
+        "rightConfidence": 1
+      },
+      {
+        "id": "clear-no-action",
+        "split": "test",
+        "label": "clear",
+        "left": "uncertain",
+        "right": "clear",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.010000000000000005,
+        "leftConfidence": 0.97,
+        "rightConfidence": 1
+      },
+      {
+        "id": "clear-ship-it",
+        "split": "calibration",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.005000000000000003,
+        "leftConfidence": 0.98,
+        "rightConfidence": 1
+      },
+      {
+        "id": "clear-satisfied",
+        "split": "test",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.04999999999999999,
+        "leftConfidence": 0.87,
+        "rightConfidence": 1
+      },
+      {
+        "id": "clear-formal-approved",
+        "split": "calibration",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.012500000000000008,
+        "leftConfidence": 0.97,
+        "rightConfidence": 1
+      },
+      {
+        "id": "clear-no-blockers",
+        "split": "test",
+        "label": "clear",
+        "left": "clear",
+        "right": "clear",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.015000000000000006,
+        "leftConfidence": 1,
+        "rightConfidence": 0.95
+      },
+      {
+        "id": "real-feedback-inline",
+        "split": "calibration",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.38000000000000006,
+        "leftConfidence": 0.15,
+        "rightConfidence": 1
+      },
+      {
+        "id": "real-feedback-review-body",
+        "split": "test",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.08999999999999998,
+        "leftConfidence": 0.74,
+        "rightConfidence": 0.97
+      },
+      {
+        "id": "feedback-concern",
+        "split": "calibration",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.012500000000000006,
+        "leftConfidence": 0.97,
+        "rightConfidence": 1
+      },
+      {
+        "id": "feedback-not-ready",
+        "split": "test",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.2175,
+        "leftConfidence": 0.42,
+        "rightConfidence": 1
+      },
+      {
+        "id": "feedback-test-gap",
+        "split": "calibration",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.015000000000000008,
+        "leftConfidence": 0.96,
+        "rightConfidence": 1
+      },
+      {
+        "id": "feedback-security",
+        "split": "test",
+        "label": "feedback",
+        "left": "feedback",
+        "right": "feedback",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.125,
+        "leftConfidence": 0.67,
+        "rightConfidence": 1
+      },
+      {
+        "id": "feedback-formal-state",
+        "split": "calibration",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.02000000000000001,
+        "leftConfidence": 0.95,
+        "rightConfidence": 1
+      },
+      {
+        "id": "feedback-subtle",
+        "split": "test",
+        "label": "feedback",
+        "left": "uncertain",
+        "right": "feedback",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.155,
+        "leftConfidence": 0.59,
+        "rightConfidence": 1
+      },
+      {
+        "id": "real-limit",
+        "split": "calibration",
+        "label": "unavailable",
+        "left": "unavailable",
+        "right": "unavailable",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.025000000000000012,
+        "leftConfidence": 0.93,
+        "rightConfidence": 1
+      },
+      {
+        "id": "real-unknown-error",
+        "split": "test",
+        "label": "unavailable",
+        "left": "unavailable",
+        "right": "unavailable",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.125,
+        "leftConfidence": 0.67,
+        "rightConfidence": 1
+      },
+      {
+        "id": "unavailable-timeout",
+        "split": "calibration",
+        "label": "unavailable",
+        "left": "unavailable",
+        "right": "unavailable",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.027500000000000014,
+        "leftConfidence": 0.92,
+        "rightConfidence": 1
+      },
+      {
+        "id": "unavailable-quota",
+        "split": "test",
+        "label": "unavailable",
+        "left": "unavailable",
+        "right": "unavailable",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.015000000000000006,
+        "leftConfidence": 0.96,
+        "rightConfidence": 1
+      },
+      {
+        "id": "unavailable-auth",
+        "split": "calibration",
+        "label": "unavailable",
+        "left": "unavailable",
+        "right": "unavailable",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.005000000000000003,
+        "leftConfidence": 0.98,
+        "rightConfidence": 1
+      },
+      {
+        "id": "unavailable-service",
+        "split": "test",
+        "label": "unavailable",
+        "left": "unavailable",
+        "right": "unavailable",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.03499999999999999,
+        "leftConfidence": 0.91,
+        "rightConfidence": 1
+      },
+      {
+        "id": "uncertain-summary",
+        "split": "calibration",
+        "label": "uncertain",
+        "left": "clear",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.39,
+        "leftConfidence": 0.57,
+        "rightConfidence": 0.91
+      },
+      {
+        "id": "uncertain-request",
+        "split": "test",
+        "label": "uncertain",
+        "left": "clear",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.42000000000000004,
+        "leftConfidence": 0.4,
+        "rightConfidence": 1
+      },
+      {
+        "id": "uncertain-progress",
+        "split": "calibration",
+        "label": "uncertain",
+        "left": "clear",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.365,
+        "leftConfidence": 0.51,
+        "rightConfidence": 0.76
+      },
+      {
+        "id": "uncertain-thanks",
+        "split": "test",
+        "label": "uncertain",
+        "left": "uncertain",
+        "right": "uncertain",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.485,
+        "leftConfidence": 0.93,
+        "rightConfidence": 1
+      },
+      {
+        "id": "uncertain-author-response",
+        "split": "calibration",
+        "label": "uncertain",
+        "left": "feedback",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.2425,
+        "leftConfidence": 0.37,
+        "rightConfidence": 0.32
+      },
+      {
+        "id": "uncertain-question",
+        "split": "test",
+        "label": "uncertain",
+        "left": "uncertain",
+        "right": "uncertain",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.395,
+        "leftConfidence": 0.3,
+        "rightConfidence": 0.99
+      }
+    ]
+  },
+  "handoffPackets": {
+    "all": {
+      "count": 18,
+      "topChoiceAgreement": 0.5,
+      "leftAccuracy": 0.333,
+      "rightAccuracy": 0.833,
+      "meanAbsoluteProbabilityDifference": 0.256,
+      "disagreements": [
+        {
+          "id": "repair-placeholders",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-mismatch",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-hidden-failure",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-vague-change",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-contradiction",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-gap-omission",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "uncertain-no-evidence-output",
+          "label": "uncertain",
+          "left": "accept",
+          "right": "uncertain"
+        },
+        {
+          "id": "uncertain-external-provider",
+          "label": "uncertain",
+          "left": "accept",
+          "right": "uncertain"
+        },
+        {
+          "id": "uncertain-partial-repro",
+          "label": "uncertain",
+          "left": "accept",
+          "right": "uncertain"
+        }
+      ]
+    },
+    "test": {
+      "count": 9,
+      "topChoiceAgreement": 0.444,
+      "leftAccuracy": 0.333,
+      "rightAccuracy": 0.889,
+      "meanAbsoluteProbabilityDifference": 0.229,
+      "disagreements": [
+        {
+          "id": "repair-mismatch",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-hidden-failure",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "repair-gap-omission",
+          "label": "repair",
+          "left": "accept",
+          "right": "repair"
+        },
+        {
+          "id": "uncertain-external-provider",
+          "label": "uncertain",
+          "left": "accept",
+          "right": "uncertain"
+        },
+        {
+          "id": "uncertain-partial-repro",
+          "label": "uncertain",
+          "left": "accept",
+          "right": "uncertain"
+        }
+      ]
+    },
+    "rows": [
+      {
+        "id": "accept-specific-code",
+        "split": "calibration",
+        "label": "accept",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.06666666666666667,
+        "leftConfidence": 0.79,
+        "rightConfidence": 0.95
+      },
+      {
+        "id": "accept-doc-research",
+        "split": "test",
+        "label": "accept",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.043333333333333314,
+        "leftConfidence": 0.64,
+        "rightConfidence": 0.74
+      },
+      {
+        "id": "accept-config",
+        "split": "calibration",
+        "label": "accept",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.11333333333333334,
+        "leftConfidence": 0.43,
+        "rightConfidence": 0.39
+      },
+      {
+        "id": "accept-tests-only",
+        "split": "test",
+        "label": "accept",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.013333333333333338,
+        "leftConfidence": 0.83,
+        "rightConfidence": 0.83
+      },
+      {
+        "id": "accept-formal",
+        "split": "calibration",
+        "label": "accept",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.07333333333333333,
+        "leftConfidence": 0.71,
+        "rightConfidence": 0.88
+      },
+      {
+        "id": "accept-fix",
+        "split": "test",
+        "label": "accept",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": true,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.040000000000000015,
+        "leftConfidence": 0.78,
+        "rightConfidence": 0.87
+      },
+      {
+        "id": "repair-placeholders",
+        "split": "calibration",
+        "label": "repair",
+        "left": "accept",
+        "right": "repair",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.4766666666666666,
+        "leftConfidence": 0.32,
+        "rightConfidence": 0.98
+      },
+      {
+        "id": "repair-mismatch",
+        "split": "test",
+        "label": "repair",
+        "left": "accept",
+        "right": "repair",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.45333333333333337,
+        "leftConfidence": 0.82,
+        "rightConfidence": 0.47
+      },
+      {
+        "id": "repair-unsupported-verification",
+        "split": "calibration",
+        "label": "repair",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": false,
+        "rightCorrect": false,
+        "meanAbsoluteProbabilityDifference": 0.26,
+        "leftConfidence": 0.8,
+        "rightConfidence": 0.19
+      },
+      {
+        "id": "repair-hidden-failure",
+        "split": "test",
+        "label": "repair",
+        "left": "accept",
+        "right": "repair",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.41999999999999993,
+        "leftConfidence": 0.32,
+        "rightConfidence": 0.88
+      },
+      {
+        "id": "repair-vague-change",
+        "split": "calibration",
+        "label": "repair",
+        "left": "accept",
+        "right": "repair",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.6266666666666667,
+        "leftConfidence": 0.83,
+        "rightConfidence": 0.97
+      },
+      {
+        "id": "repair-no-negative-path",
+        "split": "test",
+        "label": "repair",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": false,
+        "rightCorrect": false,
+        "meanAbsoluteProbabilityDifference": 0.21000000000000005,
+        "leftConfidence": 0.86,
+        "rightConfidence": 0.41
+      },
+      {
+        "id": "repair-contradiction",
+        "split": "calibration",
+        "label": "repair",
+        "left": "accept",
+        "right": "repair",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.4466666666666666,
+        "leftConfidence": 0.94,
+        "rightConfidence": 0.33
+      },
+      {
+        "id": "repair-gap-omission",
+        "split": "test",
+        "label": "repair",
+        "left": "accept",
+        "right": "repair",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.48,
+        "leftConfidence": 0.65,
+        "rightConfidence": 0.64
+      },
+      {
+        "id": "uncertain-no-evidence-output",
+        "split": "calibration",
+        "label": "uncertain",
+        "left": "accept",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.42666666666666675,
+        "leftConfidence": 0.47,
+        "rightConfidence": 0.81
+      },
+      {
+        "id": "uncertain-external-provider",
+        "split": "test",
+        "label": "uncertain",
+        "left": "accept",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.18666666666666668,
+        "leftConfidence": 0.4,
+        "rightConfidence": 0.34
+      },
+      {
+        "id": "uncertain-diffless-analysis",
+        "split": "calibration",
+        "label": "uncertain",
+        "left": "accept",
+        "right": "accept",
+        "sameTopChoice": true,
+        "leftCorrect": false,
+        "rightCorrect": false,
+        "meanAbsoluteProbabilityDifference": 0.07000000000000002,
+        "leftConfidence": 0.68,
+        "rightConfidence": 0.62
+      },
+      {
+        "id": "uncertain-partial-repro",
+        "split": "test",
+        "label": "uncertain",
+        "left": "accept",
+        "right": "uncertain",
+        "sameTopChoice": false,
+        "leftCorrect": false,
+        "rightCorrect": true,
+        "meanAbsoluteProbabilityDifference": 0.20999999999999996,
+        "leftConfidence": 0.41,
+        "rightConfidence": 0.35
+      }
+    ]
+  }
+}
