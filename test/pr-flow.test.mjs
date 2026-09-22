@@ -638,6 +638,39 @@ describe("PR review flow classification", () => {
     assert.equal(status.semantic.appliedCount, 1)
   })
 
+  it("preserves review feedback when ambiguous review and issue text share a timestamp", async () => {
+    const head = "a".repeat(40)
+    const input = ambiguousCurrentHeadComment("Summary of the completed review.", head)
+    input.rawComments.reviews = [{
+      id: 201, user: { login: "chatgpt-codex-connector[bot]" },
+      state: "COMMENTED", commit_id: head, body: "The unlock happens too early.",
+      submitted_at: "2026-09-20T20:00:00Z",
+    }]
+    input.rawComments.issueComments[0].created_at = "2026-09-20T20:00:00Z"
+    const bodies = []
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async ({ state }) => {
+        bodies.push(state.reviewComment)
+        const feedback = state.reviewComment.includes("unlock")
+        return { ok: true, answers: {
+          signal: {
+            choice: feedback ? "feedback" : "uncertain",
+            confidence: 0.99,
+            probabilities: feedback
+              ? { clear: 0, feedback: 1, unavailable: 0, uncertain: 0 }
+              : { clear: 0, feedback: 0, unavailable: 0, uncertain: 1 },
+          },
+          hasVerdict: { noul: feedback ? 1 : 0 },
+        } }
+      },
+    })
+
+    assert.deepEqual(bodies, ["The unlock happens too early.", input.rawComments.issueComments[0].body])
+    assert.equal(status.overall, "feedback")
+    assert.equal(status.semantic.appliedCount, 1)
+  })
+
   it("does not send pending or dismissed formal reviews to the semantic provider", async () => {
     for (const state of ["PENDING", "DISMISSED"]) {
       const head = "a".repeat(40)
