@@ -14,6 +14,7 @@ function validDistribution(value, labels) {
     && Object.keys(value).length > 0
     && Object.keys(value).every((key) => labels.includes(key))
     && Object.values(value).every((entry) => Number.isFinite(entry) && entry >= 0 && entry <= 1)
+    && Math.abs(Object.values(value).reduce((sum, entry) => sum + entry, 0) - 1) <= 1e-6
 }
 
 function distributionDistance(a, b, labels) {

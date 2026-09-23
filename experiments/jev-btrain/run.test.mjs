@@ -110,6 +110,7 @@ test("comparison excludes provider failures from classification metrics", async 
           { id: "no-probabilities", split: "test", label: "uncertain", prediction: "uncertain" },
           { id: "sparse", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
           { id: "unknown-vector", split: "test", label: "clear", prediction: "clear", probabilities: { alien: 1 } },
+          { id: "bad-total", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1, feedback: 1 } },
           { id: "left-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
         handoffPackets: experiment([
@@ -130,6 +131,7 @@ test("comparison excludes provider failures from classification metrics", async 
           { id: "no-probabilities", split: "test", label: "uncertain", prediction: "uncertain", probabilities: { uncertain: 1 } },
           { id: "sparse", split: "test", label: "clear", prediction: "feedback", probabilities: { feedback: 1 } },
           { id: "unknown-vector", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
+          { id: "bad-total", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
           { id: "right-only", split: "test", label: "feedback", prediction: "feedback" },
         ]),
         handoffPackets: experiment([
@@ -145,15 +147,15 @@ test("comparison excludes provider failures from classification metrics", async 
     })
     assert.equal(run.status, 0, run.stderr)
     const result = JSON.parse(await fs.readFile(path.join(dir, "comparison-test.json"), "utf8"))
-    assert.equal(result.prSignals.test.count, 5)
+    assert.equal(result.prSignals.test.count, 6)
     assert.equal(result.prSignals.test.excludedFailureCount, 3)
     assert.equal(result.prSignals.test.mismatchCount, 2)
     assert.equal(result.prSignals.test.missingCount, 2)
-    assert.equal(result.prSignals.test.coverage, 0.417)
-    assert.equal(result.prSignals.test.leftAccuracy, 0.8)
-    assert.equal(result.prSignals.test.rightAccuracy, 0.6)
+    assert.equal(result.prSignals.test.coverage, 0.462)
+    assert.equal(result.prSignals.test.leftAccuracy, 0.833)
+    assert.equal(result.prSignals.test.rightAccuracy, 0.667)
     assert.equal(result.prSignals.test.probabilityCount, 2)
-    assert.equal(result.prSignals.test.probabilityCoverage, 0.4)
+    assert.equal(result.prSignals.test.probabilityCoverage, 0.333)
     assert.equal(result.prSignals.test.meanAbsoluteProbabilityDifference, 0.25)
     assert.equal(result.handoffPackets.configurationMismatch, true)
     assert.equal(result.handoffPackets.test.count, 0)
