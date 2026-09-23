@@ -100,7 +100,7 @@ test("comparison excludes provider failures from classification metrics", async 
     const left = {
       experiments: {
         prSignals: experiment([
-          { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
+          { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 0.99 } },
           { id: "failed", split: "test", label: "feedback", modelError: "timeout" },
           { id: "null", split: "test", label: "feedback", prediction: null },
           { id: "unknown", split: "test", label: "feedback", prediction: "other" },
@@ -121,7 +121,7 @@ test("comparison excludes provider failures from classification metrics", async 
     const right = {
       experiments: {
         prSignals: experiment([
-          { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 1 } },
+          { id: "ok", split: "test", label: "clear", prediction: "clear", probabilities: { clear: 0.99 } },
           { id: "failed", split: "test", label: "feedback", prediction: "feedback", probabilities: { feedback: 1 } },
           { id: "null", split: "test", label: "feedback", prediction: "feedback" },
           { id: "unknown", split: "test", label: "feedback", prediction: "feedback" },

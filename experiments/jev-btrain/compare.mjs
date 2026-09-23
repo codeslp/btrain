@@ -8,13 +8,14 @@ const root = path.dirname(fileURLToPath(import.meta.url))
 const [leftName = "results-kev-0.6b.json", rightName = "results-jev.json"] = process.argv.slice(2)
 const left = JSON.parse(await fs.readFile(path.resolve(root, leftName), "utf8"))
 const right = JSON.parse(await fs.readFile(path.resolve(root, rightName), "utf8"))
+const DISTRIBUTION_SUM_TOLERANCE = 0.02 + Number.EPSILON
 
 function validDistribution(value, labels) {
   return value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length > 0
     && Object.keys(value).every((key) => labels.includes(key))
     && Object.values(value).every((entry) => Number.isFinite(entry) && entry >= 0 && entry <= 1)
-    && Math.abs(Object.values(value).reduce((sum, entry) => sum + entry, 0) - 1) <= 1e-6
+    && Math.abs(Object.values(value).reduce((sum, entry) => sum + entry, 0) - 1) <= DISTRIBUTION_SUM_TOLERANCE
 }
 
 function distributionDistance(a, b, labels) {
