@@ -119,6 +119,7 @@ async function postSystemOne(state, questions) {
 function noulValue(answer) {
   const value = answer?.noul ?? answer?.probability
   if (!Number.isFinite(value)) throw new Error(`Noul response is missing a probability: ${JSON.stringify(answer)}`)
+  if (value < 0 || value > 1) throw new Error(`Noul probability must be between 0 and 1: ${JSON.stringify(answer)}`)
   return value
 }
 

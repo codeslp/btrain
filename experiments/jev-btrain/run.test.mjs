@@ -50,6 +50,48 @@ for (const stall of ["fetch", "body"]) {
   })
 }
 
+test("runner rejects out-of-range Noul probabilities", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jev-invalid-noul-"))
+  try {
+    await fs.copyFile(new URL("./run.mjs", import.meta.url), path.join(dir, "run.mjs"))
+    for (const name of ["pr-signals.json", "handoff-packets.json"]) {
+      const fixtures = JSON.parse(await fs.readFile(new URL(`./${name}`, import.meta.url), "utf8"))
+      await fs.writeFile(path.join(dir, name), JSON.stringify(fixtures.slice(0, 1)))
+    }
+    const stub = path.join(dir, "fetch-stub.mjs")
+    await fs.writeFile(stub, `globalThis.fetch = async (_url, options) => {
+      const request = JSON.parse(options.body);
+      const answers = request.state.reviewComment
+        ? {
+            signal: {choice: "clear", probabilities: {clear: 1}, confidence: 1},
+            hasVerdict: {noul: 2},
+          }
+        : {
+            quality: {choice: "accept", probabilities: {accept: 1}, confidence: 1},
+            objectiveAligned: {noul: -1},
+            verificationSupportsClaim: {noul: 1},
+            gapsAreCandid: {noul: 1},
+            askIsActionable: {noul: 1},
+          };
+      return {ok: true, json: async () => ({model: "stub", answers})};
+    };`)
+    const run = spawnSync(process.execPath, ["--import", stub, path.join(dir, "run.mjs")], {
+      env: { ...process.env, RESULT_SLUG: "invalid-noul-test" },
+      encoding: "utf8",
+    })
+    assert.equal(run.status, 0, run.stderr)
+    const result = JSON.parse(await fs.readFile(path.join(dir, "results-invalid-noul-test.json"), "utf8"))
+    for (const experiment of Object.values(result.experiments)) {
+      assert.equal(experiment.rows[0].prediction, undefined)
+      assert.match(experiment.rows[0].modelError, /between 0 and 1/i)
+      assert.equal(experiment.splits.all.model.count, 0)
+      assert.equal(experiment.splits.all.model.failureCount, 1)
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test("comparison excludes provider failures from classification metrics", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jev-comparison-"))
   try {
