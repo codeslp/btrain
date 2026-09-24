@@ -106,7 +106,7 @@ export async function audit(repos, authors) {
           throw new Error(`Missing comment identity at ${repo.name}/${file}:${index + 1}`)
         }
         rows.push({ ...record, repo: repo.name })
-        fingerprints.push(`${repo.name}/${file}:${index + 1}:${record.id}:${hash(String(record.body || ""))}`)
+        fingerprints.push(`${repo.name}/${file}:${index + 1}:${hash(line)}`)
       }
     }
     perRepo[repo.name] = { files: files.length, ...counts(rows, authors) }

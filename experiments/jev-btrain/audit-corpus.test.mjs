@@ -46,3 +46,35 @@ test("corpus audit fails on a comment without source identity", async () => {
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test("source fingerprint changes when eligibility metadata changes without changing ID or body", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-corpus-audit-"))
+  try {
+    const directory = path.join(root, ".btrain", "pr-comments")
+    await fs.mkdir(directory, { recursive: true })
+    const file = path.join(directory, "lane-a-1.jsonl")
+    const original = {
+      id: 1,
+      surface: "issue",
+      author: "reviewer[bot]",
+      body: "No findings",
+      state: "COMMENTED",
+      commit_id: "abcdef1234567",
+    }
+    async function fingerprint(record) {
+      await fs.writeFile(file, `${JSON.stringify(record)}\n`)
+      return (await audit([{ name: "sample", root }], ["reviewer[bot]"])).sourceFingerprint
+    }
+    const baseline = await fingerprint(original)
+    for (const changed of [
+      { author: "author" },
+      { surface: "inline" },
+      { state: "APPROVED" },
+      { commit_id: "9876543fedcba" },
+    ]) {
+      assert.notEqual(await fingerprint({ ...original, ...changed }), baseline)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

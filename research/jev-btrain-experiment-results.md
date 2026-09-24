@@ -168,8 +168,10 @@ controls for requests, progress updates, quota failures, author replies, and soc
 The first attempt to build that corpus **did not pass the data-readiness gate**. The reproducible
 [`corpus-audit-2026-09-24.json`](../experiments/jev-btrain/corpus-audit-2026-09-24.json)
 summarizes 58 local btrain and 62 local ai_sales PR-comment JSONL files. These are local captured
-logs, not a complete GitHub-history export. The audit retained counts and a source fingerprint,
-but did not copy ai_sales comment text into this repository or call a model.
+logs, not a complete GitHub-history export. The audit retained counts and a fingerprint of the raw
+source records, but did not copy ai_sales comment text into this repository or call a model.
+Peer review caught an earlier digest that omitted eligibility metadata; the corrected digest hashes
+each raw JSONL record, and a regression test changes author, surface, review state, and commit ID.
 
 | Audit stage | Count |
 | --- | ---: |

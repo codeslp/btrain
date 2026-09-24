@@ -18,10 +18,10 @@ node experiments/jev-btrain/audit-corpus.mjs \
   --repo ai_sales=/path/to/ai_sales
 ```
 
-The audit emits aggregate counts and a source fingerprint, never comment bodies. It counts
-reviewer-bot issue/review text as an upper bound before current-head, latest-signal, and
-deterministic filters. Commit IDs and standard footers are normalized only for a diversity
-diagnostic; core-message families are not gold labels. The 2026-09-24 run is saved in
+The audit emits aggregate counts and a fingerprint of every raw JSONL source record, never comment
+bodies. It counts reviewer-bot issue/review text as an upper bound before current-head,
+latest-signal, and deterministic filters. Commit IDs and standard footers are normalized only for
+a diversity diagnostic; core-message families are not gold labels. The 2026-09-24 run is saved in
 `corpus-audit-2026-09-24.json` and explained in the research results report. It found too little
 diverse, independently labeled evidence to run the proposed 200-case comparison yet.
 
