@@ -8,6 +8,23 @@ The frozen datasets cover:
 - PR review signals: clear, actionable feedback, reviewer unavailable, and no verdict.
 - Handoff packet quality: accept, repair, and uncertain.
 
+Audit whether captured PR-comment history can support a larger corpus before adding cases:
+
+```sh
+node experiments/jev-btrain/audit-corpus.mjs \
+  --author 'chatgpt-codex-connector[bot]' \
+  --author 'unblocked[bot]' \
+  --repo btrain=/path/to/btrain \
+  --repo ai_sales=/path/to/ai_sales
+```
+
+The audit emits aggregate counts and a source fingerprint, never comment bodies. It counts
+reviewer-bot issue/review text as an upper bound before current-head, latest-signal, and
+deterministic filters. Commit IDs and standard footers are normalized only for a diversity
+diagnostic; core-message families are not gold labels. The 2026-09-24 run is saved in
+`corpus-audit-2026-09-24.json` and explained in the research results report. It found too little
+diverse, independently labeled evidence to run the proposed 200-case comparison yet.
+
 Run the deterministic baseline:
 
 ```sh

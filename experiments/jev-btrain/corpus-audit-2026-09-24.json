@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "scope": "Reviewer-bot issue and review text only; upper bound before head, state, and deterministic filters",
+  "authors": [
+    "chatgpt-codex-connector[bot]",
+    "unblocked[bot]"
+  ],
+  "sourceFingerprint": "522f873fbe280a42dda27790462e9daa1b0800991365e7315356eeab73f1d432",
+  "overall": {
+    "rows": 2523,
+    "uniqueCommentIds": 2475,
+    "reviewerBotRows": 1432,
+    "byAuthor": {
+      "chatgpt-codex-connector[bot]": 1311,
+      "unblocked[bot]": 121
+    },
+    "bySurface": {
+      "review": 481,
+      "inline": 713,
+      "issue": 238
+    },
+    "textSurfaceRows": 658,
+    "uniqueTextCommentIds": 649,
+    "uniqueExactBodies": 524,
+    "coreMessageFamilies": 40,
+    "largestFamilyRows": [
+      400,
+      92,
+      45,
+      12,
+      7
+    ],
+    "structuredReviewStateRows": 420,
+    "structuredCommitRows": 0
+  },
+  "repos": {
+    "btrain": {
+      "files": 58,
+      "rows": 1373,
+      "uniqueCommentIds": 1325,
+      "reviewerBotRows": 795,
+      "byAuthor": {
+        "chatgpt-codex-connector[bot]": 795
+      },
+      "bySurface": {
+        "review": 234,
+        "inline": 425,
+        "issue": 136
+      },
+      "textSurfaceRows": 370,
+      "uniqueTextCommentIds": 361,
+      "uniqueExactBodies": 281,
+      "coreMessageFamilies": 21,
+      "largestFamilyRows": [
+        232,
+        62,
+        38,
+        11,
+        5
+      ],
+      "structuredReviewStateRows": 234,
+      "structuredCommitRows": 0
+    },
+    "ai_sales": {
+      "files": 62,
+      "rows": 1150,
+      "uniqueCommentIds": 1150,
+      "reviewerBotRows": 637,
+      "byAuthor": {
+        "unblocked[bot]": 121,
+        "chatgpt-codex-connector[bot]": 516
+      },
+      "bySurface": {
+        "review": 247,
+        "issue": 102,
+        "inline": 288
+      },
+      "textSurfaceRows": 288,
+      "uniqueTextCommentIds": 288,
+      "uniqueExactBodies": 245,
+      "coreMessageFamilies": 36,
+      "largestFamilyRows": [
+        168,
+        30,
+        7,
+        7,
+        6
+      ],
+      "structuredReviewStateRows": 186,
+      "structuredCommitRows": 0
+    }
+  }
+}

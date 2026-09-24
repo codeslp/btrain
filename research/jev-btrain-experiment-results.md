@@ -159,9 +159,51 @@ risk.
 
 ## Recommended next gate
 
-Build a 200-case PR corpus from btrain and ai_sales comment logs. Freeze it before the next Jev
-run. Include at least 30 examples in each class and explicit negative controls for requests,
-progress updates, quota failures, author replies, and social comments.
+The original next gate was a 200-case PR corpus from btrain and ai_sales comment logs, frozen
+before another Jev run. It called for at least 30 examples in each class and explicit negative
+controls for requests, progress updates, quota failures, author replies, and social comments.
+
+### 2026-09-24 corpus feasibility audit
+
+The first attempt to build that corpus **did not pass the data-readiness gate**. The reproducible
+[`corpus-audit-2026-09-24.json`](../experiments/jev-btrain/corpus-audit-2026-09-24.json)
+summarizes 58 local btrain and 62 local ai_sales PR-comment JSONL files. These are local captured
+logs, not a complete GitHub-history export. The audit retained counts and a source fingerprint,
+but did not copy ai_sales comment text into this repository or call a model.
+
+| Audit stage | Count |
+| --- | ---: |
+| All captured rows | 2,523 |
+| Reviewer-bot rows on any surface | 1,432 |
+| Reviewer-bot issue/review rows with text, before head and deterministic filters | 658 |
+| Distinct source-comment IDs within that text pool | 649 |
+| Distinct exact bodies within that text pool | 524 |
+| Core message families after commit-ID and standard-footer normalization | 40 |
+
+The family count is a diversity diagnostic, not a count of independently labeled cases. The four
+largest families account for 549 of the 658 text rows: 400 repeated automated-suggestion wrappers,
+92 quota notices, 45 structured review-status cards, and 12 unknown-error notices. A status card
+can encode different states, so its single family is not an accuracy label. Inline findings are
+excluded from the text pool because btrain already treats them as deterministic feedback. Author
+replies and review requests are excluded by reviewer identity. The remaining pool is still an
+*upper bound*: `semanticCandidatesForBot` further requires the current head, latest signal,
+eligible review state, and text unresolved by deterministic rules.
+
+The stored issue/review rows contain no structured reviewed-commit field. Some bodies mention a
+commit, and review rows often include a formal state, but the JSONL files lack the historical PR
+head snapshots needed to prove current-head eligibility at each event. The original pilot also
+mixed controlled paraphrases with a few real comments and had one labeler. Reusing its cases or
+expanding repeated bot templates would make a 200-row score look better supported than it is.
+
+**Decision:** defer the 200-case model comparison and two-week live shadow. No new accuracy,
+recall, false-clear, latency, or provider-failure claim is made from this audit. Before the next
+run, collect or reconstruct PR-event snapshots with bot identity, comment URL and ID, surface,
+review state, reviewed commit, contemporaneous PR head, and eventual disposition. Label distinct
+cases independently; retain at least 30 defensible examples per class and keep repeated templates
+in one split. Add controlled negative cases as a separately reported stratum rather than using
+them to fill a real-history quota. Report class support and disagreement before applying the
+existing thresholds below. Keep raw comment text in its source repository and resolve a data-policy
+decision before any new hosted-provider run.
 
 Proceed to a two-week live shadow only if the frozen test meets all of these conditions:
 
