@@ -1,11 +1,12 @@
 {
   "schemaVersion": 1,
   "scope": "Reviewer-bot issue and review text only; upper bound before head, state, and deterministic filters",
+  "before": "2026-09-24T22:00:00Z",
   "authors": [
     "chatgpt-codex-connector[bot]",
     "unblocked[bot]"
   ],
-  "sourceFingerprint": "a3ed8c2f3200420c9cefd64d33f0f07808eabaddc5d33fd3d5ca7a2a0e239f0f",
+  "sourceFingerprint": "657f9c4f4040374dcd3a7d9484446eccc69d0ef6820f0255fcfbd80cb15673a7",
   "overall": {
     "rows": 2523,
     "uniqueCommentIds": 2475,
@@ -22,12 +23,12 @@
     "textSurfaceRows": 658,
     "uniqueTextCommentIds": 649,
     "uniqueExactBodies": 524,
-    "coreMessageFamilies": 40,
+    "coreMessageFamilies": 84,
     "largestFamilyRows": [
       400,
       92,
-      45,
       12,
+      7,
       7
     ],
     "structuredReviewStateRows": 420,
@@ -50,13 +51,13 @@
       "textSurfaceRows": 370,
       "uniqueTextCommentIds": 361,
       "uniqueExactBodies": 281,
-      "coreMessageFamilies": 21,
+      "coreMessageFamilies": 58,
       "largestFamilyRows": [
         232,
         62,
-        38,
         11,
-        5
+        5,
+        3
       ],
       "structuredReviewStateRows": 234,
       "structuredCommitRows": 0
@@ -78,12 +79,12 @@
       "textSurfaceRows": 288,
       "uniqueTextCommentIds": 288,
       "uniqueExactBodies": 245,
-      "coreMessageFamilies": 36,
+      "coreMessageFamilies": 42,
       "largestFamilyRows": [
         168,
         30,
         7,
-        7,
+        6,
         6
       ],
       "structuredReviewStateRows": 186,

@@ -13,13 +13,13 @@ test("corpus audit excludes inline findings and author replies, deduplicates rep
     await fs.mkdir(directory, { recursive: true })
     const message = (id, surface, author, body) => JSON.stringify({ id, surface, author, body })
     await fs.writeFile(path.join(directory, "lane-a-1.jsonl"), [
-      message(1, "issue", "reviewer[bot]", "No findings. Reviewed commit: abcdef1234567 <details>footer</details>"),
+      message(1, "issue", "reviewer[bot]", "No findings. Reviewed commit: abcdef1234567 <details><summary>ℹ️ About Codex in GitHub</summary>footer</details>"),
       message(2, "inline", "reviewer[bot]", "Fix this bug"),
       message(3, "issue", "author", "@reviewer review"),
     ].join("\n"))
     await fs.writeFile(path.join(directory, "lane-b-1.jsonl"), [
-      message(1, "issue", "reviewer[bot]", "No findings. Reviewed commit: abcdef1234567 <details>footer</details>"),
-      message(4, "issue", "reviewer[bot]", "No findings. Reviewed commit: 9876543fedcba <details>other footer</details>"),
+      message(1, "issue", "reviewer[bot]", "No findings. Reviewed commit: abcdef1234567 <details><summary>ℹ️ About Codex in GitHub</summary>footer</details>"),
+      message(4, "issue", "reviewer[bot]", "No findings. Reviewed commit: 9876543fedcba <details><summary>ℹ️ About Codex in GitHub</summary>other footer</details>"),
     ].join("\n"))
 
     const result = await audit([{ name: "sample", root }], ["reviewer[bot]"])
@@ -30,6 +30,42 @@ test("corpus audit excludes inline findings and author replies, deduplicates rep
     assert.equal(result.overall.uniqueTextCommentIds, 2)
     assert.equal(result.overall.coreMessageFamilies, 1)
     assert.equal(result.overall.bySurface.inline, 1)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("corpus audit preserves distinct review findings inside details blocks", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-corpus-audit-"))
+  try {
+    const directory = path.join(root, ".btrain", "pr-comments")
+    await fs.mkdir(directory, { recursive: true })
+    const body = (finding) => `Review summary <details><summary>Finding</summary>${finding}</details>`
+    await fs.writeFile(path.join(directory, "lane-a-1.jsonl"), [
+      JSON.stringify({ id: 1, surface: "review", author: "reviewer[bot]", body: body("Fix lock ownership") }),
+      JSON.stringify({ id: 2, surface: "review", author: "reviewer[bot]", body: body("Add a timeout guard") }),
+    ].join("\n"))
+
+    const result = await audit([{ name: "sample", root }], ["reviewer[bot]"])
+    assert.equal(result.overall.coreMessageFamilies, 2)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("corpus audit preserves different verdicts in structured review status cards", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-corpus-audit-"))
+  try {
+    const directory = path.join(root, ".btrain", "pr-comments")
+    await fs.mkdir(directory, { recursive: true })
+    const card = (status) => `<!-- codex-pull-request-review-summary --> Review status: ${status}`
+    await fs.writeFile(path.join(directory, "lane-a-1.jsonl"), [
+      JSON.stringify({ id: 1, surface: "issue", author: "reviewer[bot]", body: card("clear") }),
+      JSON.stringify({ id: 2, surface: "issue", author: "reviewer[bot]", body: card("feedback") }),
+    ].join("\n"))
+
+    const result = await audit([{ name: "sample", root }], ["reviewer[bot]"])
+    assert.equal(result.overall.coreMessageFamilies, 2)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -74,6 +110,28 @@ test("source fingerprint changes when eligibility metadata changes without chang
     ]) {
       assert.notEqual(await fingerprint({ ...original, ...changed }), baseline)
     }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("audit cutoff ignores later comments and files so a frozen snapshot remains stable", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-corpus-audit-"))
+  try {
+    const directory = path.join(root, ".btrain", "pr-comments")
+    await fs.mkdir(directory, { recursive: true })
+    const older = { id: 1, surface: "issue", author: "reviewer[bot]", body: "No findings", at: "2026-09-23T12:00:00Z" }
+    const newer = { id: 2, surface: "issue", author: "reviewer[bot]", body: "New finding", at: "2026-09-24T22:05:00Z" }
+    const options = { before: "2026-09-24T22:00:00Z" }
+    const repo = [{ name: "sample", root }]
+    await fs.writeFile(path.join(directory, "lane-a-1.jsonl"), `${JSON.stringify(older)}\n`)
+    const frozen = await audit(repo, ["reviewer[bot]"], options)
+    await fs.appendFile(path.join(directory, "lane-a-1.jsonl"), `${JSON.stringify(newer)}\n`)
+    await fs.writeFile(path.join(directory, "lane-b-2.jsonl"), `${JSON.stringify(newer)}\n`)
+    const rerun = await audit(repo, ["reviewer[bot]"], options)
+
+    assert.deepEqual(rerun, frozen)
+    assert.equal(rerun.repos.sample.files, 1)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

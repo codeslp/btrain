@@ -10,11 +10,9 @@ function hash(value) {
 }
 
 function coreText(body) {
-  if (body.includes("<!-- codex-pull-request-review-summary -->")) {
-    return "<structured Codex review status card>"
-  }
+  const standardFooter = /<details>\s*<summary>\s*ℹ️ About Codex in GitHub\s*<\/summary>[\s\S]*?<\/details>/gi
   return body
-    .split("<details>")[0]
+    .replace(standardFooter, "")
     .replace(/\b[a-f0-9]{7,40}\b/gi, "<commit>")
     .replace(/https?:\/\/[^\s)]+/g, "<url>")
     .replace(/\s+/g, " ")
@@ -24,6 +22,7 @@ function coreText(body) {
 function parseArgs(argv) {
   const repos = []
   const authors = []
+  let before = null
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--repo" && argv[i + 1]) {
       const separator = argv[++i].indexOf("=")
@@ -31,6 +30,8 @@ function parseArgs(argv) {
       repos.push({ name: argv[i].slice(0, separator), root: argv[i].slice(separator + 1) })
     } else if (argv[i] === "--author" && argv[i + 1]) {
       authors.push(argv[++i].toLowerCase())
+    } else if (argv[i] === "--before" && argv[i + 1]) {
+      before = argv[++i]
     } else {
       throw new Error(`Unexpected argument: ${argv[i]}`)
     }
@@ -41,7 +42,7 @@ function parseArgs(argv) {
   if (new Set(repos.map((repo) => repo.name)).size !== repos.length) {
     throw new Error("Repository names must be unique")
   }
-  return { repos, authors }
+  return { repos, authors, before }
 }
 
 function counts(rows, authors) {
@@ -90,7 +91,9 @@ function counts(rows, authors) {
   }
 }
 
-export async function audit(repos, authors) {
+export async function audit(repos, authors, { before = null } = {}) {
+  const beforeMs = before === null ? null : Date.parse(before)
+  if (before !== null && !Number.isFinite(beforeMs)) throw new Error("--before requires an ISO timestamp")
   const all = []
   const perRepo = {}
   const fingerprints = []
@@ -98,25 +101,34 @@ export async function audit(repos, authors) {
     const directory = path.join(repo.root, ".btrain", "pr-comments")
     const files = (await fs.readdir(directory)).filter((file) => file.endsWith(".jsonl")).sort()
     const rows = []
+    let includedFiles = 0
     for (const file of files) {
+      const previousCount = rows.length
       const lines = (await fs.readFile(path.join(directory, file), "utf8")).split("\n").filter(Boolean)
       for (const [index, line] of lines.entries()) {
         const record = JSON.parse(line)
+        if (beforeMs !== null) {
+          const atMs = Date.parse(record.at)
+          if (!Number.isFinite(atMs)) throw new Error(`Invalid comment timestamp at ${repo.name}/${file}:${index + 1}`)
+          if (atMs >= beforeMs) continue
+        }
         if (!record.id || !record.surface || !record.author) {
           throw new Error(`Missing comment identity at ${repo.name}/${file}:${index + 1}`)
         }
         rows.push({ ...record, repo: repo.name })
         fingerprints.push(`${repo.name}/${file}:${index + 1}:${hash(line)}`)
       }
+      if (rows.length > previousCount) includedFiles += 1
     }
-    perRepo[repo.name] = { files: files.length, ...counts(rows, authors) }
+    perRepo[repo.name] = { files: includedFiles, ...counts(rows, authors) }
     all.push(...rows)
   }
   return {
     schemaVersion: 1,
     scope: "Reviewer-bot issue and review text only; upper bound before head, state, and deterministic filters",
+    before,
     authors,
-    sourceFingerprint: hash(fingerprints.join("\n")),
+    sourceFingerprint: hash(`${before || ""}\n${fingerprints.join("\n")}`),
     overall: counts(all, authors),
     repos: perRepo,
   }
@@ -124,8 +136,8 @@ export async function audit(repos, authors) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const { repos, authors } = parseArgs(process.argv.slice(2))
-    process.stdout.write(`${JSON.stringify(await audit(repos, authors), null, 2)}\n`)
+    const { repos, authors, before } = parseArgs(process.argv.slice(2))
+    process.stdout.write(`${JSON.stringify(await audit(repos, authors, { before }), null, 2)}\n`)
   } catch (error) {
     process.stderr.write(`${error.message}\n`)
     process.exitCode = 1

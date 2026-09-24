@@ -168,8 +168,9 @@ controls for requests, progress updates, quota failures, author replies, and soc
 The first attempt to build that corpus **did not pass the data-readiness gate**. The reproducible
 [`corpus-audit-2026-09-24.json`](../experiments/jev-btrain/corpus-audit-2026-09-24.json)
 summarizes 58 local btrain and 62 local ai_sales PR-comment JSONL files. These are local captured
-logs, not a complete GitHub-history export. The audit retained counts and a fingerprint of the raw
-source records, but did not copy ai_sales comment text into this repository or call a model.
+logs before the 2026-09-24 22:00 UTC cutoff, not a complete GitHub-history export. The audit retained
+counts and a fingerprint of the raw source records, but did not copy ai_sales comment text into this
+repository or call a model.
 Peer review caught an earlier digest that omitted eligibility metadata; the corrected digest hashes
 each raw JSONL record, and a regression test changes author, surface, review state, and commit ID.
 
@@ -180,16 +181,18 @@ each raw JSONL record, and a regression test changes author, surface, review sta
 | Reviewer-bot issue/review rows with text, before head and deterministic filters | 658 |
 | Distinct source-comment IDs within that text pool | 649 |
 | Distinct exact bodies within that text pool | 524 |
-| Core message families after commit-ID and standard-footer normalization | 40 |
+| Core message families after commit-ID and recognized help-footer normalization | 84 |
 
-The family count is a diversity diagnostic, not a count of independently labeled cases. The four
-largest families account for 549 of the 658 text rows: 400 repeated automated-suggestion wrappers,
-92 quota notices, 45 structured review-status cards, and 12 unknown-error notices. A status card
-can encode different states, so its single family is not an accuracy label. Inline findings are
+The family count is a diversity diagnostic, not a count of independently labeled cases. The three
+largest families account for 504 of the 658 text rows: 400 repeated automated-suggestion wrappers,
+92 quota notices, and 12 unknown-error notices. Structured review-status card content is retained;
+its different states still need labels and contemporaneous head evidence. Inline findings are
 excluded from the text pool because btrain already treats them as deterministic feedback. Author
 replies and review requests are excluded by reviewer identity. The remaining pool is still an
 *upper bound*: `semanticCandidatesForBot` further requires the current head, latest signal,
 eligible review state, and text unresolved by deterministic rules.
+The normalizer retains substantive `<details>` and status-card content and strips only the
+recognized Codex help footer. Regression tests protect those distinctions.
 
 The stored issue/review rows contain no structured reviewed-commit field. Some bodies mention a
 commit, and review rows often include a formal state, but the JSONL files lack the historical PR

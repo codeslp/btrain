@@ -12,6 +12,7 @@ Audit whether captured PR-comment history can support a larger corpus before add
 
 ```sh
 node experiments/jev-btrain/audit-corpus.mjs \
+  --before 2026-09-24T22:00:00Z \
   --author 'chatgpt-codex-connector[bot]' \
   --author 'unblocked[bot]' \
   --repo btrain=/path/to/btrain \
@@ -20,10 +21,13 @@ node experiments/jev-btrain/audit-corpus.mjs \
 
 The audit emits aggregate counts and a fingerprint of every raw JSONL source record, never comment
 bodies. It counts reviewer-bot issue/review text as an upper bound before current-head,
-latest-signal, and deterministic filters. Commit IDs and standard footers are normalized only for
-a diversity diagnostic; core-message families are not gold labels. The 2026-09-24 run is saved in
-`corpus-audit-2026-09-24.json` and explained in the research results report. It found too little
-diverse, independently labeled evidence to run the proposed 200-case comparison yet.
+latest-signal, and deterministic filters. The cutoff freezes the source population as the logs
+grow. Commit IDs and the recognized Codex help footer are normalized only for a diversity
+diagnostic; substantive details blocks and status-card content are preserved. Core-message
+families are not gold labels.
+The 2026-09-24 run is saved in `corpus-audit-2026-09-24.json` and explained in the research results
+report. It found too little diverse, independently labeled evidence to run the proposed 200-case
+comparison yet.
 
 Run the deterministic baseline:
 
