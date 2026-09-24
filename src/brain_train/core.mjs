@@ -3577,7 +3577,7 @@ async function validateNeedsReviewTransition(repoRoot, { laneId = "", base, cont
   if (issues.length > 0) {
     const laneFlag = laneId ? ` --lane ${laneId}` : ""
     const baseFix = hasDiffIssue
-      ? `\n         If the diff check is wrong, bypass it with: btrain handoff update${laneFlag} --status needs-review --no-diff --actor "<agent>"`
+      ? `\n         If the work was committed before the lane was claimed, identify its real base with: btrain handoff update${laneFlag} --status needs-review --base "<pre-work-ref>" --actor "<agent>"\n         Only bypass the evidence check deliberately with: btrain handoff update${laneFlag} --status needs-review --no-diff --actor "<agent>"`
       : ""
     const simplificationFix = hasSimplificationIssue
       ? `\n         Multi-file changes require a simplification pass. Run the \`code-simplifier\` skill, then add "- [X] code-simplifier passed" to your verification lines.`

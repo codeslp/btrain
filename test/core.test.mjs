@@ -6229,6 +6229,81 @@ describe("needs-review with human-readable Base field", () => {
   })
 })
 
+describe("needs-review for work committed before lane claim", () => {
+  it("directs the owner to supply the real pre-work base", async () => {
+    const tmpDir = await makeTmpDir()
+
+    try {
+      await runGit(["init", tmpDir], tmpDir)
+      await configureGitIdentity(tmpDir)
+      await runBtrain(["init", tmpDir], tmpDir)
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, "src", "feature.ts"), "export const before = true\n", "utf8")
+      await runGit(["add", "."], tmpDir)
+      await runGit(["commit", "-m", "initial"], tmpDir)
+      const { stdout: preWorkBase } = await runGit(["rev-parse", "HEAD"], tmpDir)
+
+      await fs.writeFile(path.join(tmpDir, "src", "feature.ts"), "export const after = true\n", "utf8")
+      await runGit(["add", "src/feature.ts"], tmpDir)
+      await runGit(["commit", "-m", "finish feature before claim"], tmpDir)
+
+      let result = await runBtrain(
+        [
+          "handoff", "claim",
+          "--repo", tmpDir,
+          "--lane", "a",
+          "--task", "Review pre-claim work",
+          "--owner", "WriterBot",
+          "--reviewer", "ReviewerBot",
+          "--files", "src/feature.ts",
+          "--base", "HEAD",
+        ],
+        tmpDir,
+      )
+      assert.equal(result.code, 0, result.stderr)
+
+      const reviewContext = {
+        actor: "WriterBot",
+        changed: ["src/feature.ts - feature completed before the lane was claimed"],
+        verification: ["node --test test/core.test.mjs"],
+        gap: ["None"],
+        why: ["The committed feature is ready for review."],
+        reviewAsk: ["Verify the pre-claim commit against its real base."],
+      }
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            ...reviewContext,
+            base: "",
+          }),
+          "--lane", "a",
+        ],
+        tmpDir,
+      )
+
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /reviewable diff in locked files/)
+      assert.match(result.stderr, /--base "<pre-work-ref>"/)
+
+      result = await runBtrain(
+        [
+          ...buildNeedsReviewArgs(tmpDir, {
+            ...reviewContext,
+            base: preWorkBase.trim(),
+          }),
+          "--lane", "a",
+        ],
+        tmpDir,
+      )
+
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /status: needs-review/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+})
+
 describe("needs-review changed-path counting", () => {
   it("requires code-simplifier for the union of committed and uncommitted locked paths", async () => {
     const tmpDir = await makeTmpDir()
