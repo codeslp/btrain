@@ -845,6 +845,22 @@ class BuiltinTemplateTests(AppHarness):
         self.assertIsNone(restarted.get_template("code-review-custom-2"))
         self.assertEqual(restarted.get_template("code-review-custom")["name"], "Already custom")
 
+    def test_the_rename_steps_past_every_taken_suffix(self):
+        # Review P3 (mutant): `while new_id in taken` as `if` survived, because
+        # the only test left one suffix free. With -custom and -custom-2 both
+        # taken, a single step lands on a taken id and overwrites that template.
+        root = Path(self.tmp.name)
+        body = {"roles": ["builder"], "phases": [{"name": "Only", "participants": ["builder"], "prompt": "Go.", "is_output": True}]}
+        saved = [dict(body, id=tid, name=name) for tid, name in (
+            ("code-review", "Mine"), ("code-review-custom", "First"), ("code-review-custom-2", "Second"))]
+        (root / "custom_templates.json").write_text(json.dumps(saved), "utf-8")
+
+        reloaded = SessionStore(str(root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+
+        names = {tid: reloaded.get_template(tid)["name"] for tid in ("code-review-custom", "code-review-custom-2", "code-review-custom-3")}
+        self.assertEqual(names, {"code-review-custom": "First", "code-review-custom-2": "Second", "code-review-custom-3": "Mine"})
+        self.assert_builtin_rule_holds(reloaded)
+
     def test_malformed_custom_entries_do_not_stop_the_store_loading(self):
         # A non-dict entry or a non-string id raised at load, which kept the
         # whole server from starting.
