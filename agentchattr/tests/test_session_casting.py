@@ -183,6 +183,56 @@ class RolePromptTests(SessionHarness):
         self.assertEqual(instruction_of(prompts["gamma"]), self.review["role_prompts"]["red_team"])
 
 
+class ResumeTests(unittest.TestCase):
+    """A restart resumes saved runs, so it must hold them to today's rules."""
+
+    CONFLICT = {"builder": "alpha", "reviewer": "beta", "red_team": "alpha", "synthesiser": "beta"}
+    DISTINCT = {"builder": "alpha", "reviewer": "beta", "red_team": "beta", "synthesiser": "alpha"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        review = [p["name"] for p in load_template("code-review")["phases"]].index("Review")
+        self.review_turn = {"current_phase": review, "current_turn": 1}  # red_team's turn
+
+    def saved_run(self, run_id, cast, state, channel):
+        return {
+            "id": run_id, "template_id": "code-review", "template_name": "Code Review", "channel": channel,
+            "cast": cast, "state": state, **self.review_turn, "started_by": "user", "started_at": 0.0,
+            "updated_at": 0.0, "last_message_id": None, "output_message_id": None, "goal": "",
+        }
+
+    def restart(self, runs):
+        (self.root / "session_runs.json").write_text(json.dumps(runs), "utf-8")
+        sessions = SessionStore(str(self.root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+        trigger = RecordingTrigger()
+        engine = SessionEngine(sessions, MessageStore(str(self.root / "messages.jsonl")), trigger,
+                               FakeRegistry(["alpha", "beta"]))
+        engine.resume_active_sessions()
+        return sessions, trigger
+
+    def test_a_saved_run_that_breaks_the_rule_is_ended_not_resumed(self):
+        # Review P3: the builder was sent the red-team prompt on restart.
+        sessions, trigger = self.restart([
+            self.saved_run(1, self.CONFLICT, "active", "one"),
+            self.saved_run(2, self.CONFLICT, "waiting", "two"),
+        ])
+
+        self.assertEqual(trigger.calls, [])
+        for run_id in (1, 2):
+            run = sessions.get(run_id)
+            self.assertEqual(run["state"], "interrupted")
+            self.assertIn("'builder' and 'red_team' must be different agents", run["interrupt_reason"])
+
+    def test_a_valid_saved_run_still_resumes(self):
+        sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one")])
+
+        self.assertEqual([call["agent"] for call in trigger.calls], ["beta"])
+        self.assertTrue(instruction_of(trigger.calls[0]["prompt"]).startswith("Try to break it"))
+        self.assertEqual(sessions.get(1)["state"], "waiting")
+
+
 class TemplateValidationTests(unittest.TestCase):
     def test_bundled_templates_are_valid(self):
         # Bundled templates are not validated at load, so this is their only check.

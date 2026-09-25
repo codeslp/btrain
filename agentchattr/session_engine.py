@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+from session_store import validate_cast
+
 log = logging.getLogger(__name__)
 
 # Dissent mandate injected for review/critique roles
@@ -109,11 +111,24 @@ class SessionEngine:
     def resume_active_sessions(self):
         """On server restart, resume any sessions that were in progress.
 
+        A session whose cast breaks its template's rules (saved before the
+        builder/red_team check existed, say) is ended with the reason rather
+        than resumed, whatever its state: a waiting one would reach the
+        broken turn as soon as its agent answers.
+
         Only re-trigger 'active' sessions. 'waiting' sessions already had
         their trigger sent before the restart — re-triggering would
         double-queue the same participant.
         """
         for session in self._store.list_all():
+            if session.get("state") not in ("active", "waiting", "paused"):
+                continue
+            tmpl = self._store.get_template(session.get("template_id", ""))
+            cast_errors = validate_cast(tmpl, session.get("cast", {})) if tmpl else []
+            if cast_errors:
+                log.warning("Session %d not resumed: %s", session["id"], " ".join(cast_errors))
+                self._store.interrupt(session["id"], " ".join(cast_errors))
+                continue
             if session.get("state") == "active":
                 log.info("Resuming session %d (%s) from phase %d, turn %d",
                          session["id"], session.get("template_name", "?"),
