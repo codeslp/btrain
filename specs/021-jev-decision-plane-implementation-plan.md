@@ -62,9 +62,10 @@ observational; the event log remains canonical.
 | `SourceSnapshot` | repository, PR/lane, event URL/ID/surface, author, event and capture times, reviewed commit, observed head or `unknown`, formal state, deterministic disposition, source hash | Never claim a retrospectively fetched head was observed at event time; disposition is preserved even if no model call follows |
 | `SourceOutcome` | source snapshot reference, eventual outcome or `pending`, outcome observation time and evidence reference when known | Append a later outcome without rewriting the event-time snapshot; every captured source has a linked outcome state |
 | `LabeledCase` | source reference, family, label, two annotators, adjudication, template/PR group, split, frozen manifest | Each group occurs in exactly one of train, calibration, or test |
-| `DecisionFamily` | ID, question version, input schema, privacy class, allowed actions, timeout/call budget, fallback, thresholds | Version or threshold change creates a new comparable run |
-| `DecisionAttempt` | family/source/input hashes, provider and model when called, question version, baseline, gateway outcome (`skipped`, `decision`, `abstain`, or `failure`), applicable skip/abstention/failure reason, valid answers, probabilities, failure class, latency, applied action, later human outcome | Every candidate records its gateway outcome; failure has no prediction; trace omits raw private input and credentials |
-| `PromotionRecord` | family ID, repository, pinned model ID, question version, benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to the recorded family, model pin, question version, and repository |
+| `DecisionFamily` | ID, question version, immutable policy hash covering input builder, schema, action policy, fallback, and thresholds; privacy class, allowed actions, timeout/call budget | A policy or threshold change creates a new comparable run |
+| `DecisionAttempt` | family/source/input hashes, provider and model when called, question version, family-policy hash, code revision, baseline, gateway outcome (`skipped`, `decision`, `abstain`, or `failure`), applicable skip/abstention/failure reason, valid answers, probabilities, failure class, latency, applied action, later human outcome | Every candidate records its gateway outcome; failure has no prediction; trace omits raw private input and credentials |
+| `EvaluationRun` | family ID, family-policy hash, code revision, question version, pinned model ID, frozen dataset/split hash, thresholds, baseline, metrics | Promotion uses only the policy and implementation evaluated on the untouched test split |
+| `PromotionRecord` | family ID, repository, pinned model ID, question version, family-policy hash, evaluated code revision, evaluation-run ID, benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to the recorded family, policy, code revision, model pin, question version, and repository |
 
 Source content may be read at its source for an authorized run. The shared trace stores only
 source references, hashes, bounded metadata, and decision output. Access and retention follow
@@ -86,8 +87,10 @@ boundedState, questions, baseline}` and returns one of:
 An invalid answer shape is always `failure/invalid-answer`, never `abstain`; it increments the
 response-shape failure count and reduces valid-prediction coverage. A valid `uncertain` class or
 low-confidence choice can yield `abstain` from action, and stays in the valid-answer denominator.
-Report skipped candidates outside the attempted-call denominator, and count failures separately
-from valid-answer abstentions within that denominator.
+Report skipped candidates outside the attempted-call denominator. Valid-prediction coverage
+counts `decision` and `abstain` over attempted calls; actionable decision coverage counts only
+`decision` over deterministically eligible cases. Count failures separately from valid-answer
+abstentions within the attempted-call denominator.
 The gateway applies limits before calling a provider, validates the full answer shape, and records
 all outcomes. Each family owns a deterministic input builder and action policy. This is a proposed
 internal contract; exact CLI syntax and file layout are chosen in each workstream PR. Versioned
@@ -136,9 +139,14 @@ seeing the test split.
 The minimum counts are planning targets, not permission to pad a corpus with repeated templates.
 If a gate cannot assemble independent cases, its family remains off or in offline research. G4
 and G6 permit a small opt-in advisory pilot before the threshold only to gather labels and
-reviewer-time evidence;
-they do not authorize a blocking action. Any assist action also needs FR-10 privacy, safety,
-failure, shadow, human approval, and rollback gates.
+reviewer-time evidence; they do not authorize a blocking action. Any assist action also needs
+FR-10 privacy, safety, failure, shadow, human approval, and rollback gates.
+
+For G4–G10, a frozen offline gate also requires provider plus response-shape failures below 1%
+of attempted calls and actionable `decision` coverage of at least 80% of deterministically
+eligible cases on the untouched test split. Report schema-valid `abstain` separately and never
+count it as an actionable decision. The bounded G4/G6 label-gathering pilot is the only pre-gate
+exception; these floors apply before its later broad advisory, shadow, or assist promotion.
 
 ### WS0–2: evidence foundation
 

@@ -36,6 +36,8 @@ quality checks, not claims that the runtime work is complete.
   links a pending or eventual outcome; under-labeled families stay offline except G4/G6 pilots.
 - [x] The PR gate requires per-class support inside the untouched test split as well as training
   and calibration; grouped splits cannot borrow support from another partition.
+- [x] Evaluation runs, traces, and promotion records pin the family policy and code revision;
+  G4–G10 require low provider failure and minimum actionable decision coverage before promotion.
 
 ## Requirement-to-plan coverage
 

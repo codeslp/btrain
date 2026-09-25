@@ -105,16 +105,21 @@ text stays in its source repository unless a separate data-policy decision autho
 ### FR-3 — Reproducible evaluation
 
 Every evaluation MUST pin the source snapshot, labels, train/calibration/test split, question
-version, thresholds, model identifier, baseline, and code revision. Repeated templates and cases
-from one PR MUST remain in exactly one of train, calibration, or test. Report per-class support,
-confusion matrix, skipped candidates, valid-answer abstentions, valid-prediction coverage,
+version, family-policy hash, thresholds, model identifier, baseline, and code revision. Repeated
+templates and cases from one PR MUST remain in exactly one of train, calibration, or test.
+Report per-class support, confusion matrix, skipped candidates, valid-answer abstentions,
+valid-prediction coverage,
 provider and response-shape failures, latency, and cost separately. Failures have no prediction
-and cannot count as correct `uncertain` cases. Synthetic controls form a separate stratum.
+and cannot count as correct `uncertain` cases. Valid-prediction coverage counts schema-valid
+`decision` and `abstain` outcomes over attempted calls; actionable decision coverage counts only
+`decision` outcomes over deterministically eligible cases. Synthetic controls form a separate
+stratum.
 
 ### FR-4 — Bounded typed decisions
 
 Each decision family MUST declare a closed question schema, bounded inputs, eligible action set,
-privacy class, version, time and call budget, and deterministic fallback. An out-of-catalog or
+privacy class, immutable policy hash, time and call budget, and deterministic fallback. The hash
+MUST cover its input builder, schema, action policy, fallback, and thresholds. An out-of-catalog or
 malformed answer MUST be a `failure` with reason `invalid-answer` and no prediction. Only a
 schema-valid answer that has no sufficiently strong permitted action may `abstain`. Scores and
 probabilities are evidence for thresholding, not proof of correctness. Model text MUST NOT be
@@ -176,7 +181,8 @@ cannot block a handoff, alter lane state, or authorize an assist action. All oth
 requires a frozen benchmark and family-specific gates in the implementation plan. A human records
 the approved threshold and allowed assist action. The operator can return that family to off or
 shadow immediately; on provider failure, btrain follows its current deterministic behavior.
-Promotion is per family, pinned model, and repository, never inferred from another task or provider.
+Promotion is per family, policy hash, evaluated code revision, pinned model, and repository, never
+inferred from another task or provider.
 
 ## Success criteria and gates
 
@@ -192,8 +198,10 @@ Promotion is per family, pinned model, and repository, never inferred from anoth
   model. Only then may a two-week live shadow begin.
 - **New families:** before assist, each family has a preregistered dataset, baseline, negative
   controls, minimum class support, harmful-error definition, threshold, and measured improvement
-  on an untouched test split. Only G4/G6 may run the earlier opt-in, nonblocking advisory pilot
-  defined in FR-10.
+  on an untouched test split. For G4–G10, any live promotion outside the FR-10 pilot also needs
+  under 1% provider/response-shape failure per attempted call and at least 80% actionable
+  `decision` coverage among deterministically eligible test cases. Only G4/G6 may run the earlier
+  opt-in, nonblocking advisory pilot defined in FR-10.
 - **Safety:** injected timeout, malformed response, and provider outage never advance a lane,
   approve a PR, omit mandatory evidence, or select an ineligible option.
 - **Operations:** an operator can inspect one trace and its source references, distinguish model
