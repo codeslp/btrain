@@ -60,8 +60,8 @@ not prescribe a second PR classifier or immediate activation.
 | PR review-signal interpretation | Catch actionable feedback missed by regex | Small positive pilot; corpus gate failed | Offline after provenance repair, then shadow |
 | Handoff evidence lint | Expose vague, contradictory, or unsupported packets | Small positive pilot with one important miss | Advisory to owner and reviewer |
 | Verification and risk planning | Add missing negative, integration, security, or formal checks | Hypothesis | Advisory suggestions |
-| Repository-rule checks | Flag semantic rule violations in focused diffs | Hypothesis | Advisory findings with rule citation |
-| Context curation | Reduce repeated context cost while preserving essentials | Token-cost problem measured; Jev benefit unmeasured | Shadow selection, then reversible omission |
+| Repository-rule and end-of-turn checks | Flag semantic rule violations in focused diffs and bounded turn evidence | Hypothesis | Advisory findings with rule citation |
+| Context curation and transcript compaction selection | Reduce repeated context cost while preserving essentials | Token-cost problem measured; Jev benefit unmeasured | Shadow selection, then reversible omission |
 | Review-risk triage | Focus deeper review on likely risk | Hypothesis | Advisory prioritization |
 | Task, lane, reviewer, runner, and skill routing | Reduce misrouting and idle time | Hypothesis | Suggestion from an eligible catalog |
 | Workflow memory invalidation | Detect summaries superseded by new events | Hypothesis | Advisory stale-memory warning |
@@ -134,7 +134,8 @@ uncertainty, or conflicting evidence preserves the deterministic result.
 ### FR-7 — Handoff and rule findings
 
 Handoff and rule families MUST ask focused questions over supplied task, packet, changed surface,
-and verification evidence. They may flag a possible mismatch, missing coverage, or contradiction
+and verification evidence. End-of-turn checks MUST use bounded turn evidence and only applicable
+versioned repository rules. They may flag a possible mismatch, missing coverage, or contradiction
 for an owner or reviewer to inspect. A finding MUST identify its source rule or claim and the
 supplied evidence slice; a model-generated assertion alone cannot become a blocking finding.
 The linter cannot waive pre-handoff requirements or replace peer review.
@@ -149,7 +150,10 @@ show the existing deterministic path.
 ### FR-9 — Context, memory, supervisor, and search
 
 Context curation MUST pin user instructions, task, constraints, locks, current state, unresolved
-findings, and recent errors. Omission requires a measured benefit and a reversible fallback.
+findings, and recent errors. A later transcript-compaction selector may choose which records stay
+full, become references, or are candidates for summarization; Jev itself does not generate the
+summary. Raw records remain recoverable. Omission or compaction requires a measured benefit and a
+reversible fallback.
 Memory invalidation MUST preserve source and version links. Supervisor decisions MUST emit signals
 to a separate deterministic policy and cannot directly change lane state. Search MUST filter
 authorized records locally before any semantic ranking and remain read-only.

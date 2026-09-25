@@ -95,14 +95,39 @@ remain off without blocking independent research.
 | 1 PR evidence capture | Append-only snapshots and labeling manifest with source IDs and event-time head status | WS0 | No model | Historical unknowns excluded; capture/replay preserves exact provenance |
 | 2 Decision trace and replay | Fake backend, versioned question sets, per-family metrics and failure ledger | WS0 | Offline | Same frozen manifest reproduces counts and metrics byte for byte |
 | 3 PR signal evaluation | Existing seam replay plus expanded real labeled set | WS1–2 | Offline, then shadow if gated | Spec 021 PR offline gate passes before two-week live shadow |
-| 4 Handoff evidence lint | Packet/diff/verification input builder and warnings | WS0, WS2 | Advisory | Beats placeholder baseline on frozen real packets; misses and reviewer time reported |
-| 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Advisory | No mandatory check removed in adversarial and outage cases |
-| 6 Repository-rule and review-risk checks | Rule-to-question registry and focused diff scoring | WS2 | Advisory | Every finding links to a versioned rule and supplied evidence; reviewer confirms utility |
-| 7 Context curation | Shadow keep/full/reference decisions over bounded dispatch artifacts | WS2, Spec 020 metrics | Shadow | Measured token reduction with no lost pinned item or task-success regression |
-| 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Suggestion | No ineligible selection; real supersession set beats baseline |
-| 9 Supervisor signals | Bounded observer trace and deterministic response policy | Durable supervisor prerequisites | Shadow | Stuck/off-track signals outperform simple timers without false state changes |
-| 10 Semantic history search | Read-only locally filtered shortlist and typed rerank | Source access policy, WS2 | Read-only | Better relevant-event retrieval at a measured latency/cost budget |
+| 4 Handoff evidence lint | Packet/diff/verification input builder and warnings | WS0, WS2 | Advisory | G4 before broad advisory use |
+| 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Advisory | G5 before assist |
+| 6 Repository-rule, end-of-turn, and review-risk checks | Rule-to-question registry and focused diff/turn scoring | WS2 | Advisory | G6 before broad advisory use |
+| 7 Context curation and later transcript compaction selection | Shadow keep/full/reference decisions over bounded artifacts | WS2, Spec 020 metrics | Shadow | G7 before any omission or compaction |
+| 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Suggestion | G8 before assist |
+| 9 Supervisor signals | Bounded observer trace and deterministic response policy | Durable supervisor prerequisites | Shadow | G9 before policy-triggered nudges |
+| 10 Semantic history search | Read-only locally filtered shortlist and typed rerank | Source access policy, WS2 | Read-only | G10 before default-on search |
 | 11 Provider comparison | Same frozen suites on pinned Jev and eligible alternatives | WS2 plus family datasets | Offline | Family-specific quality, calibration, cost, and failure comparison |
+
+### Proposed family gates
+
+These are *prospective acceptance targets*, not results from the pilot. Each benchmark is frozen
+before question or threshold tuning; source groups stay in one split, two labelers adjudicate
+disagreements, and synthetic/adversarial controls are reported separately. A scoped pilot may
+collect evidence before a gate passes, but its output stays clearly advisory or shadow. The
+promotion owner may tighten these targets in a versioned record, never silently lower them after
+seeing the test split.
+
+| Gate | Minimum frozen evidence and comparator | Proceed threshold |
+| --- | --- | --- |
+| G4 Handoff lint | 100 real packets, at least 30 with reviewer-confirmed repair needs; current placeholder gate | Defect recall ≥90%, warning precision ≥80%, zero missed required negative-path controls in a separate control set; report reviewer minutes per packet |
+| G5 Verification planner | 100 real changes, at least 30 with a missing check; current path/rule check catalog | Detect ≥10 percentage points more missing checks, suggestion precision ≥80%, zero mandatory checks removed or suppressed |
+| G6 Rules and review risk | 100 focused diff or turn cases, at least 30 independently confirmed semantic violations and 10 severe findings; current deterministic rules and unprioritized review | Finding precision and violation recall each ≥80%, zero invented rule/source citations; risk ranking puts ≥90% of severe findings in the top 30% of the review queue; reviewer time no more than 10% above baseline at equal defect recall |
+| G7 Context and compaction selection | 100 paired dispatches with outcome and token accounting; existing deterministic packet | Median context tokens ↓≥10%, zero pinned-item omissions, and task completion no more than 5 percentage points below baseline; a later transcript selector passes the same gate on a separate transcript set |
+| G8 Routing and memory | 100 historical routing decisions plus 100 versioned memory claims with at least 30 superseded; current eligible routing and age-based memory baseline | Zero ineligible routes; routing success ≥5 percentage points above baseline; supersession precision and recall each ≥85% |
+| G9 Supervisor signals | 100 labeled runner windows with at least 30 stuck/off-track; simple timer baseline | Stuck/off-track F1 ≥5 percentage points above timer baseline, false policy-triggered nudge rate ≤5%, zero direct lane-state mutations |
+| G10 History search | 50 judged queries with source-access roles; lexical/structured shortlist alone | Recall@5 ≥10 percentage points above baseline, p95 response ≤2 seconds, zero unauthorized results |
+
+The minimum counts are planning targets, not permission to pad a corpus with repeated templates.
+If a gate cannot assemble independent cases, its family remains in research. G4 and G6 permit a
+small opt-in advisory pilot before the threshold only to gather labels and reviewer-time evidence;
+they do not authorize a blocking action. Any assist action also needs FR-10 privacy, safety,
+failure, shadow, human approval, and rollback gates.
 
 ### WS0–2: evidence foundation
 
@@ -150,11 +175,15 @@ warning that needs code understanding.
   migrations, security boundaries, and formal-impact cases. Out-of-catalog coverage produces
   abstention, never a forced check choice.
 - **Rule and review-risk checks:** compile only explicit repository rules into versioned,
-  inspectable questions. Scope to a focused diff; route candidate findings to a reviewer. A risk
-  score prioritizes review depth but cannot make a low-risk change skip required review.
+  inspectable questions. Scope to a focused diff or bounded end-of-turn record; route candidate
+  findings to a reviewer. A risk score prioritizes review depth but cannot make a low-risk change
+  skip required review. Evaluate diff and end-of-turn controls separately within G6.
 - **Context curation:** shadow the selected content against Spec 020's measured baseline. Pin
   instructions, state, locks, unresolved findings, and recent failures by code. Start by choosing
-  full/reference/omit for low-risk artifacts; retain source pointers and allow immediate fallback.
+  full/reference/omit for low-risk dispatch artifacts; retain source pointers and allow immediate
+  fallback. Only after that passes, test transcript selection on its own frozen set. Jev chooses
+  which records remain full or need separate summarization; it does not write a summary. Keep raw
+  transcript records recoverable and apply G7 to the later selector independently.
 - **Routing:** filter by authorization, availability, locks, role separation, and capability
   *before* ranking. Memory invalidation compares versioned claims to new events and emits an
   advisory stale marker; it never rewrites canonical history.

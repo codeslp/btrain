@@ -18,6 +18,10 @@ quality checks, not claims that the runtime work is complete.
 - [x] The plan identifies an initial artifact and dependency for every decision family.
 - [x] The plan distinguishes data collection, offline, shadow, advisory, and assist effects.
 - [x] The existing client and PR seam are reused rather than specified as new completed work.
+- [x] End-of-turn rule checks and later transcript compaction selection are explicit; Jev does
+  not claim to generate transcript summaries.
+- [x] G4–G10 name a dataset, comparator, and measurable proceed threshold, with separate
+  controls for mandatory evidence, eligibility, citations, and authorization.
 
 ## Requirement-to-plan coverage
 
@@ -29,10 +33,29 @@ quality checks, not claims that the runtime work is complete.
 | FR-4 bounded decisions | Decision contract, WS0–2 | Does every family have schema, budget, action list, and abstention? |
 | FR-5 traceability and privacy | Data model, WS2, quality gates | Can an outcome be audited without leaking private text? |
 | FR-6 PR signals | WS3 | Can semantic clear ever satisfy a required review? |
-| FR-7 handoff and rule findings | WS4 and WS6 | Is every warning tied to supplied evidence and human review? |
+| FR-7 handoff and rule findings | WS4 and WS6, including end-of-turn checks | Is every warning tied to supplied evidence and human review? |
 | FR-8 additive guidance | WS5 and WS8 | Can a score remove a required check or rank an ineligible actor? |
-| FR-9 context, memory, supervisor, search | WS7–10 | Are pinned context and canonical state protected? |
+| FR-9 context, memory, supervisor, search | WS7–10, including later transcript selection | Are pinned context and canonical state protected? |
 | FR-10 promotion and rollback | Evaluation matrix, provider comparison | Is approval scoped to family, model, repository, and action? |
+
+## Research opportunity coverage
+
+This cross-check was added after peer review found that the first draft summarized two
+opportunities too broadly. It prevents a source idea from disappearing behind a family name.
+
+| Opportunity from the Jev assessment or experiment report | Spec/plan home |
+| --- | --- |
+| PR review signals | FR-6 / WS3 |
+| Handoff evidence lint | FR-7 / WS4 |
+| Verification and risk planning | FR-8 / WS5 |
+| Semantic diff and end-of-turn repository-rule checks | FR-7 / WS6 |
+| Review-risk triage | FR-8 / WS6 |
+| Context selection and later transcript compaction selection | FR-9 / WS7 |
+| Task, lane, reviewer, runner, and skill routing | FR-8 / WS8 |
+| Workflow memory invalidation | FR-9 / WS8 |
+| Supervisor observation | FR-9 / WS9 |
+| Semantic history search | FR-9 / WS10 |
+| Pinned provider and local-backend comparison | FR-10 / WS11 |
 
 ## Implementation gates still open
 
