@@ -1,0 +1,102 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # npm test passes a quoted glob to node --test (Node 21 and later), and
+        # test:formal:witnesses uses --test-skip-pattern (Node 22.1 and later).
+        node: ["22", "24"]
+    env:
+      # CI=true, which GitHub sets, keeps the dashboard from auto-starting.
+      # This keeps needs-review from spawning reviewer CLIs; the dispatch tests
+      # opt back in with BTRAIN_NO_REVIEW_DISPATCH=0.
+      BTRAIN_NO_REVIEW_DISPATCH: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install the pinned ast-grep
+        # scripts/decomposition_inventory.mjs runs ast-grep, and three tests in
+        # test/decomposition_inventory.test.mjs fail without it. Spec 020
+        # adopted 0.45.3.
+        env:
+          AST_GREP_URL: https://github.com/ast-grep/ast-grep/releases/download/0.45.3/app-x86_64-unknown-linux-gnu.zip
+          AST_GREP_SHA256: f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8
+        run: |
+          curl --fail --location --silent --show-error "$AST_GREP_URL" --output "$RUNNER_TEMP/ast-grep.zip"
+          echo "$AST_GREP_SHA256  $RUNNER_TEMP/ast-grep.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/ast-grep.zip" -d "$RUNNER_TEMP/ast-grep"
+          chmod +x "$RUNNER_TEMP/ast-grep/ast-grep"
+          "$RUNNER_TEMP/ast-grep/ast-grep" --version
+          echo "$RUNNER_TEMP/ast-grep" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # The formal harness imports fast-check at load, and npm test loads it.
+        run: npm ci
+
+      - name: Run the test suite
+        # btrain infers the current agent from any environment value that
+        # contains claude, codex, gemini or opus. On a pull request GitHub puts
+        # the head branch (claude/..., codex/...) and the actor in the
+        # environment, which pins an agent in tests that expect none, such as
+        # test/startup.test.mjs "falls back to shared active-lane focus".
+        run: |
+          unset GITHUB_HEAD_REF GITHUB_ACTOR GITHUB_TRIGGERING_ACTOR
+          npm test
+
+      - name: Run the experiment tests
+        run: npm run test:experiments
+
+      - name: Run the formal regression witnesses (advisory)
+        # Spec 014: no formal verdict blocks a merge before Phase 3. These are
+        # the 11 deterministic witnesses from test/formal; the random-seed
+        # conformance runs and the candidate-findings test are skipped. Until
+        # the owner makes this step blocking, a failure shows on the step
+        # without failing the job.
+        continue-on-error: true
+        run: npm run test:formal:witnesses
+
+  python:
+    name: Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the agentchattr requirements and pytest
+        run: python -m pip install -r agentchattr/requirements.txt pytest
+
+      - name: Run the agentchattr tests
+        # pytest, not unittest: test_readiness.py uses plain test classes.
+        run: python -m pytest agentchattr/tests -q
+
+      - name: Run the option A review tests
+        run: python3 scripts/test_option_a_review.py
