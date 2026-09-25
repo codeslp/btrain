@@ -241,6 +241,15 @@ class SessionEngine:
         if not tmpl:
             return
 
+        # A draft run under the same id replaces the template under sessions
+        # already using it, so hold the cast to the template as it is now,
+        # not as it was when the session started.
+        cast_errors = validate_cast(tmpl, session.get("cast", {}))
+        if cast_errors:
+            log.warning("Session %d stopped before its next turn: %s", session["id"], " ".join(cast_errors))
+            self._store.interrupt(session["id"], " ".join(cast_errors))
+            return
+
         phases = tmpl.get("phases", [])
         phase_idx = session["current_phase"]
         turn_idx = session["current_turn"]

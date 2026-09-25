@@ -546,8 +546,10 @@ def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:
 def validate_cast(tmpl: dict, cast) -> list[str]:
     """Check a role -> agent cast against the template. Returns errors (empty = valid).
 
-    Roles in one ``distinct_roles`` group may not share an agent (or a human).
-    Roles left uncast are not checked here.
+    Every key must be one of the template's roles: a stray key is inert until
+    the template under a running session changes, and then it is a live role
+    held by whoever the key named. Roles in one ``distinct_roles`` group may
+    not share an agent (or a human). Roles left uncast are not checked here.
     """
     if not isinstance(cast, dict):
         return ["'cast' must be an object mapping role to agent"]
@@ -559,6 +561,9 @@ def validate_cast(tmpl: dict, cast) -> list[str]:
     if errors:
         return errors
 
+    roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
+    roles = roles if isinstance(roles, list) else []
+    errors = [f"Cast names '{role}', which is not a role in this template." for role in cast if role not in roles]
     for group in _distinct_groups(tmpl):
         first_role_by_agent: dict[str, str] = {}
         for role in group:

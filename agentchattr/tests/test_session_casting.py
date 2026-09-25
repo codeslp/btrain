@@ -89,6 +89,21 @@ def code_review_copy():
     return copy
 
 
+def pair_review_template(**overrides):
+    """A custom template with a builder and a reviewer but no red_team role."""
+    tmpl = {
+        "id": "pair-review",
+        "name": "Pair Review",
+        "roles": ["builder", "reviewer"],
+        "phases": [
+            {"name": "Submit", "participants": ["builder"], "prompt": "Present it."},
+            {"name": "Review", "participants": ["reviewer"], "prompt": "Review it.", "is_output": True},
+        ],
+    }
+    tmpl.update(overrides)
+    return tmpl
+
+
 def instruction_of(prompt):
     """The INSTRUCTION line an agent receives, without its label."""
     for block in prompt.split("\n\n"):
@@ -512,7 +527,18 @@ class ValidateCastTests(unittest.TestCase):
         # M6 (round 2). Needing only one of builder/red_team for the implicit
         # pair survived: casting ignores a group whose other role is missing,
         # so only a stray red_team key in a hand-sent cast shows the difference.
-        self.assertEqual(validate_cast({"roles": ["builder", "reviewer"]}, {"builder": "a", "red_team": "a"}), [])
+        # The stray key is itself an error now; the mutant adds a conflict to it.
+        self.assertEqual(
+            validate_cast({"roles": ["builder", "reviewer"]}, {"builder": "a", "red_team": "a"}),
+            ["Cast names 'red_team', which is not a role in this template."],
+        )
+
+    def test_a_cast_key_that_is_not_a_template_role_is_rejected(self):
+        # Review round 2 follow-up: a stray key is how a builder came to hold a
+        # red_team role that its template did not have.
+        cast = {"builder": "alpha", "reviewer": "beta", "red_team": "beta", "synthesiser": "alpha", "critic": "alpha"}
+
+        self.assertEqual(validate_cast(self.tmpl, cast), ["Cast names 'critic', which is not a role in this template."])
 
     def test_a_list_inside_a_group_is_skipped_not_hashed(self):
         # M10 (round 2). Keeping non-string members survived, because every
@@ -688,6 +714,18 @@ class StartSessionRouteTests(AppHarness):
         self.assertIn("'builder' and 'red_team'", payload["error"])
         self.assert_nothing_started()
 
+    def test_a_cast_key_the_template_does_not_have_is_a_400(self):
+        # Review round 2 follow-up, first step of its repro.
+        self.sessions.save_custom_template(pair_review_template())
+
+        status, payload = self.start(
+            template_id="pair-review", cast={"builder": "alpha", "reviewer": "beta", "red_team": "alpha"}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "Cast names 'red_team', which is not a role in this template.")
+        self.assert_nothing_started()
+
     def test_a_refused_draft_run_registers_no_template(self):
         # From the review's A2 probe: the draft path registered the draft as a
         # temporary template before any check, so a refused run still showed
@@ -715,6 +753,38 @@ class StartSessionRouteTests(AppHarness):
         request = next(m for m in self.messages.get_recent(10) if m["type"] == "session_request")
         for field in ('"role_prompts"', '"distinct_roles"', "`builder` and `red_team` always"):
             self.assertIn(field, request["text"])
+
+
+class TemplateSwapTests(AppHarness):
+    """A draft run under a template's id replaces it for sessions already using it."""
+
+    def test_a_swapped_in_template_cannot_hand_the_builder_the_red_team_turn(self):
+        # Review round 2 follow-up, the repro. Channel one runs pair-review with
+        # a stray red_team: alpha key, as a session could before cast keys were
+        # checked. A same-id draft that has red_team then runs in channel two.
+        # When channel one reached turn 2 of Review, the builder got the
+        # red-team prompt.
+        self.sessions.save_custom_template(pair_review_template())
+        one = self.sessions.create("pair-review", "one", {"builder": "alpha", "reviewer": "beta", "red_team": "alpha"}, "user")
+        swap = pair_review_template(roles=["builder", "reviewer", "red_team"])
+        swap["phases"][1]["participants"] = ["reviewer", "red_team"]
+        self.messages.add("user", "Add a red team to pair review.")  # keep the draft off id 0
+        draft = self.messages.add("system", "Session draft", msg_type="session_draft",
+                                  metadata={"valid": True, "template": swap})
+        status, _ = self.start(draft_message_id=draft["id"], channel="two",
+                               cast={"builder": "beta", "reviewer": "alpha", "red_team": "alpha"})
+        self.assertEqual(status, 200)
+        self.assertIn("red_team", self.sessions.get_template("pair-review")["roles"], "the draft replaced it")
+        self.trigger.calls.clear()
+
+        one = self.sessions.advance_phase(one["id"])  # Review, the reviewer's turn
+        one = self.sessions.advance_turn(one["id"])  # Review, turn 2: red_team under the swapped-in template
+        self.engine._trigger_current(one)
+
+        self.assertEqual(self.trigger.calls, [])
+        run = self.sessions.get(one["id"])
+        self.assertEqual(run["state"], "interrupted")
+        self.assertIn("'builder' and 'red_team' must be different agents", run["interrupt_reason"])
 
 
 class BuiltinTemplateTests(AppHarness):
@@ -970,7 +1040,10 @@ class LauncherParityTests(unittest.TestCase):
 
         for (tmpl, cast), launcher_conflicts in zip(cases, launcher):
             with self.subTest(template=tmpl["id"], cast=cast):
-                self.assertEqual(launcher_conflicts, validate_cast(tmpl, cast))
+                # Only the server checks for keys that are not template roles:
+                # the launcher builds its cast from the template's own participants.
+                server_conflicts = [e for e in validate_cast(tmpl, cast) if e.startswith("Cast conflict:")]
+                self.assertEqual(launcher_conflicts, server_conflicts)
 
 
 # Loads static/sessions.js with stub DOM globals, presses Start Session with
