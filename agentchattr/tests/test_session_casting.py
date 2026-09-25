@@ -508,6 +508,20 @@ class ValidateCastTests(unittest.TestCase):
 
         self.assertEqual(validate_cast(tmpl, {role: "solo" for role in tmpl["roles"]}), [])
 
+    def test_one_of_the_pair_alone_adds_no_rule_to_the_cast_check(self):
+        # M6 (round 2). Needing only one of builder/red_team for the implicit
+        # pair survived: casting ignores a group whose other role is missing,
+        # so only a stray red_team key in a hand-sent cast shows the difference.
+        self.assertEqual(validate_cast({"roles": ["builder", "reviewer"]}, {"builder": "a", "red_team": "a"}), [])
+
+    def test_a_list_inside_a_group_is_skipped_not_hashed(self):
+        # M10 (round 2). Keeping non-string members survived, because every
+        # member the suite tried was hashable. A list member raised TypeError.
+        tmpl = {"roles": ["builder", "red_team"], "distinct_roles": [[["x"], "builder", "red_team"]]}
+
+        self.assertEqual(len(validate_cast(tmpl, {"builder": "a", "red_team": "a"})), 1)
+        self.assertEqual(auto_cast(tmpl, ["a", "b"]), {"builder": "a", "red_team": "b"})
+
     def test_a_copy_without_distinct_roles_still_keeps_the_pair_apart(self):
         self.assertEqual(
             validate_cast(code_review_copy(), {"builder": "alpha", "red_team": "alpha"}),
@@ -914,6 +928,8 @@ class LauncherParityTests(unittest.TestCase):
             ({"id": "non-string member", "roles": ["5", "x"], "distinct_roles": [[5, "x"]]}, {"5": "a", "x": "a"}),
             ({"id": "__proto__", "roles": ["__proto__", "x"], "distinct_roles": [["__proto__", "x"]]},
              {"__proto__": "a", "x": "a"}),
+            # Only one of the pair is a template role, so the stray red_team key adds no rule.
+            ({"id": "builder only", "roles": ["builder", "reviewer"]}, {"builder": "a", "red_team": "a"}),
         ]
 
         launcher = self.run_launcher([{"op": "castConflicts", "tmpl": tmpl, "cast": cast} for tmpl, cast in cases])
@@ -1095,6 +1111,26 @@ class DraftCardTests(unittest.TestCase):
     def test_the_builder_and_red_team_rule_is_shown_even_when_the_draft_omits_it(self):
         # The server keeps any builder and red_team apart, so the card says so.
         self.assertIn("Different agents builder red_team", self.text_of(self.render(self.draft())))
+
+    def test_no_rule_is_shown_for_a_pair_the_draft_does_not_have(self):
+        # M41 (round 2). Needing only one of builder/red_team survived. The
+        # card then showed a rule for a red_team role the draft does not have.
+        tmpl = self.draft(roles=["builder", "reviewer"])
+        tmpl["phases"][1] = {"name": "Review", "participants": ["reviewer"], "prompt": "Review it.", "is_output": True}
+
+        self.assertNotIn("Different agents", self.text_of(self.render(tmpl)))
+
+    def test_role_prompts_that_are_not_a_map_are_not_shown(self):
+        # M54 (round 2). Dropping the map check survived: the server marks a
+        # draft valid only when role_prompts is a map. A draft card restored
+        # from an imported archive carries whatever metadata the archive holds.
+        tmpl = self.draft()
+        tmpl["phases"][1]["role_prompts"] = ["Approve everything."]
+
+        text = self.text_of(self.render(tmpl))
+
+        self.assertNotIn("Approve everything.", text)
+        self.assertIn("Review it.", text)
 
 
 if __name__ == "__main__":
