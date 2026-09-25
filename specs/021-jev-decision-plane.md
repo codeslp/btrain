@@ -173,14 +173,22 @@ authorized records locally before any semantic ranking and remain read-only.
 
 ### FR-10 — Per-family promotion and rollback
 
-Each family starts off. G4 handoff lint and G6 rule checks may enter a bounded opt-in advisory
-pilot before the quality benchmark passes, solely to collect labels and reviewer-time evidence.
+Each family starts off. G4 handoff lint and G6-R repository-rule checks may enter a bounded
+opt-in advisory pilot before the quality benchmark passes, solely to collect labels and
+reviewer-time evidence.
 That exception requires source-specific privacy clearance, hard-boundary tests, trace access and
 retention policy, an explicit operator opt-in and cohort, and human review of every warning. It
-cannot block a handoff, alter lane state, or authorize an assist action. All other live promotion
-requires a frozen benchmark and family-specific gates in the implementation plan. A human records
-the approved threshold and allowed assist action. The operator can return that family to off or
-shadow immediately; on provider failure, btrain follows its current deterministic behavior.
+cannot block a handoff, alter lane state, or authorize an assist action. End-of-turn checks and
+review-risk triage remain offline until their separate G6-T and G6-V gates pass. All other live
+promotion requires a frozen benchmark and family-specific gates in the implementation plan.
+After that gate, each family completes a preregistered shadow window and eligible-case count,
+compares live outcomes with its baseline, and meets its harmful-error, failure, and benefit
+criteria before broad advisory or assist. The PR family requires a two-week shadow; other
+families require at least seven consecutive days and 30 eligible live cases, with higher
+family-specific minima set before observation. A human records the approved threshold and
+allowed assist action, plus the completed shadow-run reference for assist. The operator can
+return that family to off or shadow immediately; on provider failure, btrain follows its
+current deterministic behavior.
 Promotion is per family, policy hash, evaluated code revision, pinned model, and repository, never
 inferred from another task or provider.
 
@@ -200,8 +208,12 @@ inferred from another task or provider.
   controls, minimum class support, harmful-error definition, threshold, and measured improvement
   on an untouched test split. For G4–G10, any live promotion outside the FR-10 pilot also needs
   under 1% provider/response-shape failure per attempted call and at least 80% actionable
-  `decision` coverage among deterministically eligible test cases. Only G4/G6 may run the earlier
+  `decision` coverage among deterministically eligible test cases. Only G4/G6-R may run the earlier
   opt-in, nonblocking advisory pilot defined in FR-10.
+- **Shadow-to-assist gate:** the same policy, code revision, model, and repository used for assist
+  must have a completed shadow record meeting its preregistered live window, eligible-case count,
+  baseline benefit threshold, harmful-error budget, and provider-failure ceiling. A change to any pinned
+  decision component requires a new evaluated run and shadow record before promotion.
 - **Safety:** injected timeout, malformed response, and provider outage never advance a lane,
   approve a PR, omit mandatory evidence, or select an ineligible option.
 - **Operations:** an operator can inspect one trace and its source references, distinguish model
@@ -225,7 +237,7 @@ inferred from another task or provider.
 - A contemporaneous head may be unavailable for historical comments; such cases are excluded
   from exact-head evaluation rather than relabeled by guesswork.
 - A family with insufficient labeled data remains off or in offline research. Only the bounded,
-  opt-in G4/G6 advisory pilots in FR-10 may gather live labels before their quality gates pass.
+  opt-in G4/G6-R advisory pilots in FR-10 may gather live labels before their quality gates pass.
 
 ## Open decisions before implementation
 

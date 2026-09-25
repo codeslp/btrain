@@ -26,18 +26,22 @@ quality checks, not claims that the runtime work is complete.
   denominators; an absent response is never a valid abstention.
 - [x] Source groups cannot cross any pair of train, calibration, and test splits.
 - [x] Promotion records carry family, repository, pinned model, and question version.
-- [x] The early G4/G6 advisory pilot has explicit opt-in, privacy, trace, human-review, and
+- [x] The early G4/G6-R advisory pilot has explicit opt-in, privacy, trace, human-review, and
   no-state-change conditions before its quality gate.
 - [x] Every candidate trace records a gateway outcome and applicable reason, including skips
   before a provider call; WS5 stays offline until G5 permits shadow, advisory, or assist.
 - [x] WS7–10 start offline; their own frozen gate precedes any live shadow, suggestion, nudge,
   or read-only search. Split checks cover train/calibration, train/test, and calibration/test.
 - [x] Source capture retains the deterministic disposition even without a model candidate and
-  links a pending or eventual outcome; under-labeled families stay offline except G4/G6 pilots.
+  links a pending or eventual outcome; under-labeled families stay offline except G4/G6-R pilots.
 - [x] The PR gate requires per-class support inside the untouched test split as well as training
   and calibration; grouped splits cannot borrow support from another partition.
 - [x] Evaluation runs, traces, and promotion records pin the family policy and code revision;
   G4–G10 require low provider failure and minimum actionable decision coverage before promotion.
+- [x] G6-R repository-rule findings are the only WS6 pre-gate advisory pilot; end-of-turn and
+  review-risk stay offline until separate frozen subgates pass.
+- [x] Assist promotion requires a completed same-policy/model/repository shadow record meeting
+  preregistered duration, case count, live benefit, failure, and harmful-error criteria.
 
 ## Requirement-to-plan coverage
 
@@ -52,7 +56,7 @@ quality checks, not claims that the runtime work is complete.
 | FR-7 handoff and rule findings | WS4 and WS6, including end-of-turn checks | Is every warning tied to supplied evidence and human review? |
 | FR-8 additive guidance | WS5 and WS8 | Can a score remove a required check or rank an ineligible actor? |
 | FR-9 context, memory, supervisor, search | WS7–10, including later transcript selection | Are pinned context and canonical state protected? |
-| FR-10 promotion and rollback | Evaluation matrix, provider comparison | Is approval scoped to family, model, repository, and action? Can a pre-gate G4/G6 pilot only show nonblocking warnings to opted-in humans? |
+| FR-10 promotion and rollback | Evaluation matrix, provider comparison | Is approval scoped to family, model, repository, and action? Can a pre-gate G4/G6-R pilot only show nonblocking warnings to opted-in humans? |
 
 ## Research opportunity coverage
 

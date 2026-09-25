@@ -65,7 +65,8 @@ observational; the event log remains canonical.
 | `DecisionFamily` | ID, question version, immutable policy hash covering input builder, schema, action policy, fallback, and thresholds; privacy class, allowed actions, timeout/call budget | A policy or threshold change creates a new comparable run |
 | `DecisionAttempt` | family/source/input hashes, provider and model when called, question version, family-policy hash, code revision, baseline, gateway outcome (`skipped`, `decision`, `abstain`, or `failure`), applicable skip/abstention/failure reason, valid answers, probabilities, failure class, latency, applied action, later human outcome | Every candidate records its gateway outcome; failure has no prediction; trace omits raw private input and credentials |
 | `EvaluationRun` | family ID, family-policy hash, code revision, question version, pinned model ID, frozen dataset/split hash, thresholds, baseline, metrics | Promotion uses only the policy and implementation evaluated on the untouched test split |
-| `PromotionRecord` | family ID, repository, pinned model ID, question version, family-policy hash, evaluated code revision, evaluation-run ID, benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to the recorded family, policy, code revision, model pin, question version, and repository |
+| `ShadowRun` | family ID, family-policy hash, code revision, question version, model pin, repository, preregistered minimum duration and eligible-case count, actual window and count, baseline comparison, adjudicated harmful errors, provider failures, operator verdict | Assist requires a completed run that met its preregistered duration, volume, safety, and benefit criteria on the same policy and model |
+| `PromotionRecord` | family ID, repository, pinned model ID, question version, family-policy hash, evaluated code revision, evaluation-run ID, completed shadow-run ID for assist, benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to the recorded family, policy, code revision, model pin, question version, and repository |
 
 Source content may be read at its source for an authorized run. The shared trace stores only
 source references, hashes, bounded metadata, and decision output. Access and retention follow
@@ -110,7 +111,7 @@ remain off without blocking independent research.
 | 3 PR signal evaluation | Existing seam replay plus expanded real labeled set | WS1–2 | Offline, then shadow if gated | Spec 021 PR offline gate passes before two-week live shadow |
 | 4 Handoff evidence lint | Packet/diff/verification input builder and warnings | WS0, WS2 | Advisory | G4 before broad advisory use |
 | 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Offline, then shadow after G5 | G5 before any live advisory or assist; shadow requires the offline gate and privacy approval |
-| 6 Repository-rule, end-of-turn, and review-risk checks | Rule-to-question registry and focused diff/turn scoring | WS2 | Advisory | G6 before broad advisory use |
+| 6 Repository-rule, end-of-turn, and review-risk checks | Rule-to-question registry and focused diff/turn scoring | WS2 | Repository-rule only: opt-in advisory label pilot; end-of-turn and review-risk: offline | Each subfamily passes its own G6 gate before broad advisory or shadow use; the pre-gate pilot applies only to repository-rule findings |
 | 7 Context curation and later transcript compaction selection | Keep/full/reference decisions over bounded artifacts | WS2, Spec 020 metrics | Offline | G7 before live shadow or any omission or compaction; later transcript selection passes G7 separately |
 | 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Offline | G8 before live suggestions, stale markers, or assist |
 | 9 Supervisor signals | Bounded observer trace and deterministic response policy | Durable supervisor prerequisites | Offline | G9 before live shadow or policy-triggered nudges |
@@ -121,8 +122,10 @@ remain off without blocking independent research.
 
 These are *prospective acceptance targets*, not results from the pilot. Each benchmark is frozen
 before question or threshold tuning; source groups stay in one split, two labelers adjudicate
-disagreements, and synthetic/adversarial controls are reported separately. Only G4/G6 may
-collect live labels through the pre-gate, opt-in advisory pilot; their output stays nonblocking.
+disagreements, and synthetic/adversarial controls are reported separately. Only G4 handoff lint
+and G6-R repository-rule findings may collect live labels through the pre-gate, opt-in advisory
+pilot; their output stays nonblocking. End-of-turn and review-risk remain offline until their
+own frozen G6 subgate passes.
 The promotion owner may tighten these targets in a versioned record, never lower them after
 seeing the test split.
 
@@ -130,22 +133,27 @@ seeing the test split.
 | --- | --- | --- |
 | G4 Handoff lint | 100 real packets, at least 30 with reviewer-confirmed repair needs; current placeholder gate | Defect recall ≥90%, warning precision ≥80%, zero missed required negative-path controls in a separate control set; report reviewer minutes per packet |
 | G5 Verification planner | 100 real changes, at least 30 with a missing check; current path/rule check catalog | Detect ≥10 percentage points more missing checks, suggestion precision ≥80%, zero mandatory checks removed or suppressed |
-| G6 Rules and review risk | 100 focused diff or turn cases, at least 30 independently confirmed semantic violations and 10 severe findings; current deterministic rules and unprioritized review | Finding precision and violation recall each ≥80%, zero invented rule/source citations; risk ranking puts ≥90% of severe findings in the top 30% of the review queue; reviewer time no more than 10% above baseline at equal defect recall |
+| G6-R Repository rules | 100 focused diff cases, at least 30 independently confirmed semantic violations; current deterministic rules | Finding precision and violation recall each ≥80%, zero invented rule/source citations |
+| G6-T End-of-turn rules | A separate 100 bounded turn cases, at least 30 independently confirmed semantic violations; current deterministic turn checks | Finding precision and violation recall each ≥80%, zero invented rule/source citations |
+| G6-V Review-risk triage | A separate 100 review cases with at least 10 severe findings; unprioritized review | Risk ranking puts ≥90% of severe findings in the top 30% of the review queue; reviewer time no more than 10% above baseline at equal defect recall |
 | G7 Context and compaction selection | 100 paired dispatches with outcome and token accounting; existing deterministic packet | Median context tokens ↓≥10%, zero pinned-item omissions, and task completion no more than 5 percentage points below baseline; a later transcript selector passes the same gate on a separate transcript set |
 | G8 Routing and memory | 100 historical routing decisions plus 100 versioned memory claims with at least 30 superseded; current eligible routing and age-based memory baseline | Zero ineligible routes; routing success ≥5 percentage points above baseline; supersession precision and recall each ≥85% |
 | G9 Supervisor signals | 100 labeled runner windows with at least 30 stuck/off-track; simple timer baseline | Stuck/off-track F1 ≥5 percentage points above timer baseline, false policy-triggered nudge rate ≤5%, zero direct lane-state mutations |
 | G10 History search | 50 judged queries with source-access roles; lexical/structured shortlist alone | Recall@5 ≥10 percentage points above baseline, p95 response ≤2 seconds, zero unauthorized results |
 
+G6-R, G6-T, and G6-V are separately evaluated families with independent frozen splits,
+policy hashes, and promotion records. Passing one never promotes another.
+
 The minimum counts are planning targets, not permission to pad a corpus with repeated templates.
 If a gate cannot assemble independent cases, its family remains off or in offline research. G4
-and G6 permit a small opt-in advisory pilot before the threshold only to gather labels and
+and G6-R permit a small opt-in advisory pilot before the threshold only to gather labels and
 reviewer-time evidence; they do not authorize a blocking action. Any assist action also needs
 FR-10 privacy, safety, failure, shadow, human approval, and rollback gates.
 
 For G4–G10, a frozen offline gate also requires provider plus response-shape failures below 1%
 of attempted calls and actionable `decision` coverage of at least 80% of deterministically
 eligible cases on the untouched test split. Report schema-valid `abstain` separately and never
-count it as an actionable decision. The bounded G4/G6 label-gathering pilot is the only pre-gate
+count it as an actionable decision. The bounded G4/G6-R label-gathering pilot is the only pre-gate
 exception; these floors apply before its later broad advisory, shadow, or assist promotion.
 
 ### WS0–2: evidence foundation
@@ -238,11 +246,11 @@ useful, with no cross-repository corpus transfer implied.
 | Stage | Required evidence | Allowed effect | Stop or rollback condition |
 | --- | --- | --- | --- |
 | Data collection | Source provenance, privacy class, independent label plan | None | Treating an unknown event-time head as current, or unauthorized text transfer |
-| Opt-in advisory pilot, G4/G6 only | Source-specific privacy approval, hard-boundary tests, trace policy, operator/cohort opt-in, human review of every warning | Nonblocking warning to opted-in humans for label gathering | Any state change, unreviewed warning, privacy breach, or missing trace |
+| Opt-in advisory pilot, G4/G6-R only | Source-specific privacy approval, hard-boundary tests, trace policy, operator/cohort opt-in, human review of every warning | Nonblocking warning to opted-in humans for label gathering | Any state change, unreviewed warning, privacy breach, or missing trace |
 | Offline | Frozen cases, deterministic baseline, negative controls, pinned versions | None | Family gate fails, leakage between splits, or unclassified provider errors |
-| Shadow | Offline gate passed, privacy approval, local traces, explicit duration | Trace and display only | Any privacy breach, missing trace, or unexplained provider failure trend |
+| Shadow | Offline gate passed, privacy approval, local traces, and preregistered family-specific minimum duration, eligible-case count, baseline, harmful-error budget, and benefit threshold; at least seven consecutive days and 30 eligible live cases, with 14 days for PR signals | Trace and display only | Any privacy breach, missing trace, unexplained provider failure trend, or harmful-error budget breach |
 | Advisory | Human-readable warning with source and uncertainty | Human may act | Warnings are misleading or reviewer load exceeds measured benefit |
-| Assist | Signed family promotion record and rollback path | Only listed additive/reversible action | Harmful error, eligibility violation, missed mandatory check, or policy drift |
+| Assist | Signed family promotion record, rollback path, and completed same-policy/model/repository shadow run meeting its preregistered duration and case count, live benefit threshold versus baseline, provider-failure ceiling, and harmful-error budget | Only listed additive/reversible action | Harmful error, eligibility violation, missed mandatory check, or policy drift |
 
 For unmeasured families, WS2 preregisters a minimum dataset, class support, error cost, and target
 before the test split is examined. Comparisons include option-order changes, equivalent wording,
