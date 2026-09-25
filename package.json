@@ -21,8 +21,5 @@
   },
   "devDependencies": {
     "fast-check": "^4.9.0"
-  },
-  "engines": {
-    "node": ">=22.1"
   }
 }
