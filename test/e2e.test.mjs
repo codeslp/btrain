@@ -9,6 +9,7 @@ import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const execFileAsync = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -139,7 +140,7 @@ async function createProjectRepo(btrainBin) {
   const gitInit = await runCommand("git", ["init", projectDir], { cwd: REPO_ROOT, env: process.env })
   assert.equal(gitInit.code, 0, gitInit.stderr)
 
-  const initResult = await runCommand(btrainBin, ["init", projectDir], {
+  const initResult = await runCommand(btrainBin, withTrackedInit(["init", projectDir]), {
     cwd: projectDir,
     env: buildProjectEnv(projectDir),
   })
@@ -266,7 +267,7 @@ describe("installed CLI e2e", () => {
 
     // Lanes are auto-configured by init — no enableLanes() needed
 
-    const reinitResult = await runInstalledBtrain(installState.btrainBin, projectDir, ["init", projectDir])
+    const reinitResult = await runInstalledBtrain(installState.btrainBin, projectDir, withTrackedInit(["init", projectDir]))
     assert.equal(reinitResult.code, 0, reinitResult.stderr)
 
     const claimResult = await runInstalledBtrain(
@@ -456,7 +457,7 @@ describe("installed CLI e2e", () => {
       env: process.env,
     })
     assert.equal(secondGitInit.code, 0, secondGitInit.stderr)
-    const secondInit = await runCommand(installState.btrainBin, ["init", secondProjectDir], {
+    const secondInit = await runCommand(installState.btrainBin, withTrackedInit(["init", secondProjectDir]), {
       cwd: secondProjectDir,
       env: buildProjectEnv(projectDir),
     })

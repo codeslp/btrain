@@ -80,13 +80,37 @@ import { reviewCode, formatSummary as formatReviewCodeSummary } from "./review/c
 import { reviewContext, formatReviewContextSummary } from "./review/context.mjs"
 import { runUnblockedHelper } from "./unblocked/context.mjs"
 import { TRANSITION_ROWS, formatTransitionsMermaid } from "./transitions.mjs"
+import {
+  DEFAULT_INIT_AGENTS,
+  DEV_TOOL_FEATURE_IDS,
+  FEATURES,
+  FEATURE_IDS,
+  SKILL_FEATURE_IDS,
+  featureDisabledMessage,
+  getAllOnFeatureMap,
+  getDefaultFeatureMap,
+  getFeatureMapFromConfig,
+  getStorageMode,
+  hasFeaturesTable,
+  isFeatureEnabled,
+  normalizeStorageMode,
+  parseAgentList,
+  parseFeatureList,
+  promptInitChoices,
+  removeManagedGitHooks,
+  renderLocalInstructionsHint,
+  resolveFeatureMap,
+  shouldPromptForInit,
+} from "./repo_mode.mjs"
 
 function printHelp() {
   console.log(`btrain
 
 Usage:
-  btrain init <repo-path> [--hooks] [--agent <name>]... [--lanes-per-agent <n>] [--core-only]
-                                                                              Bootstrap a repo, local dashboard, and agentchattr (--hooks installs managed git guards)
+  btrain init <repo-path> [--tracked|--local|--exclude-local] [--features a,b] [--feature x] [--no-feature x]
+               [--agents a,b | --agent <name>...] [--reviewer <name>] [--yes] [--hooks|--no-hooks] [--lanes-per-agent <n>] [--core-only]
+                                                                                Bootstrap a repo. Local by default: all state in .btrain/, added to .gitignore.
+  btrain features [list|enable|disable] [<name>[,<name>...]] [--repo <path>]    Show or change per-repo feature toggles ([features] in project.toml)
   btrain agents set --repo <path> --agent <name>... [--lanes-per-agent <n>]     Replace the active agent list and refresh docs/lanes
   btrain agents add --repo <path> --agent <name>... [--lanes-per-agent <n>]     Add agent(s) and scaffold any newly required lanes
   btrain handoff [--repo <path>] [--lane <id>] [--since <hash>]                 Check whose turn it is and what to do (--since short-circuits when state is unchanged)
@@ -155,6 +179,12 @@ Handoff/Lane Options:
   --lanes-per-agent <n>
                     Sets \`[lanes].per_agent\` when used with \`init\`, \`agents set\`, or \`agents add\`.
   --core-only       Init only the btrain core files/docs. Skips bundled project skills and local dev tools.
+  --tracked         Init with the committed layout (.claude/collab/, AGENTS.md/CLAUDE.md managed blocks). Alias: --shared.
+  --local           Init with local storage (the default): all btrain state in .btrain/, ignored by git.
+  --exclude-local   Local storage, but write .btrain/ to .git/info/exclude instead of .gitignore (no tracked change).
+  --features <list> Exactly these optional features on (see \`btrain features list\`). --feature/--no-feature adjust one.
+  --agents <list>   Comma-separated agents for \`init\` (same as repeated --agent). --reviewer sets reviewer_default.
+  --yes, -y         Accept defaults; never prompt. \`init\` prompts only on a TTY for a new repo.
   --base <ref>      Branch or commit for the work under review.
   --preflight [text]
                     Mark or describe the pre-flight review that was completed.
@@ -197,11 +227,13 @@ Handoff/Lane Options:
 
 Environment:
   BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
+  BTRAIN_INIT_STORAGE=local|tracked sets the storage default for new repos (default: local).
   BTRAIN_AGENT or BRAIN_TRAIN_AGENT can pin the current agent identity for handoff verification.
 
 Notes:
   - \`init\`, \`agents set\`, and \`agents add\` are safe to re-run. They refresh the managed docs and scaffold any missing lane sections/files.
-  - \`init\` also scaffolds the bundled \`.claude/skills/\` and \`.agents/skills/\` packs plus repo-local dashboard, handoff-history helpers, and \`agentchattr/\` unless you pass \`--core-only\`.
+  - \`init\` also scaffolds the bundled skills and the dev tools for enabled features unless you pass \`--core-only\`. Local repos get them under \`.btrain/\`; tracked repos under \`.claude/skills/\`, \`.agents/skills/\`, \`scripts/\`, and \`agentchattr/\`.
+  - An existing repo keeps its storage mode on re-init. btrain never migrates between local and tracked.
   - \`handoff claim\` resets the peer-review context and review response sections for a new task.
   - \`loop\` reads the active harness profile from \`[harness].active_profile\` in \`.btrain/project.toml\`; new repos default to the bundled \`default\` profile.
   - Use \`handoff claim|update|request-changes|resolve\` to keep handoff headers consistent.
@@ -213,6 +245,40 @@ Notes:
   - \`override grant\` writes a pending audited override under \`.btrain/overrides/\`; push overrides are consumed automatically by the managed pre-push hook.
   - \`doctor --repair\` applies only safe mechanical fixes such as stale-lock release and backstop handoff-history compaction.
 `)
+}
+
+const INIT_BOOLEAN_FLAGS = ["tracked", "shared", "local", "exclude-local", "yes", "hooks", "no-hooks", "core-only"]
+
+// parseOptions() binds the next token to any flag. For boolean init flags a
+// following positional (e.g. `btrain init --tracked /repo`) belongs to `_`.
+function normalizeBooleanFlags(options, flags) {
+  for (const flag of flags) {
+    const value = options[flag]
+    if (typeof value === "string") {
+      options._.push(value)
+      options[flag] = true
+    }
+  }
+  return options
+}
+
+async function readProjectConfigSafe(repoRoot) {
+  try {
+    return await readProjectConfig(repoRoot)
+  } catch {
+    return null
+  }
+}
+
+async function assertFeatureEnabled(repoRoot, featureId, commandLabel) {
+  const config = await readProjectConfigSafe(repoRoot)
+  if (config && !isFeatureEnabled(config, featureId)) {
+    throw new BtrainError({
+      message: featureDisabledMessage(featureId, commandLabel),
+      reason: `[features].${featureId} is false in .btrain/project.toml.`,
+      fix: `btrain features enable ${featureId}`,
+    })
+  }
 }
 
 function parseOptions(args) {
@@ -545,6 +611,17 @@ function formatDoctorResult(result) {
     `- ${result.repoRoot}`,
     `  healthy: ${result.healthy ? "yes" : "no"}`,
   ]
+  if (result.storageMode) {
+    lines.push(
+      result.storageMode === "local"
+        ? "  storage: local (btrain state in .btrain/, ignored by git)"
+        : "  storage: tracked (handoffs in .claude/collab/, managed blocks in AGENTS.md/CLAUDE.md)",
+    )
+  }
+  if (result.features) {
+    const off = FEATURE_IDS.filter((id) => result.features[id] === false)
+    lines.push(`  features off: ${off.length > 0 ? off.join(", ") : "(none)"}`)
+  }
 
   if (result.issues.length > 0) {
     lines.push(`  issues: ${result.issues.join(" | ")}`)
@@ -1438,6 +1515,10 @@ async function maybeAutoStartDashboard(repoRoot) {
   if (!shouldAutoStartDashboard()) {
     return
   }
+  const dashboardConfig = await readProjectConfigSafe(repoRoot)
+  if (dashboardConfig && !isFeatureEnabled(dashboardConfig, "dashboard")) {
+    return
+  }
   try {
     const result = await ensureDashboard(repoRoot)
     if (result.started) {
@@ -1470,6 +1551,8 @@ async function runDashboardCommand(repoRoot, subcommand, options) {
     console.log(result.stopped ? `dashboard: stopped (pid ${result.pid})` : "dashboard: not running")
     return
   }
+
+  await assertFeatureEnabled(repoRoot, "dashboard", `btrain dashboard ${subcommand}`)
 
   if (subcommand === "open") {
     const status = await getDashboardStatus(repoRoot)
@@ -1529,7 +1612,9 @@ async function run() {
   }
 
   if (command === "init") {
-    const options = parseOptions(rest)
+    const options = parseOptions(rest.filter((token) => token !== "-y"))
+    if (rest.includes("-y")) options.yes = true
+    normalizeBooleanFlags(options, INIT_BOOLEAN_FLAGS)
     const targetPath = options._[0]
     if (!targetPath) {
       throw new BtrainError({
@@ -1539,9 +1624,72 @@ async function run() {
       })
     }
 
+    const wantsTracked = options.tracked === true || options.shared === true
+    const wantsLocal = options.local === true || options["exclude-local"] === true
+    if (wantsTracked && wantsLocal) {
+      throw new BtrainError({
+        message: "`btrain init` cannot combine --tracked/--shared with --local/--exclude-local.",
+        reason: "Tracked storage commits btrain files; local storage keeps them out of git.",
+        fix: "Pick one: `btrain init <path>` (local, default) or `btrain init <path> --tracked`.",
+      })
+    }
+    const storage = wantsTracked ? "tracked" : wantsLocal ? "local" : ""
+    const resolvedTarget = path.resolve(targetPath)
+    let existingConfig = null
+    try {
+      existingConfig = await readProjectConfig(resolvedTarget)
+    } catch {
+      existingConfig = null
+    }
+    const projectExists = existingConfig !== null
+    const defaultStorage = normalizeStorageMode(process.env.BTRAIN_INIT_STORAGE) || "local"
+    const newRepoStorage = storage || defaultStorage
+    const baseFeatureMap = hasFeaturesTable(existingConfig)
+      ? getFeatureMapFromConfig(existingConfig)
+      : projectExists || newRepoStorage === "tracked"
+        ? getAllOnFeatureMap()
+        : getDefaultFeatureMap()
+
+    let featureMap
+    try {
+      const hasFeatureFlags = options.features !== undefined || options.feature !== undefined || options["no-feature"] !== undefined
+      if (hasFeatureFlags) {
+        featureMap = resolveFeatureMap({
+          base: baseFeatureMap,
+          features: options.features,
+          enable: options.feature,
+          disable: options["no-feature"],
+        })
+      }
+    } catch (error) {
+      throw new BtrainError({
+        message: error.message,
+        reason: "A feature name passed to --features, --feature, or --no-feature is not recognized.",
+        fix: "Run `btrain features list` to see the feature names.",
+      })
+    }
+
+    let agents = parseAgentList(options.agent, options.agents)
+    let reviewer = typeof options.reviewer === "string" ? options.reviewer.trim() : ""
+    if (!projectExists && shouldPromptForInit({ yes: options.yes === true })) {
+      const answers = await promptInitChoices({
+        featureMap: featureMap || baseFeatureMap,
+        agents: agents.length > 0 ? agents : DEFAULT_INIT_AGENTS,
+        reviewer,
+      })
+      featureMap = answers.featureMap
+      agents = answers.agents
+      reviewer = answers.reviewer
+    }
+
     const result = await initRepo(targetPath, {
-      hooks: !!options.hooks,
-      agent: options.agent,
+      hooks: options.hooks === true ? true : options["no-hooks"] === true ? false : undefined,
+      agent: agents,
+      reviewer,
+      storage,
+      defaultStorage,
+      ignoreTarget: options["exclude-local"] === true ? "exclude" : "gitignore",
+      featureMap,
       lanesPerAgent: options["lanes-per-agent"],
       scaffoldBundledSkills: !options["core-only"],
       scaffoldDevTools: !options["core-only"],
@@ -1550,6 +1698,26 @@ async function run() {
     console.log(`repo: ${result.repoRoot}`)
     console.log(`home: ${result.homeDir}`)
     console.log(`handoff: ${result.repoPaths.handoffPath}`)
+    if (result.storageMode === "local") {
+      const ignoreLabel = result.ignoreResult
+        ? `${path.relative(result.repoRoot, result.ignoreResult.path) || result.ignoreResult.path}${result.ignoreResult.changed ? " (added .btrain/)" : " (already ignores .btrain/)"}`
+        : "unchanged"
+      console.log("storage: local (all btrain state lives in .btrain/, ignored by git)")
+      console.log(`ignore: ${ignoreLabel}`)
+      console.log(renderLocalInstructionsHint(result.repoRoot))
+    } else if (result.storageDetected === "legacy-artifacts") {
+      console.log("storage: tracked (existing committed btrain files detected; not migrated)")
+    } else if (result.storageDetected !== "project-toml" || storage) {
+      console.log("storage: tracked")
+    }
+    if (result.featureMap) {
+      const enabled = FEATURE_IDS.filter((id) => result.featureMap[id])
+      const disabled = FEATURE_IDS.filter((id) => !result.featureMap[id])
+      console.log(`features: ${enabled.join(", ") || "(none)"}`)
+      if (disabled.length > 0) {
+        console.log(`features off: ${disabled.join(", ")} (enable later with: btrain features enable <name>)`)
+      }
+    }
     if (options["core-only"]) {
       console.log("bundled skills: skipped (--core-only)")
     } else if (result.bundledSkillsResult?.skippedReason === "self") {
@@ -1580,6 +1748,84 @@ async function run() {
     if (result.hookResult) {
       printHookInstallResult("pre-commit hook", result.hookResult.preCommit)
       printHookInstallResult("pre-push hook", result.hookResult.prePush)
+    }
+    return
+  }
+
+  if (command === "features") {
+    const subcommand = ["list", "enable", "disable"].includes(rest[0]) ? rest[0] : "list"
+    const options = parseOptions(subcommand === rest[0] ? rest.slice(1) : rest)
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const config = await readProjectConfigSafe(repoRoot)
+    if (!config) {
+      throw new BtrainError({
+        message: "`btrain features` requires an initialized repo.",
+        reason: `No .btrain/project.toml was found at ${repoRoot}.`,
+        fix: "Run `btrain init <repo-path>` first.",
+      })
+    }
+    const currentMap = hasFeaturesTable(config) ? getFeatureMapFromConfig(config) : getAllOnFeatureMap()
+
+    if (subcommand === "list") {
+      if (options.format === "json") {
+        console.log(JSON.stringify({ storage: getStorageMode(config), explicit: hasFeaturesTable(config), features: currentMap }, null, 2))
+        return
+      }
+      console.log(`repo: ${repoRoot}`)
+      console.log(`storage: ${getStorageMode(config)}`)
+      if (!hasFeaturesTable(config)) {
+        console.log("features: no [features] table, so every feature is on (pre-022 behavior)")
+      }
+      for (const feature of FEATURES) {
+        console.log(`  [${currentMap[feature.id] ? "x" : " "}] ${feature.id.padEnd(16)} ${feature.label} — ${feature.description}`)
+      }
+      console.log("change with: btrain features enable|disable <name>[,<name>...]")
+      return
+    }
+
+    let ids
+    try {
+      ids = parseFeatureList(options._, `features ${subcommand}`)
+    } catch (error) {
+      throw new BtrainError({
+        message: error.message,
+        reason: "The feature name is not recognized.",
+        fix: "Run `btrain features list` to see the feature names.",
+      })
+    }
+    if (ids.length === 0) {
+      throw new BtrainError({
+        message: `\`btrain features ${subcommand}\` requires at least one feature name.`,
+        reason: "No feature names were provided.",
+        fix: `btrain features ${subcommand} formal,cgraph`,
+      })
+    }
+
+    const enabling = subcommand === "enable"
+    const nextMap = { ...currentMap }
+    for (const id of ids) nextMap[id] = enabling
+    const scaffoldSkills = enabling && ids.some((id) => SKILL_FEATURE_IDS.has(id))
+    const scaffoldTools = enabling && ids.some((id) => DEV_TOOL_FEATURE_IDS.has(id))
+    await initRepo(repoRoot, {
+      featureMap: nextMap,
+      enableSections: ids.filter((id) => id === "cgraph" || id === "pr_flow"),
+      hooks: enabling && ids.includes("hooks") ? true : undefined,
+      scaffoldBundledSkills: scaffoldSkills,
+      scaffoldDevTools: scaffoldTools,
+      skipInstructionRefresh: !scaffoldSkills,
+    })
+    if (!enabling && ids.includes("hooks")) {
+      const removed = await removeManagedGitHooks(repoRoot)
+      if (removed.length > 0) {
+        console.log(`removed managed hooks: ${removed.join(", ")}`)
+      }
+    }
+    console.log(`${enabling ? "enabled" : "disabled"}: ${ids.join(", ")}`)
+    if (!enabling) {
+      const leftovers = ids.filter((id) => SKILL_FEATURE_IDS.has(id) || DEV_TOOL_FEATURE_IDS.has(id))
+      if (leftovers.length > 0) {
+        console.log("note: files already scaffolded for these features were left in place; delete them by hand if unwanted.")
+      }
     }
     return
   }
@@ -2114,6 +2360,7 @@ async function run() {
   if (command === "loop") {
     const options = parseOptions(rest)
     const repoRoot = await resolveRepoRoot(options.repo)
+    await assertFeatureEnabled(repoRoot, "loop", "btrain loop")
     const result = await runLoop({
       repoRoot,
       lane: options.lane,
@@ -2459,9 +2706,11 @@ async function run() {
 
     // 1. Agent instructions
     console.log("## Agent instructions")
+    const isLocalStorage = getStorageMode(config) === "local"
     const claudeMd = path.join(repoRoot, "CLAUDE.md")
     const agentsMd = path.join(repoRoot, "AGENTS.md")
-    for (const filePath of [claudeMd, agentsMd]) {
+    const localAgentsMd = path.join(repoRoot, ".btrain", "AGENTS.md")
+    for (const filePath of isLocalStorage ? [localAgentsMd, claudeMd, agentsMd] : [claudeMd, agentsMd]) {
       try {
         await fs.access(filePath)
         console.log(`  ${path.relative(repoRoot, filePath)}`)
@@ -2496,7 +2745,7 @@ async function run() {
     if (laneConfigs) {
       console.log(`  ${laneConfigs.length} lanes configured (${laneConfigs.map((l) => l.id).join(", ")})`)
     }
-    console.log("  Do NOT read .claude/collab/HANDOFF_*.md directly — always use the CLI.")
+    console.log(`  Do NOT read ${isLocalStorage ? ".btrain/collab" : ".claude/collab"}/HANDOFF_*.md directly — always use the CLI.`)
 
     // 4. Lock registry
     console.log("")
@@ -2513,12 +2762,13 @@ async function run() {
     // 5. Skills
     console.log("")
     console.log("## Skills")
-    const skillsDir = path.join(repoRoot, ".claude", "skills")
+    const skillsRel = isLocalStorage ? ".btrain/skills" : ".claude/skills"
+    const skillsDir = path.join(repoRoot, skillsRel)
     try {
       const entries = await fs.readdir(skillsDir)
       const skillNames = entries.filter((e) => !e.startsWith(".")).sort()
       if (skillNames.length > 0) {
-        console.log(`  .claude/skills/ (${skillNames.length} skills)`)
+        console.log(`  ${skillsRel}/ (${skillNames.length} skills)`)
         for (const name of skillNames) {
           console.log(`    ${name}`)
         }
@@ -2526,7 +2776,7 @@ async function run() {
         console.log("  (no skills)")
       }
     } catch {
-      console.log("  (no .claude/skills/ directory)")
+      console.log(`  (no ${skillsRel}/ directory)`)
     }
 
     // 6. Settings

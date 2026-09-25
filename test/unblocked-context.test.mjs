@@ -10,6 +10,7 @@ import {
   buildClaimReviewContextFields,
   runUnblockedResearch,
 } from "../src/brain_train/unblocked/context.mjs"
+import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -23,7 +24,7 @@ async function rmDir(dirPath) {
 
 async function runBtrain(args, cwd) {
   try {
-    const result = await execFileAsync("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
+    const result = await execFileAsync("node", [path.resolve("src/brain_train/cli.mjs"), ...withTrackedInit(args)], {
       cwd,
       env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home") },
       maxBuffer: 5 * 1024 * 1024,

@@ -259,6 +259,8 @@ async function execCommand(binPath, args, kind, opts = {}) {
 async function createAdapter(repoRoot, config) {
   const cgraphConfig = config?.cgraph || {}
   if (cgraphConfig.enabled === false) return null
+  // spec 022: [features].cgraph = false turns the whole integration off.
+  if (config?.features?.cgraph === false) return null
 
   const binPath = await resolveBinary(config)
   if (!binPath) return null
