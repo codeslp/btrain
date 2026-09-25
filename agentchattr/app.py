@@ -3070,8 +3070,10 @@ async def start_session(request: Request):
         tmpl = meta.get("template")
         if not tmpl:
             return JSONResponse({"error": "draft has no template"}, status_code=400)
-        # Register as a temporary template
+        # Register as a temporary template, never over a built-in one
         template_id = tmpl.get("id", f"draft-{draft_message_id}")
+        if session_store.is_builtin_template(template_id):
+            template_id = f"draft-{draft_message_id}"
         tmpl["id"] = template_id
         tmpl["is_custom"] = True
         session_store._templates[template_id] = tmpl
@@ -3181,6 +3183,8 @@ async def save_draft(request: Request):
         return JSONResponse({"error": "no template in draft"}, status_code=400)
 
     tmpl.setdefault("id", f"custom-{msg_id}")
+    if session_store.is_builtin_template(tmpl["id"]):
+        tmpl["id"] = f"custom-{msg_id}"  # never replace a built-in template
     session_store.save_custom_template(tmpl)
     return JSONResponse({"ok": True, "template_id": tmpl["id"]})
 

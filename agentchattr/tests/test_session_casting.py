@@ -412,8 +412,8 @@ def json_request(body):
     return Request(scope, receive)
 
 
-class StartSessionRouteTests(SessionHarness):
-    """/api/sessions/start is the only way in, and the UI always sends a full cast."""
+class AppHarness(SessionHarness):
+    """SessionHarness wired into the app module globals the routes read."""
 
     agents = ("alpha", "beta")
 
@@ -434,6 +434,10 @@ class StartSessionRouteTests(SessionHarness):
     def start(self, **body):
         response = asyncio.run(app.start_session(json_request(body)))
         return response.status_code, json.loads(response.body.decode("utf-8"))
+
+
+class StartSessionRouteTests(AppHarness):
+    """/api/sessions/start is the only way in, and the UI always sends a full cast."""
 
     def assert_nothing_started(self):
         self.assertEqual(self.sessions.list_all(), [])
@@ -512,6 +516,71 @@ class StartSessionRouteTests(SessionHarness):
         self.assertEqual(status, 400)
         self.assertIn("'builder' and 'red_team'", payload["error"])
         self.assert_nothing_started()
+
+
+class BuiltinTemplateTests(AppHarness):
+    """A draft or custom template must not take a built-in template's id.
+
+    Replacing code-review that way silently dropped its builder/red_team rule
+    for every later code-review session: in memory when the draft was run,
+    and across restarts once it was saved.
+    """
+
+    def shadow_draft(self):
+        self.messages.add("user", "Design a code review session.")  # keep the draft off id 0
+        shadow = {
+            "id": "code-review",
+            "name": "Code Review",
+            "roles": ["builder", "red_team"],
+            "phases": [{"name": "Only", "participants": ["builder", "red_team"], "prompt": "Go.", "is_output": True}],
+        }
+        return self.messages.add(
+            "system", "Session draft", msg_type="session_draft", metadata={"valid": True, "template": shadow}
+        )
+
+    def assert_builtin_rule_holds(self, sessions):
+        tmpl = sessions.get_template("code-review")
+        self.assertFalse(tmpl.get("is_custom"))
+        self.assertEqual(tmpl["distinct_roles"], [["builder", "red_team"]])
+
+    def test_running_a_draft_leaves_the_builtin_in_place(self):
+        draft = self.shadow_draft()
+
+        # The draft declares no distinct_roles of its own, so its cast is fine.
+        status, payload = self.start(
+            draft_message_id=draft["id"], channel="drafts", cast={"builder": "alpha", "red_team": "alpha"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["template_id"], f"draft-{draft['id']}")
+        self.assert_builtin_rule_holds(self.sessions)
+
+        conflict = {"builder": "alpha", "reviewer": "beta", "red_team": "alpha", "synthesiser": "beta"}
+        status, _ = self.start(template_id="code-review", channel="general", cast=conflict)
+        self.assertEqual(status, 400, "the built-in code-review must still refuse builder == red_team")
+
+    def test_saving_a_draft_leaves_the_builtin_in_place_across_a_restart(self):
+        draft = self.shadow_draft()
+
+        response = asyncio.run(app.save_draft(json_request({"message_id": draft["id"]})))
+
+        self.assertEqual(response.status_code, 200)
+        saved_id = json.loads(response.body.decode("utf-8"))["template_id"]
+        self.assertEqual(saved_id, f"custom-{draft['id']}")
+        self.assert_builtin_rule_holds(self.sessions)
+        reloaded = SessionStore(str(Path(self.tmp.name) / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+        self.assert_builtin_rule_holds(reloaded)
+        self.assertIsNotNone(reloaded.get_template(saved_id))
+
+    def test_a_custom_template_file_cannot_replace_a_builtin(self):
+        # A custom_templates.json saved before this guard existed, or edited by hand.
+        root = Path(self.tmp.name)
+        (root / "custom_templates.json").write_text(
+            json.dumps([{"id": "code-review", "name": "Shadow", "roles": ["builder"], "phases": []}]), "utf-8"
+        )
+
+        reloaded = SessionStore(str(root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+
+        self.assert_builtin_rule_holds(reloaded)
 
 
 # Loads static/sessions.js in a bare VM with stub globals, then answers each

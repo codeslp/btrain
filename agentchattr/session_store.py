@@ -38,6 +38,9 @@ class SessionStore:
                 custom = json.loads(custom_path.read_text("utf-8"))
                 for tmpl in (custom if isinstance(custom, list) else []):
                     tid = tmpl.get("id", "")
+                    if tid and self.is_builtin_template(tid):
+                        log.warning("Ignoring custom template %s: it would replace a built-in template", tid)
+                        continue
                     if tid:
                         tmpl["is_custom"] = True
                         self._templates[tid] = tmpl
@@ -87,6 +90,15 @@ class SessionStore:
 
     def get_template(self, template_id: str) -> dict | None:
         return self._templates.get(template_id)
+
+    def is_builtin_template(self, template_id: str) -> bool:
+        """True for a template shipped in session_templates/.
+
+        Drafts and custom templates may not take its id: replacing it would
+        drop its rules, such as code-review's distinct_roles.
+        """
+        tmpl = self._templates.get(template_id)
+        return tmpl is not None and not tmpl.get("is_custom")
 
     def save_custom_template(self, tmpl: dict) -> dict:
         custom_path = self._path.parent / "custom_templates.json"
