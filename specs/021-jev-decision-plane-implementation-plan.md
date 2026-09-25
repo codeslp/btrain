@@ -59,7 +59,8 @@ observational; the event log remains canonical.
 
 | Entity | Required fields | Invariant |
 | --- | --- | --- |
-| `SourceSnapshot` | repository, PR/lane, event URL/ID/surface, author, event and capture times, reviewed commit, observed head or `unknown`, formal state, source hash | Never claim a retrospectively fetched head was observed at event time |
+| `SourceSnapshot` | repository, PR/lane, event URL/ID/surface, author, event and capture times, reviewed commit, observed head or `unknown`, formal state, deterministic disposition, source hash | Never claim a retrospectively fetched head was observed at event time; disposition is preserved even if no model call follows |
+| `SourceOutcome` | source snapshot reference, eventual outcome or `pending`, outcome observation time and evidence reference when known | Append a later outcome without rewriting the event-time snapshot; every captured source has a linked outcome state |
 | `LabeledCase` | source reference, family, label, two annotators, adjudication, template/PR group, split, frozen manifest | Each group occurs in exactly one of train, calibration, or test |
 | `DecisionFamily` | ID, question version, input schema, privacy class, allowed actions, timeout/call budget, fallback, thresholds | Version or threshold change creates a new comparable run |
 | `DecisionAttempt` | family/source/input hashes, provider and model when called, question version, baseline, gateway outcome (`skipped`, `decision`, `abstain`, or `failure`), applicable skip/abstention/failure reason, valid answers, probabilities, failure class, latency, applied action, later human outcome | Every candidate records its gateway outcome; failure has no prediction; trace omits raw private input and credentials |
@@ -133,8 +134,9 @@ seeing the test split.
 | G10 History search | 50 judged queries with source-access roles; lexical/structured shortlist alone | Recall@5 ≥10 percentage points above baseline, p95 response ≤2 seconds, zero unauthorized results |
 
 The minimum counts are planning targets, not permission to pad a corpus with repeated templates.
-If a gate cannot assemble independent cases, its family remains in research. G4 and G6 permit a
-small opt-in advisory pilot before the threshold only to gather labels and reviewer-time evidence;
+If a gate cannot assemble independent cases, its family remains off or in offline research. G4
+and G6 permit a small opt-in advisory pilot before the threshold only to gather labels and
+reviewer-time evidence;
 they do not authorize a blocking action. Any assist action also needs FR-10 privacy, safety,
 failure, shadow, human approval, and rollback gates.
 
@@ -181,8 +183,8 @@ warning that needs code understanding.
 
 - **Verification planner:** deterministic rules first identify mandatory checks from paths and
   contracts. A model may add catalog checks. Test negative paths, cross-component wiring,
-  migrations, security boundaries, and formal-impact cases. Out-of-catalog coverage produces
-  abstention, never a forced check choice.
+  migrations, security boundaries, and formal-impact cases. A valid answer indicating no catalog
+  check covers a need yields abstention from action; an out-of-catalog answer is a failure.
 - **Rule and review-risk checks:** compile only explicit repository rules into versioned,
   inspectable questions. Scope to a focused diff or bounded end-of-turn record; route candidate
   findings to a reviewer. A risk score prioritizes review depth but cannot make a low-risk change

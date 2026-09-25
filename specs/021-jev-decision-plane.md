@@ -214,7 +214,8 @@ Promotion is per family, pinned model, and repository, never inferred from anoth
 - The current System One client and PR semantic seam are starting points, not proof of readiness.
 - A contemporaneous head may be unavailable for historical comments; such cases are excluded
   from exact-head evaluation rather than relabeled by guesswork.
-- A family with insufficient labeled data remains in research or advisory mode.
+- A family with insufficient labeled data remains off or in offline research. Only the bounded,
+  opt-in G4/G6 advisory pilots in FR-10 may gather live labels before their quality gates pass.
 
 ## Open decisions before implementation
 

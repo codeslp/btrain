@@ -32,6 +32,8 @@ quality checks, not claims that the runtime work is complete.
   before a provider call; WS5 stays offline until G5 permits shadow, advisory, or assist.
 - [x] WS7–10 start offline; their own frozen gate precedes any live shadow, suggestion, nudge,
   or read-only search. Split checks cover train/calibration, train/test, and calibration/test.
+- [x] Source capture retains the deterministic disposition even without a model candidate and
+  links a pending or eventual outcome; under-labeled families stay offline except G4/G6 pilots.
 
 ## Requirement-to-plan coverage
 
