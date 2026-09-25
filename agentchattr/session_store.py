@@ -8,6 +8,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Longest phase prompt or per-role prompt a template may carry.
+MAX_PROMPT_CHARS = 200
+
 
 class SessionStore:
     def __init__(self, path: str, templates_dir: str | None = None):
@@ -346,8 +349,9 @@ def validate_session_template(tmpl: dict) -> list[str]:
             if p not in roles_set:
                 errors.append(f"Phase {i + 1}: participant '{p}' not in roles list")
         prompt = phase.get("prompt", "")
-        if isinstance(prompt, str) and len(prompt) > 200:
-            errors.append(f"Phase {i + 1}: prompt too long ({len(prompt)} chars, max 200)")
+        if isinstance(prompt, str) and len(prompt) > MAX_PROMPT_CHARS:
+            errors.append(f"Phase {i + 1}: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_CHARS})")
+        errors.extend(_role_prompt_errors(i, phase, participants))
         if phase.get("is_output"):
             output_count += 1
 
@@ -356,4 +360,31 @@ def validate_session_template(tmpl: dict) -> list[str]:
     elif output_count > 1:
         errors.append(f"Multiple phases marked as output ({output_count}, expected 1)")
 
+    return errors
+
+
+def _role_prompt_errors(index: int, phase: dict, participants) -> list[str]:
+    """Errors for a phase's optional ``role_prompts`` map of role -> prompt.
+
+    A role prompt replaces the phase prompt for that one participant, so it
+    must name a participant of the same phase and obey the same length cap.
+    """
+    role_prompts = phase.get("role_prompts")
+    if role_prompts is None:
+        return []
+    label = f"Phase {index + 1}"
+    if not isinstance(role_prompts, dict):
+        return [f"{label}: 'role_prompts' must be an object mapping role to prompt"]
+
+    members = {p for p in participants if isinstance(p, str)} if isinstance(participants, list) else set()
+    errors = []
+    for role, text in role_prompts.items():
+        if role not in members:
+            errors.append(f"{label}: role prompt for '{role}', which is not a participant in this phase")
+        if not isinstance(text, str) or not text.strip():
+            errors.append(f"{label}: role prompt for '{role}' must be a non-empty string")
+        elif len(text) > MAX_PROMPT_CHARS:
+            errors.append(
+                f"{label}: role prompt for '{role}' too long ({len(text)} chars, max {MAX_PROMPT_CHARS})"
+            )
     return errors

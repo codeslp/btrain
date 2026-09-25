@@ -15,6 +15,9 @@
       "name": "Review",
       "participants": ["reviewer", "red_team"],
       "prompt": "Review the submission. Identify issues, suggest improvements. Be specific and evidence-based.",
+      "role_prompts": {
+        "red_team": "Try to break it: give concrete inputs, states, or interleavings that fail, each with a repro or failing test. Do not restate the review. If nothing breaks, say what you tried."
+      },
       "turn_order": "sequential"
     },
     {

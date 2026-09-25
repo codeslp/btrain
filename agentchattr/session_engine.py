@@ -285,7 +285,15 @@ class SessionEngine:
             lines.append(f"GOAL: {session['goal']}")
         lines.append(f"PHASE: {phase['name']} ({phase_idx + 1}/{total_phases})")
         lines.append(f"YOUR ROLE: {role}")
-        lines.append(f"INSTRUCTION: {phase.get('prompt', '')}")
+        # A phase may give one participant its own instruction (e.g. red_team
+        # in a review phase); every other participant gets the phase prompt.
+        instruction = phase.get("prompt", "")
+        role_prompts = phase.get("role_prompts")
+        if isinstance(role_prompts, dict):
+            role_prompt = role_prompts.get(role)
+            if isinstance(role_prompt, str) and role_prompt.strip():
+                instruction = role_prompt
+        lines.append(f"INSTRUCTION: {instruction}")
 
         # Dissent mandate for review/critique roles
         if role.lower() in _DISSENT_ROLES:
