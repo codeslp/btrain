@@ -1,12 +1,40 @@
 """Session store — persists active session runs to JSON."""
 
 import json
+import os
+import shutil
 import time
 import threading
 import logging
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    """Replace ``path`` with ``data`` as JSON through a temp file and os.replace.
+
+    A failed or interrupted write leaves the old file whole, never truncated.
+    A read-only target is refused rather than silently replaced, since
+    os.replace needs only a writable directory.
+    """
+    if path.exists() and not os.access(path, os.W_OK):
+        raise PermissionError(f"{path} is read-only")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 # Longest phase prompt or per-role prompt a template may carry.
 MAX_PROMPT_CHARS = 200
@@ -105,7 +133,13 @@ class SessionStore:
             self._templates[tid] = tmpl
             log.info("Loaded custom template: %s", tid)
         if renamed:
-            custom_path.write_text(json.dumps(custom, indent=2, ensure_ascii=False) + "\n", "utf-8")
+            try:
+                _write_json_atomic(custom_path, custom)
+            except OSError as exc:
+                # Starting matters more than persisting: the rename holds in
+                # memory and is tried again at the next load.
+                log.warning("Could not save renamed custom templates to %s (%s); "
+                            "the rename holds until restart", custom_path, exc)
 
     def get_templates(self) -> list[dict]:
         return list(self._templates.values())

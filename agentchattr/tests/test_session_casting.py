@@ -10,6 +10,7 @@ chosen by auto-cast, by hand in the launcher, or sent straight to the API.
 import asyncio
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from starlette.requests import Request
 
@@ -930,6 +932,52 @@ class BuiltinTemplateTests(AppHarness):
         names = {tid: reloaded.get_template(tid)["name"] for tid in ("code-review-custom", "code-review-custom-2", "code-review-custom-3")}
         self.assertEqual(names, {"code-review-custom": "First", "code-review-custom-2": "Second", "code-review-custom-3": "Mine"})
         self.assert_builtin_rule_holds(reloaded)
+
+    def colliding_custom_file(self, name="store"):
+        root = Path(self.tmp.name) / name
+        root.mkdir()
+        path = root / "custom_templates.json"
+        mine = {"id": "code-review", "name": "Mine", "roles": ["builder"],
+                "phases": [{"name": "Only", "participants": ["builder"], "prompt": "Go.", "is_output": True}]}
+        path.write_text(json.dumps([mine]), "utf-8")
+        return root, path
+
+    @unittest.skipIf(os.name == "posix" and os.geteuid() == 0, "root ignores file permissions")
+    def test_a_rename_that_cannot_be_saved_still_loads(self):
+        # Review round 2 follow-up: the rename rewrote custom_templates.json,
+        # and a failed write (a read-only file) raised PermissionError out of
+        # SessionStore, so the server did not start. A read-only directory
+        # blocks the temp file an atomic write needs.
+        for read_only in ("file", "directory"):
+            with self.subTest(read_only=read_only):
+                root, path = self.colliding_custom_file(read_only)
+                before = path.read_bytes()
+                target = path if read_only == "file" else root
+                os.chmod(target, 0o444 if read_only == "file" else 0o555)
+                self.addCleanup(os.chmod, target, 0o644 if read_only == "file" else 0o755)
+
+                with self.assertLogs("session_store", level="WARNING") as logs:
+                    reloaded = SessionStore(str(root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+                os.chmod(target, 0o644 if read_only == "file" else 0o755)
+
+                self.assertEqual(reloaded.get_template("code-review-custom")["name"], "Mine", "the rename holds in memory")
+                self.assert_builtin_rule_holds(reloaded)
+                self.assertEqual(path.read_bytes(), before, "a read-only target is left as it was")
+                self.assertTrue(any("could not save" in line.lower() for line in logs.output), logs.output)
+
+    def test_the_rename_is_written_atomically(self):
+        # A write cut short (a crash, a full disk) must leave the old file,
+        # never a truncated one, and no temp file behind.
+        root, path = self.colliding_custom_file()
+        before = path.read_bytes()
+
+        with mock.patch("session_store.os.replace", side_effect=OSError("disk full")), \
+                self.assertLogs("session_store", level="WARNING"):
+            reloaded = SessionStore(str(root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+
+        self.assertEqual(reloaded.get_template("code-review-custom")["name"], "Mine")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ["custom_templates.json"])
 
     def test_malformed_custom_entries_do_not_stop_the_store_loading(self):
         # A non-dict entry or a non-string id raised at load, which kept the
