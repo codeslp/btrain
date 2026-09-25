@@ -1,0 +1,242 @@
+# 021 — Jev Decision Plane Implementation Plan
+
+**Status:** Proposed, no runtime work authorized by this document
+**Spec:** [021 — Jev Decision Plane](021-jev-decision-plane.md)
+**Date:** 2026-09-24
+
+## Plan decision
+
+Build a small, shared evidence and evaluation layer, then pilot individual decision families in
+separate lanes and PRs. Keep `btrain`'s state machine and review gates deterministic. The first
+deliverable is a source-quality repair, because the [2026-09-24 corpus audit](../research/jev-btrain-experiment-results.md)
+could not support the recommended PR benchmark. The handoff linter is the first new Jev-facing
+feature, but starts as advisory. Other families remain distinct experiments with their own labels
+and promotion decisions.
+
+The repo has numbered flat specs and no `.specify/` script or template directory. This plan uses
+that established format and records the design, data model, contracts, and quality gates here.
+
+## Current integration points
+
+| Surface | Existing state | Planned change |
+| --- | --- | --- |
+| `src/brain_train/handoff/pr-comments.mjs` | Captures deduplicated JSONL comment records, not event-time PR heads | Add prospective event snapshots and provenance without rewriting old rows |
+| `src/brain_train/pr-flow.mjs` | Deterministic PR classifier plus off/shadow/feedback-only semantic seam | Preserve rules; add replayable traces and evaluate before activation |
+| `src/brain_train/system-one.mjs` | Bounded hosted System One client with timeout and response checks | Wrap with versioned family policy and fake/local backend contract when needed |
+| Handoff pre-flight in `core.mjs` | Checks required fields and placeholders | Add separate advisory semantic evidence lint after hard checks |
+| Harness traces and events | Records workflow evidence | Link decision traces by source and version; do not create a second lane-state store |
+| Spec 020 context budget | Measures and limits context | Supply a deterministic baseline for a later curation experiment |
+
+The current `BTRAIN_JEV_MODE` defaults to `off`; that remains the default. Existing `assist` may
+add high-confidence feedback but cannot manufacture clear approval. No phase enables it just by
+landing code.
+
+## Architecture and invariants
+
+```mermaid
+flowchart LR
+    SRC["Source event and exact metadata"] --> ELIG["Deterministic eligibility and policy"]
+    ELIG -->|bounded candidate| DEC["Versioned decision family"]
+    DEC --> JEV["Hosted Jev or evaluated backend"]
+    DEC --> FAKE["Fake backend for replay"]
+    JEV --> VALID["Shape and probability validation"]
+    FAKE --> VALID
+    VALID --> TRACE["Local decision trace"]
+    VALID --> ACT["Allowed deterministic action policy"]
+    ELIG --> ACT
+    ACT --> UI["Advisory or bounded assist"]
+```
+
+No model output directly mutates a lane, approval, lock, override, push, merge, or deployment.
+The policy maps a *validated* answer to a family-specific list of permitted actions. A separately
+approved feedback-only policy may treat a model finding as additional blocking evidence; it
+cannot turn a model `clear` into approval. A rejected or absent answer maps to `abstain`, and the
+existing deterministic result survives. The trace is observational; the event log remains
+canonical.
+
+### Proposed data model
+
+| Entity | Required fields | Invariant |
+| --- | --- | --- |
+| `SourceSnapshot` | repository, PR/lane, event URL/ID/surface, author, event and capture times, reviewed commit, observed head or `unknown`, formal state, source hash | Never claim a retrospectively fetched head was observed at event time |
+| `LabeledCase` | source reference, family, label, two annotators, adjudication, template/PR group, split, frozen manifest | No group crosses calibration and test |
+| `DecisionFamily` | ID, question version, input schema, privacy class, allowed actions, timeout/call budget, fallback, thresholds | Version or threshold change creates a new comparable run |
+| `DecisionAttempt` | family/source/input hashes, provider and model, question version, baseline, valid answers, probabilities, failure class, latency, applied action, later outcome | Failure has no prediction; trace omits raw private input and credentials |
+| `PromotionRecord` | benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to one family, model pin, and repository |
+
+Source content may be read at its source for an authorized run. The shared trace stores only
+source references, hashes, bounded metadata, and decision output. Access and retention follow
+the source repository's policy. A hash is for integrity and correlation, not anonymization.
+
+### Decision contract
+
+The family gateway accepts `{family, questionVersion, sourceRefs, inputHash, privacyClass,
+boundedState, questions, baseline}` and returns one of:
+
+- `decision`: schema-valid typed answers with probability vectors, model pin, latency, and trace ID;
+- `abstain`: valid response without a supported or sufficiently strong action;
+- `failure`: timeout, authentication, rate limit, provider error, malformed response, or policy
+  denial, with no classification prediction.
+
+The gateway applies limits before calling a provider, validates the full answer shape, and records
+all outcomes. Each family owns a deterministic input builder and action policy. This is a proposed
+internal contract; exact CLI syntax and file layout are chosen in each workstream PR. Versioned
+fixtures must exercise the contract through a fake backend before a live backend is used.
+
+## Workstreams and order
+
+Each workstream is a separately reviewable implementation slice. The table names the first
+artifact, not a promise to activate a model. Dependencies are explicit so an unready family can
+remain off without blocking independent research.
+
+| WS | First artifact | Depends on | Initial mode | Proceed criterion |
+| --- | --- | --- | --- | --- |
+| 0 Authority and data policy | Invariant tests, family registry, privacy and retention decision | Existing specs 002/005/006/014/015 | Off | No lane or PR gate can be crossed by fake model output |
+| 1 PR evidence capture | Append-only snapshots and labeling manifest with source IDs and event-time head status | WS0 | No model | Historical unknowns excluded; capture/replay preserves exact provenance |
+| 2 Decision trace and replay | Fake backend, versioned question sets, per-family metrics and failure ledger | WS0 | Offline | Same frozen manifest reproduces counts and metrics byte for byte |
+| 3 PR signal evaluation | Existing seam replay plus expanded real labeled set | WS1–2 | Offline, then shadow if gated | Spec 021 PR offline gate passes before two-week live shadow |
+| 4 Handoff evidence lint | Packet/diff/verification input builder and warnings | WS0, WS2 | Advisory | Beats placeholder baseline on frozen real packets; misses and reviewer time reported |
+| 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Advisory | No mandatory check removed in adversarial and outage cases |
+| 6 Repository-rule and review-risk checks | Rule-to-question registry and focused diff scoring | WS2 | Advisory | Every finding links to a versioned rule and supplied evidence; reviewer confirms utility |
+| 7 Context curation | Shadow keep/full/reference decisions over bounded dispatch artifacts | WS2, Spec 020 metrics | Shadow | Measured token reduction with no lost pinned item or task-success regression |
+| 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Suggestion | No ineligible selection; real supersession set beats baseline |
+| 9 Supervisor signals | Bounded observer trace and deterministic response policy | Durable supervisor prerequisites | Shadow | Stuck/off-track signals outperform simple timers without false state changes |
+| 10 Semantic history search | Read-only locally filtered shortlist and typed rerank | Source access policy, WS2 | Read-only | Better relevant-event retrieval at a measured latency/cost budget |
+| 11 Provider comparison | Same frozen suites on pinned Jev and eligible alternatives | WS2 plus family datasets | Offline | Family-specific quality, calibration, cost, and failure comparison |
+
+### WS0–2: evidence foundation
+
+1. Extract the hard authority boundary into integration tests that inject `clear`, `feedback`,
+   malformed, timeout, and contradictory fake answers at every family seam. The tests assert that
+   only the explicitly allowed advisory/additive action is possible.
+2. Extend future PR capture with an event-time head snapshot when btrain witnesses the event.
+   Store `unknown` for backfills; do not retroactively label them current-head. Preserve the
+   existing JSONL log and append new metadata or a linked evidence record. Record eventual PR/lane
+   disposition separately from the original event.
+3. Provide an annotation export that groups duplicates by PR and template, keeps raw text in the
+   source repo, and requires independent labels and adjudication. Freeze a manifest before prompt
+   or threshold tuning. Keep synthetic controls outside the real-history quota.
+4. Build one metrics runner over the existing deterministic baseline and a fake decision provider.
+   It reports wrong predictions and provider failures in separate denominators, including class
+   support, confusion matrix, coverage, calibration, latency, and cost.
+5. Add local traces with family/question versions, model pin, input hash, baseline, decision,
+   action, and later outcome. Set a retention and access policy before live collection.
+
+WS1 has no hosted calls and can start before the data-policy decision. WS2 can use synthetic or
+approved public cases until the private-data policy is settled.
+
+### WS3–4: first two measured seams
+
+**PR signals.** Reuse `classifyPrReviewStateWithSemantic`; keep its deterministic candidate
+selection and feedback-only assist policy. Reconcile candidate metadata with the new source
+snapshot. Freeze 200 independently labeled, diverse, provenance-complete real cases with at
+least 30 per class. Run exact existing baseline and pinned Jev on the same cases. Only if all
+Spec 021 PR gates pass, run two weeks of shadow with no state change. A later assist proposal must
+name its threshold, feedback-only action, false-feedback cost, and rollback trigger in a separate
+promotion record. Never use semantic `clear` for approval.
+
+**Handoff lint.** Ask narrow questions: does the packet match the changed surface, do verification
+claims match supplied output, are known failures disclosed, and are review asks actionable? Use
+the pilot's negative-path miss as a required control. Show warnings before handoff and to the
+reviewer; do not block on a model score. Freeze real packets paired with reviewer feedback before
+any automatic repair request. Compare against the current field/placeholder gate and report
+warning precision, defect recall, and reviewer time. The generative peer reviewer diagnoses any
+warning that needs code understanding.
+
+### WS5–8: additive decisions
+
+- **Verification planner:** deterministic rules first identify mandatory checks from paths and
+  contracts. A model may add catalog checks. Test negative paths, cross-component wiring,
+  migrations, security boundaries, and formal-impact cases. Out-of-catalog coverage produces
+  abstention, never a forced check choice.
+- **Rule and review-risk checks:** compile only explicit repository rules into versioned,
+  inspectable questions. Scope to a focused diff; route candidate findings to a reviewer. A risk
+  score prioritizes review depth but cannot make a low-risk change skip required review.
+- **Context curation:** shadow the selected content against Spec 020's measured baseline. Pin
+  instructions, state, locks, unresolved findings, and recent failures by code. Start by choosing
+  full/reference/omit for low-risk artifacts; retain source pointers and allow immediate fallback.
+- **Routing:** filter by authorization, availability, locks, role separation, and capability
+  *before* ranking. Memory invalidation compares versioned claims to new events and emits an
+  advisory stale marker; it never rewrites canonical history.
+
+Promote one action at a time only after its own frozen data and operator approval. In particular,
+no family can inherit the PR pilot's threshold or evidence.
+
+### WS9–11: high-risk or optional expansion
+
+The semantic observer waits for a durable, lane-aware supervisor with event cursor, retry,
+acknowledgement, and restart recovery. It reads bounded evidence, emits progress/stuck/off-track
+signals, and a deterministic policy may only choose an already allowed nudge or escalation after
+hysteresis. It never mutates state directly. Semantic history search is a read-only command over
+locally authorized and prefiltered records; no network decision belongs in the hot path of
+ordinary status reads. Provider comparison uses frozen family suites; do not assume a small local
+model is equivalent to Jev or that one backend wins all families.
+
+### Product-owned companion work
+
+The btrain gateway must not become a shared pool of ai_sales or mech_ai customer data. If those
+teams pursue Jev, ai_sales should start from its existing scoring evaluation and then test
+retrieval reranking and versioned coaching rubrics; mech_ai should test evidence sufficiency,
+citation entailment, passage safety, ingest metadata, and query class on its existing golden
+retrieval set. Each product owns its privacy, tenant/equipment eligibility, labels, baselines,
+cost budget, and promotion record. Share only contract patterns and evaluation tooling where
+useful, with no cross-repository corpus transfer implied.
+
+## Evaluation and promotion matrix
+
+| Stage | Required evidence | Allowed effect | Stop or rollback condition |
+| --- | --- | --- | --- |
+| Data collection | Source provenance, privacy class, independent label plan | None | Missing event-time head or unauthorized text transfer |
+| Offline | Frozen cases, deterministic baseline, negative controls, pinned versions | None | Family gate fails, leakage between splits, or unclassified provider errors |
+| Shadow | Offline gate passed, privacy approval, local traces, explicit duration | Trace and display only | Any privacy breach, missing trace, or unexplained provider failure trend |
+| Advisory | Human-readable warning with source and uncertainty | Human may act | Warnings are misleading or reviewer load exceeds measured benefit |
+| Assist | Signed family promotion record and rollback path | Only listed additive/reversible action | Harmful error, eligibility violation, missed mandatory check, or policy drift |
+
+For unmeasured families, WS2 preregisters a minimum dataset, class support, error cost, and target
+before the test split is examined. Comparisons include option-order changes, equivalent wording,
+stale evidence, irrelevant text, no-valid-option cases, and injected failures. Report confidence
+calibration only where the label volume supports it. A nominal confidence value is not a reason
+to shorten the evaluation.
+
+## Quality and formal gates
+
+- Run focused component and composition tests for each new seam. Assert fallback preserves the
+  exact previous state on timeout, malformed answer, missing key, or policy denial.
+- For any change touching an existing modeled transition, follow Spec 014 and the owning spec:
+  declare semantic impact, update pinned prose/model first where required, then run focused TLC
+  and trace validation. This plan itself adds no lane transition.
+- Check that source grouping prevents the same PR/template from appearing across calibration and
+  test. Publish excluded-row counts and reasons.
+- Make privacy, authorization, and source-repository boundaries explicit before any live hosted
+  request. Never log credentials or copy ai_sales comment bodies into btrain.
+- Keep the optional decision plane off by default and test a one-command family disable path.
+
+## Risks and tradeoffs
+
+| Risk | Design response |
+| --- | --- |
+| Small pilot looks like production proof | Label it exploratory; require a new frozen real-history benchmark |
+| Backfilled comments appear current | Record event-time head or `unknown`; exclude unknown from exact-head labels |
+| Model confidence is wrong | Measure harmful errors and calibration; abstain and keep deterministic fallback |
+| Hosted data transfer exceeds policy | Per-family privacy class and explicit approval before private requests |
+| Too many calls or long waits | Family budgets and bounded inputs; fail closed to abstention |
+| Advisory noise slows reviewers | Measure warning precision and time saved; switch off per family |
+| Semantic observation steers workflow | Separate signal from deterministic action policy; stage behind durable supervisor |
+| Local backend is mistaken for Jev | Same frozen suite and family-specific promotion; Kev-0.6B remains excluded |
+
+## Context receipt
+
+**Tier:** deep — this is a cross-subsystem spec and architecture plan.
+**Questions:** Which Jev seams were previously proposed, which were actually measured, and which
+workflow and data boundaries must remain authoritative?
+**Primary sources:** [Jev opportunity assessment](../research/jev-typesafe-repo-assessment.md),
+[pilot and corpus audit](../research/jev-btrain-experiment-results.md),
+[Spec 002](002-multi-lane-handoffs.md), [Spec 014](014-specula-formal-verification-pilot.md),
+[Spec 020](020-token-spend-and-decomposition.md), and current `pr-flow.mjs` / `system-one.mjs`.
+The repo-local Unblocked deep search also returned ai_sales tenant and data-isolation decisions;
+those are adjacent product constraints, not btrain authorization for cross-repo data use.
+**Constraints:** exact workflow authority, reviewer independence, source privacy, and separate
+failure/quality accounting.
+**Gaps:** no independent real PR labels, no contemporaneous historical head snapshots, no Jev
+evaluation for the eight unmeasured families, and no approved private-text hosted data policy.
+**Durable writeback:** this spec and plan.
