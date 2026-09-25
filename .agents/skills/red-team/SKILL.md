@@ -15,6 +15,7 @@ In an agentchattr code-review session, the red team speaks after the reviewer in
 
 - Do not red-team your own work. agentchattr refuses to start a session that casts one agent, or one person, as both `builder` and `red_team`, in any template that has both roles. It cannot recognize the same two jobs under other role names, so check the cast yourself. In btrain, do not red-team a lane that you own.
 - Do not restate the review. If the reviewer already found an issue, skip it, or add the repro that the review did not have.
+- Work in a throwaway worktree, never in the author's tree: `git worktree add --detach "${TMPDIR:-/tmp}/red-team-<lane>" <lane-head-sha>`. Hand over each repro as a file or a patch. Never write untracked files into the author's tree.
 - Do not edit the author's locked files. Put each repro in a new test file outside the lane's locks, or put the exact command and input in the review summary.
 - Do not keep a repro under `.btrain/`. That directory is gitignored, so the writer and CI cannot run what is in it.
 
@@ -29,9 +30,9 @@ In an agentchattr code-review session, the red team speaks after the reviewer in
    - **Save, reload, restart.** Persist the state, restart the process, and load it again. Check that the state survives, that nothing fires twice, and that work resumes at the right step.
 3. Run each attack. Record the input, the expected result, the actual result, and the command.
 4. Turn each failure into a repro that fails now:
-   - Best: a test in a new file outside the lane's locks, for example `test/<area>-red-team.test.mjs` or `agentchattr/tests/test_<area>_red_team.py`. Run it and show the failure.
+   - Best: a test in a new file, written and run in your throwaway worktree, at a path outside the lane's locks, for example `test/<area>-red-team.test.mjs` or `agentchattr/tests/test_<area>_red_team.py`. Show the failure. Hand it over as the file, or as a patch that you make there with `git add -N <file>` and `git diff`.
    - Otherwise: the exact command, input, and output in the review summary, so that the writer can turn it into a test.
-5. Give the verdict.
+5. Give the verdict. When the writer has every repro, remove the worktree with `git worktree remove --force "${TMPDIR:-/tmp}/red-team-<lane>"`.
 
 ## If something breaks
 

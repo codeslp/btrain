@@ -22,12 +22,12 @@ Show that the tests fail when the code is wrong. Change one thing at a time in t
 2. **Make the throwaway worktree.**
 
    ```bash
-   git worktree add --detach "$TMPDIR/mut-<lane>" <lane-head-sha>
+   git worktree add --detach "${TMPDIR:-/tmp}/mut-<lane>" <lane-head-sha>
    ```
 
-   Install its dependencies there, for example with `npm ci`, or in a venv for Python. Do not run an installer through a symlinked `node_modules`. When you finish, remove the worktree with `git worktree remove --force "$TMPDIR/mut-<lane>"`.
+   Install its dependencies there, for example with `npm ci`, or in a venv for Python. Do not run an installer through a symlinked `node_modules`. When you finish, remove the worktree with `git worktree remove --force "${TMPDIR:-/tmp}/mut-<lane>"`.
 
-   If you may not add a worktree, for example because a lane rule keeps you out of the shared `.git`, extract a snapshot instead: `git archive <lane-head-sha> | tar -x -C "$TMPDIR/mut-<lane>"`. A snapshot has no git, so keep a copy of each original file to restore it.
+   If you may not add a worktree, for example because a lane rule keeps you out of the shared `.git`, extract a snapshot instead: `mkdir -p "${TMPDIR:-/tmp}/mut-<lane>" && git archive <lane-head-sha> | tar -x -C "${TMPDIR:-/tmp}/mut-<lane>"`. A snapshot has no git, so keep a copy of each original file to restore it.
 3. **Record the baseline.** Find every suite that imports each target, not only the sibling test, for example with `rg -l "<module name>" test/`. Run them. Record the command, the pass count, and the time. That command is the kill check for every mutant.
 4. **Write the mutants.** Before you run any, write 15 to 30 numbered mutants, M1 to Mn. Give each one a location, the original code, and the change. Use these operators:
    - Negate a guard: `if (!x)` to `if (x)`, or to `if (false)`.
@@ -37,7 +37,7 @@ Show that the tests fail when the code is wrong. Change one thing at a time in t
    - Drop a config or environment fallback.
    - Swallow an error: a `catch` that returns a default, or a removed `throw`.
    - Reverse a sort or a comparison.
-5. **Run each mutant alone.** Apply it, run the baseline command, and restore the file with `git checkout -- <file>` in the throwaway worktree. Check that `git status` is clean before the next mutant.
+5. **Run each mutant alone.** Apply it, run the baseline command, and restore the file with `git checkout -- <file>`, in the throwaway worktree only: in the author's tree that command destroys their uncommitted edits. Check that `git status` is clean before the next mutant.
    - Keep each mutant as an exact triple: the file, the original text, and the replacement. Refuse a mutant whose original text does not match exactly once, because an ambiguous match changes the wrong line.
    - A fail-fast run (for example `pytest -x`) is enough to mark a kill. The revert check in step 7 needs the full run.
 
@@ -55,7 +55,15 @@ Show that the tests fail when the code is wrong. Change one thing at a time in t
    // M22. The only "no reading" test used a missing directory, which returns two branches earlier.
    ```
 
-   In Python, use `# M22. ...`. Revert-check each new test: apply the mutant again, run the suites, and confirm that only the new test fails. Then restore the source.
+   In Python, use `# M22. ...`.
+
+   Commit the pinning tests before you revert-check them. Then make a throwaway worktree at that commit (or a snapshot, as in step 2), never your own tree:
+
+   ```bash
+   git worktree add --detach "${TMPDIR:-/tmp}/revert-<lane>" <pin-sha>
+   ```
+
+   There, apply each survivor's mutant again, run the suites, and confirm that only its new test fails. Then remove the worktree. Your own tree never holds a mutant, so it has nothing to restore.
 8. **Record the result** in the handoff with `--verification`, for example:
 
    ```bash

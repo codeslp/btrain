@@ -87,4 +87,40 @@ describe("bundled review skills", () => {
 
     assert.match(text, /\/\/ M\d+\. /)
   })
+
+  // Review P2-3: a mutant re-applied, a file restored or a repro written in the
+  // author's tree destroys or buries their uncommitted work. Both skills must
+  // send that work to a throwaway worktree, and their commands must run as written.
+  describe("keeps mutants and repros out of the author's tree", () => {
+    const read = (name) => fs.readFile(path.resolve(SURFACES[0], name, "SKILL.md"), "utf8")
+
+    it("mutation-round revert-checks in a throwaway worktree at the pin commit", async () => {
+      assert.match(await read("mutation-round"), /git worktree add --detach "\$\{TMPDIR:-\/tmp\}\/[^"]+" <pin-sha>/)
+    })
+
+    it("mutation-round scopes every checkout-restore to the throwaway worktree", async () => {
+      const lines = (await read("mutation-round")).split("\n").filter((line) => line.includes("git checkout --"))
+      assert.ok(lines.length > 0)
+      for (const line of lines) {
+        assert.match(line, /throwaway worktree/, line)
+        assert.match(line, /author's tree/, line)
+      }
+    })
+
+    it("red-team attacks from a throwaway worktree and hands over a file or a patch", async () => {
+      const text = await read("red-team")
+      assert.match(text, /git worktree add --detach "\$\{TMPDIR:-\/tmp\}\/[^"]+" <lane-head-sha>/)
+      assert.match(text, /Never write untracked files into the author's tree/)
+    })
+
+    for (const name of REVIEW_SKILLS) {
+      it(`${name} commands run as written`, async () => {
+        const text = await read(name)
+        assert.doesNotMatch(text, /\$TMPDIR/, "use ${TMPDIR:-/tmp}; TMPDIR is unset on many Linux hosts")
+        for (const [, dir] of text.matchAll(/tar -x -C "([^"]+)"/g)) {
+          assert.ok(text.includes(`mkdir -p "${dir}"`), `tar -x -C "${dir}" needs mkdir -p "${dir}" first`)
+        }
+      })
+    }
+  })
 })
