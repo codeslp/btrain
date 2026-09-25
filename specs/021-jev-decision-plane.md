@@ -123,9 +123,11 @@ MUST be `skipped` before a provider call, not counted as a model failure or abst
 
 ### FR-5 — Traceability and privacy
 
-Each attempted decision MUST produce a local trace with family and question versions, source
-references, input hash, provider/model identifier, outcome, probabilities when valid, latency,
-failure class, baseline result, action actually taken, and later human outcome when known. No
+Each candidate MUST produce a local trace with family and question versions, source references,
+input hash, provider/model identifier when called, gateway outcome (`skipped`, `decision`,
+`abstain`, or `failure`), applicable skip/abstention/failure reason, probabilities when valid,
+latency when called, failure class, baseline result, action actually taken, and later human
+outcome when known. No
 credential or unrelated private text may enter a trace. A hosted call with private source content
 requires an explicit data-policy approval and an enabled family-specific configuration.
 

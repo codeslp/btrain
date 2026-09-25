@@ -28,6 +28,8 @@ quality checks, not claims that the runtime work is complete.
 - [x] Promotion records carry family, repository, pinned model, and question version.
 - [x] The early G4/G6 advisory pilot has explicit opt-in, privacy, trace, human-review, and
   no-state-change conditions before its quality gate.
+- [x] Every candidate trace records a gateway outcome and applicable reason, including skips
+  before a provider call; WS5 stays offline until G5 permits shadow, advisory, or assist.
 
 ## Requirement-to-plan coverage
 

@@ -62,7 +62,7 @@ observational; the event log remains canonical.
 | `SourceSnapshot` | repository, PR/lane, event URL/ID/surface, author, event and capture times, reviewed commit, observed head or `unknown`, formal state, source hash | Never claim a retrospectively fetched head was observed at event time |
 | `LabeledCase` | source reference, family, label, two annotators, adjudication, template/PR group, split, frozen manifest | Each group occurs in exactly one of train, calibration, or test |
 | `DecisionFamily` | ID, question version, input schema, privacy class, allowed actions, timeout/call budget, fallback, thresholds | Version or threshold change creates a new comparable run |
-| `DecisionAttempt` | family/source/input hashes, provider and model, question version, baseline, valid answers, probabilities, failure class, latency, applied action, later outcome | Failure has no prediction; trace omits raw private input and credentials |
+| `DecisionAttempt` | family/source/input hashes, provider and model when called, question version, baseline, gateway outcome (`skipped`, `decision`, `abstain`, or `failure`), applicable skip/abstention/failure reason, valid answers, probabilities, failure class, latency, applied action, later human outcome | Every candidate records its gateway outcome; failure has no prediction; trace omits raw private input and credentials |
 | `PromotionRecord` | family ID, repository, pinned model ID, question version, benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to the recorded family, model pin, question version, and repository |
 
 Source content may be read at its source for an authorized run. The shared trace stores only
@@ -105,7 +105,7 @@ remain off without blocking independent research.
 | 2 Decision trace and replay | Fake backend, versioned question sets, per-family metrics and failure ledger | WS0 | Offline | Same frozen manifest reproduces counts and metrics byte for byte |
 | 3 PR signal evaluation | Existing seam replay plus expanded real labeled set | WS1–2 | Offline, then shadow if gated | Spec 021 PR offline gate passes before two-week live shadow |
 | 4 Handoff evidence lint | Packet/diff/verification input builder and warnings | WS0, WS2 | Advisory | G4 before broad advisory use |
-| 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Advisory | G5 before assist |
+| 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Offline, then shadow after G5 | G5 before any live advisory or assist; shadow requires the offline gate and privacy approval |
 | 6 Repository-rule, end-of-turn, and review-risk checks | Rule-to-question registry and focused diff/turn scoring | WS2 | Advisory | G6 before broad advisory use |
 | 7 Context curation and later transcript compaction selection | Shadow keep/full/reference decisions over bounded artifacts | WS2, Spec 020 metrics | Shadow | G7 before any omission or compaction |
 | 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Suggestion | G8 before assist |
