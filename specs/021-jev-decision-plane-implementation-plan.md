@@ -50,19 +50,20 @@ flowchart LR
 No model output directly mutates a lane, approval, lock, override, push, merge, or deployment.
 The policy maps a *validated* answer to a family-specific list of permitted actions. A separately
 approved feedback-only policy may treat a model finding as additional blocking evidence; it
-cannot turn a model `clear` into approval. A rejected or absent answer maps to `abstain`, and the
-existing deterministic result survives. The trace is observational; the event log remains
-canonical.
+cannot turn a model `clear` into approval. A candidate rejected before a call is `skipped`; an
+attempted call with no valid answer is a `failure`. Only a valid answer without a permitted action
+may `abstain`. In all three cases the existing deterministic result survives. The trace is
+observational; the event log remains canonical.
 
 ### Proposed data model
 
 | Entity | Required fields | Invariant |
 | --- | --- | --- |
 | `SourceSnapshot` | repository, PR/lane, event URL/ID/surface, author, event and capture times, reviewed commit, observed head or `unknown`, formal state, source hash | Never claim a retrospectively fetched head was observed at event time |
-| `LabeledCase` | source reference, family, label, two annotators, adjudication, template/PR group, split, frozen manifest | No group crosses calibration and test |
+| `LabeledCase` | source reference, family, label, two annotators, adjudication, template/PR group, split, frozen manifest | Each group occurs in exactly one of train, calibration, or test |
 | `DecisionFamily` | ID, question version, input schema, privacy class, allowed actions, timeout/call budget, fallback, thresholds | Version or threshold change creates a new comparable run |
 | `DecisionAttempt` | family/source/input hashes, provider and model, question version, baseline, valid answers, probabilities, failure class, latency, applied action, later outcome | Failure has no prediction; trace omits raw private input and credentials |
-| `PromotionRecord` | benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to one family, model pin, and repository |
+| `PromotionRecord` | family ID, repository, pinned model ID, question version, benchmark ID, dataset hash, metrics, privacy approval, allowed action, threshold, approver, rollback trigger | Applies only to the recorded family, model pin, question version, and repository |
 
 Source content may be read at its source for an authorized run. The shared trace stores only
 source references, hashes, bounded metadata, and decision output. Access and retention follow
@@ -73,15 +74,19 @@ the source repository's policy. A hash is for integrity and correlation, not ano
 The family gateway accepts `{family, questionVersion, sourceRefs, inputHash, privacyClass,
 boundedState, questions, baseline}` and returns one of:
 
+- `skipped`: deterministic eligibility or privacy policy prevents a call; record the reason and
+  baseline, with no model prediction or attempted-call failure;
 - `decision`: schema-valid typed answers with probability vectors, model pin, latency, and trace ID;
 - `abstain`: schema-valid response without a sufficiently strong permitted action; record its
   valid answer and abstention reason, but apply no action;
 - `failure`: timeout, authentication, rate limit, provider error, malformed or out-of-catalog
-  answer, or policy denial, with a reason code and no classification prediction.
+  answer, or absent response after an attempted call, with a reason code and no prediction.
 
 An invalid answer shape is always `failure/invalid-answer`, never `abstain`; it increments the
 response-shape failure count and reduces valid-prediction coverage. A valid `uncertain` class or
 low-confidence choice can yield `abstain` from action, and stays in the valid-answer denominator.
+Report skipped candidates outside the attempted-call denominator, and count failures separately
+from valid-answer abstentions within that denominator.
 The gateway applies limits before calling a provider, validates the full answer shape, and records
 all outcomes. Each family owns a deterministic input builder and action policy. This is a proposed
 internal contract; exact CLI syntax and file layout are chosen in each workstream PR. Versioned
@@ -112,9 +117,9 @@ remain off without blocking independent research.
 
 These are *prospective acceptance targets*, not results from the pilot. Each benchmark is frozen
 before question or threshold tuning; source groups stay in one split, two labelers adjudicate
-disagreements, and synthetic/adversarial controls are reported separately. A scoped pilot may
-collect evidence before a gate passes, but its output stays clearly advisory or shadow. The
-promotion owner may tighten these targets in a versioned record, never silently lower them after
+disagreements, and synthetic/adversarial controls are reported separately. Only G4/G6 may
+collect live labels through the pre-gate, opt-in advisory pilot; their output stays nonblocking.
+The promotion owner may tighten these targets in a versioned record, never lower them after
 seeing the test split.
 
 | Gate | Minimum frozen evidence and comparator | Proceed threshold |
@@ -219,7 +224,8 @@ useful, with no cross-repository corpus transfer implied.
 
 | Stage | Required evidence | Allowed effect | Stop or rollback condition |
 | --- | --- | --- | --- |
-| Data collection | Source provenance, privacy class, independent label plan | None | Missing event-time head or unauthorized text transfer |
+| Data collection | Source provenance, privacy class, independent label plan | None | Treating an unknown event-time head as current, or unauthorized text transfer |
+| Opt-in advisory pilot, G4/G6 only | Source-specific privacy approval, hard-boundary tests, trace policy, operator/cohort opt-in, human review of every warning | Nonblocking warning to opted-in humans for label gathering | Any state change, unreviewed warning, privacy breach, or missing trace |
 | Offline | Frozen cases, deterministic baseline, negative controls, pinned versions | None | Family gate fails, leakage between splits, or unclassified provider errors |
 | Shadow | Offline gate passed, privacy approval, local traces, explicit duration | Trace and display only | Any privacy breach, missing trace, or unexplained provider failure trend |
 | Advisory | Human-readable warning with source and uncertainty | Human may act | Warnings are misleading or reviewer load exceeds measured benefit |
@@ -252,7 +258,7 @@ to shorten the evaluation.
 | Backfilled comments appear current | Record event-time head or `unknown`; exclude unknown from exact-head labels |
 | Model confidence is wrong | Measure harmful errors and calibration; abstain and keep deterministic fallback |
 | Hosted data transfer exceeds policy | Per-family privacy class and explicit approval before private requests |
-| Too many calls or long waits | Family budgets and bounded inputs; fail closed to abstention |
+| Too many calls or long waits | Family budgets and bounded inputs; classify attempted-call failure and take no action |
 | Advisory noise slows reviewers | Measure warning precision and time saved; switch off per family |
 | Semantic observation steers workflow | Separate signal from deterministic action policy; stage behind durable supervisor |
 | Local backend is mistaken for Jev | Same frozen suite and family-specific promotion; Kev-0.6B remains excluded |

@@ -22,6 +22,12 @@ quality checks, not claims that the runtime work is complete.
   not claim to generate transcript summaries.
 - [x] G4–G10 name a dataset, comparator, and measurable proceed threshold, with separate
   controls for mandatory evidence, eligibility, citations, and authorization.
+- [x] `skipped`, `failure`, and valid-answer `abstain` have nonoverlapping meanings and
+  denominators; an absent response is never a valid abstention.
+- [x] Source groups cannot cross any pair of train, calibration, and test splits.
+- [x] Promotion records carry family, repository, pinned model, and question version.
+- [x] The early G4/G6 advisory pilot has explicit opt-in, privacy, trace, human-review, and
+  no-state-change conditions before its quality gate.
 
 ## Requirement-to-plan coverage
 
@@ -36,7 +42,7 @@ quality checks, not claims that the runtime work is complete.
 | FR-7 handoff and rule findings | WS4 and WS6, including end-of-turn checks | Is every warning tied to supplied evidence and human review? |
 | FR-8 additive guidance | WS5 and WS8 | Can a score remove a required check or rank an ineligible actor? |
 | FR-9 context, memory, supervisor, search | WS7–10, including later transcript selection | Are pinned context and canonical state protected? |
-| FR-10 promotion and rollback | Evaluation matrix, provider comparison | Is approval scoped to family, model, repository, and action? |
+| FR-10 promotion and rollback | Evaluation matrix, provider comparison | Is approval scoped to family, model, repository, and action? Can a pre-gate G4/G6 pilot only show nonblocking warnings to opted-in humans? |
 
 ## Research opportunity coverage
 
