@@ -112,8 +112,10 @@ and cannot count as correct `uncertain` cases. Synthetic controls form a separat
 
 Each decision family MUST declare a closed question schema, bounded inputs, eligible action set,
 privacy class, version, time and call budget, and deterministic fallback. An out-of-catalog or
-malformed answer MUST abstain. Scores and probabilities are evidence for thresholding, not proof
-of correctness. Model text MUST NOT be treated as an executable instruction.
+malformed answer MUST be a `failure` with reason `invalid-answer` and no prediction. Only a
+schema-valid answer that has no sufficiently strong permitted action may `abstain`. Scores and
+probabilities are evidence for thresholding, not proof of correctness. Model text MUST NOT be
+treated as an executable instruction.
 
 ### FR-5 — Traceability and privacy
 

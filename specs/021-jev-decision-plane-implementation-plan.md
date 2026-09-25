@@ -74,10 +74,14 @@ The family gateway accepts `{family, questionVersion, sourceRefs, inputHash, pri
 boundedState, questions, baseline}` and returns one of:
 
 - `decision`: schema-valid typed answers with probability vectors, model pin, latency, and trace ID;
-- `abstain`: valid response without a supported or sufficiently strong action;
-- `failure`: timeout, authentication, rate limit, provider error, malformed response, or policy
-  denial, with no classification prediction.
+- `abstain`: schema-valid response without a sufficiently strong permitted action; record its
+  valid answer and abstention reason, but apply no action;
+- `failure`: timeout, authentication, rate limit, provider error, malformed or out-of-catalog
+  answer, or policy denial, with a reason code and no classification prediction.
 
+An invalid answer shape is always `failure/invalid-answer`, never `abstain`; it increments the
+response-shape failure count and reduces valid-prediction coverage. A valid `uncertain` class or
+low-confidence choice can yield `abstain` from action, and stays in the valid-answer denominator.
 The gateway applies limits before calling a provider, validates the full answer shape, and records
 all outcomes. Each family owns a deterministic input builder and action policy. This is a proposed
 internal contract; exact CLI syntax and file layout are chosen in each workstream PR. Versioned

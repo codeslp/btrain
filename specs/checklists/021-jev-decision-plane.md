@@ -30,7 +30,7 @@ quality checks, not claims that the runtime work is complete.
 | FR-1 deterministic authority | Architecture, WS0, quality/formal gates | Can fake model output cross any state or approval gate? |
 | FR-2 source evidence and labels | Data model, WS1 | Are backfilled heads marked unknown and split groups preserved? |
 | FR-3 reproducible evaluation | WS2–3, evaluation matrix | Are failures excluded from prediction metrics and separately counted? |
-| FR-4 bounded decisions | Decision contract, WS0–2 | Does every family have schema, budget, action list, and abstention? |
+| FR-4 bounded decisions | Decision contract, WS0–2 | Does every family have schema, budget, action list, and abstention? Are malformed and out-of-catalog answers failures without predictions? |
 | FR-5 traceability and privacy | Data model, WS2, quality gates | Can an outcome be audited without leaking private text? |
 | FR-6 PR signals | WS3 | Can semantic clear ever satisfy a required review? |
 | FR-7 handoff and rule findings | WS4 and WS6, including end-of-turn checks | Is every warning tied to supplied evidence and human review? |
