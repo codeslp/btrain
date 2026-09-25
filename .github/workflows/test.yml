@@ -45,7 +45,7 @@ jobs:
           AST_GREP_URL: https://github.com/ast-grep/ast-grep/releases/download/0.45.3/app-x86_64-unknown-linux-gnu.zip
           AST_GREP_SHA256: f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8
         run: |
-          curl --fail --location --silent --show-error "$AST_GREP_URL" --output "$RUNNER_TEMP/ast-grep.zip"
+          curl --fail --location --silent --show-error --retry 3 "$AST_GREP_URL" --output "$RUNNER_TEMP/ast-grep.zip"
           echo "$AST_GREP_SHA256  $RUNNER_TEMP/ast-grep.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/ast-grep.zip" -d "$RUNNER_TEMP/ast-grep"
           chmod +x "$RUNNER_TEMP/ast-grep/ast-grep"
@@ -57,11 +57,15 @@ jobs:
         run: npm ci
 
       - name: Run the test suite
-        # btrain infers the current agent from any environment value that
-        # contains claude, codex, gemini or opus. On a pull request GitHub puts
+        # Workaround, not a fix: btrain infers the current agent from any
+        # environment value that contains claude, codex, gemini or opus
+        # (collectRuntimeAgentHints in core.mjs). On a pull request GitHub puts
         # the head branch (claude/..., codex/...) and the actor in the
         # environment, which pins an agent in tests that expect none, such as
-        # test/startup.test.mjs "falls back to shared active-lane focus".
+        # test/startup.test.mjs "falls back to shared active-lane focus". The
+        # same substring scan misdetects real sessions (the default macOS PATH
+        # contains codex.system). Remove this unset once detection reads only
+        # the markers agent tools set and that test passes its env explicitly.
         run: |
           unset GITHUB_HEAD_REF GITHUB_ACTOR GITHUB_TRIGGERING_ACTOR
           npm test
@@ -76,7 +80,11 @@ jobs:
         # the owner makes this step blocking, a failure shows on the step
         # without failing the job.
         continue-on-error: true
-        run: npm run test:formal:witnesses
+        run: |
+          npm run test:formal:witnesses || {
+            echo "::warning title=Formal witnesses (advisory)::the deterministic formal witnesses failed; see this step's log"
+            exit 1
+          }
 
   python:
     name: Python 3.12
