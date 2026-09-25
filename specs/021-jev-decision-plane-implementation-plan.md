@@ -107,10 +107,10 @@ remain off without blocking independent research.
 | 4 Handoff evidence lint | Packet/diff/verification input builder and warnings | WS0, WS2 | Advisory | G4 before broad advisory use |
 | 5 Verification and risk planning | Closed check catalog and additive suggestions | WS2 | Offline, then shadow after G5 | G5 before any live advisory or assist; shadow requires the offline gate and privacy approval |
 | 6 Repository-rule, end-of-turn, and review-risk checks | Rule-to-question registry and focused diff/turn scoring | WS2 | Advisory | G6 before broad advisory use |
-| 7 Context curation and later transcript compaction selection | Shadow keep/full/reference decisions over bounded artifacts | WS2, Spec 020 metrics | Shadow | G7 before any omission or compaction |
-| 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Suggestion | G8 before assist |
-| 9 Supervisor signals | Bounded observer trace and deterministic response policy | Durable supervisor prerequisites | Shadow | G9 before policy-triggered nudges |
-| 10 Semantic history search | Read-only locally filtered shortlist and typed rerank | Source access policy, WS2 | Read-only | G10 before default-on search |
+| 7 Context curation and later transcript compaction selection | Keep/full/reference decisions over bounded artifacts | WS2, Spec 020 metrics | Offline | G7 before live shadow or any omission or compaction; later transcript selection passes G7 separately |
+| 8 Eligible routing and memory invalidation | Catalog-filtered rankings; versioned memory lease warnings | WS2, event/source provenance | Offline | G8 before live suggestions, stale markers, or assist |
+| 9 Supervisor signals | Bounded observer trace and deterministic response policy | Durable supervisor prerequisites | Offline | G9 before live shadow or policy-triggered nudges |
+| 10 Semantic history search | Locally filtered shortlist and typed rerank | Source access policy, WS2 | Offline | G10 before any live read-only search |
 | 11 Provider comparison | Same frozen suites on pinned Jev and eligible alternatives | WS2 plus family datasets | Offline | Family-specific quality, calibration, cost, and failure comparison |
 
 ### Proposed family gates
@@ -187,7 +187,8 @@ warning that needs code understanding.
   inspectable questions. Scope to a focused diff or bounded end-of-turn record; route candidate
   findings to a reviewer. A risk score prioritizes review depth but cannot make a low-risk change
   skip required review. Evaluate diff and end-of-turn controls separately within G6.
-- **Context curation:** shadow the selected content against Spec 020's measured baseline. Pin
+- **Context curation:** evaluate selected content offline against Spec 020's measured baseline;
+  after G7 passes, shadow it on live dispatches. Pin
   instructions, state, locks, unresolved findings, and recent failures by code. Start by choosing
   full/reference/omit for low-risk dispatch artifacts; retain source pointers and allow immediate
   fallback. Only after that passes, test transcript selection on its own frozen set. Jev chooses
@@ -244,8 +245,8 @@ to shorten the evaluation.
 - For any change touching an existing modeled transition, follow Spec 014 and the owning spec:
   declare semantic impact, update pinned prose/model first where required, then run focused TLC
   and trace validation. This plan itself adds no lane transition.
-- Check that source grouping prevents the same PR/template from appearing across calibration and
-  test. Publish excluded-row counts and reasons.
+- Check that source grouping prevents the same PR/template from appearing across any pair of
+  train, calibration, and test splits. Publish excluded-row counts and reasons.
 - Make privacy, authorization, and source-repository boundaries explicit before any live hosted
   request. Never log credentials or copy ai_sales comment bodies into btrain.
 - Keep the optional decision plane off by default and test a one-command family disable path.

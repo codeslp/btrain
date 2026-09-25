@@ -30,6 +30,8 @@ quality checks, not claims that the runtime work is complete.
   no-state-change conditions before its quality gate.
 - [x] Every candidate trace records a gateway outcome and applicable reason, including skips
   before a provider call; WS5 stays offline until G5 permits shadow, advisory, or assist.
+- [x] WS7–10 start offline; their own frozen gate precedes any live shadow, suggestion, nudge,
+  or read-only search. Split checks cover train/calibration, train/test, and calibration/test.
 
 ## Requirement-to-plan coverage
 
