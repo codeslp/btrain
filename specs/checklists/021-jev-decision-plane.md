@@ -34,6 +34,8 @@ quality checks, not claims that the runtime work is complete.
   or read-only search. Split checks cover train/calibration, train/test, and calibration/test.
 - [x] Source capture retains the deterministic disposition even without a model candidate and
   links a pending or eventual outcome; under-labeled families stay offline except G4/G6 pilots.
+- [x] The PR gate requires per-class support inside the untouched test split as well as training
+  and calibration; grouped splits cannot borrow support from another partition.
 
 ## Requirement-to-plan coverage
 

@@ -165,9 +165,11 @@ approved public cases until the private-data policy is settled.
 
 **PR signals.** Reuse `classifyPrReviewStateWithSemantic`; keep its deterministic candidate
 selection and feedback-only assist policy. Reconcile candidate metadata with the new source
-snapshot. Freeze 200 independently labeled, diverse, provenance-complete real cases with at
-least 30 per class. Run exact existing baseline and pinned Jev on the same cases. Only if all
-Spec 021 PR gates pass, run two weeks of shadow with no state change. A later assist proposal must
+snapshot. Freeze at least 200 independently labeled, diverse, provenance-complete real cases,
+with at least 30 per class in the untouched test split and 10 per class in each training and
+calibration split; collect more if PR/template grouping requires it. Run the exact existing
+baseline and pinned Jev on the same cases. Only if all Spec 021 PR gates pass, run two weeks of
+shadow with no state change. A later assist proposal must
 name its threshold, feedback-only action, false-feedback cost, and rollback trigger in a separate
 promotion record. Never use semantic `clear` for approval.
 

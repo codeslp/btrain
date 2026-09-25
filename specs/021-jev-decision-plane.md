@@ -182,8 +182,10 @@ Promotion is per family, pinned model, and repository, never inferred from anoth
 
 - **Evidence readiness:** each PR test case has complete provenance or is explicitly excluded;
   two independent labelers resolve disagreements; at least 200 distinct defensible PR cases with
-  at least 30 per class are frozen before repeating the proposed PR comparison. This is a gate,
-  not a claim that the current logs meet it.
+  at least 30 per class in the untouched test split and at least 10 per class in each training
+  and calibration split are frozen before repeating the proposed PR comparison. Collect more than
+  200 cases if group-preserving splits cannot meet those minima. This is a gate, not a claim that
+  the current logs meet it.
 - **PR offline gate:** at least 95% overall accuracy and feedback recall, zero false `clear` on
   feedback/unavailable/uncertain controls, 100% agreement with deterministic stale-head and
   identity exclusion, under 1% provider/response-shape failure, and stable results on a pinned
