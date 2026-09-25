@@ -430,6 +430,20 @@ class AutoCastTests(unittest.TestCase):
             auto_cast(tmpl, ["a", "b"])
         self.assertIn("'x' and 'y'", str(caught.exception))
 
+    def test_the_error_admits_a_hand_cast_may_still_work(self):
+        # Review P3: auto-cast is greedy. For roles [a, c, b] with a and c each
+        # apart from b, it gives a and c different agents and has none left
+        # for b, although a=one, b=two, c=one is valid. The error must not
+        # claim that no cast exists.
+        tmpl = {"roles": ["a", "c", "b"], "distinct_roles": [["a", "b"], ["b", "c"]]}
+
+        with self.assertRaises(CastError) as caught:
+            auto_cast(tmpl, ["one", "two"])
+
+        self.assertIn("does not try every combination", str(caught.exception))
+        self.assertIn("choose the cast by hand", str(caught.exception))
+        self.assertEqual(validate_cast(tmpl, {"a": "one", "b": "two", "c": "one"}), [])
+
     def test_leaves_its_inputs_alone(self):
         roles_before = list(self.tmpl["roles"])
         agents = ["alpha", "beta"]

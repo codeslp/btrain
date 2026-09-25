@@ -494,6 +494,10 @@ def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:
     except that two roles in one ``distinct_roles`` group never share an
     agent: a candidate that would repeat one is passed over for the next
     agent in the rotation. Raises CastError when a role cannot be cast.
+
+    The pass is greedy and never revisits a choice, so with several
+    overlapping groups it can fail where a hand cast would work. For one
+    pair such as builder/red_team it fails only when one agent is online.
     """
     roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
     if not isinstance(roles, list) or not roles:
@@ -518,7 +522,8 @@ def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:
             raise CastError(
                 f"Cannot auto-cast '{role}': it needs a different agent than "
                 f"{' and '.join(repr(r) for r in rivals)}, but only {online} online ({', '.join(agents)}). "
-                "Bring another agent online or choose the cast by hand."
+                "Auto-cast fills roles in order and does not try every combination, "
+                "so choose the cast by hand or bring another agent online."
             )
         cast[role] = agents[pick]
         turn = (pick + 1) % len(agents)
