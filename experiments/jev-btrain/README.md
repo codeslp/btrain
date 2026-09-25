@@ -8,6 +8,32 @@ The frozen datasets cover:
 - PR review signals: clear, actionable feedback, reviewer unavailable, and no verdict.
 - Handoff packet quality: accept, repair, and uncertain.
 
+Reproduce the saved PR-comment corpus audit from the local btrain and ai_sales checkouts:
+
+```sh
+node experiments/jev-btrain/audit-corpus.mjs \
+  --manifest experiments/jev-btrain/corpus-source-manifest-2026-09-24.json \
+  --author 'chatgpt-codex-connector[bot]' \
+  --author 'unblocked[bot]' \
+  --repo btrain=/path/to/btrain \
+  --repo ai_sales=/path/to/ai_sales
+```
+
+The committed source manifest pins each file's JSONL prefix by line count and SHA-256 hash. The
+audit verifies those prefixes and ignores later appended rows and new files, even when their
+timestamps predate the cutoff. A changed or missing pinned prefix fails reproduction. To capture a
+new manifest, run `audit-corpus.mjs --capture-manifest --before <ISO timestamp> --repo ...` and
+save its JSON output; the timestamp selects the initial prefixes but cannot freeze them alone.
+
+The audit emits aggregate counts and a fingerprint of every raw JSONL source record, never comment
+bodies. It counts reviewer-bot issue/review text as an upper bound before current-head,
+latest-signal, and deterministic filters. Commit IDs and the recognized Codex help footer are
+normalized only for a diversity diagnostic; substantive details blocks and status-card content
+are preserved. Core-message families are not gold labels.
+The 2026-09-24 run is saved in `corpus-audit-2026-09-24.json` and explained in the research results
+report. It found too little diverse, independently labeled evidence to run the proposed 200-case
+comparison yet.
+
 Run the deterministic baseline:
 
 ```sh
