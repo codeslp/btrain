@@ -100,6 +100,20 @@ default in repos you own, and `--exclude-local` in repos where you do not want
 any diff at all (third-party or client repos). Both edits are idempotent: an
 existing `.btrain/`, `.btrain`, `/.btrain/`, or `/.btrain` line is left alone.
 
+Only the first init picks the target. Every later write (plain re-init,
+`init --feature ...`, `btrain features`, `btrain agents set|add`) first asks
+`git check-ignore` whether `.btrain/` is already ignored and, if so, writes
+nothing, so an `--exclude-local` repo never grows a `.gitignore`. If
+`.btrain/` is not ignored, those commands add the `.gitignore` line (or the
+exclude line with `--exclude-local`).
+
+Bundled skills and helper scripts copied in local mode have their state paths
+rewritten on copy: `.claude/collab/` becomes `.btrain/collab/`,
+`.claude/scripts/` becomes `.btrain/tools/.claude/scripts/`, `.claude/skills/`
+becomes `.btrain/skills/`, and `.agents/skills/` becomes
+`.btrain/agent-skills/`. The agentchattr tree is copied verbatim. References
+to the repo's own `AGENTS.md`/`CLAUDE.md` are left alone.
+
 ### Agent discovery in local mode
 
 Local mode does not write managed blocks into tracked `AGENTS.md` or
@@ -170,8 +184,21 @@ target repo, so `formal` controls only the skills that target repos receive.
 - `[features]` in `project.toml` holds one boolean per feature. A missing
   table, or a missing key, means enabled, so pre-022 repos keep everything on.
 - New local repos get the defaults above. New tracked repos without feature
-  flags or prompt answers get the pre-022 output with no `[features]` table
-  (feature choices for a tracked repo start from all-on).
+  flags or prompt answers get the pre-022 output with no `[features]` table.
+  Feature choices for a new tracked repo start from all-on except `cgraph`
+  and `pr_flow`, matching the tracked template.
+- The effective map of an existing repo is its `[features]` table. With no
+  table, every feature is on except `cgraph` and `pr_flow`, which follow
+  their own sections (`[cgraph]` present and not disabled;
+  `[pr_flow].enabled = true`). `btrain features list` and `init --feature`
+  start from this map, so a flag changes only the features it names.
+- Whenever a feature map is written, runtime sections follow it:
+  `cgraph = true` sets `[cgraph] enabled = true`; `[pr_flow].enabled`
+  matches `pr_flow` when the section exists or `pr_flow` is on. Disabling
+  cgraph leaves `[cgraph]` alone because `[features]` already gates it.
+  Turning `hooks` on installs the managed hooks, and turning it off removes
+  them (hooks without the btrain marker are never touched). This applies to
+  both `init --feature/--no-feature` and `btrain features`.
 - Disabled features are not scaffolded. Commands for a disabled feature exit
   non-zero with `the "<id>" feature (...) is disabled for this repo. Enable it
   with: btrain features enable <id>`. This covers `btrain loop`,
@@ -180,11 +207,8 @@ target repo, so `formal` controls only the skills that target repos receive.
   auto-start, cgraph (every call site and the adapter), feedback checks, and
   PR flow (`getPrFlowConfig().enabled`) are silently off.
 - `btrain features list|enable|disable <ids> [--repo <path>]` changes toggles
-  later. `enable` scaffolds the missing skills or tools for that feature;
-  `enable cgraph` and `enable pr_flow` also set `enabled = true` in their
-  sections; `enable hooks` installs the hooks. `disable` edits config only,
-  except `disable hooks`, which removes the btrain-managed hooks (hooks
-  without the btrain marker are never touched). Files already scaffolded for
+  later, with the section and hook syncing above. `enable` also scaffolds
+  the missing skills or tools for that feature. Files already scaffolded for
   a disabled feature are left in place.
 
 ### Interactive init
@@ -235,7 +259,11 @@ reproduces the committed layout; existing tracked repos stay tracked and
 refuse `--local`; legacy-artifact detection; feature flag persistence;
 `formal` and `cgraph` toggles disabling their subsystem; disabled `loop`,
 `dashboard`, and `unblocked` messages; `features disable hooks`; prompt
-answer parsing and scripted interactive runs. Pre-022 suites opt into
+answer parsing and scripted interactive runs. Review round 1 added:
+`--exclude-local` surviving re-init, feature changes, and agent changes;
+`pr_flow` and `cgraph` sections following their toggles (including a legacy
+tracked repo); hooks installed and removed by `init --feature/--no-feature`;
+and local skill copies pointing at `.btrain/collab/`. Pre-022 suites opt into
 tracked storage through `test/helpers/legacy-init.mjs`.
 
 ## Follow-ups
@@ -247,6 +275,10 @@ tracked storage through `test/helpers/legacy-init.mjs`.
 - Candidate toggles not added yet: `context_budget` (has its own config),
   harness trace capture, solo mode (spec 017/019, not implemented), and the
   parallel review script (`[reviews].parallel_enabled`).
+- With `unblocked` or `zvec` off, skills that mention
+  `.btrain/tools/.claude/scripts/unblocked-context.sh` or `zvec-context.sh`
+  point at a helper that was not scaffolded. The skills already treat those
+  helpers as optional.
 - The managed block still mentions the `context-scout` skill and
   `--unblocked-context` when those are off. Changing the template would mark
   every existing repo as drifted, so it was left alone.

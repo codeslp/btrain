@@ -89,7 +89,9 @@ import {
   featureDisabledMessage,
   getAllOnFeatureMap,
   getDefaultFeatureMap,
+  getEffectiveFeatureMap,
   getFeatureMapFromConfig,
+  getNewRepoFeatureBase,
   getStorageMode,
   hasFeaturesTable,
   isFeatureEnabled,
@@ -1644,11 +1646,9 @@ async function run() {
     const projectExists = existingConfig !== null
     const defaultStorage = normalizeStorageMode(process.env.BTRAIN_INIT_STORAGE) || "local"
     const newRepoStorage = storage || defaultStorage
-    const baseFeatureMap = hasFeaturesTable(existingConfig)
-      ? getFeatureMapFromConfig(existingConfig)
-      : projectExists || newRepoStorage === "tracked"
-        ? getAllOnFeatureMap()
-        : getDefaultFeatureMap()
+    const baseFeatureMap = projectExists
+      ? getEffectiveFeatureMap(existingConfig)
+      : getNewRepoFeatureBase(newRepoStorage)
 
     let featureMap
     try {
@@ -1688,7 +1688,7 @@ async function run() {
       reviewer,
       storage,
       defaultStorage,
-      ignoreTarget: options["exclude-local"] === true ? "exclude" : "gitignore",
+      ignoreTarget: options["exclude-local"] === true ? "exclude" : undefined,
       featureMap,
       lanesPerAgent: options["lanes-per-agent"],
       scaffoldBundledSkills: !options["core-only"],
@@ -1764,7 +1764,7 @@ async function run() {
         fix: "Run `btrain init <repo-path>` first.",
       })
     }
-    const currentMap = hasFeaturesTable(config) ? getFeatureMapFromConfig(config) : getAllOnFeatureMap()
+    const currentMap = getEffectiveFeatureMap(config)
 
     if (subcommand === "list") {
       if (options.format === "json") {
@@ -1806,19 +1806,17 @@ async function run() {
     for (const id of ids) nextMap[id] = enabling
     const scaffoldSkills = enabling && ids.some((id) => SKILL_FEATURE_IDS.has(id))
     const scaffoldTools = enabling && ids.some((id) => DEV_TOOL_FEATURE_IDS.has(id))
-    await initRepo(repoRoot, {
+    const result = await initRepo(repoRoot, {
       featureMap: nextMap,
-      enableSections: ids.filter((id) => id === "cgraph" || id === "pr_flow"),
-      hooks: enabling && ids.includes("hooks") ? true : undefined,
       scaffoldBundledSkills: scaffoldSkills,
       scaffoldDevTools: scaffoldTools,
       skipInstructionRefresh: !scaffoldSkills,
     })
-    if (!enabling && ids.includes("hooks")) {
-      const removed = await removeManagedGitHooks(repoRoot)
-      if (removed.length > 0) {
-        console.log(`removed managed hooks: ${removed.join(", ")}`)
-      }
+    if (result.hookResult) {
+      console.log(`installed managed hooks: ${Object.keys(result.hookResult).join(", ")}`)
+    }
+    if (result.removedHooks?.length) {
+      console.log(`removed managed hooks: ${result.removedHooks.join(", ")}`)
     }
     console.log(`${enabling ? "enabled" : "disabled"}: ${ids.join(", ")}`)
     if (!enabling) {

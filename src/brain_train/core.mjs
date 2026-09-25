@@ -31,6 +31,11 @@ import {
   getHookHandoffGlob,
   resolveInitStorage,
   localizeProjectToml,
+  IGNORE_TARGET_AUTO,
+  getEffectiveFeatureMap,
+  isLocalizableTextFile,
+  localizeStateText,
+  removeManagedGitHooks,
 } from "./repo_mode.mjs"
 import {
   DEFAULT_HARNESS_PROFILE_ID,
@@ -2082,7 +2087,12 @@ async function copyMissingTree(sourcePath, targetPath, options = {}, relativePat
   }
 
   await ensureDir(path.dirname(targetPath))
-  await fs.copyFile(sourcePath, targetPath)
+  if (options.transformText && isLocalizableTextFile(sourcePath)) {
+    const original = await fs.readFile(sourcePath, "utf8")
+    await fs.writeFile(targetPath, options.transformText(original), "utf8")
+  } else {
+    await fs.copyFile(sourcePath, targetPath)
+  }
   await fs.chmod(targetPath, sourceStats.mode)
   return 1
 }
@@ -2135,6 +2145,7 @@ async function syncBundledSkills(targetSkillsPath, options = {}) {
     const targetExisted = await pathExists(targetPath)
     const copiedCount = await copyMissingTree(sourcePath, targetPath, {
       overwrite: options.overwrite,
+      transformText: options.transformText,
     })
     if (!targetExisted || (options.overwrite && copiedCount > 0)) {
       copiedSkills.push(entry.name)
@@ -2149,13 +2160,16 @@ async function syncBundledSkills(targetSkillsPath, options = {}) {
 }
 
 async function syncBundledSkillTargets(repoPaths, { featureMap = null } = {}) {
+  const transformText = repoPaths.storageMode === STORAGE_LOCAL ? localizeStateText : undefined
   const claude = await syncBundledSkills(repoPaths.skillsPath, {
     sourceSkillsDir: BUNDLED_SKILLS_DIR,
     featureMap,
+    transformText,
   })
   const agents = await syncBundledSkills(repoPaths.agentSkillsPath, {
     sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
     featureMap,
+    transformText,
   })
   const copiedSkills = Array.from(new Set([
     ...claude.copiedSkills,
@@ -2181,7 +2195,7 @@ async function syncBundledSkillTargets(repoPaths, { featureMap = null } = {}) {
   }
 }
 
-async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null, targetRoot = null, featureMap = null } = {}) {
+async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null, targetRoot = null, featureMap = null, transformText = undefined } = {}) {
   const copiedTools = []
   const missingTools = []
   const selfTools = []
@@ -2208,6 +2222,9 @@ async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null,
     const copiedForTool = await copyMissingTree(tool.sourcePath, targetPath, {
       overwrite,
       shouldSkip: tool.shouldSkip,
+      // Only the small helper scripts carry state paths; never rewrite the
+      // agentchattr tree.
+      transformText: tool.label === "agentchattr" ? undefined : transformText,
     })
     copiedFileCount += copiedForTool
 
@@ -2793,14 +2810,18 @@ async function initRepo(repoPathInput, options = {}) {
   } else if (!projectTomlExists && isLocal) {
     featureMap = getDefaultFeatureMap()
   }
-  const enableSections = new Set(options.enableSections || [])
+  const previousFeatureMap = projectTomlExists ? getEffectiveFeatureMap(existingConfig) : null
   // Arrow helpers (not declarations) keep core's function inventory unchanged.
+  // A feature that owns a runtime section turns that section on with it, so
+  // `[features]` and the section can never disagree about an enabled feature.
+  // Disabling leaves [cgraph] alone ([features] gates it); [pr_flow].enabled
+  // follows the toggle when the section exists.
   const applyFeatureSections = (tomlContent) => {
     let next = upsertFeaturesTable(tomlContent, featureMap)
-    if (enableSections.has("cgraph") && featureMap.cgraph) {
+    if (featureMap.cgraph) {
       next = upsertTomlEntryInSection(next, "cgraph", "enabled", "enabled = true")
     }
-    if (enableSections.has("pr_flow") && (parseProjectToml(next)?.pr_flow || featureMap.pr_flow)) {
+    if (parseProjectToml(next)?.pr_flow || featureMap.pr_flow) {
       next = upsertTomlEntryInSection(next, "pr_flow", "enabled", `enabled = ${featureMap.pr_flow ? "true" : "false"}`)
     }
     return next
@@ -2809,10 +2830,6 @@ async function initRepo(repoPathInput, options = {}) {
     const exists = await pathExists(filePath)
     const content = exists ? await readText(filePath) : ""
     await writeText(filePath, exists ? replaceManagedBlock(content, managedBlockContent) : stubContent)
-  }
-  if (!projectTomlExists && featureMap) {
-    enableSections.add("pr_flow")
-    enableSections.add("cgraph")
   }
 
   // Seed global templates if needed
@@ -2958,7 +2975,11 @@ async function initRepo(repoPathInput, options = {}) {
   if (isLocal) {
     try {
       ignoreResult = await ensureLocalStateIgnored(repoRoot, {
-        target: options.ignoreTarget === IGNORE_TARGET_EXCLUDE ? IGNORE_TARGET_EXCLUDE : IGNORE_TARGET_GITIGNORE,
+        target: options.ignoreTarget === IGNORE_TARGET_EXCLUDE
+          ? IGNORE_TARGET_EXCLUDE
+          : !projectTomlExists || options.ignoreTarget === IGNORE_TARGET_GITIGNORE
+            ? IGNORE_TARGET_GITIGNORE
+            : IGNORE_TARGET_AUTO,
       })
     } catch (error) {
       throw new BtrainError({
@@ -2975,7 +2996,11 @@ async function initRepo(repoPathInput, options = {}) {
     ? await syncBundledSkillTargets(repoPaths, { featureMap })
     : null
   const devToolsResult = shouldScaffoldDevTools
-    ? await syncBundledDevTools(repoRoot, { targetRoot: repoPaths.toolsRoot, featureMap })
+    ? await syncBundledDevTools(repoRoot, {
+      targetRoot: repoPaths.toolsRoot,
+      featureMap,
+      transformText: isLocal ? localizeStateText : undefined,
+    })
     : null
 
   upsertRepoEntry(registry, {
@@ -2991,10 +3016,16 @@ async function initRepo(repoPathInput, options = {}) {
   await saveRegistry(registryPath, registry)
 
   let hookResult = null
+  let removedHooks = []
+  const explicitFeatures = Boolean(options.featureMap && typeof options.featureMap === "object")
+  const hooksTurnedOn = explicitFeatures && featureMap.hooks === true && previousFeatureMap?.hooks === false
+  const hooksTurnedOff = explicitFeatures && featureMap.hooks === false && previousFeatureMap?.hooks !== false
   const shouldInstallHooks = options.hooks === true
-    || (options.hooks !== false && featureMap?.hooks === true && !projectTomlExists)
+    || (options.hooks !== false && featureMap?.hooks === true && (!projectTomlExists || hooksTurnedOn))
   if (shouldInstallHooks) {
     hookResult = await installGitHooks(repoRoot)
+  } else if (hooksTurnedOff && projectTomlExists) {
+    removedHooks = await removeManagedGitHooks(repoRoot)
   }
 
   return {
@@ -3008,6 +3039,7 @@ async function initRepo(repoPathInput, options = {}) {
     ignoreResult,
     featureMap,
     hookResult,
+    removedHooks,
     bundledSkillsResult,
     devToolsResult,
   }
@@ -10386,18 +10418,21 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
     // A repo with a [features] table only receives skills for enabled
     // features; an explicitly named skill is always honored.
     const featureMap = hasFeaturesTable(repoConfig) && !skillName ? getFeatureMapFromConfig(repoConfig) : null
+    const transformText = repoPaths.storageMode === STORAGE_LOCAL ? localizeStateText : undefined
     const [claude, agents] = await Promise.all([
       syncBundledSkills(repoPaths.skillsPath, {
         sourceSkillsDir: BUNDLED_SKILLS_DIR,
         skillName,
         overwrite,
         featureMap,
+        transformText,
       }),
       syncBundledSkills(repoPaths.agentSkillsPath, {
         sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
         skillName,
         overwrite,
         featureMap,
+        transformText,
       }),
     ])
 
@@ -10414,11 +10449,13 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
           sourceSkillsDir: BUNDLED_SKILLS_DIR,
           skillName: CONTEXT_SCOUT_SKILL_NAME,
           overwrite: false,
+          transformText,
         }),
         syncBundledSkills(repoPaths.agentSkillsPath, {
           sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
           skillName: CONTEXT_SCOUT_SKILL_NAME,
           overwrite: false,
+          transformText,
         }),
       ])
       : []
@@ -10443,12 +10480,14 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
         labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
         targetRoot: repoPaths.toolsRoot,
         featureMap,
+        transformText,
       }),
       syncBundledDevTools(absoluteRepoRoot, {
         overwrite: zvecHelperOverwrite,
         labels: new Set([ZVEC_CONTEXT_HELPER_LABEL]),
         targetRoot: repoPaths.toolsRoot,
         featureMap,
+        transformText,
       }),
     ])
     const copiedTools = supportToolResults.flatMap((result) => result.copiedTools)

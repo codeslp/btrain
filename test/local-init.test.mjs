@@ -345,6 +345,82 @@ describe("feature toggles", () => {
   })
 })
 
+describe("later commands keep init's choices (review round 1)", () => {
+  it("--exclude-local survives re-init, features changes, and agent changes", async () => {
+    const repo = await makeRepo()
+    assert.equal((await btrain(["init", repo, "--exclude-local", "--agents", "claude,codex"], repo)).code, 0)
+    const steps = [
+      ["init", repo],
+      ["init", repo, "--feature", "formal"],
+      ["features", "enable", "zvec", "--repo", repo],
+      ["features", "disable", "zvec", "--repo", repo],
+      ["agents", "set", "--repo", repo, "--agent", "claude", "--agent", "gemini"],
+      ["agents", "add", "--repo", repo, "--agent", "codex"],
+    ]
+    for (const args of steps) {
+      const result = await btrain(args, repo)
+      assert.equal(result.code, 0, `${args.join(" ")}: ${result.stderr}`)
+      assert.equal(await exists(path.join(repo, ".gitignore")), false, `${args.join(" ")} created .gitignore`)
+      assert.equal(await porcelain(repo), "", `${args.join(" ")} dirtied the tree`)
+    }
+  })
+
+  it("enabling pr_flow on re-init turns [pr_flow] on, and disabling turns it off", async () => {
+    const repo = await makeRepo()
+    assert.equal((await btrain(["init", repo], repo)).code, 0)
+    assert.equal((await btrain(["init", repo, "--feature", "pr_flow"], repo)).code, 0)
+    let config = await readProjectConfig(repo)
+    assert.equal(config.features.pr_flow, true)
+    assert.equal(config.pr_flow.enabled, true)
+    assert.equal((await btrain(["features", "disable", "pr_flow", "--repo", repo], repo)).code, 0)
+    config = await readProjectConfig(repo)
+    assert.equal(config.features.pr_flow, false)
+    assert.equal(config.pr_flow.enabled, false)
+  })
+
+  it("a legacy tracked repo reports its real cgraph/pr_flow state and can enable cgraph", async () => {
+    const repo = await makeRepo()
+    assert.equal((await btrain(["init", repo, "--tracked"], repo)).code, 0)
+    const listed = await btrain(["features", "list", "--repo", repo, "--format", "json"], repo)
+    const map = JSON.parse(listed.stdout).features
+    assert.equal(map.pr_flow, false, "tracked template ships [pr_flow] enabled = false")
+    assert.equal(map.cgraph, false, "no [cgraph] section")
+    assert.equal(map.formal, true)
+    assert.equal((await btrain(["init", repo, "--feature", "cgraph"], repo)).code, 0)
+    const config = await readProjectConfig(repo)
+    assert.equal(config.features.cgraph, true)
+    assert.equal(config.cgraph.enabled, true)
+    assert.equal(config.features.pr_flow, false, "pr_flow is not silently flipped on")
+  })
+
+  it("init --feature/--no-feature hooks installs and removes the managed hooks", async () => {
+    const repo = await makeRepo()
+    const preCommit = path.join(repo, ".git", "hooks", "pre-commit")
+    assert.equal((await btrain(["init", repo, "--no-feature", "hooks"], repo)).code, 0)
+    assert.equal(await exists(preCommit), false)
+    assert.equal((await btrain(["init", repo, "--feature", "hooks"], repo)).code, 0)
+    assert.equal(await exists(preCommit), true)
+    assert.equal((await btrain(["init", repo, "--no-feature", "hooks"], repo)).code, 0)
+    assert.equal(await exists(preCommit), false)
+    const enabled = await btrain(["features", "enable", "hooks", "--repo", repo], repo)
+    assert.equal(enabled.code, 0, enabled.stderr)
+    assert.equal(await exists(preCommit), true)
+  })
+
+  it("local mode rewrites state paths inside copied skills; tracked mode keeps them", async () => {
+    const local = await makeRepo("local")
+    assert.equal((await btrain(["init", local], local)).code, 0)
+    const localSkill = await fs.readFile(path.join(local, ".btrain", "skills", "feedback-triage", "SKILL.md"), "utf8")
+    assert.doesNotMatch(localSkill, /\.claude\/collab\//)
+    assert.match(localSkill, /\.btrain\/collab\/FEEDBACK_LOG\.md/)
+
+    const tracked = await makeRepo("tracked")
+    assert.equal((await btrain(["init", tracked, "--tracked"], tracked)).code, 0)
+    const trackedSkill = await fs.readFile(path.join(tracked, ".claude", "skills", "feedback-triage", "SKILL.md"), "utf8")
+    assert.match(trackedSkill, /\.claude\/collab\/FEEDBACK_LOG\.md/)
+  })
+})
+
 describe("init choices parsing", () => {
   it("resolveFeatureMap applies --features, --feature, and --no-feature in order", () => {
     const map = resolveFeatureMap({ features: "skills,hooks", enable: ["tla"], disable: "hooks" })

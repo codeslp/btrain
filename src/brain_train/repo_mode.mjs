@@ -107,7 +107,17 @@ async function resolveInfoExcludePath(repoRoot) {
 
 // Idempotently add `.btrain/` to `.gitignore` (default) or `.git/info/exclude`.
 // Returns { target, path, changed }.
+export const IGNORE_TARGET_AUTO = "auto"
+
 export async function ensureLocalStateIgnored(repoRoot, { target = IGNORE_TARGET_GITIGNORE } = {}) {
+  // "auto" (every call after the first init: re-init, features, agents)
+  // keeps whatever already ignores .btrain/, so --exclude-local survives.
+  if (target === IGNORE_TARGET_AUTO) {
+    if (await isLocalStateIgnored(repoRoot)) {
+      return { target: "existing", path: "", changed: false }
+    }
+    target = IGNORE_TARGET_GITIGNORE
+  }
   let ignorePath
   if (target === IGNORE_TARGET_EXCLUDE) {
     ignorePath = await resolveInfoExcludePath(repoRoot)
@@ -656,4 +666,50 @@ export function localizeProjectToml(renderedToml, mode) {
     lines.splice(firstSection === -1 ? lines.length : firstSection, 0, storageLine, `handoff_path = "${localHandoff}"`)
   }
   return lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes (lane b round 1)
+// ---------------------------------------------------------------------------
+
+// The feature map a repo effectively runs with today. With a [features]
+// table that is the table; without one (pre-022 repos) every scaffolding
+// feature is on, while cgraph and pr_flow follow their own sections, so a
+// later `--feature`/`--no-feature` never silently flips them.
+export function getEffectiveFeatureMap(config) {
+  if (hasFeaturesTable(config)) return getFeatureMapFromConfig(config)
+  const map = getAllOnFeatureMap()
+  const cgraph = config?.cgraph
+  map.cgraph = Boolean(cgraph && typeof cgraph === "object" && Object.keys(cgraph).length > 0 && cgraph.enabled !== false)
+  map.pr_flow = config?.pr_flow?.enabled === true
+  return map
+}
+
+// Base map for feature choices on a repo with no project.toml yet.
+export function getNewRepoFeatureBase(mode) {
+  if (mode === STORAGE_LOCAL) return getDefaultFeatureMap()
+  // The tracked template ships pr_flow disabled and no [cgraph] section.
+  return { ...getAllOnFeatureMap(), cgraph: false, pr_flow: false }
+}
+
+// Rewrite bundled skill and helper text for local storage so copied
+// instructions point at the files local mode actually creates.
+const LOCAL_TEXT_EXTENSIONS = new Set([".md", ".sh", ".txt", ".py", ".mjs", ".js", ".json", ".yaml", ".yml", ".toml"])
+const LOCAL_PATH_REWRITES = [
+  [/\.claude\/collab\//g, ".btrain/collab/"],
+  [/\.claude\/scripts\//g, ".btrain/tools/.claude/scripts/"],
+  [/\.claude\/skills\//g, ".btrain/skills/"],
+  [/\.agents\/skills\//g, ".btrain/agent-skills/"],
+]
+
+export function isLocalizableTextFile(filePath) {
+  return LOCAL_TEXT_EXTENSIONS.has(path.extname(filePath).toLowerCase())
+}
+
+export function localizeStateText(content) {
+  let next = content
+  for (const [pattern, replacement] of LOCAL_PATH_REWRITES) {
+    next = next.replace(pattern, replacement)
+  }
+  return next
 }
