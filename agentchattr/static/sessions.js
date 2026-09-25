@@ -337,11 +337,19 @@ function _getAvailableAgents() {
 // _distinctGroups, _autoCast and _castConflicts mirror _distinct_groups,
 // auto_cast and validate_cast in session_store.py; the server check is the
 // one that holds, this copy only keeps the launcher from proposing a bad cast.
+// A template with both builder and red_team keeps them apart even when its
+// distinct_roles leaves them out.
 function _distinctGroups(tmpl) {
     const groups = Array.isArray(tmpl?.distinct_roles) ? tmpl.distinct_roles : [];
-    return groups
+    const result = groups
         .filter(group => Array.isArray(group))
         .map(group => [...new Set(group.filter(role => typeof role === 'string'))]);
+    const pair = ['builder', 'red_team'];
+    const roles = Array.isArray(tmpl?.roles) ? tmpl.roles : [];
+    if (pair.every(role => roles.includes(role)) && !result.some(group => pair.every(role => group.includes(role)))) {
+        result.push(pair);
+    }
+    return result;
 }
 
 // Round-robin in role order, reusing agents when roles outnumber them, but

@@ -81,6 +81,14 @@ def two_role_template(**overrides):
     return tmpl
 
 
+def code_review_copy():
+    """A draft copy of code-review that dropped distinct_roles, as an agent might write it."""
+    copy = load_template("code-review")
+    copy.pop("distinct_roles")
+    copy["id"] = "code-review-copy"
+    return copy
+
+
 def instruction_of(prompt):
     """The INSTRUCTION line an agent receives, without its label."""
     for block in prompt.split("\n\n"):
@@ -331,6 +339,18 @@ class AutoCastTests(unittest.TestCase):
 
         self.assertEqual(auto_cast(tmpl, ["solo"]), {role: "solo" for role in tmpl["roles"]})
 
+    def test_builder_and_red_team_stay_apart_without_distinct_roles(self):
+        # Any template with both roles keeps them apart, so a copy that drops
+        # the field cannot bring back the builder as its own red team.
+        copy = code_review_copy()
+
+        self.assertEqual(auto_cast(copy, ["alpha", "beta"])["red_team"], "beta")
+        with self.assertRaises(CastError):
+            auto_cast(copy, ["alpha"])
+
+    def test_one_of_the_pair_alone_adds_no_rule(self):
+        self.assertEqual(auto_cast({"roles": ["builder", "reviewer"]}, ["solo"]), {"builder": "solo", "reviewer": "solo"})
+
     def test_duplicate_agent_names_count_once(self):
         with self.assertRaises(CastError):
             auto_cast(self.tmpl, ["alpha", "alpha"])
@@ -415,6 +435,12 @@ class ValidateCastTests(unittest.TestCase):
         tmpl = load_template("design-critique")
 
         self.assertEqual(validate_cast(tmpl, {role: "solo" for role in tmpl["roles"]}), [])
+
+    def test_a_copy_without_distinct_roles_still_keeps_the_pair_apart(self):
+        self.assertEqual(
+            validate_cast(code_review_copy(), {"builder": "alpha", "red_team": "alpha"}),
+            ["Cast conflict: 'builder' and 'red_team' must be different agents, but both are 'alpha'."],
+        )
 
     def test_a_repeated_role_in_a_group_is_not_a_self_conflict(self):
         tmpl = dict(self.tmpl, distinct_roles=[["builder", "builder", "red_team"]])
@@ -561,6 +587,31 @@ class StartSessionRouteTests(AppHarness):
         self.assertIn("'builder' and 'red_team'", payload["error"])
         self.assert_nothing_started()
 
+    def test_a_draft_copy_that_drops_distinct_roles_is_still_refused(self):
+        # Review P2-2: a copy of code-review without distinct_roles, under
+        # its own id, used to start with builder == red_team.
+        self.messages.add("user", "Copy the code review session.")  # keep the draft off id 0
+        draft = self.messages.add(
+            "system", "Session draft", msg_type="session_draft", metadata={"valid": True, "template": code_review_copy()}
+        )
+        conflict = {"builder": "alpha", "reviewer": "beta", "red_team": "alpha", "synthesiser": "beta"}
+
+        status, payload = self.start(draft_message_id=draft["id"], cast=conflict)
+
+        self.assertEqual(status, 400)
+        self.assertIn("'builder' and 'red_team'", payload["error"])
+        self.assert_nothing_started()
+
+    def test_the_draft_request_documents_both_fields(self):
+        # An agent drafting a session only learns the fields this prompt names.
+        body = {"agent": "gemini", "description": "a red-team review", "channel": "general", "sender": "user"}
+        response = asyncio.run(app.request_session_draft(json_request(body)))
+
+        self.assertEqual(response.status_code, 200)
+        request = next(m for m in self.messages.get_recent(10) if m["type"] == "session_request")
+        for field in ('"role_prompts"', '"distinct_roles"', "`builder` and `red_team` always"):
+            self.assertIn(field, request["text"])
+
 
 class BuiltinTemplateTests(AppHarness):
     """A draft or custom template must not take a built-in template's id.
@@ -590,9 +641,8 @@ class BuiltinTemplateTests(AppHarness):
     def test_running_a_draft_leaves_the_builtin_in_place(self):
         draft = self.shadow_draft()
 
-        # The draft declares no distinct_roles of its own, so its cast is fine.
         status, payload = self.start(
-            draft_message_id=draft["id"], channel="drafts", cast={"builder": "alpha", "red_team": "alpha"}
+            draft_message_id=draft["id"], channel="drafts", cast={"builder": "alpha", "red_team": "beta"}
         )
         self.assertEqual(status, 200)
         self.assertEqual(payload["template_id"], f"draft-{draft['id']}")
@@ -667,6 +717,7 @@ class LauncherParityTests(unittest.TestCase):
             "debate": load_template("debate"),
             "triangle": {"roles": ["x", "y", "z"], "distinct_roles": [["x", "y"], ["y", "z"], ["x", "z"]]},
             "role listed twice": {"roles": ["builder", "red_team", "builder"], "distinct_roles": [["builder", "red_team"]]},
+            "code-review copy without distinct_roles": code_review_copy(),
         }
         cases = [
             {"label": f"{label}, {count} agents", "tmpl": tmpl, "agents": [f"agent{i}" for i in range(count)]}
@@ -694,11 +745,13 @@ class LauncherParityTests(unittest.TestCase):
             {},
         ]
 
-        launcher = self.run_launcher([{"op": "castConflicts", "tmpl": code_review, "cast": cast} for cast in casts])
+        cases = [(code_review, cast) for cast in casts] + [(code_review_copy(), casts[0])]
 
-        for cast, launcher_conflicts in zip(casts, launcher):
-            with self.subTest(cast=cast):
-                self.assertEqual(launcher_conflicts, validate_cast(code_review, cast))
+        launcher = self.run_launcher([{"op": "castConflicts", "tmpl": tmpl, "cast": cast} for tmpl, cast in cases])
+
+        for (tmpl, cast), launcher_conflicts in zip(cases, launcher):
+            with self.subTest(template=tmpl["id"], cast=cast):
+                self.assertEqual(launcher_conflicts, validate_cast(tmpl, cast))
 
 
 # Loads static/sessions.js with stub DOM globals, presses Start Session with
@@ -869,6 +922,10 @@ class DraftCardTests(unittest.TestCase):
         text = self.text_of(card)
         self.assertIn("Different agents builder red_team", text)
         self.assertIn("Different agents reviewer red_team", text)
+
+    def test_the_builder_and_red_team_rule_is_shown_even_when_the_draft_omits_it(self):
+        # The server keeps any builder and red_team apart, so the card says so.
+        self.assertIn("Different agents builder red_team", self.text_of(self.render(self.draft())))
 
 
 if __name__ == "__main__":

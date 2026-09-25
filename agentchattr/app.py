@@ -3151,10 +3151,16 @@ async def request_session_draft(request: Request):
         "Respond with a single chat message containing a fenced JSON code block with this exact structure:\n"
         "```session\n"
         '{"name": "...", "description": "...", "roles": ["role1", "role2", ...], '
-        '"phases": [{"name": "...", "participants": ["role1"], "prompt": "...", "is_output": false}, ...]}\n'
+        '"distinct_roles": [["role1", "role2"]], '
+        '"phases": [{"name": "...", "participants": ["role1", "role2"], "prompt": "...", '
+        '"role_prompts": {"role2": "..."}, "is_output": false}, ...]}\n'
         "```\n"
-        "Rules: max 6 roles, max 6 phases, max 4 participants per phase, max 200 chars per prompt. "
+        "Rules: max 6 roles, max 6 phases, max 4 participants per phase, "
+        "max 200 chars per prompt and per role prompt. "
         "Mark exactly one phase as `is_output: true` (the final deliverable). "
+        "`role_prompts` is optional: it gives one participant of that phase its own prompt "
+        "in place of the phase prompt. `distinct_roles` is optional: each group lists roles "
+        "that must go to different agents, and `builder` and `red_team` always do. "
         f"Keep it focused and sequential. Use the chat_send tool to post your response in the #{channel} channel. "
         "Do NOT respond only in your terminal.",
         channel=channel,

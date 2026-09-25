@@ -433,20 +433,36 @@ class CastError(ValueError):
     """The template's roles cannot be given to the agents that are online."""
 
 
-def _distinct_groups(tmpl: dict) -> list[list[str]]:
-    """``distinct_roles`` as groups of unique role names, skipping malformed entries.
+# Roles that never share an agent in a template that has both, whatever its
+# distinct_roles says: nobody red-teams their own build.
+BUILDER_AND_RED_TEAM = ("builder", "red_team")
 
-    validate_session_template reports malformed groups for drafts; this only
-    has to keep casting from crashing on a template that was never validated.
+
+def _distinct_groups(tmpl: dict) -> list[list[str]]:
+    """The groups casting enforces: ``distinct_roles`` plus builder/red_team.
+
+    A template with both a builder and a red_team role keeps them apart even
+    when its distinct_roles leaves them out, as a draft copy of code-review
+    might. Malformed entries are skipped here; validate_session_template
+    reports them for drafts, and casting also runs on templates that were
+    never validated.
     """
-    groups = tmpl.get("distinct_roles") if isinstance(tmpl, dict) else None
-    if not isinstance(groups, list):
+    if not isinstance(tmpl, dict):
         return []
-    return [
+    groups = tmpl.get("distinct_roles")
+    result = [
         list(dict.fromkeys(role for role in group if isinstance(role, str)))
-        for group in groups
+        for group in (groups if isinstance(groups, list) else [])
         if isinstance(group, list)
     ]
+    roles = tmpl.get("roles")
+    if (
+        isinstance(roles, list)
+        and all(role in roles for role in BUILDER_AND_RED_TEAM)
+        and not any(set(BUILDER_AND_RED_TEAM) <= set(group) for group in result)
+    ):
+        result.append(list(BUILDER_AND_RED_TEAM))
+    return result
 
 
 def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:

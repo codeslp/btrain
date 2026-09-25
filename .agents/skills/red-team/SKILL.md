@@ -13,7 +13,7 @@ In an agentchattr code-review session, the red team speaks after the reviewer in
 
 ## Rules
 
-- Do not red-team your own work. agentchattr refuses a cast that gives the builder the `red_team` role. In btrain, do not red-team a lane that you own.
+- Do not red-team your own work. agentchattr refuses to start a session that casts one agent, or one person, as both `builder` and `red_team`, in any template that has both roles. It cannot recognize the same two jobs under other role names, so check the cast yourself. In btrain, do not red-team a lane that you own.
 - Do not restate the review. If the reviewer already found an issue, skip it, or add the repro that the review did not have.
 - Do not edit the author's locked files. Put each repro in a new test file outside the lane's locks, or put the exact command and input in the review summary.
 - Do not keep a repro under `.btrain/`. That directory is gitignored, so the writer and CI cannot run what is in it.
