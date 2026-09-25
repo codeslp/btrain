@@ -253,6 +253,22 @@ class TemplateValidationTests(unittest.TestCase):
                 self.assertEqual(len(errors), 1, errors)
                 self.assertIn("role", errors[0])
 
+    def test_falsy_role_prompts_that_are_not_a_map_are_rejected(self):
+        # M4. Loosening `is None` to a falsy check survived: every non-map the
+        # suite tried ("red_team", ["red_team"]) was truthy.
+        for bad in ([], "", 0):
+            with self.subTest(role_prompts=bad):
+                tmpl = two_role_template()
+                tmpl["phases"][0]["role_prompts"] = bad
+
+                self.assertEqual(
+                    validate_session_template(tmpl),
+                    ["Phase 1: 'role_prompts' must be an object mapping role to prompt"],
+                )
+        tmpl = two_role_template()
+        tmpl["phases"][0]["role_prompts"] = {}
+        self.assertEqual(validate_session_template(tmpl), [], "an empty map is still a map")
+
     def test_code_review_keeps_builder_and_red_team_apart(self):
         self.assertIn(["builder", "red_team"], load_template("code-review")["distinct_roles"])
 
@@ -351,6 +367,22 @@ class AutoCastTests(unittest.TestCase):
         self.assertEqual(agents, ["alpha", "beta"])
         self.assertEqual(self.tmpl["roles"], roles_before)
 
+    def test_a_role_listed_twice_is_not_its_own_rival(self):
+        # M8. Dropping `other != role` survived: it only matters when a role is
+        # listed twice, which validate_session_template allows and no test did.
+        tmpl = {"roles": ["builder", "red_team", "builder"], "distinct_roles": [["builder", "red_team"]]}
+
+        self.assertEqual(auto_cast(tmpl, ["alpha", "beta"]), {"builder": "alpha", "red_team": "beta"})
+
+    def test_a_template_without_roles_is_a_cast_error(self):
+        # M13. Dropping the empty-roles check survived. The route would then
+        # start a session with an empty cast that stops at its first turn,
+        # where the old _auto_cast gave a 400.
+        with self.assertRaises(CastError) as caught:
+            auto_cast({"roles": []}, ["alpha"])
+
+        self.assertEqual(str(caught.exception), "template has no roles to cast")
+
 
 class ValidateCastTests(unittest.TestCase):
     def setUp(self):
@@ -386,6 +418,16 @@ class ValidateCastTests(unittest.TestCase):
         tmpl = dict(self.tmpl, distinct_roles=[["builder", "builder", "red_team"]])
 
         self.assertEqual(validate_cast(tmpl, {"builder": "alpha", "red_team": "beta"}), [])
+
+    def test_malformed_groups_do_not_break_casting(self):
+        # M18. Dropping the list check on groups survived: only the validator
+        # had seen malformed distinct_roles, but casting also runs on bundled
+        # and custom templates that are never validated. A group of 5 then
+        # raised TypeError, a 500 from the start route.
+        tmpl = {"roles": ["builder", "red_team"], "distinct_roles": [5, None, ["builder", "red_team"]]}
+
+        self.assertEqual(len(validate_cast(tmpl, {"builder": "alpha", "red_team": "alpha"})), 1)
+        self.assertEqual(auto_cast(tmpl, ["alpha", "beta"]), {"builder": "alpha", "red_team": "beta"})
 
     def test_cast_must_be_an_object_of_agent_names(self):
         self.assertEqual(validate_cast(self.tmpl, ["alpha", "beta"]), ["'cast' must be an object mapping role to agent"])
@@ -622,6 +664,7 @@ class LauncherParityTests(unittest.TestCase):
             "code-review reversed": dict(code_review, roles=list(reversed(code_review["roles"]))),
             "debate": load_template("debate"),
             "triangle": {"roles": ["x", "y", "z"], "distinct_roles": [["x", "y"], ["y", "z"], ["x", "z"]]},
+            "role listed twice": {"roles": ["builder", "red_team", "builder"], "distinct_roles": [["builder", "red_team"]]},
         }
         cases = [
             {"label": f"{label}, {count} agents", "tmpl": tmpl, "agents": [f"agent{i}" for i in range(count)]}
@@ -654,6 +697,75 @@ class LauncherParityTests(unittest.TestCase):
         for cast, launcher_conflicts in zip(casts, launcher):
             with self.subTest(cast=cast):
                 self.assertEqual(launcher_conflicts, validate_cast(code_review, cast))
+
+
+# Loads static/sessions.js with stub DOM globals, presses Start Session with
+# the cast read from stdin, and prints what the launcher did.
+_LAUNCH_RUNNER = r"""
+const fs = require("fs")
+const vm = require("vm")
+const { tmpl, cast, mode } = JSON.parse(fs.readFileSync(0, "utf8"))
+const calls = { alerts: [], posts: [], closed: 0 }
+const selects = Object.entries(cast).map(([role, value]) => ({ dataset: { role }, value }))
+const draftCard = { dataset: { draftTemplate: JSON.stringify(tmpl) } }
+const context = {
+  window: { SESSION_TOKEN: "token", activeChannel: "general", username: "user" },
+  Hub: { on() {} },
+  Store: { watch() {} },
+  console,
+  alert: (message) => calls.alerts.push(message),
+  fetch: async (url, options) => { calls.posts.push(JSON.parse(options.body)); return { ok: true } },
+  document: {
+    getElementById: (id) => (id === "session-launcher-modal" ? { remove: () => { calls.closed += 1 } } : null),
+    querySelectorAll: () => selects,
+    querySelector: () => draftCard,
+  },
+}
+vm.createContext(context)
+vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context, { filename: "sessions.js" })
+vm.runInContext(`sessionTemplates = ${JSON.stringify([tmpl])}`, context)
+const launch = mode === "draft" ? context.launchDraftSession(7) : context.launchSessionWithCast(tmpl.id)
+Promise.resolve(launch).then(() => process.stdout.write(JSON.stringify(calls)))
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class LauncherPrecheckTests(unittest.TestCase):
+    """Start Session in the launcher, from a template card and from a draft."""
+
+    conflict = {"builder": "alpha", "reviewer": "beta", "red_team": "alpha", "synthesiser": "beta"}
+    distinct = {"builder": "alpha", "reviewer": "beta", "red_team": "beta", "synthesiser": "alpha"}
+
+    def press_start(self, mode, cast):
+        result = subprocess.run(
+            [NODE, "-e", _LAUNCH_RUNNER, str(SESSIONS_JS)],
+            input=json.dumps({"tmpl": load_template("code-review"), "cast": cast, "mode": mode}),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_a_conflicting_pick_keeps_the_modal_and_sends_nothing(self):
+        # M30. Disabling this pre-check survived: the parity tests cover the
+        # casting helpers, not the Start Session handlers that call them.
+        for mode in ("template", "draft"):
+            with self.subTest(mode=mode):
+                calls = self.press_start(mode, self.conflict)
+
+                self.assertEqual(calls["alerts"], validate_cast(load_template("code-review"), self.conflict))
+                self.assertEqual(calls["posts"], [])
+                self.assertEqual(calls["closed"], 0)
+
+    def test_a_distinct_pick_is_sent_and_closes_the_modal(self):
+        for mode in ("template", "draft"):
+            with self.subTest(mode=mode):
+                calls = self.press_start(mode, self.distinct)
+
+                self.assertEqual(calls["alerts"], [])
+                self.assertEqual([post["cast"] for post in calls["posts"]], [self.distinct])
+                self.assertEqual(calls["closed"], 1)
 
 
 if __name__ == "__main__":
