@@ -242,6 +242,28 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual(run["state"], "interrupted")
             self.assertIn("'builder' and 'red_team' must be different agents", run["interrupt_reason"])
 
+    def test_a_run_whose_template_was_renamed_away_is_ended(self):
+        # Review round 2 follow-up: a run started on a custom template that
+        # shared the built-in code-review id resumed on the built-in once the
+        # load renamed the custom template to code-review-custom.
+        mine = dict(load_template("code-review"), name="My tuned review")
+        mine.pop("is_custom", None)
+        (self.root / "custom_templates.json").write_text(json.dumps([mine]), "utf-8")
+        runs = [dict(self.saved_run(1, self.DISTINCT, "active", "one"), template_name="My tuned review"),
+                dict(self.saved_run(2, self.DISTINCT, "waiting", "two"), template_name="My tuned review")]
+
+        sessions, trigger = self.restart(runs)
+
+        self.assertEqual(sessions.get_template("code-review-custom")["name"], "My tuned review")
+        self.assertEqual(trigger.calls, [])
+        for run_id in (1, 2):
+            run = sessions.get(run_id)
+            self.assertEqual(run["state"], "interrupted")
+            self.assertEqual(
+                run["interrupt_reason"],
+                "Template 'code-review' changed since the session started (was 'My tuned review', now 'Code Review').",
+            )
+
     def test_a_valid_saved_run_still_resumes(self):
         sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one")])
 

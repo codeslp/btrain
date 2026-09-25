@@ -124,16 +124,31 @@ class SessionEngine:
             if session.get("state") not in ("active", "waiting", "paused"):
                 continue
             tmpl = self._store.get_template(session.get("template_id", ""))
-            cast_errors = validate_cast(tmpl, session.get("cast", {})) if tmpl else []
-            if cast_errors:
-                log.warning("Session %d not resumed: %s", session["id"], " ".join(cast_errors))
-                self._store.interrupt(session["id"], " ".join(cast_errors))
+            reason = self._resume_blocker(session, tmpl) if tmpl else ""
+            if reason:
+                log.warning("Session %d not resumed: %s", session["id"], reason)
+                self._store.interrupt(session["id"], reason)
                 continue
             if session.get("state") == "active":
                 log.info("Resuming session %d (%s) from phase %d, turn %d",
                          session["id"], session.get("template_name", "?"),
                          session["current_phase"], session["current_turn"])
                 self._trigger_current(session)
+
+    @staticmethod
+    def _resume_blocker(session: dict, tmpl: dict) -> str:
+        """Why a saved session must not resume on ``tmpl``, or "" if it may.
+
+        The id can resolve to a different template than the one the session
+        started on: a custom template that shared a built-in id is renamed at
+        load, and the id then names the built-in. The saved name catches that.
+        """
+        saved_name = session.get("template_name")
+        current_name = tmpl.get("name", session.get("template_id"))
+        if saved_name and saved_name != current_name:
+            return (f"Template '{session.get('template_id')}' changed since the session started "
+                    f"(was '{saved_name}', now '{current_name}').")
+        return " ".join(validate_cast(tmpl, session.get("cast", {})))
 
     def _is_agent(self, name: str) -> bool:
         """Check if name belongs to a registered agent (not a human)."""
