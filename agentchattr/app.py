@@ -36,7 +36,7 @@ from btrain.notifications import (
 from btrain.routing import resolve_poller_cue_targets
 from btrain.validator import btrainValidator
 from registry import RuntimeRegistry
-from session_store import SessionStore, validate_session_template
+from session_store import CastError, SessionStore, auto_cast, validate_cast, validate_session_template
 from session_engine import SessionEngine
 
 log = logging.getLogger(__name__)
@@ -3070,11 +3070,10 @@ async def start_session(request: Request):
         tmpl = meta.get("template")
         if not tmpl:
             return JSONResponse({"error": "draft has no template"}, status_code=400)
-        # Register as a temporary template
-        template_id = tmpl.get("id", f"draft-{draft_message_id}")
+        # Its id, never a built-in one; registered below once the cast passes
+        template_id = session_store.usable_template_id(tmpl.get("id"), f"draft-{draft_message_id}")
         tmpl["id"] = template_id
         tmpl["is_custom"] = True
-        session_store._templates[template_id] = tmpl
 
     # Validate template exists
     if not tmpl:
@@ -3085,13 +3084,21 @@ async def start_session(request: Request):
     # Auto-fill cast from available agents if not fully provided
     if not cast:
         online = registry.get_active_names() if registry else []
-        roles = tmpl.get("roles", [])
-        cast = _auto_cast(roles, online, started_by)
-        if not cast:
-            return JSONResponse(
-                {"error": "not enough agents online to fill all roles"},
-                status_code=400,
-            )
+        try:
+            cast = auto_cast(tmpl, online)
+        except CastError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # The launcher always sends a full cast, so this is the check that holds:
+    # reject a cast that breaks distinct_roles (e.g. the builder as its own
+    # red team) before anything is created or triggered.
+    cast_errors = validate_cast(tmpl, cast)
+    if cast_errors:
+        return JSONResponse({"error": " ".join(cast_errors), "errors": cast_errors}, status_code=400)
+
+    if draft_message_id:
+        # Register the draft as a temporary template so the session can run it
+        session_store._templates[template_id] = tmpl
 
     session = session_engine.start_session(template_id, channel, cast, started_by, goal)
     if not session:
@@ -3145,10 +3152,16 @@ async def request_session_draft(request: Request):
         "Respond with a single chat message containing a fenced JSON code block with this exact structure:\n"
         "```session\n"
         '{"name": "...", "description": "...", "roles": ["role1", "role2", ...], '
-        '"phases": [{"name": "...", "participants": ["role1"], "prompt": "...", "is_output": false}, ...]}\n'
+        '"distinct_roles": [["role1", "role2"]], '
+        '"phases": [{"name": "...", "participants": ["role1", "role2"], "prompt": "...", '
+        '"role_prompts": {"role2": "..."}, "is_output": false}, ...]}\n'
         "```\n"
-        "Rules: max 6 roles, max 6 phases, max 4 participants per phase, max 200 chars per prompt. "
+        "Rules: max 6 roles, max 6 phases, max 4 participants per phase, "
+        "max 200 chars per prompt and per role prompt. "
         "Mark exactly one phase as `is_output: true` (the final deliverable). "
+        "`role_prompts` is optional: it gives one participant of that phase its own prompt "
+        "in place of the phase prompt. `distinct_roles` is optional: each group lists roles "
+        "that must go to different agents, and `builder` and `red_team` always do. "
         f"Keep it focused and sequential. Use the chat_send tool to post your response in the #{channel} channel. "
         "Do NOT respond only in your terminal.",
         channel=channel,
@@ -3176,7 +3189,7 @@ async def save_draft(request: Request):
     if not tmpl:
         return JSONResponse({"error": "no template in draft"}, status_code=400)
 
-    tmpl.setdefault("id", f"custom-{msg_id}")
+    tmpl["id"] = session_store.usable_template_id(tmpl.get("id"), f"custom-{msg_id}")
     session_store.save_custom_template(tmpl)
     return JSONResponse({"ok": True, "template_id": tmpl["id"]})
 
@@ -3189,23 +3202,6 @@ async def delete_session_template(template_id: str):
     if not deleted:
         return JSONResponse({"error": "template not found or not custom"}, status_code=404)
     return JSONResponse({"ok": True, "template_id": template_id})
-
-
-def _auto_cast(roles: list[str], online_agents: list[str], started_by: str) -> dict:
-    """Auto-assign roles to available agents. Returns empty dict if not enough agents."""
-    cast = {}
-    available = list(online_agents)
-
-    for role in roles:
-        if not available:
-            # Reuse agents if we run out (one agent, multiple roles)
-            available = list(online_agents)
-        if not available:
-            return {}
-        agent = available.pop(0)
-        cast[role] = agent
-
-    return cast
 
 
 # --- Version check (GitHub release notifier) ---

@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+from session_store import validate_cast
+
 log = logging.getLogger(__name__)
 
 # Dissent mandate injected for review/critique roles
@@ -109,16 +111,44 @@ class SessionEngine:
     def resume_active_sessions(self):
         """On server restart, resume any sessions that were in progress.
 
+        A session whose cast breaks its template's rules (saved before the
+        builder/red_team check existed, say) is ended with the reason rather
+        than resumed, whatever its state: a waiting one would reach the
+        broken turn as soon as its agent answers.
+
         Only re-trigger 'active' sessions. 'waiting' sessions already had
         their trigger sent before the restart — re-triggering would
         double-queue the same participant.
         """
         for session in self._store.list_all():
+            if session.get("state") not in ("active", "waiting", "paused"):
+                continue
+            tmpl = self._store.get_template(session.get("template_id", ""))
+            reason = self._resume_blocker(session, tmpl) if tmpl else ""
+            if reason:
+                log.warning("Session %d not resumed: %s", session["id"], reason)
+                self._store.interrupt(session["id"], reason)
+                continue
             if session.get("state") == "active":
                 log.info("Resuming session %d (%s) from phase %d, turn %d",
                          session["id"], session.get("template_name", "?"),
                          session["current_phase"], session["current_turn"])
                 self._trigger_current(session)
+
+    @staticmethod
+    def _resume_blocker(session: dict, tmpl: dict) -> str:
+        """Why a saved session must not resume on ``tmpl``, or "" if it may.
+
+        The id can resolve to a different template than the one the session
+        started on: a custom template that shared a built-in id is renamed at
+        load, and the id then names the built-in. The saved name catches that.
+        """
+        saved_name = session.get("template_name")
+        current_name = tmpl.get("name", session.get("template_id"))
+        if saved_name and saved_name != current_name:
+            return (f"Template '{session.get('template_id')}' changed since the session started "
+                    f"(was '{saved_name}', now '{current_name}').")
+        return " ".join(validate_cast(tmpl, session.get("cast", {})))
 
     def _is_agent(self, name: str) -> bool:
         """Check if name belongs to a registered agent (not a human)."""
@@ -226,6 +256,15 @@ class SessionEngine:
         if not tmpl:
             return
 
+        # A draft run under the same id replaces the template under sessions
+        # already using it, so hold the cast to the template as it is now,
+        # not as it was when the session started.
+        cast_errors = validate_cast(tmpl, session.get("cast", {}))
+        if cast_errors:
+            log.warning("Session %d stopped before its next turn: %s", session["id"], " ".join(cast_errors))
+            self._store.interrupt(session["id"], " ".join(cast_errors))
+            return
+
         phases = tmpl.get("phases", [])
         phase_idx = session["current_phase"]
         turn_idx = session["current_turn"]
@@ -285,7 +324,15 @@ class SessionEngine:
             lines.append(f"GOAL: {session['goal']}")
         lines.append(f"PHASE: {phase['name']} ({phase_idx + 1}/{total_phases})")
         lines.append(f"YOUR ROLE: {role}")
-        lines.append(f"INSTRUCTION: {phase.get('prompt', '')}")
+        # A phase may give one participant its own instruction (e.g. red_team
+        # in a review phase); every other participant gets the phase prompt.
+        instruction = phase.get("prompt", "")
+        role_prompts = phase.get("role_prompts")
+        if isinstance(role_prompts, dict):
+            role_prompt = role_prompts.get(role)
+            if isinstance(role_prompt, str) and role_prompt.strip():
+                instruction = role_prompt
+        lines.append(f"INSTRUCTION: {instruction}")
 
         # Dissent mandate for review/critique roles
         if role.lower() in _DISSENT_ROLES:

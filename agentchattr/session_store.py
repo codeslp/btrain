@@ -1,12 +1,43 @@
 """Session store — persists active session runs to JSON."""
 
 import json
+import os
+import shutil
 import time
 import threading
 import logging
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    """Replace ``path`` with ``data`` as JSON through a temp file and os.replace.
+
+    A failed or interrupted write leaves the old file whole, never truncated.
+    A read-only target is refused rather than silently replaced, since
+    os.replace needs only a writable directory.
+    """
+    if path.exists() and not os.access(path, os.W_OK):
+        raise PermissionError(f"{path} is read-only")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+# Longest phase prompt or per-role prompt a template may carry.
+MAX_PROMPT_CHARS = 200
 
 
 class SessionStore:
@@ -33,12 +64,7 @@ class SessionStore:
         if custom_path.exists():
             try:
                 custom = json.loads(custom_path.read_text("utf-8"))
-                for tmpl in (custom if isinstance(custom, list) else []):
-                    tid = tmpl.get("id", "")
-                    if tid:
-                        tmpl["is_custom"] = True
-                        self._templates[tid] = tmpl
-                        log.info("Loaded custom template: %s", tid)
+                self._load_custom_templates(custom if isinstance(custom, list) else [], custom_path)
             except (json.JSONDecodeError, KeyError) as exc:
                 log.warning("Failed to load custom templates: %s", exc)
 
@@ -79,11 +105,66 @@ class SessionStore:
             except (json.JSONDecodeError, KeyError) as exc:
                 log.warning("Failed to load template %s: %s", f.name, exc)
 
+    def _load_custom_templates(self, custom: list, custom_path: Path):
+        """Register saved custom templates after the built-in ones.
+
+        One that reuses a built-in id (saved before drafts were kept off
+        built-in ids, or edited by hand) is renamed to ``<id>-custom`` and the
+        file rewritten, so it stays listed, runnable and deletable without
+        replacing the built-in. Entries without a string id are skipped.
+        """
+        saved_ids = {t.get("id") for t in custom if isinstance(t, dict) and isinstance(t.get("id"), str)}
+        taken = set(self._templates) | saved_ids
+        renamed = False
+        for tmpl in custom:
+            tid = tmpl.get("id") if isinstance(tmpl, dict) else None
+            if not isinstance(tid, str) or not tid:
+                log.warning("Skipping custom template without a string id: %r", tmpl)
+                continue
+            if self.is_builtin_template(tid):
+                new_id, n = f"{tid}-custom", 2
+                while new_id in taken:
+                    new_id, n = f"{tid}-custom-{n}", n + 1
+                log.warning("Custom template %s shares a built-in id; renamed it to %s", tid, new_id)
+                tmpl["id"] = tid = new_id
+                taken.add(new_id)
+                renamed = True
+            tmpl["is_custom"] = True
+            self._templates[tid] = tmpl
+            log.info("Loaded custom template: %s", tid)
+        if renamed:
+            try:
+                _write_json_atomic(custom_path, custom)
+            except OSError as exc:
+                # Starting matters more than persisting: the rename holds in
+                # memory and is tried again at the next load.
+                log.warning("Could not save renamed custom templates to %s (%s); "
+                            "the rename holds until restart", custom_path, exc)
+
     def get_templates(self) -> list[dict]:
         return list(self._templates.values())
 
     def get_template(self, template_id: str) -> dict | None:
         return self._templates.get(template_id)
+
+    def is_builtin_template(self, template_id: str) -> bool:
+        """True for a template shipped in session_templates/.
+
+        Drafts and custom templates may not take its id: replacing it would
+        drop its rules, such as code-review's distinct_roles.
+        """
+        tmpl = self._templates.get(template_id)
+        return tmpl is not None and not tmpl.get("is_custom")
+
+    def usable_template_id(self, template_id, fallback: str) -> str:
+        """``template_id`` if a draft may keep it, else ``fallback``.
+
+        A draft may not take a built-in template's id, and ids are dict keys,
+        so one that is not a non-empty string is replaced too.
+        """
+        if isinstance(template_id, str) and template_id.strip() and not self.is_builtin_template(template_id):
+            return template_id
+        return fallback
 
     def save_custom_template(self, tmpl: dict) -> dict:
         custom_path = self._path.parent / "custom_templates.json"
@@ -316,6 +397,9 @@ def validate_session_template(tmpl: dict) -> list[str]:
     if not tmpl.get("name") or not isinstance(tmpl.get("name"), str):
         errors.append("Missing or invalid 'name' (string required)")
 
+    if "id" in tmpl and (not isinstance(tmpl["id"], str) or not tmpl["id"].strip()):
+        errors.append("'id' must be a non-empty string")
+
     roles = tmpl.get("roles", [])
     if not isinstance(roles, list) or len(roles) == 0:
         errors.append("'roles' must be a non-empty array")
@@ -346,8 +430,9 @@ def validate_session_template(tmpl: dict) -> list[str]:
             if p not in roles_set:
                 errors.append(f"Phase {i + 1}: participant '{p}' not in roles list")
         prompt = phase.get("prompt", "")
-        if isinstance(prompt, str) and len(prompt) > 200:
-            errors.append(f"Phase {i + 1}: prompt too long ({len(prompt)} chars, max 200)")
+        if isinstance(prompt, str) and len(prompt) > MAX_PROMPT_CHARS:
+            errors.append(f"Phase {i + 1}: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_CHARS})")
+        errors.extend(_role_prompt_errors(i, phase, participants))
         if phase.get("is_output"):
             output_count += 1
 
@@ -356,4 +441,174 @@ def validate_session_template(tmpl: dict) -> list[str]:
     elif output_count > 1:
         errors.append(f"Multiple phases marked as output ({output_count}, expected 1)")
 
+    errors.extend(_distinct_roles_errors(tmpl.get("distinct_roles"), roles_set))
+    return errors
+
+
+def _distinct_roles_errors(groups, roles_set: set) -> list[str]:
+    """Errors for the optional ``distinct_roles`` list of role groups."""
+    if groups is None:
+        return []
+    if not isinstance(groups, list):
+        return ["'distinct_roles' must be an array of role groups"]
+    errors = []
+    for j, group in enumerate(groups):
+        names = [r for r in group if isinstance(r, str)] if isinstance(group, list) else []
+        if len(set(names)) < 2:
+            errors.append(f"distinct_roles group {j + 1}: must list at least two different roles")
+            continue
+        for role in group:
+            if not isinstance(role, str) or role not in roles_set:
+                errors.append(f"distinct_roles group {j + 1}: '{role}' not in roles list")
+    return errors
+
+
+def _role_prompt_errors(index: int, phase: dict, participants) -> list[str]:
+    """Errors for a phase's optional ``role_prompts`` map of role -> prompt.
+
+    A role prompt replaces the phase prompt for that one participant, so it
+    must name a participant of the same phase and obey the same length cap.
+    """
+    role_prompts = phase.get("role_prompts")
+    if role_prompts is None:
+        return []
+    label = f"Phase {index + 1}"
+    if not isinstance(role_prompts, dict):
+        return [f"{label}: 'role_prompts' must be an object mapping role to prompt"]
+
+    members = {p for p in participants if isinstance(p, str)} if isinstance(participants, list) else set()
+    errors = []
+    for role, text in role_prompts.items():
+        if role not in members:
+            errors.append(f"{label}: role prompt for '{role}', which is not a participant in this phase")
+        if not isinstance(text, str) or not text.strip():
+            errors.append(f"{label}: role prompt for '{role}' must be a non-empty string")
+        elif len(text) > MAX_PROMPT_CHARS:
+            errors.append(
+                f"{label}: role prompt for '{role}' too long ({len(text)} chars, max {MAX_PROMPT_CHARS})"
+            )
+    return errors
+
+
+# --- Casting ---
+#
+# A template's ``distinct_roles`` lists groups of roles that must go to
+# different agents, e.g. ``[["builder", "red_team"]]`` so that nobody
+# red-teams their own build. static/sessions.js mirrors auto_cast and the
+# conflict check (``_autoCast`` / ``_castConflicts``) for the launcher.
+
+
+class CastError(ValueError):
+    """The template's roles cannot be given to the agents that are online."""
+
+
+# Roles that never share an agent in a template that has both, whatever its
+# distinct_roles says: nobody red-teams their own build.
+BUILDER_AND_RED_TEAM = ("builder", "red_team")
+
+
+def _distinct_groups(tmpl: dict) -> list[list[str]]:
+    """The groups casting enforces: ``distinct_roles`` plus builder/red_team.
+
+    A template with both a builder and a red_team role keeps them apart even
+    when its distinct_roles leaves them out, as a draft copy of code-review
+    might. Malformed entries are skipped here; validate_session_template
+    reports them for drafts, and casting also runs on templates that were
+    never validated.
+    """
+    if not isinstance(tmpl, dict):
+        return []
+    groups = tmpl.get("distinct_roles")
+    result = [
+        list(dict.fromkeys(role for role in group if isinstance(role, str)))
+        for group in (groups if isinstance(groups, list) else [])
+        if isinstance(group, list)
+    ]
+    roles = tmpl.get("roles")
+    if (
+        isinstance(roles, list)
+        and all(role in roles for role in BUILDER_AND_RED_TEAM)
+        and not any(set(BUILDER_AND_RED_TEAM) <= set(group) for group in result)
+    ):
+        result.append(list(BUILDER_AND_RED_TEAM))
+    return result
+
+
+def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:
+    """Give each of the template's roles to an online agent.
+
+    Round-robin in role order, reusing agents when roles outnumber them,
+    except that two roles in one ``distinct_roles`` group never share an
+    agent: a candidate that would repeat one is passed over for the next
+    agent in the rotation. Raises CastError when a role cannot be cast.
+
+    The pass is greedy and never revisits a choice, so with several
+    overlapping groups it can fail where a hand cast would work. For one
+    pair such as builder/red_team it fails only when one agent is online.
+    """
+    roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
+    if not isinstance(roles, list) or not roles:
+        raise CastError("template has no roles to cast")
+    agents = list(dict.fromkeys(online_agents))
+    if not agents:
+        raise CastError("not enough agents online to fill all roles")
+
+    groups = _distinct_groups(tmpl)
+    cast: dict[str, str] = {}
+    turn = 0
+    for role in roles:
+        rival_roles = {other for group in groups if role in group for other in group if other != role}
+        rivals = [other for other in dict.fromkeys(roles) if other in rival_roles and other in cast]
+        taken = {cast[other] for other in rivals}
+        pick = next(
+            (i % len(agents) for i in range(turn, turn + len(agents)) if agents[i % len(agents)] not in taken),
+            None,
+        )
+        if pick is None:
+            online = f"{len(agents)} agent is" if len(agents) == 1 else f"{len(agents)} agents are"
+            raise CastError(
+                f"Cannot auto-cast '{role}': it needs a different agent than "
+                f"{' and '.join(repr(r) for r in rivals)}, but only {online} online ({', '.join(agents)}). "
+                "Auto-cast fills roles in order and does not try every combination, "
+                "so choose the cast by hand or bring another agent online."
+            )
+        cast[role] = agents[pick]
+        turn = (pick + 1) % len(agents)
+    return cast
+
+
+def validate_cast(tmpl: dict, cast) -> list[str]:
+    """Check a role -> agent cast against the template. Returns errors (empty = valid).
+
+    Every key must be one of the template's roles: a stray key is inert until
+    the template under a running session changes, and then it is a live role
+    held by whoever the key named. Roles in one ``distinct_roles`` group may
+    not share an agent (or a human). Roles left uncast are not checked here.
+    """
+    if not isinstance(cast, dict):
+        return ["'cast' must be an object mapping role to agent"]
+    errors = [
+        f"Cast for '{role}' must be an agent name"
+        for role, agent in cast.items()
+        if agent and not isinstance(agent, str)
+    ]
+    if errors:
+        return errors
+
+    roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
+    roles = roles if isinstance(roles, list) else []
+    errors = [f"Cast names '{role}', which is not a role in this template." for role in cast if role not in roles]
+    for group in _distinct_groups(tmpl):
+        first_role_by_agent: dict[str, str] = {}
+        for role in group:
+            agent = cast.get(role)
+            if not agent:
+                continue
+            if agent in first_role_by_agent:
+                errors.append(
+                    f"Cast conflict: '{first_role_by_agent[agent]}' and '{role}' "
+                    f"must be different agents, but both are '{agent}'."
+                )
+            else:
+                first_role_by_agent[agent] = role
     return errors
