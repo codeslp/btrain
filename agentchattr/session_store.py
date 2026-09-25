@@ -36,15 +36,7 @@ class SessionStore:
         if custom_path.exists():
             try:
                 custom = json.loads(custom_path.read_text("utf-8"))
-                for tmpl in (custom if isinstance(custom, list) else []):
-                    tid = tmpl.get("id", "")
-                    if tid and self.is_builtin_template(tid):
-                        log.warning("Ignoring custom template %s: it would replace a built-in template", tid)
-                        continue
-                    if tid:
-                        tmpl["is_custom"] = True
-                        self._templates[tid] = tmpl
-                        log.info("Loaded custom template: %s", tid)
+                self._load_custom_templates(custom if isinstance(custom, list) else [], custom_path)
             except (json.JSONDecodeError, KeyError) as exc:
                 log.warning("Failed to load custom templates: %s", exc)
 
@@ -84,6 +76,36 @@ class SessionStore:
                 log.info("Loaded session template: %s", tid)
             except (json.JSONDecodeError, KeyError) as exc:
                 log.warning("Failed to load template %s: %s", f.name, exc)
+
+    def _load_custom_templates(self, custom: list, custom_path: Path):
+        """Register saved custom templates after the built-in ones.
+
+        One that reuses a built-in id (saved before drafts were kept off
+        built-in ids, or edited by hand) is renamed to ``<id>-custom`` and the
+        file rewritten, so it stays listed, runnable and deletable without
+        replacing the built-in. Entries without a string id are skipped.
+        """
+        saved_ids = {t.get("id") for t in custom if isinstance(t, dict) and isinstance(t.get("id"), str)}
+        taken = set(self._templates) | saved_ids
+        renamed = False
+        for tmpl in custom:
+            tid = tmpl.get("id") if isinstance(tmpl, dict) else None
+            if not isinstance(tid, str) or not tid:
+                log.warning("Skipping custom template without a string id: %r", tmpl)
+                continue
+            if self.is_builtin_template(tid):
+                new_id, n = f"{tid}-custom", 2
+                while new_id in taken:
+                    new_id, n = f"{tid}-custom-{n}", n + 1
+                log.warning("Custom template %s shares a built-in id; renamed it to %s", tid, new_id)
+                tmpl["id"] = tid = new_id
+                taken.add(new_id)
+                renamed = True
+            tmpl["is_custom"] = True
+            self._templates[tid] = tmpl
+            log.info("Loaded custom template: %s", tid)
+        if renamed:
+            custom_path.write_text(json.dumps(custom, indent=2, ensure_ascii=False) + "\n", "utf-8")
 
     def get_templates(self) -> list[dict]:
         return list(self._templates.values())
