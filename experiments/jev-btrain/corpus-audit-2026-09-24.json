@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "scope": "Reviewer-bot issue and review text only; upper bound before head, state, and deterministic filters",
   "before": "2026-09-24T22:00:00Z",
+  "manifestFingerprint": "1f68dee41f5af376a7794daecc319815c8284a70056728ef5890ea49053b9fef",
   "authors": [
     "chatgpt-codex-connector[bot]",
     "unblocked[bot]"

@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 
-import { audit } from "./audit-corpus.mjs"
+import { audit, captureManifest } from "./audit-corpus.mjs"
 
 test("corpus audit excludes inline findings and author replies, deduplicates repeated source IDs, and groups commit variants", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-corpus-audit-"))
@@ -115,23 +115,28 @@ test("source fingerprint changes when eligibility metadata changes without chang
   }
 })
 
-test("audit cutoff ignores later comments and files so a frozen snapshot remains stable", async () => {
+test("audit manifest ignores later backfilled comments and files", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-corpus-audit-"))
   try {
     const directory = path.join(root, ".btrain", "pr-comments")
     await fs.mkdir(directory, { recursive: true })
     const older = { id: 1, surface: "issue", author: "reviewer[bot]", body: "No findings", at: "2026-09-23T12:00:00Z" }
-    const newer = { id: 2, surface: "issue", author: "reviewer[bot]", body: "New finding", at: "2026-09-24T22:05:00Z" }
-    const options = { before: "2026-09-24T22:00:00Z" }
+    const newer = { id: 2, surface: "issue", author: "reviewer[bot]", body: "New finding", at: "2026-09-23T12:01:00Z" }
     const repo = [{ name: "sample", root }]
     await fs.writeFile(path.join(directory, "lane-a-1.jsonl"), `${JSON.stringify(older)}\n`)
-    const frozen = await audit(repo, ["reviewer[bot]"], options)
+    const manifest = await captureManifest(repo, "2026-09-24T22:00:00Z")
+    assert.equal(manifest.repos.sample[0].lineCount, 1)
+    const frozen = await audit(repo, ["reviewer[bot]"], { manifest })
     await fs.appendFile(path.join(directory, "lane-a-1.jsonl"), `${JSON.stringify(newer)}\n`)
     await fs.writeFile(path.join(directory, "lane-b-2.jsonl"), `${JSON.stringify(newer)}\n`)
-    const rerun = await audit(repo, ["reviewer[bot]"], options)
+    const rerun = await audit(repo, ["reviewer[bot]"], { manifest })
 
     assert.deepEqual(rerun, frozen)
     assert.equal(rerun.repos.sample.files, 1)
+    await fs.appendFile(path.join(directory, "lane-a-1.jsonl"), "\n")
+    assert.deepEqual(await audit(repo, ["reviewer[bot]"], { manifest }), frozen)
+    await fs.writeFile(path.join(directory, "lane-a-1.jsonl"), `${JSON.stringify({ ...older, author: "author" })}\n${JSON.stringify(newer)}\n`)
+    await assert.rejects(audit(repo, ["reviewer[bot]"], { manifest }), /Manifest source mismatch/)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

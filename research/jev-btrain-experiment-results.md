@@ -168,9 +168,12 @@ controls for requests, progress updates, quota failures, author replies, and soc
 The first attempt to build that corpus **did not pass the data-readiness gate**. The reproducible
 [`corpus-audit-2026-09-24.json`](../experiments/jev-btrain/corpus-audit-2026-09-24.json)
 summarizes 58 local btrain and 62 local ai_sales PR-comment JSONL files. These are local captured
-logs before the 2026-09-24 22:00 UTC cutoff, not a complete GitHub-history export. The audit retained
-counts and a fingerprint of the raw source records, but did not copy ai_sales comment text into this
-repository or call a model.
+logs selected before the 2026-09-24 22:00 UTC cutoff, not a complete GitHub-history export. The
+committed [`source manifest`](../experiments/jev-btrain/corpus-source-manifest-2026-09-24.json)
+pins each selected file prefix by line count and SHA-256 hash. Reproduction verifies the pinned
+prefixes and ignores later appends or files, including backfilled historical comments. The audit
+retained counts and a fingerprint of the raw source records, but did not copy ai_sales comment
+text into this repository or call a model.
 Peer review caught an earlier digest that omitted eligibility metadata; the corrected digest hashes
 each raw JSONL record, and a regression test changes author, surface, review state, and commit ID.
 

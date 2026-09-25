@@ -23,6 +23,8 @@ function parseArgs(argv) {
   const repos = []
   const authors = []
   let before = null
+  let manifestPath = null
+  let capture = false
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--repo" && argv[i + 1]) {
       const separator = argv[++i].indexOf("=")
@@ -32,17 +34,68 @@ function parseArgs(argv) {
       authors.push(argv[++i].toLowerCase())
     } else if (argv[i] === "--before" && argv[i + 1]) {
       before = argv[++i]
+    } else if (argv[i] === "--manifest" && argv[i + 1]) {
+      manifestPath = argv[++i]
+    } else if (argv[i] === "--capture-manifest") {
+      capture = true
     } else {
       throw new Error(`Unexpected argument: ${argv[i]}`)
     }
   }
-  if (!repos.length || !authors.length) {
-    throw new Error("Usage: node audit-corpus.mjs --author reviewer[bot] --repo name=/absolute/path [--repo ...]")
+  if (!repos.length || (!capture && !authors.length)) {
+    throw new Error("Usage: node audit-corpus.mjs --repo name=/absolute/path [--author reviewer[bot]] [--manifest path | --capture-manifest --before time]")
   }
   if (new Set(repos.map((repo) => repo.name)).size !== repos.length) {
     throw new Error("Repository names must be unique")
   }
-  return { repos, authors, before }
+  if (capture && (!before || manifestPath)) throw new Error("--capture-manifest requires --before and excludes --manifest")
+  if (manifestPath && before) throw new Error("Use --manifest without --before; the manifest defines the snapshot")
+  return { repos, authors, before, manifestPath, capture }
+}
+
+function parseLines(raw, source, limit = null) {
+  const lines = raw.split("\n")
+  if (lines.at(-1) === "") lines.pop()
+  const selected = limit === null ? lines : lines.slice(0, limit)
+  if (limit !== null && selected.length < limit) throw new Error(`Manifest line count mismatch in ${source}`)
+  if (selected.some((line) => !line)) throw new Error(`Blank JSONL line in ${source}`)
+  return selected
+}
+
+function cutoffTime(before) {
+  const value = Date.parse(before)
+  if (!Number.isFinite(value)) throw new Error("--before requires an ISO timestamp")
+  return value
+}
+
+export async function captureManifest(repos, before) {
+  const beforeMs = cutoffTime(before)
+  const entries = {}
+  for (const repo of repos) {
+    const directory = path.join(repo.root, ".btrain", "pr-comments")
+    const files = (await fs.readdir(directory)).filter((file) => file.endsWith(".jsonl")).sort()
+    entries[repo.name] = []
+    for (const file of files) {
+      const lines = parseLines(await fs.readFile(path.join(directory, file), "utf8"), `${repo.name}/${file}`)
+      let lineCount = 0
+      let passedCutoff = false
+      for (const line of lines) {
+        const atMs = Date.parse(JSON.parse(line).at)
+        if (!Number.isFinite(atMs)) throw new Error(`Invalid comment timestamp in ${repo.name}/${file}`)
+        if (atMs >= beforeMs) passedCutoff = true
+        else if (passedCutoff) throw new Error(`Non-prefix cutoff in ${repo.name}/${file}`)
+        else lineCount += 1
+      }
+      if (lineCount) {
+        entries[repo.name].push({
+          file,
+          lineCount,
+          sha256: hash(`${lines.slice(0, lineCount).join("\n")}\n`),
+        })
+      }
+    }
+  }
+  return { schemaVersion: 1, before, repos: entries }
 }
 
 function counts(rows, authors) {
@@ -91,20 +144,37 @@ function counts(rows, authors) {
   }
 }
 
-export async function audit(repos, authors, { before = null } = {}) {
-  const beforeMs = before === null ? null : Date.parse(before)
-  if (before !== null && !Number.isFinite(beforeMs)) throw new Error("--before requires an ISO timestamp")
+export async function audit(repos, authors, { before = null, manifest = null } = {}) {
+  if (manifest && before) throw new Error("A manifest already defines the snapshot cutoff")
+  const beforeMs = before === null ? null : cutoffTime(before)
+  if (manifest && manifest.schemaVersion !== 1) throw new Error("Unsupported source manifest")
   const all = []
   const perRepo = {}
   const fingerprints = []
   for (const repo of repos) {
     const directory = path.join(repo.root, ".btrain", "pr-comments")
-    const files = (await fs.readdir(directory)).filter((file) => file.endsWith(".jsonl")).sort()
+    const files = manifest
+      ? manifest.repos?.[repo.name]
+      : (await fs.readdir(directory)).filter((file) => file.endsWith(".jsonl")).sort().map((file) => ({ file }))
+    if (!Array.isArray(files)) throw new Error(`Manifest has no source list for ${repo.name}`)
     const rows = []
     let includedFiles = 0
-    for (const file of files) {
+    for (const entry of files) {
+      const file = entry.file
+      if (path.basename(file) !== file || !file.endsWith(".jsonl")) throw new Error(`Invalid manifest file: ${file}`)
       const previousCount = rows.length
-      const lines = (await fs.readFile(path.join(directory, file), "utf8")).split("\n").filter(Boolean)
+      if (manifest && (!Number.isSafeInteger(entry.lineCount) || entry.lineCount < 1)) {
+        throw new Error(`Manifest line count mismatch in ${repo.name}/${file}`)
+      }
+      const lines = parseLines(
+        await fs.readFile(path.join(directory, file), "utf8"),
+        `${repo.name}/${file}`,
+        manifest ? entry.lineCount : null,
+      )
+      if (manifest) {
+        const prefixHash = hash(`${lines.join("\n")}\n`)
+        if (prefixHash !== entry.sha256) throw new Error(`Manifest source mismatch in ${repo.name}/${file}`)
+      }
       for (const [index, line] of lines.entries()) {
         const record = JSON.parse(line)
         if (beforeMs !== null) {
@@ -126,9 +196,10 @@ export async function audit(repos, authors, { before = null } = {}) {
   return {
     schemaVersion: 1,
     scope: "Reviewer-bot issue and review text only; upper bound before head, state, and deterministic filters",
-    before,
+    before: manifest?.before ?? before,
+    manifestFingerprint: manifest ? hash(JSON.stringify(manifest)) : null,
     authors,
-    sourceFingerprint: hash(`${before || ""}\n${fingerprints.join("\n")}`),
+    sourceFingerprint: hash(`${manifest?.before || before || ""}\n${fingerprints.join("\n")}`),
     overall: counts(all, authors),
     repos: perRepo,
   }
@@ -136,8 +207,14 @@ export async function audit(repos, authors, { before = null } = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const { repos, authors, before } = parseArgs(process.argv.slice(2))
-    process.stdout.write(`${JSON.stringify(await audit(repos, authors, { before }), null, 2)}\n`)
+    const { repos, authors, before, manifestPath, capture } = parseArgs(process.argv.slice(2))
+    const result = capture
+      ? await captureManifest(repos, before)
+      : await audit(repos, authors, {
+        before,
+        manifest: manifestPath ? JSON.parse(await fs.readFile(manifestPath, "utf8")) : null,
+      })
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
   } catch (error) {
     process.stderr.write(`${error.message}\n`)
     process.exitCode = 1
