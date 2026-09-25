@@ -36,7 +36,7 @@ from btrain.notifications import (
 from btrain.routing import resolve_poller_cue_targets
 from btrain.validator import btrainValidator
 from registry import RuntimeRegistry
-from session_store import SessionStore, validate_session_template
+from session_store import CastError, SessionStore, auto_cast, validate_cast, validate_session_template
 from session_engine import SessionEngine
 
 log = logging.getLogger(__name__)
@@ -3085,13 +3085,17 @@ async def start_session(request: Request):
     # Auto-fill cast from available agents if not fully provided
     if not cast:
         online = registry.get_active_names() if registry else []
-        roles = tmpl.get("roles", [])
-        cast = _auto_cast(roles, online, started_by)
-        if not cast:
-            return JSONResponse(
-                {"error": "not enough agents online to fill all roles"},
-                status_code=400,
-            )
+        try:
+            cast = auto_cast(tmpl, online)
+        except CastError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # The launcher always sends a full cast, so this is the check that holds:
+    # reject a cast that breaks distinct_roles (e.g. the builder as its own
+    # red team) before anything is created or triggered.
+    cast_errors = validate_cast(tmpl, cast)
+    if cast_errors:
+        return JSONResponse({"error": " ".join(cast_errors), "errors": cast_errors}, status_code=400)
 
     session = session_engine.start_session(template_id, channel, cast, started_by, goal)
     if not session:
@@ -3189,23 +3193,6 @@ async def delete_session_template(template_id: str):
     if not deleted:
         return JSONResponse({"error": "template not found or not custom"}, status_code=404)
     return JSONResponse({"ok": True, "template_id": template_id})
-
-
-def _auto_cast(roles: list[str], online_agents: list[str], started_by: str) -> dict:
-    """Auto-assign roles to available agents. Returns empty dict if not enough agents."""
-    cast = {}
-    available = list(online_agents)
-
-    for role in roles:
-        if not available:
-            # Reuse agents if we run out (one agent, multiple roles)
-            available = list(online_agents)
-        if not available:
-            return {}
-        agent = available.pop(0)
-        cast[role] = agent
-
-    return cast
 
 
 # --- Version check (GitHub release notifier) ---

@@ -3,6 +3,7 @@
   "name": "Code Review",
   "description": "Structured code review with builder, reviewer, and red team.",
   "roles": ["builder", "reviewer", "red_team", "synthesiser"],
+  "distinct_roles": [["builder", "red_team"]],
   "user_required": false,
   "phases": [
     {

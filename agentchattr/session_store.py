@@ -360,6 +360,25 @@ def validate_session_template(tmpl: dict) -> list[str]:
     elif output_count > 1:
         errors.append(f"Multiple phases marked as output ({output_count}, expected 1)")
 
+    errors.extend(_distinct_roles_errors(tmpl.get("distinct_roles"), roles_set))
+    return errors
+
+
+def _distinct_roles_errors(groups, roles_set: set) -> list[str]:
+    """Errors for the optional ``distinct_roles`` list of role groups."""
+    if groups is None:
+        return []
+    if not isinstance(groups, list):
+        return ["'distinct_roles' must be an array of role groups"]
+    errors = []
+    for j, group in enumerate(groups):
+        names = [r for r in group if isinstance(r, str)] if isinstance(group, list) else []
+        if len(set(names)) < 2:
+            errors.append(f"distinct_roles group {j + 1}: must list at least two different roles")
+            continue
+        for role in group:
+            if not isinstance(role, str) or role not in roles_set:
+                errors.append(f"distinct_roles group {j + 1}: '{role}' not in roles list")
     return errors
 
 
@@ -387,4 +406,102 @@ def _role_prompt_errors(index: int, phase: dict, participants) -> list[str]:
             errors.append(
                 f"{label}: role prompt for '{role}' too long ({len(text)} chars, max {MAX_PROMPT_CHARS})"
             )
+    return errors
+
+
+# --- Casting ---
+#
+# A template's ``distinct_roles`` lists groups of roles that must go to
+# different agents, e.g. ``[["builder", "red_team"]]`` so that nobody
+# red-teams their own build. static/sessions.js mirrors auto_cast and the
+# conflict check (``_autoCast`` / ``_castConflicts``) for the launcher.
+
+
+class CastError(ValueError):
+    """The template's roles cannot be given to the agents that are online."""
+
+
+def _distinct_groups(tmpl: dict) -> list[list[str]]:
+    """``distinct_roles`` as groups of unique role names, skipping malformed entries.
+
+    validate_session_template reports malformed groups for drafts; this only
+    has to keep casting from crashing on a template that was never validated.
+    """
+    groups = tmpl.get("distinct_roles") if isinstance(tmpl, dict) else None
+    if not isinstance(groups, list):
+        return []
+    return [
+        list(dict.fromkeys(role for role in group if isinstance(role, str)))
+        for group in groups
+        if isinstance(group, list)
+    ]
+
+
+def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:
+    """Give each of the template's roles to an online agent.
+
+    Round-robin in role order, reusing agents when roles outnumber them,
+    except that two roles in one ``distinct_roles`` group never share an
+    agent: a candidate that would repeat one is passed over for the next
+    agent in the rotation. Raises CastError when a role cannot be cast.
+    """
+    roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
+    if not isinstance(roles, list) or not roles:
+        raise CastError("template has no roles to cast")
+    agents = list(dict.fromkeys(online_agents))
+    if not agents:
+        raise CastError("not enough agents online to fill all roles")
+
+    groups = _distinct_groups(tmpl)
+    cast: dict[str, str] = {}
+    turn = 0
+    for role in roles:
+        rival_roles = {other for group in groups if role in group for other in group if other != role}
+        rivals = [other for other in dict.fromkeys(roles) if other in rival_roles and other in cast]
+        taken = {cast[other] for other in rivals}
+        pick = next(
+            (i % len(agents) for i in range(turn, turn + len(agents)) if agents[i % len(agents)] not in taken),
+            None,
+        )
+        if pick is None:
+            online = f"{len(agents)} agent is" if len(agents) == 1 else f"{len(agents)} agents are"
+            raise CastError(
+                f"Cannot auto-cast '{role}': it needs a different agent than "
+                f"{' and '.join(repr(r) for r in rivals)}, but only {online} online ({', '.join(agents)}). "
+                "Bring another agent online or choose the cast by hand."
+            )
+        cast[role] = agents[pick]
+        turn = (pick + 1) % len(agents)
+    return cast
+
+
+def validate_cast(tmpl: dict, cast) -> list[str]:
+    """Check a role -> agent cast against the template. Returns errors (empty = valid).
+
+    Roles in one ``distinct_roles`` group may not share an agent (or a human).
+    Roles left uncast are not checked here.
+    """
+    if not isinstance(cast, dict):
+        return ["'cast' must be an object mapping role to agent"]
+    errors = [
+        f"Cast for '{role}' must be an agent name"
+        for role, agent in cast.items()
+        if agent and not isinstance(agent, str)
+    ]
+    if errors:
+        return errors
+
+    for group in _distinct_groups(tmpl):
+        first_role_by_agent: dict[str, str] = {}
+        for role in group:
+            agent = cast.get(role)
+            if not agent:
+                continue
+            if agent in first_role_by_agent:
+                errors.append(
+                    f"Cast conflict: '{first_role_by_agent[agent]}' and '{role}' "
+                    f"must be different agents, but both are '{agent}'."
+                )
+            else:
+                first_role_by_agent[agent] = role
     return errors
