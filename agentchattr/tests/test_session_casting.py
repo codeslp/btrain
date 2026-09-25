@@ -715,6 +715,25 @@ class BuiltinTemplateTests(AppHarness):
         self.assert_builtin_rule_holds(reloaded)
         self.assertIsNotNone(reloaded.get_template(saved_id))
 
+    def test_saving_a_revised_draft_updates_its_custom_template(self):
+        # Review P3 (mutant): treating any known id as built-in, custom ones
+        # included, survived. A revised draft would then be saved as a second
+        # template instead of updating the first.
+        self.messages.add("user", "Design my review.")  # keep the drafts off id 0
+        revisions = []
+        for name in ("My review", "My review, revised"):
+            tmpl = dict(two_role_template(), id="my-review", name=name)
+            revisions.append(self.messages.add(
+                "system", "Session draft", msg_type="session_draft", metadata={"valid": True, "template": tmpl}
+            ))
+
+        for draft in revisions:
+            response = asyncio.run(app.save_draft(json_request({"message_id": draft["id"]})))
+            self.assertEqual(json.loads(response.body.decode("utf-8"))["template_id"], "my-review")
+
+        custom = [t for t in self.sessions.get_templates() if t.get("is_custom")]
+        self.assertEqual([(t["id"], t["name"]) for t in custom], [("my-review", "My review, revised")])
+
     def test_a_custom_template_file_cannot_replace_a_builtin(self):
         # A custom_templates.json saved before this guard existed, or edited by hand.
         root = Path(self.tmp.name)
@@ -807,6 +826,11 @@ class LauncherParityTests(unittest.TestCase):
             "triangle": {"roles": ["x", "y", "z"], "distinct_roles": [["x", "y"], ["y", "z"], ["x", "z"]]},
             "role listed twice": {"roles": ["builder", "red_team", "builder"], "distinct_roles": [["builder", "red_team"]]},
             "code-review copy without distinct_roles": code_review_copy(),
+            # Review P3: malformed groups and a non-string member, which both
+            # copies must skip, and a role the JS object prototype would eat.
+            "malformed groups": {"roles": ["builder", "red_team"], "distinct_roles": [5, None, "builder", ["builder", "red_team"]]},
+            "non-string group member": {"roles": ["5", "x"], "distinct_roles": [[5, "x"]]},
+            "__proto__ role": {"roles": ["__proto__", "x"], "distinct_roles": [["__proto__", "x"]]},
         }
         cases = [
             {"label": f"{label}, {count} agents", "tmpl": tmpl, "agents": [f"agent{i}" for i in range(count)]}
@@ -834,7 +858,21 @@ class LauncherParityTests(unittest.TestCase):
             {},
         ]
 
-        cases = [(code_review, cast) for cast in casts] + [(code_review_copy(), casts[0])]
+        triangle = {"id": "triangle", "roles": ["x", "y", "z"], "distinct_roles": [["x", "y"], ["y", "z"], ["x", "z"]]}
+        malformed = {"id": "malformed", "roles": ["builder", "red_team"],
+                     "distinct_roles": [5, None, "builder", ["builder", "red_team"]]}
+        cases = [(code_review, cast) for cast in casts] + [
+            (code_review_copy(), casts[0]),
+            # A conflict in each group of the triangle, not only the first.
+            (triangle, {"x": "a", "y": "a", "z": "b"}),
+            (triangle, {"x": "a", "y": "b", "z": "b"}),
+            (triangle, {"x": "a", "y": "b", "z": "a"}),
+            (triangle, {"x": "a", "y": "a", "z": "a"}),
+            (malformed, {"builder": "a", "red_team": "a"}),
+            ({"id": "non-string member", "roles": ["5", "x"], "distinct_roles": [[5, "x"]]}, {"5": "a", "x": "a"}),
+            ({"id": "__proto__", "roles": ["__proto__", "x"], "distinct_roles": [["__proto__", "x"]]},
+             {"__proto__": "a", "x": "a"}),
+        ]
 
         launcher = self.run_launcher([{"op": "castConflicts", "tmpl": tmpl, "cast": cast} for tmpl, cast in cases])
 

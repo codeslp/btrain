@@ -360,7 +360,8 @@ function _autoCast(tmpl, agents) {
     const pool = [...new Set(agents)];
     if (!roles.length || !pool.length) return null;
     const groups = _distinctGroups(tmpl);
-    const cast = {};
+    // Role names are template text: a plain {} would swallow a role named __proto__.
+    const cast = Object.create(null);
     let turn = 0;
     for (const role of roles) {
         const taken = new Set();
@@ -563,7 +564,7 @@ async function launchSessionWithCast(templateId) {
     const goal = goalInput ? goalInput.value.trim() : '';
 
     // Read cast from dropdowns
-    const cast = {};
+    const cast = Object.create(null);
     document.querySelectorAll('#session-step-cast .session-cast-select').forEach(sel => {
         cast[sel.dataset.role] = sel.value;
     });
@@ -750,7 +751,7 @@ async function launchDraftSession(draftMsgId) {
     const goalInput = document.getElementById('session-goal-input');
     const goal = goalInput ? goalInput.value.trim() : '';
 
-    const cast = {};
+    const cast = Object.create(null);
     document.querySelectorAll('#session-step-cast .session-cast-select').forEach(sel => {
         cast[sel.dataset.role] = sel.value;
     });
