@@ -97,11 +97,18 @@ window._messageRenderers['session_draft'] = function (el, msg) {
             </div>`;
     } else {
         const phases = tmpl.phases || [];
+        const rolePill = r => `<span class="session-draft-phase-participant-pill">${window.escapeHtml(r)}</span>`;
         const phasesDetailHtml = phases.map((p, i) => {
-            const parts = (p.participants || [])
-                .map(r => `<span class="session-draft-phase-participant-pill">${window.escapeHtml(r)}</span>`)
-                .join('');
+            const parts = (p.participants || []).map(rolePill).join('');
             const promptText = p.prompt ? window.escapeHtml(p.prompt) : '';
+            // A role prompt replaces the phase prompt for one participant, so
+            // the human approving the draft must see each one, by role.
+            const rolePrompts = p.role_prompts && typeof p.role_prompts === 'object' && !Array.isArray(p.role_prompts)
+                ? Object.entries(p.role_prompts)
+                : [];
+            const rolePromptsHtml = rolePrompts
+                .map(([role, text]) => `<div class="session-draft-phase-prompt">${rolePill(role)} ${window.escapeHtml(text)}</div>`)
+                .join('');
             return `<div class="session-draft-phase-detail">
                 <span class="session-draft-phase-num">${i + 1}</span>
                 <div class="session-draft-phase-copy">
@@ -110,9 +117,20 @@ window._messageRenderers['session_draft'] = function (el, msg) {
                         ${parts ? `<span class="session-draft-phase-participants">${parts}</span>` : ''}
                     </div>
                     ${promptText ? `<div class="session-draft-phase-prompt">${promptText}</div>` : ''}
+                    ${rolePromptsHtml}
                 </div>
             </div>`;
         }).join('');
+        // Casting rules the server will enforce, shown before anyone runs the draft.
+        const distinctHtml = _distinctGroups(tmpl).map(group => `<div class="session-draft-phase-detail">
+                <span class="session-draft-phase-num">&ne;</span>
+                <div class="session-draft-phase-copy">
+                    <div class="session-draft-phase-top">
+                        <span class="session-draft-phase-name">Different agents</span>
+                        <span class="session-draft-phase-participants">${group.map(rolePill).join('')}</span>
+                    </div>
+                </div>
+            </div>`).join('');
         const metaLabel = revision > 1 ? `rev ${revision}` : '';
         el.dataset.draftTemplate = JSON.stringify(tmpl);
         el.dataset.draftMsgId = msg.id;
@@ -127,6 +145,7 @@ window._messageRenderers['session_draft'] = function (el, msg) {
                 ${tmpl.description ? `<div class="proposal-body session-proposal-desc">${window.escapeHtml(tmpl.description)}</div>` : ''}
                 <div class="session-draft-details">
                     ${phasesDetailHtml}
+                    ${distinctHtml}
                 </div>
                 <div class="proposal-actions">
                     <button class="proposal-accept" onclick="runDraft(${msg.id})">Run</button>
