@@ -3070,11 +3070,10 @@ async def start_session(request: Request):
         tmpl = meta.get("template")
         if not tmpl:
             return JSONResponse({"error": "draft has no template"}, status_code=400)
-        # Register as a temporary template, never over a built-in one
+        # Its id, never a built-in one; registered below once the cast passes
         template_id = session_store.usable_template_id(tmpl.get("id"), f"draft-{draft_message_id}")
         tmpl["id"] = template_id
         tmpl["is_custom"] = True
-        session_store._templates[template_id] = tmpl
 
     # Validate template exists
     if not tmpl:
@@ -3096,6 +3095,10 @@ async def start_session(request: Request):
     cast_errors = validate_cast(tmpl, cast)
     if cast_errors:
         return JSONResponse({"error": " ".join(cast_errors), "errors": cast_errors}, status_code=400)
+
+    if draft_message_id:
+        # Register the draft as a temporary template so the session can run it
+        session_store._templates[template_id] = tmpl
 
     session = session_engine.start_session(template_id, channel, cast, started_by, goal)
     if not session:

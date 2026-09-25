@@ -688,6 +688,24 @@ class StartSessionRouteTests(AppHarness):
         self.assertIn("'builder' and 'red_team'", payload["error"])
         self.assert_nothing_started()
 
+    def test_a_refused_draft_run_registers_no_template(self):
+        # From the review's A2 probe: the draft path registered the draft as a
+        # temporary template before any check, so a refused run still showed
+        # up in the launcher's template list.
+        self.messages.add("user", "Copy the code review session.")  # keep the drafts off id 0
+        for cast in ({"builder": "alpha", "reviewer": "beta", "red_team": "alpha", "synthesiser": "beta"}, {}):
+            with self.subTest(cast=cast):
+                self.registry.names = ["alpha", "beta"] if cast else ["alpha"]  # {} auto-casts with one agent
+                draft = self.messages.add(
+                    "system", "Session draft", msg_type="session_draft",
+                    metadata={"valid": True, "template": code_review_copy()},
+                )
+
+                status, _ = self.start(draft_message_id=draft["id"], cast=cast)
+
+                self.assertEqual(status, 400)
+                self.assertNotIn("code-review-copy", [t["id"] for t in self.sessions.get_templates()])
+
     def test_the_draft_request_documents_both_fields(self):
         # An agent drafting a session only learns the fields this prompt names.
         body = {"agent": "gemini", "description": "a red-team review", "channel": "general", "sender": "user"}
