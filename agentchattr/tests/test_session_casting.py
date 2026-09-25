@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -263,6 +264,41 @@ class ResumeTests(unittest.TestCase):
                 run["interrupt_reason"],
                 "Template 'code-review' changed since the session started (was 'My tuned review', now 'Code Review').",
             )
+
+    def test_a_run_saved_without_a_template_name_resumes(self):
+        # R5 (round 3). Checking the name when none was saved survived: the
+        # store always saves one, but a run file from an older build or edited
+        # by hand may not have it.
+        run = self.saved_run(1, self.DISTINCT, "active", "one")
+        run.pop("template_name")
+
+        _, trigger = self.restart([run])
+
+        self.assertEqual([call["agent"] for call in trigger.calls], ["beta"])
+
+    def test_a_run_on_a_nameless_template_resumes(self):
+        # R6 (round 3). Comparing against the bare name survived. The store
+        # saves a nameless template's id as its name, so the check must fall
+        # back to the id the same way.
+        nameless = {"id": "nameless", "roles": ["builder"],
+                    "phases": [{"name": "Only", "participants": ["builder"], "prompt": "Go.", "is_output": True}]}
+        (self.root / "custom_templates.json").write_text(json.dumps([nameless]), "utf-8")
+        run = dict(self.saved_run(1, {"builder": "alpha"}, "active", "one"),
+                   template_id="nameless", template_name="nameless", current_phase=0, current_turn=0)
+
+        _, trigger = self.restart([run])
+
+        self.assertEqual([call["agent"] for call in trigger.calls], ["alpha"])
+
+    def test_a_run_whose_template_is_gone_does_not_stop_the_restart(self):
+        # R7 (round 3). Dropping the `if tmpl` guard survived. A draft run's
+        # template lives only in memory, so after any restart its id resolves
+        # to nothing, and resuming raised AttributeError as the server started.
+        run = dict(self.saved_run(1, self.DISTINCT, "active", "one"), template_id="draft-7", template_name="A draft")
+
+        _, trigger = self.restart([run])
+
+        self.assertEqual(trigger.calls, [])
 
     def test_a_valid_saved_run_still_resumes(self):
         sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one")])
@@ -555,6 +591,15 @@ class ValidateCastTests(unittest.TestCase):
         self.assertEqual(
             validate_cast({"roles": ["builder", "reviewer"]}, {"builder": "a", "red_team": "a"}),
             ["Cast names 'red_team', which is not a role in this template."],
+        )
+
+    def test_a_template_without_a_roles_list_names_every_key_as_stray(self):
+        # R2 (round 3). Dropping the roles-list guard survived: every template
+        # in the suite had one. Without it, validate_cast raised TypeError: a
+        # 500 from the start route, and a crash in resume as the server started.
+        self.assertEqual(
+            validate_cast({"name": "No roles"}, {"builder": "a"}),
+            ["Cast names 'builder', which is not a role in this template."],
         )
 
     def test_a_cast_key_that_is_not_a_template_role_is_rejected(self):
@@ -986,6 +1031,18 @@ class BuiltinTemplateTests(AppHarness):
                 self.assert_builtin_rule_holds(reloaded)
                 self.assertEqual(path.read_bytes(), before, "a read-only target is left as it was")
                 self.assertTrue(any("could not save" in line.lower() for line in logs.output), logs.output)
+
+    @unittest.skipIf(os.name != "posix", "file modes are POSIX")
+    def test_the_rename_keeps_the_file_mode(self):
+        # R12 (round 3). Dropping copymode survived: the replacement file took
+        # the process umask, not the mode the operator gave the original.
+        root, path = self.colliding_custom_file()
+        os.chmod(path, 0o640)
+
+        SessionStore(str(root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+
+        self.assertIn("code-review-custom", path.read_text("utf-8"))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o640)
 
     def test_the_rename_is_written_atomically(self):
         # A write cut short (a crash, a full disk) must leave the old file,
