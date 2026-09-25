@@ -347,6 +347,14 @@ class TemplateValidationTests(unittest.TestCase):
                 self.assertEqual(len(errors), 1, errors)
                 self.assertIn("at least two different roles", errors[0])
 
+    def test_an_id_must_be_a_non_empty_string(self):
+        for bad in (["code-review"], {"x": 1}, 5, ""):
+            with self.subTest(id=bad):
+                self.assertEqual(
+                    validate_session_template(two_role_template(id=bad)), ["'id' must be a non-empty string"]
+                )
+        self.assertEqual(validate_session_template(two_role_template(id="mine")), [])
+
     def test_distinct_roles_must_be_a_list_of_groups(self):
         errors = validate_session_template(two_role_template(distinct_roles={"builder": "red_team"}))
 
@@ -728,6 +736,26 @@ class BuiltinTemplateTests(AppHarness):
         reloaded = SessionStore(str(Path(self.tmp.name) / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
         self.assert_builtin_rule_holds(reloaded)
         self.assertIsNotNone(reloaded.get_template(saved_id))
+
+    def test_a_draft_id_that_is_not_a_string_falls_back_to_the_generated_id(self):
+        # From the review's A6 probe: the id is used as a dict key, so a list
+        # or object id raised TypeError (a 500) in both draft routes. New drafts
+        # with such ids are invalid; this covers a draft card saved before that.
+        self.messages.add("user", "Design a session.")  # keep the drafts off id 0
+        for bad in (["code-review"], {"x": 1}, 5, ""):
+            with self.subTest(id=bad):
+                tmpl = dict(two_role_template(), id=bad)
+                draft = self.messages.add(
+                    "system", "Session draft", msg_type="session_draft", metadata={"valid": True, "template": tmpl}
+                )
+
+                status, payload = self.start(draft_message_id=draft["id"], channel=f"c{draft['id']}",
+                                             cast={"builder": "alpha", "red_team": "beta"})
+                self.assertEqual((status, payload["template_id"]), (200, f"draft-{draft['id']}"))
+
+                tmpl["id"] = bad  # the run above renamed the metadata copy in place
+                response = asyncio.run(app.save_draft(json_request({"message_id": draft["id"]})))
+                self.assertEqual(json.loads(response.body.decode("utf-8"))["template_id"], f"custom-{draft['id']}")
 
     def test_saving_a_revised_draft_updates_its_custom_template(self):
         # Review P3 (mutant): treating any known id as built-in, custom ones

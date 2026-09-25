@@ -122,6 +122,16 @@ class SessionStore:
         tmpl = self._templates.get(template_id)
         return tmpl is not None and not tmpl.get("is_custom")
 
+    def usable_template_id(self, template_id, fallback: str) -> str:
+        """``template_id`` if a draft may keep it, else ``fallback``.
+
+        A draft may not take a built-in template's id, and ids are dict keys,
+        so one that is not a non-empty string is replaced too.
+        """
+        if isinstance(template_id, str) and template_id.strip() and not self.is_builtin_template(template_id):
+            return template_id
+        return fallback
+
     def save_custom_template(self, tmpl: dict) -> dict:
         custom_path = self._path.parent / "custom_templates.json"
         custom = []
@@ -352,6 +362,9 @@ def validate_session_template(tmpl: dict) -> list[str]:
 
     if not tmpl.get("name") or not isinstance(tmpl.get("name"), str):
         errors.append("Missing or invalid 'name' (string required)")
+
+    if "id" in tmpl and (not isinstance(tmpl["id"], str) or not tmpl["id"].strip()):
+        errors.append("'id' must be a non-empty string")
 
     roles = tmpl.get("roles", [])
     if not isinstance(roles, list) or len(roles) == 0:
