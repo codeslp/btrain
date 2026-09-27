@@ -1,0 +1,71 @@
+import { createHash } from "node:crypto"
+
+const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
+const splits = new Set(["train", "calibration", "test"])
+
+export function datasetHashFor(cases, labels, sourceSnapshotHash) {
+  if (!sourceSnapshotHash) throw new Error("Source snapshot hash is required")
+  return hash({ cases: [...cases].sort((a, b) => a.sourceId.localeCompare(b.sourceId)), labels, sourceSnapshotHash })
+}
+
+export function annotationCandidates(sources, { requireEventHead = false } = {}) {
+  const eligible = []
+  const excluded = []
+  for (const source of sources) {
+    if (requireEventHead && (!source.eventHead || source.eventHead === "unknown")) {
+      excluded.push({ sourceId: source.id, reason: "unknown-event-head" })
+      continue
+    }
+    if (!source.sourceRef || !source.sourceHash || !source.repository || !source.id) {
+      excluded.push({ sourceId: source.id || null, reason: "incomplete-provenance" })
+      continue
+    }
+    eligible.push({ sourceId: source.id, sourceRef: source.sourceRef, repository: source.repository, prNumber: source.prNumber, surface: source.surface, author: source.author, sourceHash: source.sourceHash, templateGroup: source.templateGroup })
+  }
+  return { eligible, excluded }
+}
+
+export function freezeLabeledManifest({ sources, cases, pins, labels, requireEventHead = false }) {
+  if (!Array.isArray(sources) || !Array.isArray(cases) || !cases.length) throw new Error("Sources and nonempty cases are required")
+  if (!Array.isArray(labels) || !labels.length || new Set(labels).size !== labels.length) throw new Error("A closed label set is required")
+  for (const key of ["family", "questionVersion", "policyHash", "model", "codeRevision", "baseline", "thresholds"]) {
+    if (!pins?.[key]) throw new Error(`Missing evaluation pin: ${key}`)
+  }
+  const sourceById = new Map(sources.map((source) => [source.id, source]))
+  if (sourceById.size !== sources.length) throw new Error("Duplicate source IDs")
+  const prSplits = new Map()
+  const templateSplits = new Map()
+  const sourceIds = new Set()
+  const frozenCases = []
+  for (const item of cases) {
+    const source = sourceById.get(item.sourceId)
+    if (!source) throw new Error(`Unknown source: ${item.sourceId}`)
+    if (sourceIds.has(item.sourceId)) throw new Error(`Duplicate case source: ${item.sourceId}`)
+    sourceIds.add(item.sourceId)
+    if (requireEventHead && (!source.eventHead || source.eventHead === "unknown")) throw new Error("Unknown event-time head cannot enter exact-head evaluation")
+    if (!source.sourceHash || !source.sourceRef || !source.repository) throw new Error("Incomplete source provenance")
+    if (!splits.has(item.split)) throw new Error("Invalid split")
+    if (!labels.includes(item.label)) throw new Error("Out-of-catalog label")
+    if (source.repository !== item.repository || source.prNumber !== item.prNumber) throw new Error("Case source identity mismatch")
+    if (!item.templateGroup) throw new Error("Template group is required")
+    if (source.templateGroup && source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
+    if (!Array.isArray(item.annotations) || item.annotations.length < 2 || new Set(item.annotations.map((a) => a.by)).size < 2) throw new Error("Two independent annotators are required")
+    if (item.annotations.some((a) => !a.by || !labels.includes(a.label))) throw new Error("Invalid annotation")
+    if (!item.adjudication?.by || item.adjudication.label !== item.label || !item.adjudication.reason) throw new Error("Explicit adjudication is required")
+    const prGroup = `${item.repository}#${item.prNumber}`
+    const templateGroup = `${item.repository}:${item.templateGroup}`
+    if (prSplits.has(prGroup) && prSplits.get(prGroup) !== item.split) throw new Error("PR group crosses splits")
+    if (templateSplits.has(templateGroup) && templateSplits.get(templateGroup) !== item.split) throw new Error("Template group crosses splits")
+    prSplits.set(prGroup, item.split)
+    templateSplits.set(templateGroup, item.split)
+    frozenCases.push({ sourceId: item.sourceId, repository: item.repository, prNumber: item.prNumber, templateGroup: item.templateGroup, split: item.split, label: item.label, annotations: item.annotations.map((a) => ({ by: a.by, label: a.label })), adjudication: { by: item.adjudication.by, label: item.adjudication.label, reason: item.adjudication.reason }, sourceHash: source.sourceHash })
+  }
+  frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
+  const selectedSources = [...sourceIds].sort().map((id) => {
+    const s = sourceById.get(id)
+    return { id, repository: s.repository, prNumber: s.prNumber, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
+  })
+  const sourceSnapshotHash = hash(selectedSources)
+  const datasetHash = datasetHashFor(frozenCases, labels, sourceSnapshotHash)
+  return { schemaVersion: 1, pins: { ...pins }, labels: [...labels], sourceSnapshotHash, datasetHash, cases: frozenCases }
+}

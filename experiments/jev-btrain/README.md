@@ -1,5 +1,35 @@
 # btrain typed-decision experiments
 
+## Spec 021 offline foundation
+
+`btrain handoff pull-pr` now stores append-only source snapshots under
+`.btrain/jev/evidence/`. Each snapshot has the source repository, PR, comment URL and ID,
+author, event and capture times, reviewed commit when GitHub supplies one, a body hash,
+and the PR head observed during the pull. The event-time head stays `unknown`: polling
+cannot prove what the head was when an earlier comment was written. Later outcomes are
+appended separately through `appendSourceOutcome`; `readEvidence` includes an initial
+`pending` outcome for every snapshot. These local records contain no comment body.
+
+Use `annotationCandidates` from `src/brain_train/jev/manifest.mjs` to export source
+references for independent labeling. Set `requireEventHead: true` for an exact-head PR
+evaluation; current polling snapshots are excluded until a true event-time source exists.
+`freezeLabeledManifest` requires two distinct annotators, adjudication, pinned model and
+policy metadata, and one split per PR and normalized template group. It returns a source
+hash and dataset hash. Keep raw text and candidate fixtures inside their source repository.
+
+`decideCandidate` from `src/brain_train/jev/decision.mjs` defaults to `off`. In `offline`
+mode an injected local fake provider can replay private fixtures without a hosted call.
+It returns `skipped`, `decision`, `abstain`, or `failure` traces and only *suggests* an
+allowed action. `appendDecisionTrace` writes an allowlisted local trace without the input
+text. `replayManifest` from `src/brain_train/jev/replay.mjs` compares a pinned manifest
+with a deterministic baseline and reports skips, valid abstentions, provider failures,
+class metrics, coverage, latency, and observed cost separately. The focused executable
+examples are `test/jev/*.test.mjs`.
+
+This foundation does not enable live Jev use. Family-specific benchmarks, privacy and
+retention decisions, shadow evidence, and human promotion records are still required by
+Spec 021 before broad advisory or assist behavior.
+
 These experiments compare btrain's current deterministic heuristics with a local,
 Jev-compatible System One model. They do not change workflow state.
 

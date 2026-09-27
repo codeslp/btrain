@@ -1,0 +1,66 @@
+import { decideCandidate } from "./decision.mjs"
+import { datasetHashFor } from "./manifest.mjs"
+
+const ratio = (numerator, denominator) => denominator ? numerator / denominator : null
+const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor((values.length - 1) * fraction))] : null
+
+function predictionMetrics(rows, labels, pick, supportRows = rows) {
+  const support = Object.fromEntries(labels.map((label) => [label, supportRows.filter((row) => row.label === label).length]))
+  const confusion = Object.fromEntries(labels.map((label) => [label, Object.fromEntries(labels.map((predicted) => [predicted, 0]))]))
+  const evaluated = rows.filter((row) => labels.includes(pick(row)))
+  for (const row of evaluated) confusion[row.label][pick(row)] += 1
+  const correct = evaluated.filter((row) => row.label === pick(row)).length
+  const perClass = Object.fromEntries(labels.map((label) => {
+    const tp = confusion[label][label]
+    const predicted = labels.reduce((sum, actual) => sum + confusion[actual][label], 0)
+    const actual = support[label]
+    const precision = ratio(tp, predicted)
+    const recall = ratio(tp, actual)
+    return [label, { support: support[label], precision, recall, f1: precision !== null && recall !== null && precision + recall ? 2 * precision * recall / (precision + recall) : null }]
+  }))
+  return { support, confusion, evaluated: evaluated.length, correct, accuracy: ratio(correct, evaluated.length), perClass }
+}
+
+export function summarizeReplay(rows, labels) {
+  if (!Array.isArray(rows) || !Array.isArray(labels) || !labels.length) throw new Error("Replay rows and labels are required")
+  const attempted = rows.filter((row) => row.trace.attemptedCall)
+  const valid = attempted.filter((row) => ["decision", "abstain"].includes(row.trace.outcome))
+  const decisions = rows.filter((row) => row.trace.outcome === "decision")
+  const failures = rows.filter((row) => row.trace.outcome === "failure")
+  const skipped = rows.filter((row) => row.trace.outcome === "skipped")
+  const eligible = rows.filter((row) => row.eligible)
+  const latencies = attempted.map((row) => row.trace.latencyMs).filter(Number.isFinite)
+  const costs = attempted.map((row) => row.trace.cost).filter(Number.isFinite)
+  return {
+    counts: { cases: rows.length, eligible: eligible.length, attempted: attempted.length, skipped: skipped.length, validPredictions: valid.length, actionableDecisions: decisions.length, abstentions: rows.filter((row) => row.trace.outcome === "abstain").length, failures: failures.length },
+    coverage: { validPrediction: ratio(valid.length, attempted.length), actionable: ratio(decisions.length, eligible.length) },
+    baseline: predictionMetrics(rows, labels, (row) => row.baseline),
+    model: predictionMetrics(valid, labels, (row) => row.trace.prediction, rows),
+    failures: failures.map((row) => ({ sourceId: row.sourceId, reason: row.trace.reason, failureClass: row.trace.failureClass })),
+    skips: skipped.map((row) => ({ sourceId: row.sourceId, reason: row.trace.reason })),
+    abstentions: rows.filter((row) => row.trace.outcome === "abstain").map((row) => ({ sourceId: row.sourceId, reason: row.trace.reason })),
+    latencyMs: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95) },
+    cost: { observedCalls: costs.length, total: costs.reduce((sum, value) => sum + value, 0) },
+  }
+}
+
+export async function replayManifest({ manifest, family, candidates, provider }) {
+  if (!manifest?.datasetHash || !Array.isArray(manifest.cases) || !Array.isArray(manifest.labels)) throw new Error("Frozen manifest is required")
+  if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash)) throw new Error("Manifest dataset hash does not match frozen cases")
+  if (manifest.pins?.policyHash !== family.policyHash) throw new Error("Manifest policy hash does not match family")
+  if (manifest.pins?.family !== family.id || manifest.pins?.questionVersion !== family.questionVersion) throw new Error("Manifest family version does not match")
+  if (!manifest.pins?.model || !manifest.pins?.codeRevision) throw new Error("Manifest model and code revision pins are required")
+  const rows = []
+  for (const item of manifest.cases) {
+    const candidate = candidates[item.sourceId]
+    if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
+    const trace = await decideCandidate({ family, candidate: { ...candidate, sourceId: item.sourceId }, provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
+    rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: !!candidate.eligible, trace })
+  }
+  const splits = {}
+  for (const split of ["train", "calibration", "test", "all"]) {
+    const selected = split === "all" ? rows : rows.filter((row) => row.split === split)
+    splits[split] = summarizeReplay(selected, manifest.labels)
+  }
+  return { schemaVersion: 1, datasetHash: manifest.datasetHash, pins: manifest.pins, splits, rows }
+}

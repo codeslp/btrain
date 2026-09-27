@@ -13,6 +13,7 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import path from "node:path"
 import fs from "node:fs/promises"
+import { appendSourceSnapshots, createSourceSnapshot } from "../jev/evidence.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -178,6 +179,17 @@ export async function fetchAllComments({ owner, repo, prNumber, cwd }) {
   return { issueComments, reviewComments, reviews }
 }
 
+export async function fetchCaptureHead({ owner, repo, prNumber, cwd }) {
+  try {
+    const { stdout } = await execFileAsync("gh", ["api", `repos/${owner}/${repo}/pulls/${prNumber}`, "--jq", ".head.sha"], { cwd, maxBuffer: GH_MAX_BUFFER })
+    const head = stdout.trim()
+    return /^[a-f0-9]{40}$/i.test(head) ? { head, observedAt: new Date().toISOString() } : { head: null, observedAt: null }
+  } catch {
+    // Evidence capture remains useful without a polling-time head.
+    return { head: null, observedAt: null }
+  }
+}
+
 // ---- comment shaping ----
 
 export function shapeComments({ issueComments, reviewComments, reviews }) {
@@ -203,6 +215,7 @@ export function shapeComments({ issueComments, reviewComments, reviews }) {
       file: c.path || null,
       line: c.line ?? c.original_line ?? null,
       review_id: c.pull_request_review_id || null,
+      reviewedCommit: c.commit_id || null,
     })
   }
   for (const r of reviews || []) {
@@ -217,6 +230,7 @@ export function shapeComments({ issueComments, reviewComments, reviews }) {
       state: r.state || null,
       url: r.html_url,
       at: r.submitted_at,
+      reviewedCommit: r.commit_id || null,
     })
   }
   out.sort((a, b) => {
@@ -277,6 +291,24 @@ export function formatComment(c) {
   return `${header}\n  ${c.url}\n  ${body.split("\n").join("\n  ")}`
 }
 
+export async function persistCapturedComments(repoRoot, { identity, laneId, prNumber, comments, captureHead, capturedAt }) {
+  // Store evidence before the comment log so a failed log append can be
+  // retried. Existing historical comments are safely backfilled as unknown.
+  if (comments.length) {
+    const snapshots = comments.map((comment) => createSourceSnapshot({
+      repository: `${identity.owner}/${identity.repo}`,
+      prNumber,
+      laneId,
+      comment,
+      capturedAt,
+      captureHead: captureHead.head,
+      captureHeadObservedAt: captureHead.observedAt,
+    }))
+    await appendSourceSnapshots(repoRoot, snapshots)
+  }
+  return appendComments(repoRoot, laneId, prNumber, comments)
+}
+
 // ---- main entry ----
 
 export async function pullPrComments(repoRoot, options) {
@@ -314,14 +346,16 @@ export async function pullPrComments(repoRoot, options) {
   }
 
   const shaped = shapeComments(raw)
+  const captureHead = await fetchCaptureHead({ ...identity, prNumber, cwd: repoRoot })
 
   const cursors = await readCursors(repoRoot)
   const cursorKey = getCursorKey(laneId, prNumber)
   const surfaceCursors = cursors[cursorKey] || {}
 
-  // Append all shaped comments; appendComments dedups on (surface, id) so
-  // re-pulls do not re-append. Returns only the records actually written.
-  const appended = await appendComments(repoRoot, laneId, prNumber, shaped)
+  const appended = await persistCapturedComments(repoRoot, {
+    identity, laneId, prNumber, comments: shaped, captureHead,
+    capturedAt: new Date().toISOString(),
+  })
 
   // Counts reflect "unread vs current cursor" (pre-acknowledge).
   const { unread, changesRequested } = countUnread(shaped, surfaceCursors)
