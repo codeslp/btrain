@@ -36,7 +36,8 @@ from btrain.notifications import (
 from btrain.routing import resolve_poller_cue_targets
 from btrain.validator import btrainValidator
 from registry import RuntimeRegistry
-from session_store import CastError, SessionStore, auto_cast, validate_cast, validate_session_template
+from session_store import (CastError, CustomTemplatesUnreadable, SessionStore, auto_cast, validate_cast,
+                           validate_session_template)
 from session_engine import SessionEngine
 
 log = logging.getLogger(__name__)
@@ -3190,7 +3191,10 @@ async def save_draft(request: Request):
         return JSONResponse({"error": "no template in draft"}, status_code=400)
 
     tmpl["id"] = session_store.usable_template_id(tmpl.get("id"), f"custom-{msg_id}")
-    session_store.save_custom_template(tmpl)
+    try:
+        session_store.save_custom_template(tmpl)
+    except CustomTemplatesUnreadable as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse({"ok": True, "template_id": tmpl["id"]})
 
 
@@ -3198,7 +3202,10 @@ async def save_draft(request: Request):
 async def delete_session_template(template_id: str):
     if not session_store:
         return JSONResponse({"error": "sessions not configured"}, status_code=500)
-    deleted = session_store.delete_custom_template(template_id)
+    try:
+        deleted = session_store.delete_custom_template(template_id)
+    except CustomTemplatesUnreadable as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if not deleted:
         return JSONResponse({"error": "template not found or not custom"}, status_code=404)
     return JSONResponse({"ok": True, "template_id": template_id})

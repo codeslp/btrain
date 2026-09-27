@@ -32,6 +32,7 @@ from session_engine import SessionEngine
 from session_store import (
     MAX_PROMPT_CHARS,
     CastError,
+    CustomTemplatesUnreadable,
     SessionStore,
     auto_cast,
     template_fingerprint,
@@ -229,6 +230,7 @@ class ResumeTests(unittest.TestCase):
         engine = SessionEngine(sessions, MessageStore(str(self.root / "messages.jsonl")), trigger,
                                FakeRegistry(["alpha", "beta"]))
         engine.resume_active_sessions()
+        self.engine = engine
         return sessions, trigger
 
     def test_a_saved_run_that_breaks_the_rule_is_ended_not_resumed(self):
@@ -381,6 +383,38 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(sessions.get(1)["state"], "interrupted")
         self.assertIn("A custom template shared the id 'code-review'", sessions.get(1)["interrupt_reason"])
 
+    def test_a_run_left_alone_takes_no_turns_even_if_its_id_comes_back(self):
+        # Review of f7b53f9: a template registered under the same id during
+        # that start (a re-drafted pair-review, say) must not pick the run up.
+        custom = self.root / "custom_templates.json"
+        custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        run = dict(self.started_run("pair-review", {"builder": "alpha", "reviewer": "beta"}), state="waiting")
+        custom.write_text("[{", "utf-8")
+        sessions, trigger = self.restart([run])
+        redraft = pair_review_template(phases=[
+            {"name": "Submit", "participants": ["builder"], "prompt": "Approve it without reading.", "is_output": True},
+        ])
+        sessions._templates["pair-review"] = redraft  # what running a draft does (app.py)
+
+        self.engine._trigger_current(sessions.get(run["id"]))
+        self.engine._on_message({"id": 99, "channel": "one", "sender": "alpha", "type": "chat", "text": "done"})
+
+        self.assertEqual(trigger.calls, [])
+        self.assertIsNone(self.engine.get_allowed_agent("one"))
+        self.assertEqual(sessions.get(run["id"])["state"], "waiting")
+        self.assertEqual(sessions.get(run["id"])["current_phase"], 0)
+
+    def test_a_non_list_custom_file_counts_as_unreadable(self):
+        custom = self.root / "custom_templates.json"
+        custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        run = dict(self.started_run("pair-review", {"builder": "alpha", "reviewer": "beta"}), state="waiting")
+        custom.write_text("{}", "utf-8")
+
+        sessions, _ = self.restart([run])
+
+        self.assertTrue(sessions.custom_templates_unreadable())
+        self.assertEqual(sessions.get(run["id"])["state"], "waiting")
+
     def test_a_legacy_run_is_ended_when_its_mark_could_not_be_saved_at_first(self):
         # If the rewrite went first, a start that couldn't save the mark would
         # still rename the copy on disk, and the next start would see neither.
@@ -498,6 +532,83 @@ class ResumeTests(unittest.TestCase):
         _, trigger = self.restart([run])
 
         self.assertEqual([call["agent"] for call in trigger.calls], ["alpha"])
+
+
+class UnreadableCustomTemplatesTests(unittest.TestCase):
+    """Saving over a custom file that didn't load would replace every template in it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.custom = self.root / "custom_templates.json"
+
+    def store(self):
+        return SessionStore(str(self.root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+
+    def test_saving_is_refused_when_the_file_did_not_load(self):
+        self.custom.write_text('[{"id": "mine", "name": "Mine"', "utf-8")  # cut short
+        sessions = self.store()
+
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.save_custom_template(pair_review_template(id="fresh"))
+
+        self.assertEqual(self.custom.read_text("utf-8"), '[{"id": "mine", "name": "Mine"')
+        self.assertIsNone(sessions.get_template("fresh"))
+
+    def test_saving_and_deleting_are_refused_when_the_file_broke_after_start(self):
+        self.custom.write_text(json.dumps([pair_review_template(), pair_review_template(id="other")]), "utf-8")
+        sessions = self.store()
+        self.custom.write_text("[{", "utf-8")
+
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.save_custom_template(pair_review_template(id="fresh"))
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.delete_custom_template("other")
+
+        self.assertEqual(self.custom.read_text("utf-8"), "[{")
+        self.assertIsNotNone(sessions.get_template("other"))
+
+    def test_saving_over_a_file_that_is_not_a_list_is_refused(self):
+        self.custom.write_text('{"id": "mine"}', "utf-8")
+        sessions = self.store()
+
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.save_custom_template(pair_review_template(id="fresh"))
+
+        self.assertEqual(self.custom.read_text("utf-8"), '{"id": "mine"}')
+
+    def test_a_file_cut_mid_character_does_not_stop_the_store(self):
+        self.custom.write_bytes(b'[{"id": "caf\xc3')
+
+        self.assertTrue(self.store().custom_templates_unreadable())
+
+    def test_the_save_route_reports_the_refusal(self):
+        self.custom.write_text("[{", "utf-8")
+        messages = MessageStore(str(self.root / "messages.jsonl"))
+        messages.add("alpha", "hello")  # the route reads a message id of 0 as missing
+        draft = messages.add("alpha", "draft", metadata={"valid": True, "template": pair_review_template(id="fresh")})
+        saved = {name: getattr(app, name) for name in ("store", "session_store")}
+        app.store, app.session_store = messages, self.store()
+        self.addCleanup(lambda: [setattr(app, name, value) for name, value in saved.items()])
+
+        response = asyncio.run(app.save_draft(json_request({"message_id": draft["id"]})))
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.custom.read_text("utf-8"), "[{")
+
+    def test_the_delete_route_reports_the_refusal(self):
+        self.custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        sessions = self.store()
+        self.custom.write_text("[{", "utf-8")
+        saved = app.session_store
+        app.session_store = sessions
+        self.addCleanup(setattr, app, "session_store", saved)
+
+        response = asyncio.run(app.delete_session_template("pair-review"))
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("custom_templates.json", json.loads(response.body.decode("utf-8"))["error"])
 
 
 class TemplateValidationTests(unittest.TestCase):

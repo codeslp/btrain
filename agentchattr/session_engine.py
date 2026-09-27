@@ -28,6 +28,9 @@ class SessionEngine:
         self._trigger = agent_trigger
         self._registry = registry
         self._lock = threading.Lock()
+        # Runs whose template was missing at startup while the custom templates
+        # couldn't be read. They take no turns until a later start checks them.
+        self._held: set[int] = set()
 
         # Hook into message stream
         self._messages.on_message(self._on_message)
@@ -118,8 +121,8 @@ class SessionEngine:
         is gone (a draft, which lives only in memory) or changed since it
         started, including a built-in changed by an upgrade: resuming it
         could run a role, phase or prompt it didn't start with. A run whose
-        template is missing while custom_templates.json can't be read is left
-        alone for a later start.
+        template is missing while custom_templates.json can't be read is held
+        instead: it takes no turns, and a later start checks it again.
 
         Only re-trigger 'active' sessions. 'waiting' sessions already had
         their trigger sent before the restart — re-triggering would
@@ -133,9 +136,12 @@ class SessionEngine:
                 reason = self._resume_blocker(session, tmpl)
             elif self._store.custom_templates_unreadable():
                 # Its template may be in the file that didn't load, and ending
-                # the run can't be undone once the file is repaired.
-                log.warning("Session %d left as is: template '%s' is missing and the custom templates "
+                # the run can't be undone once the file is repaired. It is held
+                # instead: a template registered under the same id during this
+                # start must not pick it up.
+                log.warning("Session %d held: template '%s' is missing and the custom templates "
                             "failed to load", session["id"], session.get("template_id"))
+                self._held.add(session["id"])
                 continue
             else:
                 reason = "template not found"
@@ -278,6 +284,8 @@ class SessionEngine:
 
     def _trigger_current(self, session: dict):
         """Trigger the agent whose turn it is."""
+        if session.get("id") in self._held:
+            return
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
             return
@@ -376,6 +384,8 @@ class SessionEngine:
 
     def _get_expected_agent(self, session: dict) -> str | None:
         """Get the agent name expected to respond next."""
+        if session.get("id") in self._held:
+            return None
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
             return None

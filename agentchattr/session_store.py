@@ -58,6 +58,10 @@ def template_fingerprint(tmpl: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+class CustomTemplatesUnreadable(RuntimeError):
+    """custom_templates.json exists but can't be read, so writing it would lose what it holds."""
+
+
 class SessionStore:
     def __init__(self, path: str, templates_dir: str | None = None):
         self._path = Path(path)
@@ -87,7 +91,7 @@ class SessionStore:
                     self._custom_templates_unreadable = True
                     log.warning("Failed to load custom templates: %s is not a list", custom_path.name)
                 self._load_custom_templates(custom if isinstance(custom, list) else [], custom_path)
-            except (json.JSONDecodeError, KeyError) as exc:
+            except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
                 self._custom_templates_unreadable = True
                 log.warning("Failed to load custom templates: %s", exc)
 
@@ -216,18 +220,31 @@ class SessionStore:
             return template_id
         return fallback
 
+    def _read_custom_file(self, custom_path: Path) -> list:
+        """The saved custom templates, for a save or delete to rewrite.
+
+        Raises CustomTemplatesUnreadable rather than start from an empty list
+        when the file can't be read: the rewrite would replace every template
+        in it.
+        """
+        if not custom_path.exists():
+            return []
+        try:
+            custom = json.loads(custom_path.read_text("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CustomTemplatesUnreadable(
+                f"{custom_path.name} can't be read ({exc}); fix it before changing templates") from exc
+        if not isinstance(custom, list):
+            raise CustomTemplatesUnreadable(f"{custom_path.name} is not a list; fix it before changing templates")
+        return custom
+
     def save_custom_template(self, tmpl: dict) -> dict:
         custom_path = self._path.parent / "custom_templates.json"
-        custom = []
-        if custom_path.exists():
-            try:
-                custom = json.loads(custom_path.read_text("utf-8"))
-            except (json.JSONDecodeError, KeyError):
-                custom = []
+        custom = self._read_custom_file(custom_path)
 
         saved = dict(tmpl)
         saved["is_custom"] = True
-        custom = [t for t in custom if t.get("id") != saved.get("id")]
+        custom = [t for t in custom if not (isinstance(t, dict) and t.get("id") == saved.get("id"))]
         custom.append(saved)
         custom_path.write_text(json.dumps(custom, indent=2, ensure_ascii=False) + "\n", "utf-8")
         self._templates[saved["id"]] = saved
@@ -239,14 +256,9 @@ class SessionStore:
             return False
 
         custom_path = self._path.parent / "custom_templates.json"
-        custom = []
-        if custom_path.exists():
-            try:
-                custom = json.loads(custom_path.read_text("utf-8"))
-            except (json.JSONDecodeError, KeyError):
-                custom = []
+        custom = self._read_custom_file(custom_path)
 
-        new_custom = [t for t in custom if t.get("id") != template_id]
+        new_custom = [t for t in custom if not (isinstance(t, dict) and t.get("id") == template_id)]
         if len(new_custom) != len(custom):
             custom_path.write_text(json.dumps(new_custom, indent=2, ensure_ascii=False) + "\n", "utf-8")
 
