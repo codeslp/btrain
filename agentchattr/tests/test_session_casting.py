@@ -408,6 +408,18 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(shown["held"])
         self.assertNotIn("phase_name", shown)
         self.assertNotIn("current_agent", shown)
+        # Review of e957ea9: the frontend fields must not land on the saved run,
+        # or a later start would still report it held.
+        self.assertNotIn("held", sessions.get(run["id"]))
+
+    def test_listing_sessions_leaves_the_saved_runs_untouched(self):
+        run = self.started_run()
+        sessions, _ = self.restart([run])
+
+        shown = next(s for s in self.engine.list_active() if s["id"] == run["id"])
+
+        self.assertIn("phase_name", shown)
+        self.assertNotIn("phase_name", sessions.get(run["id"]))
 
     def test_a_held_run_is_announced_in_its_channel(self):
         custom = self.root / "custom_templates.json"

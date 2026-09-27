@@ -108,7 +108,7 @@ class SessionEngine:
         active = []
         for session in self._store.list_all():
             if session.get("state") in ("active", "waiting", "paused"):
-                active.append(self._enrich(session))
+                active.append(self._enrich(dict(session)))
         return active
 
     def resume_active_sessions(self):
