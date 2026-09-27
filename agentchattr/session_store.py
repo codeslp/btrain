@@ -73,7 +73,8 @@ class SessionStore:
         self._callbacks: list = []
         self._templates: dict[str, dict] = {}
         self._custom_templates_unreadable = False
-        self._custom_templates_rename_unsaved = False
+        # Why a rename at load couldn't be saved, or None. See _load_custom_templates.
+        self._custom_templates_rename_error: str | None = None
         self._load()
 
         # Warn about legacy file
@@ -167,12 +168,13 @@ class SessionStore:
             try:
                 self._mark_runs_on_renamed_ids(renamed)
                 _write_json_atomic(custom_path, custom)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 # Starting matters more than persisting: the rename holds in
                 # memory and is tried again at the next load. Until then the
                 # file still has the old ids, so a delete would miss the entry
                 # and a save would write both ids; _read_custom_file refuses both.
-                self._custom_templates_rename_unsaved = True
+                # ValueError: a hand-edited lone surrogate can't be encoded.
+                self._custom_templates_rename_error = str(exc) or type(exc).__name__
                 log.warning("Could not save the rename of custom templates that shared a built-in id (%s); "
                             "it holds until restart, and template changes are refused until then", exc)
 
@@ -232,17 +234,19 @@ class SessionStore:
         when the file can't be read: the rewrite would replace every template
         in it. Also for the rest of a start whose load failed, even once the
         file is repaired: its templates were never loaded, so a save could
-        replace one the user never saw.
+        replace one the user never saw. And for the rest of a start whose
+        rename of ids shared with built-ins couldn't be saved: the file still
+        has the old ids, so a delete would miss its entry and a save would
+        write both ids.
         """
         if self._custom_templates_unreadable:
             raise CustomTemplatesUnreadable(
                 f"{custom_path.name} couldn't be read when agentchattr started; "
                 "fix it and restart before changing templates")
-        if self._custom_templates_rename_unsaved:
+        if self._custom_templates_rename_error:
             raise CustomTemplatesUnreadable(
-                f"{custom_path.name} couldn't be updated when agentchattr started, so it still has "
-                "template ids that were renamed only in memory; make it writable and restart "
-                "before changing templates")
+                f"The template renames at startup couldn't be saved ({self._custom_templates_rename_error}), "
+                f"so {custom_path.name} still has the old ids; fix that and restart before changing templates")
         if not custom_path.exists():
             return []
         try:

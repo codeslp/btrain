@@ -621,23 +621,63 @@ class UnreadableCustomTemplatesTests(unittest.TestCase):
 
         self.assertEqual(json.loads(self.custom.read_text("utf-8"))[0]["name"], "Pair Review")
 
+    def saved_ids(self):
+        return [t["id"] for t in json.loads(self.custom.read_text("utf-8"))]
+
     def test_changes_are_refused_when_a_rename_at_load_could_not_be_saved(self):
         # Codex on 92c87da: the file still holds the old id, so a delete would
         # miss the entry and report success, and a save would write both ids.
         mine = dict(load_template("code-review"), name="My tuned review")
         self.custom.write_text(json.dumps([mine]), "utf-8")
-        self.custom.chmod(0o444)
-        self.addCleanup(self.custom.chmod, 0o644)
-        sessions = self.store()
+        with mock.patch("session_store.os.replace", side_effect=OSError("disk full")), \
+                self.assertLogs("session_store", level="WARNING"):
+            sessions = self.store()
         self.assertEqual(sessions.get_template("code-review-custom")["name"], "My tuned review")
+        # Every template loaded, so a resume must not treat the file as unreadable.
+        self.assertFalse(sessions.custom_templates_unreadable())
 
-        with self.assertRaises(CustomTemplatesUnreadable):
+        with self.assertRaisesRegex(CustomTemplatesUnreadable, "disk full"):
             sessions.delete_custom_template("code-review-custom")
-        with self.assertRaises(CustomTemplatesUnreadable):
+        with self.assertRaisesRegex(CustomTemplatesUnreadable, "disk full"):
             sessions.save_custom_template(dict(mine, id="code-review-custom", name="Redraft"))
 
-        self.assertEqual([t["id"] for t in json.loads(self.custom.read_text("utf-8"))], ["code-review"])
+        self.assertEqual(self.saved_ids(), ["code-review"])
         self.assertEqual(sessions.get_template("code-review-custom")["name"], "My tuned review")
+
+    def test_changes_are_refused_when_the_run_marks_could_not_be_saved(self):
+        # The marks on unfinished runs are saved before the rewrite, so when
+        # that write fails the custom file keeps its old ids too.
+        mine = dict(load_template("code-review"), name="My tuned review")
+        self.custom.write_text(json.dumps([mine]), "utf-8")
+        (self.root / "session_runs.json").write_text(
+            json.dumps([{"id": 1, "template_id": "code-review", "state": "waiting"}]), "utf-8")
+        real_replace = os.replace
+
+        def replace(src, dst):
+            if Path(dst).name == "session_runs.json":
+                raise OSError("session_runs.json: disk full")
+            return real_replace(src, dst)
+
+        with mock.patch("session_store.os.replace", side_effect=replace), \
+                self.assertLogs("session_store", level="WARNING"):
+            sessions = self.store()
+
+        with self.assertRaisesRegex(CustomTemplatesUnreadable, "session_runs.json"):
+            sessions.delete_custom_template("code-review-custom")
+        self.assertEqual(self.saved_ids(), ["code-review"])
+
+    def test_a_rename_that_cannot_be_encoded_does_not_stop_the_store(self):
+        # A hand-edited lone surrogate made the rewrite raise UnicodeEncodeError,
+        # which is not an OSError, so the server didn't start.
+        self.custom.write_text(json.dumps([dict(load_template("code-review"), name="Mine \ud800")]), "utf-8")
+
+        with self.assertLogs("session_store", level="WARNING"):
+            sessions = self.store()
+
+        self.assertIsNotNone(sessions.get_template("code-review-custom"))
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.delete_custom_template("code-review-custom")
+        self.assertEqual(self.saved_ids(), ["code-review"])
 
     def test_a_custom_file_it_may_not_read_does_not_stop_the_store(self):
         self.custom.write_text(json.dumps([pair_review_template()]), "utf-8")
