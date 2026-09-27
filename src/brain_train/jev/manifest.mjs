@@ -2,6 +2,19 @@ import { createHash } from "node:crypto"
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const splits = new Set(["train", "calibration", "test"])
+const sourceFields = ["id", "repository", "prNumber", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "formalState", "deterministicDisposition"]
+
+function canonicalSources(sources) {
+  if (!Array.isArray(sources)) throw new Error("Source snapshots are required")
+  const records = sources.map((source) => Object.fromEntries(sourceFields.filter((key) => Object.hasOwn(source, key)).map((key) => [key, source[key]])))
+  records.sort((a, b) => a.id.localeCompare(b.id))
+  if (new Set(records.map((source) => source.id)).size !== records.length) throw new Error("Duplicate source IDs")
+  return records
+}
+
+export function sourceSnapshotHashFor(sources) {
+  return hash(canonicalSources(sources))
+}
 
 export function datasetHashFor(cases, labels, sourceSnapshotHash) {
   if (!sourceSnapshotHash) throw new Error("Source snapshot hash is required")
@@ -61,11 +74,11 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     frozenCases.push({ sourceId: item.sourceId, repository: item.repository, prNumber: item.prNumber, templateGroup: item.templateGroup, split: item.split, label: item.label, annotations: item.annotations.map((a) => ({ by: a.by, label: a.label })), adjudication: { by: item.adjudication.by, label: item.adjudication.label, reason: item.adjudication.reason }, sourceHash: source.sourceHash })
   }
   frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
-  const selectedSources = [...sourceIds].sort().map((id) => {
+  const selectedSources = canonicalSources([...sourceIds].map((id) => {
     const s = sourceById.get(id)
     return { id, repository: s.repository, prNumber: s.prNumber, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
-  })
-  const sourceSnapshotHash = hash(selectedSources)
+  }))
+  const sourceSnapshotHash = sourceSnapshotHashFor(selectedSources)
   const datasetHash = datasetHashFor(frozenCases, labels, sourceSnapshotHash)
-  return { schemaVersion: 1, pins: { ...pins }, labels: [...labels], sourceSnapshotHash, datasetHash, cases: frozenCases }
+  return { schemaVersion: 1, pins: { ...pins }, labels: [...labels], sourceSnapshotHash, datasetHash, sources: selectedSources, cases: frozenCases }
 }

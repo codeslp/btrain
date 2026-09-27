@@ -1,5 +1,5 @@
 import { decideCandidate } from "./decision.mjs"
-import { datasetHashFor } from "./manifest.mjs"
+import { datasetHashFor, sourceSnapshotHashFor } from "./manifest.mjs"
 
 const ratio = (numerator, denominator) => denominator ? numerator / denominator : null
 const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor((values.length - 1) * fraction))] : null
@@ -46,10 +46,16 @@ export function summarizeReplay(rows, labels) {
 
 export async function replayManifest({ manifest, family, candidates, provider }) {
   if (!manifest?.datasetHash || !Array.isArray(manifest.cases) || !Array.isArray(manifest.labels)) throw new Error("Frozen manifest is required")
+  if (manifest.sourceSnapshotHash !== sourceSnapshotHashFor(manifest.sources)) throw new Error("Manifest source snapshot hash does not match provenance")
   if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash)) throw new Error("Manifest dataset hash does not match frozen cases")
   if (manifest.pins?.policyHash !== family.policyHash) throw new Error("Manifest policy hash does not match family")
   if (manifest.pins?.family !== family.id || manifest.pins?.questionVersion !== family.questionVersion) throw new Error("Manifest family version does not match")
   if (!manifest.pins?.model || !manifest.pins?.codeRevision) throw new Error("Manifest model and code revision pins are required")
+  const sources = new Map(manifest.sources.map((source) => [source.id, source]))
+  for (const item of manifest.cases) {
+    const source = sources.get(item.sourceId)
+    if (!source || (item.sourceHash && item.sourceHash !== source.sourceHash)) throw new Error(`Case source provenance mismatch: ${item.sourceId}`)
+  }
   const rows = []
   for (const item of manifest.cases) {
     const candidate = candidates[item.sourceId]

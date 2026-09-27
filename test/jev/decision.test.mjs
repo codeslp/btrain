@@ -64,14 +64,34 @@ describe("offline decision gateway", () => {
     assert.notEqual(changed.policyHash, family.policyHash)
   })
 
+  it("does not allow a family catalog to drift after hashing", () => {
+    assert.throws(() => family.choices.push("secret"), TypeError)
+    assert.throws(() => family.allowedActions.push("approve-pr"), TypeError)
+  })
+
   it("persists only allowlisted trace fields", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-trace-"))
     try {
       const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", privacyApproved: true, modelPin: "jev-pinned" })
-      await appendDecisionTrace(root, { ...trace, privateInput: "do not write me" })
+      await appendDecisionTrace(root, { ...trace, privateInput: "do not write me" }, family)
       const raw = await fs.readFile(path.join(root, ".btrain", "jev", "decision-traces.jsonl"), "utf8")
       assert.equal(raw.includes("do not write me"), false)
       assert.equal(JSON.parse(raw).outcome, "decision")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("never returns or persists private data from a malformed baseline or trace metadata", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-private-trace-"))
+    try {
+      const privateCandidate = { ...candidate, baseline: { rawPrivateText: "secret baseline" } }
+      const trace = await decideCandidate({ family, candidate: privateCandidate, provider: fakeProvider(answer()), mode: "offline" })
+      assert.equal(JSON.stringify(trace).includes("secret baseline"), false)
+      await appendDecisionTrace(root, { ...trace, baseline: { rawPrivateText: "secret baseline" }, provider: "secret provider metadata" }, family)
+      const raw = await fs.readFile(path.join(root, ".btrain", "jev", "decision-traces.jsonl"), "utf8")
+      assert.equal(raw.includes("secret baseline"), false)
+      assert.equal(raw.includes("secret provider metadata"), false)
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

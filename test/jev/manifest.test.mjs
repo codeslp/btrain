@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { annotationCandidates, freezeLabeledManifest } from "../../src/brain_train/jev/manifest.mjs"
+import { annotationCandidates, freezeLabeledManifest, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
 const snapshot = (id, prNumber, eventHead = "a".repeat(40)) => ({ id, repository: "o/r", prNumber, eventHead, sourceHash: "b".repeat(64), sourceRef: `https://example.test/${id}`, surface: "review", author: "bot" })
 const entry = (id, prNumber, templateGroup, split = "test") => ({
@@ -25,6 +25,9 @@ describe("frozen Jev label manifest", () => {
     assert.deepEqual(first, second)
     assert.equal(first.datasetHash.length, 64)
     assert.equal(first.cases.length, 2)
+    assert.equal(first.sources.length, 2)
+    assert.equal(first.sources[0].sourceRef, "https://example.test/s1")
+    assert.equal(sourceSnapshotHashFor(first.sources), first.sourceSnapshotHash)
   })
 
   it("rejects a PR or normalized template across splits", () => {

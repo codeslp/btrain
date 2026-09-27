@@ -14,14 +14,16 @@ Use `annotationCandidates` from `src/brain_train/jev/manifest.mjs` to export sou
 references for independent labeling. Set `requireEventHead: true` for an exact-head PR
 evaluation; current polling snapshots are excluded until a true event-time source exists.
 `freezeLabeledManifest` requires two distinct annotators, adjudication, pinned model and
-policy metadata, and one split per PR and normalized template group. It returns a source
-hash and dataset hash. Keep raw text and candidate fixtures inside their source repository.
+policy metadata, and one split per PR and normalized template group. It returns canonical
+source metadata, a source hash, and a dataset hash. Replay checks both hashes, so a changed
+source URL, reviewed commit, event head, or label fails before a provider call. Keep raw text
+and candidate fixtures inside their source repository.
 
 `decideCandidate` from `src/brain_train/jev/decision.mjs` defaults to `off`. In `offline`
 mode an injected local fake provider can replay private fixtures without a hosted call.
 It returns `skipped`, `decision`, `abstain`, or `failure` traces and only *suggests* an
-allowed action. `appendDecisionTrace` writes an allowlisted local trace without the input
-text. `replayManifest` from `src/brain_train/jev/replay.mjs` compares a pinned manifest
+allowed action. `appendDecisionTrace` requires the matching family and writes an allowlisted
+local trace without the input text. `replayManifest` from `src/brain_train/jev/replay.mjs` compares a pinned manifest
 with a deterministic baseline and reports skips, valid abstentions, provider failures,
 class metrics, coverage, latency, and observed cost separately. The focused executable
 examples are `test/jev/*.test.mjs`.

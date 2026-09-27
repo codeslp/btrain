@@ -6,6 +6,10 @@ const hash = (value) => createHash("sha256").update(JSON.stringify(value)).diges
 const outcomes = new Set(["off", "offline"])
 const failureReasons = new Set(["timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled"])
 
+function safeCode(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._:/@-]{0,127}$/i.test(value) ? value : null
+}
+
 function safeRefs(refs) {
   if (!Array.isArray(refs)) return []
   return refs.slice(0, 16).flatMap((ref) => {
@@ -27,7 +31,7 @@ export function createDecisionFamily(config) {
   if (!["public", "synthetic", "private"].includes(privacyClass)) throw new Error("A privacy class is required")
   if (!Array.isArray(allowedActions) || typeof inputBuilder !== "function" || typeof actionPolicy !== "function" || typeof fallback !== "function") throw new Error("Family input, action, and fallback policies are required")
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new Error("Invalid decision threshold")
-  const family = { id, questionVersion, choices: [...choices], privacyClass, allowedActions: [...allowedActions], threshold, inputBuilder, actionPolicy, fallback, questionId: config.questionId || "signal", timeoutMs: config.timeoutMs || 2000, maxInputBytes: config.maxInputBytes || 16 * 1024, maxCalls: config.maxCalls || 1 }
+  const family = { id, questionVersion, choices: Object.freeze([...choices]), privacyClass, allowedActions: Object.freeze([...allowedActions]), threshold, inputBuilder, actionPolicy, fallback, questionId: config.questionId || "signal", timeoutMs: config.timeoutMs || 2000, maxInputBytes: config.maxInputBytes || 16 * 1024, maxCalls: config.maxCalls || 1 }
   family.policyHash = hash({ id, questionVersion, choices, privacyClass, allowedActions, threshold, questionId: family.questionId, timeoutMs: family.timeoutMs, maxInputBytes: family.maxInputBytes, maxCalls: family.maxCalls, inputBuilder: inputBuilder.toString(), actionPolicy: actionPolicy.toString(), fallback: fallback.toString() })
   return Object.freeze(family)
 }
@@ -36,10 +40,24 @@ export function fakeProvider(result) {
   return { localOnly: true, decide: async () => structuredClone(result) }
 }
 
-export async function appendDecisionTrace(root, trace) {
+export async function appendDecisionTrace(root, trace, family) {
   if (!trace || !["skipped", "decision", "abstain", "failure"].includes(trace.outcome)) throw new Error("A gateway trace is required")
+  if (!family || trace.family !== family.id || trace.policyHash !== family.policyHash) throw new Error("A matching decision family is required")
   const allowed = ["family", "questionVersion", "policyHash", "codeRevision", "sourceRefs", "baseline", "actionTaken", "outcome", "reason", "attemptedCall", "inputHash", "provider", "modelPin", "failureClass", "latencyMs", "prediction", "probabilities", "model", "inputTokens", "cost", "suggestedAction"]
   const record = Object.fromEntries(allowed.filter((key) => Object.hasOwn(trace, key)).map((key) => [key, trace[key]]))
+  for (const key of ["family", "questionVersion", "policyHash", "codeRevision", "baseline", "actionTaken", "outcome", "reason", "inputHash", "provider", "modelPin", "failureClass", "prediction", "model", "suggestedAction"]) {
+    if (Object.hasOwn(record, key)) record[key] = safeCode(record[key])
+  }
+  if (!family.choices.includes(record.baseline)) record.baseline = null
+  if (record.prediction && !family.choices.includes(record.prediction)) record.prediction = null
+  if (record.suggestedAction && !family.allowedActions.includes(record.suggestedAction)) record.suggestedAction = null
+  if (Object.hasOwn(record, "probabilities")) {
+    record.probabilities = Object.fromEntries(Object.entries(record.probabilities || {}).filter(([key, value]) => family.choices.includes(key) && Number.isFinite(value) && value >= 0 && value <= 1))
+  }
+  for (const key of ["latencyMs", "inputTokens", "cost"]) {
+    if (Object.hasOwn(record, key) && (!Number.isFinite(record[key]) || record[key] < 0)) record[key] = null
+  }
+  if (Object.hasOwn(record, "attemptedCall")) record.attemptedCall = record.attemptedCall === true
   record.sourceRefs = safeRefs(record.sourceRefs)
   const file = path.join(root, ".btrain", "jev", "decision-traces.jsonl")
   await fs.mkdir(path.dirname(file), { recursive: true })
@@ -61,10 +79,16 @@ function validAnswer(response, family) {
 export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null }) {
   if (!outcomes.has(mode)) throw new Error("Decision gateway supports only off or offline mode")
   const sourceRefs = safeRefs(candidate?.sourceRefs)
-  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision, sourceRefs, baseline: family.fallback(candidate?.baseline), actionTaken: "none" }
+  let baseline
+  try {
+    const result = family.fallback(candidate?.baseline)
+    baseline = family.choices.includes(result) ? result : null
+  } catch { baseline = null }
+  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision, sourceRefs, baseline, actionTaken: "none" }
   const skip = (reason) => ({ ...base, outcome: "skipped", reason, attemptedCall: false })
   if (mode === "off") return skip("mode-off")
   if (!candidate?.eligible) return skip("ineligible")
+  if (!baseline) return skip("invalid-baseline")
   if ((family.privacyClass === "private" || candidate.privacyClass === "private") && !privacyApproved && provider?.localOnly !== true) return skip("privacy-denied")
   if (candidate.callIndex >= family.maxCalls) return skip("call-budget")
   if (!sourceRefs.length) return skip("invalid-source-reference")

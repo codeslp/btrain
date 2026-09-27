@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { summarizeReplay, replayManifest } from "../../src/brain_train/jev/replay.mjs"
 import { createDecisionFamily } from "../../src/brain_train/jev/decision.mjs"
-import { datasetHashFor } from "../../src/brain_train/jev/manifest.mjs"
+import { datasetHashFor, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
 const family = createDecisionFamily({ id: "sample", questionVersion: "1", choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
 const rows = [
@@ -34,8 +34,9 @@ describe("Jev replay metrics", () => {
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
     const cases = [{ sourceId: "a", split: "test", label: "feedback" }]
     const labels = ["clear", "feedback", "uncertain"]
-    const sourceSnapshotHash = "source-pin"
-    const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash), sourceSnapshotHash, labels, pins: { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "rev" }, cases }
+    const sources = [{ id: "a", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash: "b".repeat(64) }]
+    const sourceSnapshotHash = sourceSnapshotHashFor(sources)
+    const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash), sourceSnapshotHash, sources, labels, pins: { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "rev" }, cases }
     const candidates = { a: { eligible: true, sourceRefs: ["https://example.test/a"], baseline: "uncertain" } }
     const provider = { decide: async () => ({ ok: true, model: "pinned", answers: { signal: { choice: "feedback", probabilities: { clear: 0.05, feedback: 0.9, uncertain: 0.05 } } }, latencyMs: 10 }) }
     const first = await replayManifest({ manifest, family, candidates, provider })
@@ -44,5 +45,7 @@ describe("Jev replay metrics", () => {
     assert.equal(first.splits.test.model.correct, 1)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, policyHash: "wrong" } }, family, candidates, provider }), /policy hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, cases: [{ ...cases[0], label: "clear" }] }, family, candidates, provider }), /dataset hash/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, sources: [{ ...sources[0], sourceRef: "https://example.test/tampered" }] }, family, candidates, provider }), /source snapshot hash/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, sources: [{ ...sources[0], reviewedCommit: "c".repeat(40) }] }, family, candidates, provider }), /source snapshot hash/)
   })
 })
