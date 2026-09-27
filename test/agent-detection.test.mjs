@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import { collectRuntimeAgentHints } from "../src/brain_train/runtime_agent_hints.mjs"
+import { collectRuntimeAgentHints, runtimeAgentSignalKeys } from "../src/brain_train/runtime_agent_hints.mjs"
 import { withoutAgentIdentity, withoutLaneScope } from "./helpers/runner-scope.mjs"
 
 const exec = promisify(execFile)
@@ -27,6 +27,24 @@ const MACOS_PATH = [
   "/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin",
 ].join(":")
 
+// Spelled out here rather than read from the module, so a misspelled marker
+// fails instead of matching itself on both sides.
+const EXPECTED_MARKERS = {
+  claude: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"],
+  codex: [
+    "CODEX_THREAD_ID",
+    "CODEX_CI",
+    "CODEX_SHELL",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_MANAGED_BY_NPM",
+    "CODEX_MANAGED_BY_BUN",
+    "CODEX_MANAGED_BY_PNPM",
+    "CODEX_MANAGED_BY_VITE_PLUS",
+  ],
+  gemini: ["GEMINI_CLI"],
+}
+
 const THREAD_ID = "00000000-0000-7000-8000-000000000000"
 const NO_HINTS = "agent check: unknown (no runtime hints; set BTRAIN_AGENT to pin it if needed)"
 
@@ -46,21 +64,16 @@ describe("collectRuntimeAgentHints", () => {
     )
   })
 
-  it("finds codex from each variable Codex sets for the commands it runs", () => {
-    for (const [key, value] of Object.entries({
-      CODEX_THREAD_ID: THREAD_ID,
-      CODEX_CI: "1",
-      CODEX_SHELL: "1",
-      CODEX_SANDBOX: "seatbelt",
-      CODEX_SANDBOX_NETWORK_DISABLED: "1",
-      CODEX_MANAGED_BY_NPM: "1",
-    })) {
-      assert.deepEqual(collectRuntimeAgentHints(macosEnv({ [key]: value })), ["codex"], key)
+  it("finds each agent from any one of its markers", () => {
+    for (const [hint, keys] of Object.entries(EXPECTED_MARKERS)) {
+      for (const key of keys) {
+        assert.deepEqual(collectRuntimeAgentHints(macosEnv({ [key]: "1" })), [hint], key)
+      }
     }
   })
 
-  it("finds gemini from GEMINI_CLI", () => {
-    assert.deepEqual(collectRuntimeAgentHints(macosEnv({ GEMINI_CLI: "1" })), ["gemini"])
+  it("treats exactly the expected variables as markers", () => {
+    assert.deepEqual(runtimeAgentSignalKeys().sort(), Object.values(EXPECTED_MARKERS).flat().sort())
   })
 
   it("ignores a lone PATH or HOME that contains an agent name", () => {
@@ -132,9 +145,11 @@ describe("btrain handoff agent check", () => {
 
   before(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-agent-detection-"))
-    // No inherited variables: only what a macOS login shell would have.
+    // Nothing inherited except the real PATH, appended after the macOS entries
+    // so git resolves on any machine. PATH is not a signal, so it cannot add a
+    // hint.
     baseEnv = {
-      PATH: MACOS_PATH,
+      PATH: [MACOS_PATH, process.env.PATH].filter(Boolean).join(path.delimiter),
       HOME: tmpDir,
       BRAIN_TRAIN_HOME: path.join(tmpDir, ".btrain-test-home"),
       BTRAIN_NO_REVIEW_DISPATCH: "1",
@@ -163,7 +178,7 @@ describe("btrain handoff agent check", () => {
     const home = path.join(tmpDir, "codex-home")
     await fs.mkdir(home)
     assert.equal(
-      await agentCheck(pairRepo, { PATH: `/Users/x/claude-notes/bin:${MACOS_PATH}`, HOME: home }),
+      await agentCheck(pairRepo, { PATH: `/Users/x/claude-notes/bin${path.delimiter}${baseEnv.PATH}`, HOME: home }),
       NO_HINTS,
     )
   })

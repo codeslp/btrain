@@ -14,10 +14,10 @@ const RUNTIME_AGENT_SIGNALS = [
   // Claude Code adds CLAUDECODE=1 to its shell and hook environments and
   // exports CLAUDE_CODE_ENTRYPOINT (cli, sdk-ts, claude-desktop, ...).
   { hint: "claude", keys: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"] },
-  // Codex sets CODEX_THREAD_ID, CODEX_CI and CODEX_SHELL for shell commands,
-  // CODEX_SANDBOX* inside its sandbox, and its npm launcher sets
-  // CODEX_MANAGED_BY_<package manager>. CODEX_HOME is user configuration,
-  // present whichever agent runs, so it is not a marker.
+  // Codex sets CODEX_THREAD_ID and CODEX_CI for shell commands (releases up to
+  // 0.146 also set CODEX_SHELL), CODEX_SANDBOX* inside its sandbox, and its npm
+  // launcher sets CODEX_MANAGED_BY_<package manager>. CODEX_HOME is user
+  // configuration, present whichever agent runs, so it is not a marker.
   {
     hint: "codex",
     keys: [

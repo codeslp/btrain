@@ -31,7 +31,9 @@ const LANE_SCOPE_KEYS = [
 const AGENT_MARKER_KEYS = runtimeAgentSignalKeys()
 
 /**
- * The variables a test subprocess must not inherit, as one source.
+ * The lane-scope variables a test subprocess must not inherit, as one source.
+ * withoutLaneScope also strips the agent markers, which the npm scripts leave
+ * alone.
  *
  * Exported so the npm-script guard derives from the same list rather than
  * pinning one variable: adding a seventh here and to `buildLoopRunnerEnv` while
