@@ -1,3 +1,5 @@
+import { runtimeAgentSignalKeys } from "../../src/brain_train/runtime_agent_hints.mjs"
+
 // Test subprocesses must not inherit a loop runner's lane scope: a bare
 // `node --test` run from a lane-locked session would otherwise have its
 // spawned btrain commands rejected by the lane-lock allowlist. npm test
@@ -21,6 +23,13 @@ const LANE_SCOPE_KEYS = [
   "BTRAIN_LOOP_ACTIVE",
 ]
 
+// Nor the markers of the agent CLI running the suite (CLAUDECODE,
+// CODEX_THREAD_ID, ...). btrain detects the current agent from them, so a run
+// from Claude Code would verify as claude in every test repo that configures a
+// claude agent, and results would depend on who ran the suite. The list comes
+// from the detector, so a new marker is stripped without an edit here.
+const AGENT_MARKER_KEYS = runtimeAgentSignalKeys()
+
 /**
  * The variables a test subprocess must not inherit, as one source.
  *
@@ -35,7 +44,7 @@ export function laneScopeKeys() {
 
 export function withoutLaneScope(env = process.env) {
   const clean = { ...env }
-  for (const key of LANE_SCOPE_KEYS) {
+  for (const key of [...LANE_SCOPE_KEYS, ...AGENT_MARKER_KEYS]) {
     delete clean[key]
   }
   // Existing tests must not auto-spawn configured claude/codex CLIs when a
@@ -44,4 +53,29 @@ export function withoutLaneScope(env = process.env) {
     clean.BTRAIN_NO_REVIEW_DISPATCH = "1"
   }
   return clean
+}
+
+/**
+ * Run `fn` with no agent identity in `process.env`: no BTRAIN_AGENT pin and
+ * none of the agent CLI markers. For tests that run detection in-process, where
+ * the subprocess env from withoutLaneScope does not apply. The previous values
+ * are restored afterwards.
+ */
+export async function withoutAgentIdentity(fn) {
+  const keys = ["BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", ...AGENT_MARKER_KEYS]
+  const saved = {}
+  for (const key of keys) {
+    if (key in process.env) {
+      saved[key] = process.env[key]
+    }
+    delete process.env[key]
+  }
+  try {
+    return await fn()
+  } finally {
+    for (const key of keys) {
+      delete process.env[key]
+    }
+    Object.assign(process.env, saved)
+  }
 }
