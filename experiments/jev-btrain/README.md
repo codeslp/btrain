@@ -22,8 +22,12 @@ and candidate fixtures inside their source repository.
 `decideCandidate` from `src/brain_train/jev/decision.mjs` defaults to `off`. In `offline`
 mode an injected local fake provider can replay private fixtures without a hosted call.
 It returns `skipped`, `decision`, `abstain`, or `failure` traces and only *suggests* an
-allowed action. `appendDecisionTrace` requires the matching family and writes an allowlisted
-local trace without the input text. `replayManifest` from `src/brain_train/jev/replay.mjs` compares a pinned manifest
+allowed action. `appendDecisionTrace` requires the matching family and a source manifest proof,
+then writes an allowlisted
+local trace without the input text. Trace source references and provider/model IDs are opaque
+hashes; source URLs and pinned model names remain inspectable in the local evidence and frozen
+manifest. `replayManifest` requires candidate source content, hash, and URL to match the frozen
+source before any provider call. It compares the pinned manifest
 with a deterministic baseline and reports skips, valid abstentions, provider failures,
 class metrics, coverage, latency, and observed cost separately. The focused executable
 examples are `test/jev/*.test.mjs`.

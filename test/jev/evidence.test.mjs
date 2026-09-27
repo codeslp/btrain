@@ -17,6 +17,8 @@ describe("Jev source evidence", () => {
     assert.equal(row.sourceHash.length, 64)
     const sameTemplate = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "a", comment: { ...comment, id: 43, body: "Fix the test" }, capturedAt: "2026-09-01T10:05:00Z" })
     assert.equal(row.templateGroup, sameTemplate.templateGroup)
+    const sanitized = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...comment, url: "https://user:pass@example.test/42?token=secret#part" }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(sanitized.sourceRef, "https://example.test/42")
   })
 
   it("appends each source once and records later outcomes without rewriting the source", async () => {

@@ -1,26 +1,29 @@
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { sourceSnapshotHashFor } from "./manifest.mjs"
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const outcomes = new Set(["off", "offline"])
 const failureReasons = new Set(["timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled"])
+const traceReasons = new Set(["mode-off", "ineligible", "invalid-baseline", "privacy-denied", "call-budget", "invalid-source-reference", "invalid-input", "input-budget", "provider-unavailable", "timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled", "model-mismatch", "invalid-answer", "below-threshold", "no-permitted-action"])
 
-function safeCode(value) {
-  return typeof value === "string" && /^[a-z0-9][a-z0-9._:/@-]{0,127}$/i.test(value) ? value : null
+function opaqueId(value) {
+  if (typeof value !== "string" || !value) return null
+  return /^id-sha256:[a-f0-9]{64}$/.test(value) ? value : `id-sha256:${hash(value)}`
 }
 
-function safeRefs(refs) {
+function opaqueRefs(refs) {
   if (!Array.isArray(refs)) return []
   return refs.slice(0, 16).flatMap((ref) => {
+    if (typeof ref === "string" && /^ref-sha256:[a-f0-9]{64}$/.test(ref)) return [ref]
     try {
       const url = new URL(ref)
       if (!["https:", "http:"].includes(url.protocol)) return []
       url.username = ""
       url.password = ""
-      url.search = ""
       url.hash = ""
-      return [url.toString()]
+      return [`ref-sha256:${hash(url.toString())}`]
     } catch { return [] }
   })
 }
@@ -40,25 +43,44 @@ export function fakeProvider(result) {
   return { localOnly: true, decide: async () => structuredClone(result) }
 }
 
-export async function appendDecisionTrace(root, trace, family) {
+export async function appendDecisionTrace(root, trace, family, sourceProof) {
   if (!trace || !["skipped", "decision", "abstain", "failure"].includes(trace.outcome)) throw new Error("A gateway trace is required")
   if (!family || trace.family !== family.id || trace.policyHash !== family.policyHash) throw new Error("A matching decision family is required")
-  const allowed = ["family", "questionVersion", "policyHash", "codeRevision", "sourceRefs", "baseline", "actionTaken", "outcome", "reason", "attemptedCall", "inputHash", "provider", "modelPin", "failureClass", "latencyMs", "prediction", "probabilities", "model", "inputTokens", "cost", "suggestedAction"]
-  const record = Object.fromEntries(allowed.filter((key) => Object.hasOwn(trace, key)).map((key) => [key, trace[key]]))
-  for (const key of ["family", "questionVersion", "policyHash", "codeRevision", "baseline", "actionTaken", "outcome", "reason", "inputHash", "provider", "modelPin", "failureClass", "prediction", "model", "suggestedAction"]) {
-    if (Object.hasOwn(record, key)) record[key] = safeCode(record[key])
+  const traceRefs = opaqueRefs(trace.sourceRefs)
+  let validProof = false
+  try {
+    validProof = Array.isArray(sourceProof?.sources)
+      && sourceProof.sourceSnapshotHash === sourceSnapshotHashFor(sourceProof.sources)
+  } catch { validProof = false }
+  const verifiedRefs = validProof ? new Set(opaqueRefs(sourceProof.sources.map((source) => source.sourceRef))) : new Set()
+  if (!validProof || (trace.outcome !== "skipped" && !traceRefs.length)
+    || traceRefs.some((ref) => !verifiedRefs.has(ref))) {
+    throw new Error("Trace source provenance does not match frozen evidence")
   }
-  if (!family.choices.includes(record.baseline)) record.baseline = null
-  if (record.prediction && !family.choices.includes(record.prediction)) record.prediction = null
-  if (record.suggestedAction && !family.allowedActions.includes(record.suggestedAction)) record.suggestedAction = null
-  if (Object.hasOwn(record, "probabilities")) {
-    record.probabilities = Object.fromEntries(Object.entries(record.probabilities || {}).filter(([key, value]) => family.choices.includes(key) && Number.isFinite(value) && value >= 0 && value <= 1))
+  const nonnegative = (value) => Number.isFinite(value) && value >= 0 ? value : null
+  const record = {
+    family: family.id,
+    questionVersion: family.questionVersion,
+    policyHash: family.policyHash,
+    codeRevision: /^[a-f0-9]{40}$/.test(trace.codeRevision || "") ? trace.codeRevision : null,
+    sourceRefs: traceRefs,
+    baseline: family.choices.includes(trace.baseline) ? trace.baseline : null,
+    actionTaken: trace.actionTaken === "none" || family.allowedActions.includes(trace.actionTaken) ? trace.actionTaken : "none",
+    outcome: trace.outcome,
+    reason: traceReasons.has(trace.reason) ? trace.reason : "unclassified",
+    attemptedCall: trace.attemptedCall === true,
+    inputHash: /^[a-f0-9]{64}$/.test(trace.inputHash || "") ? trace.inputHash : null,
+    provider: opaqueId(trace.provider),
+    modelPin: opaqueId(trace.modelPin),
+    model: opaqueId(trace.model),
+    failureClass: ["provider", "response-shape"].includes(trace.failureClass) ? trace.failureClass : null,
+    prediction: family.choices.includes(trace.prediction) ? trace.prediction : null,
+    suggestedAction: family.allowedActions.includes(trace.suggestedAction) ? trace.suggestedAction : null,
+    probabilities: Object.fromEntries(Object.entries(trace.probabilities || {}).filter(([key, value]) => family.choices.includes(key) && Number.isFinite(value) && value >= 0 && value <= 1)),
+    latencyMs: nonnegative(trace.latencyMs),
+    inputTokens: nonnegative(trace.inputTokens),
+    cost: nonnegative(trace.cost),
   }
-  for (const key of ["latencyMs", "inputTokens", "cost"]) {
-    if (Object.hasOwn(record, key) && (!Number.isFinite(record[key]) || record[key] < 0)) record[key] = null
-  }
-  if (Object.hasOwn(record, "attemptedCall")) record.attemptedCall = record.attemptedCall === true
-  record.sourceRefs = safeRefs(record.sourceRefs)
   const file = path.join(root, ".btrain", "jev", "decision-traces.jsonl")
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.appendFile(file, `${JSON.stringify(record)}\n`, "utf8")
@@ -78,13 +100,13 @@ function validAnswer(response, family) {
 
 export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null }) {
   if (!outcomes.has(mode)) throw new Error("Decision gateway supports only off or offline mode")
-  const sourceRefs = safeRefs(candidate?.sourceRefs)
+  const sourceRefs = opaqueRefs(candidate?.sourceRefs)
   let baseline
   try {
     const result = family.fallback(candidate?.baseline)
     baseline = family.choices.includes(result) ? result : null
   } catch { baseline = null }
-  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision, sourceRefs, baseline, actionTaken: "none" }
+  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision: /^[a-f0-9]{40}$/.test(codeRevision || "") ? codeRevision : null, sourceRefs, baseline, actionTaken: "none" }
   const skip = (reason) => ({ ...base, outcome: "skipped", reason, attemptedCall: false })
   if (mode === "off") return skip("mode-off")
   if (!candidate?.eligible) return skip("ineligible")
@@ -100,7 +122,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   } catch { return skip("invalid-input") }
   if (!encoded || Buffer.byteLength(encoded) > family.maxInputBytes) return skip("input-budget")
   const inputHash = hash(boundedState)
-  const attempted = { ...base, inputHash, provider: provider?.id || "injected", modelPin, attemptedCall: true }
+  const attempted = { ...base, inputHash, provider: opaqueId(provider?.id || "injected"), modelPin: opaqueId(modelPin), attemptedCall: true }
   const fail = (reason, latencyMs = null) => ({ ...attempted, outcome: "failure", reason, failureClass: reason === "invalid-answer" ? "response-shape" : "provider", latencyMs, actionTaken: "none" })
   if (typeof provider?.decide !== "function") return fail("provider-unavailable")
   let response
@@ -120,7 +142,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   try { proposedAction = family.actionPolicy(answer.choice) } catch { return fail("invalid-answer", response.latencyMs ?? null) }
   if (proposedAction !== null && !family.allowedActions.includes(proposedAction)) return fail("invalid-answer", response.latencyMs ?? null)
   const confidence = answer.probabilities[answer.choice]
-  const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: response.model || null, latencyMs: response.latencyMs ?? null, inputTokens: Number.isFinite(response.usage?.input_tokens) ? response.usage.input_tokens : null, cost: Number.isFinite(response.usage?.cost) ? response.usage.cost : null }
+  const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: opaqueId(response.model), latencyMs: response.latencyMs ?? null, inputTokens: Number.isFinite(response.usage?.input_tokens) ? response.usage.input_tokens : null, cost: Number.isFinite(response.usage?.cost) ? response.usage.cost : null }
   return proposedAction && confidence >= family.threshold
     ? { ...common, outcome: "decision", suggestedAction: proposedAction, actionTaken: "none" }
     : { ...common, outcome: "abstain", reason: proposedAction ? "below-threshold" : "no-permitted-action", actionTaken: "none" }

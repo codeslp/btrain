@@ -1,8 +1,33 @@
 import { decideCandidate } from "./decision.mjs"
 import { datasetHashFor, sourceSnapshotHashFor } from "./manifest.mjs"
+import { createHash } from "node:crypto"
 
 const ratio = (numerator, denominator) => denominator ? numerator / denominator : null
 const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor((values.length - 1) * fraction))] : null
+
+function verifiedCandidate(item, source, candidate) {
+  const contentHash = typeof candidate.sourceContent === "string"
+    ? createHash("sha256").update(candidate.sourceContent).digest("hex")
+    : null
+  const sourceMatches = contentHash === source.sourceHash
+    && candidate.sourceHash === source.sourceHash
+    && (candidate.sourceRef === undefined || candidate.sourceRef === source.sourceRef)
+    && Array.isArray(candidate.sourceRefs)
+    && candidate.sourceRefs.length === 1
+    && candidate.sourceRefs[0] === source.sourceRef
+    && (candidate.text === undefined || candidate.text === candidate.sourceContent)
+  if (!sourceMatches) throw new Error(`Replay candidate source provenance mismatch: ${item.sourceId}`)
+  return {
+    sourceId: item.sourceId,
+    sourceContent: candidate.sourceContent,
+    text: candidate.sourceContent,
+    sourceRefs: [source.sourceRef],
+    baseline: candidate.baseline,
+    eligible: candidate.eligible === true,
+    privacyClass: candidate.privacyClass,
+    callIndex: candidate.callIndex,
+  }
+}
 
 function predictionMetrics(rows, labels, pick, supportRows = rows) {
   const support = Object.fromEntries(labels.map((label) => [label, supportRows.filter((row) => row.label === label).length]))
@@ -60,7 +85,8 @@ export async function replayManifest({ manifest, family, candidates, provider })
   for (const item of manifest.cases) {
     const candidate = candidates[item.sourceId]
     if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
-    const trace = await decideCandidate({ family, candidate: { ...candidate, sourceId: item.sourceId }, provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
+    const source = sources.get(item.sourceId)
+    const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
     rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: !!candidate.eligible, trace })
   }
   const splits = {}

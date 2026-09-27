@@ -9,6 +9,15 @@ const templateText = (value) => String(value || "")
   .replace(/https?:\/\/[^\s)]+/g, "<url>")
   .replace(/\s+/g, " ")
   .trim()
+function safeSourceRef(value) {
+  const url = new URL(value)
+  if (!["https:", "http:"].includes(url.protocol)) throw new Error("Source reference must be an HTTP URL")
+  url.username = ""
+  url.password = ""
+  url.search = ""
+  url.hash = ""
+  return url.toString()
+}
 const evidenceDir = (root) => path.join(root, ".btrain", "jev", "evidence")
 const snapshotsPath = (root) => path.join(evidenceDir(root), "source-snapshots.jsonl")
 const outcomesPath = (root) => path.join(evidenceDir(root), "source-outcomes.jsonl")
@@ -44,7 +53,7 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
     laneId: String(laneId),
     surface: comment.surface,
     eventId: String(comment.id),
-    sourceRef: comment.url,
+    sourceRef: safeSourceRef(comment.url),
     author: comment.author,
     eventAt: comment.at,
     capturedAt,
