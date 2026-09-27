@@ -1865,3 +1865,115 @@ describe("reviewCode masks whole test files in a commit range", () => {
     }
   })
 })
+
+// ---- review round 2: masking drift, non-literal callbacks, CRLF, packed lines ----
+
+describe("regex literal detection in the masker", () => {
+  it("does not start a regex after < or a postfix ++ / --, so later templates keep their state", () => {
+    const leads = [
+      "render(<p>Hi</p>); expect(getByText(`a/b`))",
+      "const half = i++ / 2; const route = `a/b`",
+      "const half = i-- / 2; const route = `a/b`",
+    ]
+    for (const lead of leads) {
+      const lines = [
+        'import { it } from "node:test"',
+        lead,
+        "const fixture = `",
+        `  it.${T.only}("inside the fixture", () => {})`,
+        "`",
+        `it.${T.only}("real", () => {})`,
+      ]
+      const result = scanDiff(makeDiff("test/jsx.test.mjs", lines))
+      assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 6]], lead)
+    }
+  })
+})
+
+describe("focus and skip calls with non-literal callbacks", () => {
+  it("flags it / test / describe with a string title and any second argument", () => {
+    const focused = [
+      `it.${T.only}("uses a named case", runCase)`,
+      `it.${T.only}("wraps the callback", withDb(async () => {}))`,
+      `test.${T.only}("typed callback", async (): Promise<void> => {})`,
+      `describe.${T.only}(SomeSuite.name, () => {})`,
+    ]
+    for (const line of focused) {
+      assert.deepEqual(scanDiff(makeDiff("test/cases.test.ts", [line])).summary, { hard: 1, warn: 0 }, line)
+    }
+    const skipped = scanDiff(makeDiff("test/cases.test.ts", [`describe.${T.skip}("shared suite", sharedSuite)`]))
+    assert.deepEqual(skipped.violations.map((v) => v.rule), ["skipped-test"])
+  })
+
+  it("still needs a literal callback for look-alike receivers, and keeps conditional skips out", () => {
+    const lines = [
+      `context.${T.only}("tenant", runCase)`,
+      `suite.${T.only}("fast", runCase)`,
+      `${T.fit}("linear", fitPoints)`,
+      `test.${T.skip}(isMobile, "no touch support")`,
+      `test.${T.skip}(browserName === "webkit", "flaky on webkit")`,
+    ]
+    assert.deepEqual(scanDiff(makeDiff("test/cases.test.ts", lines)).violations, [])
+  })
+})
+
+describe("reviewCode on a CRLF checkout", () => {
+  it("keeps focused-test hard in worktree mode when the file on disk uses CRLF", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-crlf-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await fs.writeFile(path.join(repo, ".gitattributes"), "*.mjs text eol=crlf\n")
+      await fs.mkdir(path.join(repo, "test"), { recursive: true })
+      const file = path.join(repo, "test", "crlf.test.mjs")
+      const body = [
+        'import { it } from "node:test"',
+        "",
+        "it('one', () => {})",
+        "it('two', () => {})",
+        "it('three', () => {})",
+        "it('four', () => {})",
+        "it('five', () => {})",
+      ]
+      await fs.writeFile(file, `${body.join("\n")}\n`)
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      // The worktree copy carries CRLF, as a checkout with eol=crlf writes it.
+      await fs.writeFile(file, `${[...body, `it.${T.only}('focus', () => {})`].join("\r\n")}\r\n`)
+      const result = await reviewCode(repo, { base: "HEAD" })
+      assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 8]])
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("scan time on packed lines", () => {
+  it("scans lines packed with calls and imports within a time bound", () => {
+    // A child process, like the pathological-line test above.
+    const script = `
+      import { scanDiff } from ${JSON.stringify(CODE_RULES_URL)}
+      const lines = []
+      for (let i = 0; i < 200; i++) lines.push("test(".repeat(990))
+      for (let i = 0; i < 50; i++) lines.push("import ".repeat(700))
+      for (let i = 0; i < 50; i++) lines.push('it.${T.only}("x", '.repeat(300))
+      lines.push('${T.fit}("focus", () => {})')
+      const file = "test/packed.test.mjs"
+      const diff = [
+        "diff --git a/" + file + " b/" + file,
+        "--- a/" + file,
+        "+++ b/" + file,
+        "@@ -0,0 +1," + lines.length + " @@",
+        ...lines.map((line) => "+" + line),
+      ].join("\\n") + "\\n"
+      const started = Date.now()
+      scanDiff(diff, { fileContentsByPath: { [file]: lines.join("\\n") } })
+      process.stdout.write(String(Date.now() - started))
+    `
+    const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 120_000 })
+    const elapsed = Number(output)
+    assert.ok(elapsed < 3000, `scan took ${elapsed} ms`)
+  })
+})

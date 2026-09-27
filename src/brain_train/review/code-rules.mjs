@@ -163,21 +163,29 @@ const PYTHON_ASSERT_STATEMENT = /^\s*assert\b(?!\s*\.)/
 
 // Focus and skip calls: it.only(, describe.skip(, test.concurrent.only(,
 // test.describe.serial.only(, it.only.each(, and fit( / xit( / xdescribe(
-// with an optional .each. Without .each a call also needs a title and a
-// callback, so context.only("tenant") or a fit("linear", points) helper is
-// not one; neither is a Jest test.todo("title") placeholder.
+// with an optional .each. Without .each a call needs two arguments: a string
+// title for it / test / describe (and fdescribe, xdescribe, xtest), so
+// it.only("x", runCase) counts; a literal callback for the look-alike names
+// (context, suite, specify, fit, xit), so context.only("tenant") and a
+// fit("linear", points) helper do not. A Jest test.todo("title") placeholder
+// and a Playwright test.skip(condition, "reason") never count.
 const RUNNER_MARKER_CALL =
-  /(?<![\w$.])(?:it|test|describe|suite|context|specify)(?:\.(?:concurrent|serial|parallel|sequential|describe))*\.(only|skip|todo|fixme)(\.each)?\s*[(`]/g
+  /(?<![\w$.])(it|test|describe|suite|context|specify)(?:\.(?:concurrent|serial|parallel|sequential|describe))*\.(only|skip|todo|fixme)(\.each)?\s*[(`]/g
 const PREFIXED_MARKER_CALL = /(?<![\w$.])(f(?:it|describe)|x(?:it|test|describe|context|specify))(\.each)?\s*[(`]/g
 const PREFIXED_MARKER_NAMES = ["fit", "fdescribe", "xit", "xtest", "xdescribe", "xcontext", "xspecify"]
+const TITLE_RECEIVERS = new Set(["it", "test", "describe", "fdescribe", "xdescribe", "xtest"])
 // A fit or xit that the file defines, or imports from a non-test module, is a helper.
 const TEST_FRAMEWORK_MODULES = new Set(["@jest/globals", "vitest", "bun:test", "jasmine", "jasmine-core", "mocha", "@playwright/test"])
 // Test calls whose top-level options object can set only, skip, todo or
 // retry: test("name", { only: true }, fn). Other receivers are not test calls
 // (pattern.test(x)), except node:test's `t`.
 const TEST_OPTIONS_CALL = /(?<![\w$.])(?:t\.)?(?:test|it|describe|suite)\s*\(/g
-const CALLBACK_ARG = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)/
-const CALL_LOOKAHEAD_LINES = 12
+// A literal callback, with an optional TypeScript return type:
+// async (): Promise<void> => {}.
+const CALLBACK_ARG = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*(?::[^=]*?)?=>|[\w$]+\s*=>)/
+// Arguments read per call, and characters read from the start of each one.
+const MAX_CALL_ARGS = 6
+const ARG_HEAD_LENGTH = 300
 // Runner-level retry settings in a test file. Anything else there named
 // retries is usually the code under test.
 const RUNNER_RETRY_CALL = /\bthis\.retries\s*\(|\bjest\.retryTimes\s*\(|\btest(?:\.describe)?\.configure\s*\(/
@@ -405,8 +413,6 @@ function lineIsAllowed(text, line, lines, ruleId) {
 // ---- code masking (weakened-test rules) ----
 
 const MAX_SCANNED_LINE = 5000
-// Joined call text examined for a title, callback or options object.
-const CALL_TEXT_LIMIT = 2000
 
 // Blank comments and fill string, template and regex literal contents with
 // "x", keeping every other character in its column. Structural scans (call
@@ -520,7 +526,12 @@ function findClosingQuote(text, from, quote) {
 function regexLiteralCanStart(text, index) {
   let j = index - 1
   while (j >= 0 && /\s/.test(text[j])) j--
-  if (j < 0 || /[(,=:[!&|?{};+\-*%<>~^]/.test(text[j])) return true
+  if (j < 0) return true
+  // `</p>` closes a JSX tag and `i++ / 2` divides. Starting a regex there
+  // would swallow the next quote and flip every later string.
+  if (text[j] === "<") return false
+  if ((text[j] === "+" || text[j] === "-") && text[j - 1] === text[j]) return false
+  if (/[(,=:[!&|?{};+\-*%>~^]/.test(text[j])) return true
   const tail = text.slice(Math.max(0, j - 7), j + 1)
   return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(tail)
 }
@@ -1025,9 +1036,10 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
 
 // ---- weakened-test scanners ----
 
-// Masked rows for one side ("new" or "old") of a file diff. Whole-file
-// contents give exact masking; without them each hunk is masked from its own
-// first line, which is exact only for a hunk that starts at line 1.
+// Masked rows for one side ("new" or "old") of a file diff, in runs: the
+// whole file, or one run per hunk. Whole-file contents give exact masking;
+// without them each hunk is masked from its own first line, which is exact
+// only for a hunk that starts at line 1.
 function createSide(entry, sideName, content) {
   const lineKey = sideName === "new" ? "newLine" : "oldLine"
   const otherKind = sideName === "new" ? "removed" : "added"
@@ -1035,23 +1047,66 @@ function createSide(entry, sideName, content) {
   if (typeof content === "string") {
     const texts = content.split("\n")
     // Use the file only when it is the text the diff describes.
-    if (hunkLines.every((entries) => entries.every((e) => texts[e[lineKey] - 1] === e.text))) {
+    if (hunkLines.every((entries) => entries.every((e) => sameText(texts[e[lineKey] - 1], e.text)))) {
       const rows = maskLines(texts, entry.file)
-      return { whole: true, rows, row: (line) => rows[line - 1] ?? null, exact: () => true }
+      return buildSide([{ lines: texts.map((_, index) => index + 1), rows }], () => true)
     }
   }
-  const byLine = new Map()
   const exactLines = new Set()
-  for (const [index, hunk] of entry.hunks.entries()) {
+  const parts = entry.hunks.map((hunk, index) => {
     const entries = hunkLines[index]
-    const rows = maskLines(entries.map((e) => e.text), entry.file)
-    const startsAtTop = (sideName === "new" ? hunk.newStart : hunk.oldStart) <= 1
-    for (const [i, e] of entries.entries()) {
-      byLine.set(e[lineKey], rows[i])
-      if (startsAtTop) exactLines.add(e[lineKey])
+    if ((sideName === "new" ? hunk.newStart : hunk.oldStart) <= 1) {
+      for (const e of entries) exactLines.add(e[lineKey])
     }
+    return { lines: entries.map((e) => e[lineKey]), rows: maskLines(entries.map((e) => e.text), entry.file) }
+  })
+  return buildSide(parts, (line) => exactLines.has(line))
+}
+
+// A CRLF checkout differs from git's LF diff only by each line's trailing \r.
+function sameText(fileLine, diffLine) {
+  if (fileLine === undefined) return false
+  return fileLine === diffLine || fileLine.replace(/\r$/, "") === diffLine.replace(/\r$/, "")
+}
+
+function buildSide(parts, exact) {
+  const places = new Map()
+  const runs = parts.map(({ lines, rows }) => {
+    const run = createRun(lines, rows)
+    for (const [index, line] of lines.entries()) places.set(line, { run, index })
+    return run
+  })
+  return {
+    runs,
+    exact,
+    row: (line) => {
+      const place = places.get(line)
+      return place ? place.run.rows[place.index] : null
+    },
+    // The run holding a line, and the line's offset in the run's text.
+    place: (line) => {
+      const place = places.get(line)
+      return place ? { run: place.run, start: place.run.starts[place.index] } : null
+    },
   }
-  return { whole: false, rows: null, row: (line) => byLine.get(line) ?? null, exact: (line) => exactLines.has(line) }
+}
+
+// A run's rows joined by "\n", so calls can be parsed across lines once.
+function createRun(lines, rows) {
+  const starts = []
+  let offset = 0
+  for (const row of rows) {
+    starts.push(offset)
+    offset += row.masked.length + 1
+  }
+  return {
+    lines,
+    rows,
+    starts,
+    code: rows.map((row) => row.code).join("\n"),
+    masked: rows.map((row) => row.masked).join("\n"),
+    analysis: null,
+  }
 }
 
 function createSideView(entry, options) {
@@ -1061,32 +1116,97 @@ function createSideView(entry, options) {
   }
 }
 
-// Line numbers to scan on one side: the whole file, or each hunk's lines.
-function sideRuns(entry, side, sideName) {
-  if (side.whole) return [side.rows.map((_, index) => index + 1)]
-  const lineKey = sideName === "new" ? "newLine" : "oldLine"
-  const otherKind = sideName === "new" ? "removed" : "added"
-  return entry.hunks.map((hunk) => hunk.entries.filter((e) => e.kind !== otherKind).map((e) => e[lineKey]))
+function lineAtOffset(run, offset) {
+  let low = 0
+  let high = run.starts.length - 1
+  while (low < high) {
+    const mid = (low + high + 1) >> 1
+    if (run.starts[mid] <= offset) low = mid
+    else high = mid - 1
+  }
+  return run.lines[low]
 }
 
-// A call's text from its opening bracket, joined across the following lines
-// of the side until it closes (at most maxLines). lineAt maps an offset in
-// the joined text back to its line.
-function joinCall(side, line, row, openIndex, maxLines) {
-  let code = row.code.slice(openIndex, openIndex + CALL_TEXT_LIMIT)
-  let masked = row.masked.slice(openIndex, openIndex + CALL_TEXT_LIMIT)
-  const starts = [{ offset: 0, line }]
-  let depth = bracketDelta(masked)
-  for (let next = line + 1; depth > 0 && next < line + maxLines && code.length < CALL_TEXT_LIMIT; next++) {
-    const nextRow = side.row(next)
-    if (!nextRow) break
-    starts.push({ offset: code.length + 1, line: next })
-    code += `\n${nextRow.code}`
-    masked += `\n${nextRow.masked}`
-    depth += bracketDelta(nextRow.masked)
+// Top-level argument spans of every bracket opened at one of `openers`, in a
+// single pass over the text (at most MAX_CALL_ARGS each). An unclosed call's
+// last span runs to the end of the text.
+function collectArgSpans(masked, openers) {
+  const spans = new Map()
+  if (openers.size === 0) return spans
+  const stack = []
+  const add = (frame, end) => {
+    const list = spans.get(frame.index)
+    if (list.length < MAX_CALL_ARGS) list.push({ start: frame.argStart, end })
   }
-  const lineAt = (offset) => starts.filter((start) => start.offset <= offset).at(-1).line
-  return { code, masked, lineAt }
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") {
+      const tracked = openers.has(i)
+      if (tracked) spans.set(i, [])
+      stack.push({ index: i, tracked, argStart: i + 1 })
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      const frame = stack.pop()
+      if (frame?.tracked) add(frame, i)
+    } else if (ch === ",") {
+      const frame = stack[stack.length - 1]
+      if (frame?.tracked) {
+        add(frame, i)
+        frame.argStart = i + 1
+      }
+    }
+  }
+  for (const frame of stack) {
+    if (frame.tracked) add(frame, masked.length)
+  }
+  return spans
+}
+
+// The trimmed start of each argument span: enough to read a title, an
+// options object or the head of a callback.
+function argHeads(run, spans = []) {
+  return spans
+    .map(({ start, end }) => trimmedSlice(run.code, run.masked, start, Math.min(end, start + ARG_HEAD_LENGTH)))
+    .filter((arg) => arg.masked)
+}
+
+// Every focus, skip or options call in a run with its argument spans, and
+// the top-level properties of test-call options objects by line:
+// test("name", { only: true, retry: 2 }, fn). Two linear passes per run,
+// however many calls a line packs.
+function analyzeRun(run) {
+  if (run.analysis) return run.analysis
+  const openers = new Set()
+  const optionCalls = []
+  for (const pattern of [RUNNER_MARKER_CALL, PREFIXED_MARKER_CALL, TEST_OPTIONS_CALL]) {
+    for (const match of run.masked.matchAll(pattern)) {
+      if (!match[0].endsWith("(")) continue
+      const open = match.index + match[0].length - 1
+      openers.add(open)
+      if (pattern === TEST_OPTIONS_CALL) optionCalls.push(open)
+    }
+  }
+  const calls = collectArgSpans(run.masked, openers)
+  // Options objects come before the callback; nested objects never count.
+  const objectOpeners = new Set()
+  for (const open of optionCalls) {
+    for (const arg of argHeads(run, calls.get(open)).slice(1)) {
+      if (CALLBACK_ARG.test(arg.masked)) break
+      if (arg.masked.startsWith("{")) objectOpeners.add(arg.start)
+    }
+  }
+  const optionsByLine = new Map()
+  for (const spans of collectArgSpans(run.masked, objectOpeners).values()) {
+    for (const property of argHeads(run, spans)) {
+      const key = /^["']?([\w$]+)["']?\s*:/.exec(property.code)
+      if (!key) continue
+      const value = trimmedSlice(property.code, property.masked, key[0].length, property.code.length)
+      const line = lineAtOffset(run, property.start)
+      if (!optionsByLine.has(line)) optionsByLine.set(line, [])
+      optionsByLine.get(line).push({ key: key[1], code: value.code, masked: value.masked })
+    }
+  }
+  run.analysis = { calls, optionsByLine }
+  return run.analysis
 }
 
 // Deleted files have no surviving line, so the finding is file-level
@@ -1171,50 +1291,35 @@ function scanRemovedAssertion(entry, view) {
   return out
 }
 
-// Top-level properties of test-call options objects on one side, by line:
-// test("name", { only: true, retry: 2 }, fn). Arguments after the callback
-// are not options, and nested objects never count.
-function testOptionProperties(entry, side, sideName) {
+// Test-call option properties on one side, by line.
+function sideOptionProperties(side) {
   const byLine = new Map()
-  for (const run of sideRuns(entry, side, sideName)) {
-    for (const line of run) {
-      const row = side.row(line)
-      if (!row) continue
-      for (const match of row.masked.matchAll(TEST_OPTIONS_CALL)) {
-        const call = joinCall(side, line, row, match.index + match[0].length - 1, CALL_LOOKAHEAD_LINES)
-        for (const arg of splitTopLevel(call.code, call.masked, 0).items.slice(1)) {
-          if (CALLBACK_ARG.test(arg.masked)) break
-          if (!arg.masked.startsWith("{")) continue
-          for (const property of splitTopLevel(arg.code, arg.masked, 0).items) {
-            const key = /^["']?([\w$]+)["']?\s*:/.exec(property.code)
-            if (!key) continue
-            const value = trimmedSlice(property.code, property.masked, key[0].length, property.code.length)
-            const at = call.lineAt(arg.start + property.start)
-            if (!byLine.has(at)) byLine.set(at, [])
-            byLine.get(at).push({ key: key[1], code: value.code, masked: value.masked })
-          }
-        }
-      }
-    }
+  for (const run of side.runs) {
+    for (const [line, properties] of analyzeRun(run).optionsByLine) byLine.set(line, properties)
   }
   return byLine
 }
 
-function callHasTitleAndCallback(side, line, row, match) {
-  if (!match[0].endsWith("(")) return false
-  const call = joinCall(side, line, row, match.index + match[0].length - 1, CALL_LOOKAHEAD_LINES)
-  const args = splitTopLevel(call.code, call.masked, 0).items
-  return args.length >= 2 && args.slice(1).some((arg) => CALLBACK_ARG.test(arg.masked))
+// Whether a focus or skip call's arguments look like a test declaration
+// (see RUNNER_MARKER_CALL): two arguments, with a literal callback, or a
+// string title when the receiver is a real test function.
+function qualifiesAsTestCall(args, titleReceiver) {
+  if (args.length < 2) return false
+  if (args.slice(1).some((arg) => CALLBACK_ARG.test(arg.masked))) return true
+  return titleReceiver && /^["'`]/.test(args[0].masked)
 }
 
 // Names such as fit or xit that the file defines, or imports from a module
-// that is not a test framework: calls to them are helpers, not focus.
-function shadowedMarkerNames(entry, side) {
-  const code = sideRuns(entry, side, "new").flat().map((line) => side.row(line)?.code ?? "").join("\n")
+// that is not a test framework: calls to them are helpers, not focus. The
+// import patterns are bounded, so the scan stays linear on packed lines.
+function shadowedMarkerNames(side) {
+  const code = side.runs.map((run) => run.code).join("\n")
   const imported = []
-  for (const match of code.matchAll(/\bimport\s+([^;'"]*?)\bfrom\s*(["'])([^"'\n]+)\2/g)) imported.push([match[1], match[3]])
-  for (const match of code.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\s*\(\s*(["'])([^"'\n]+)\2/g)) imported.push([match[1], match[3]])
-  for (const match of code.matchAll(/\bfrom\s+([\w.]+)\s+import\s+([^\n]*)/g)) imported.push([match[2], match[1]])
+  for (const match of code.matchAll(/\bimport\s+([^;'"]{0,300}?)\bfrom\s*(["'])([^"'\n]{1,300})\2/g)) imported.push([match[1], match[3]])
+  for (const match of code.matchAll(/\b(?:const|let|var)\s*\{([^}]{0,500})\}\s*=\s*require\s*\(\s*(["'])([^"'\n]{1,300})\2/g)) {
+    imported.push([match[1], match[3]])
+  }
+  for (const match of code.matchAll(/\bfrom\s+([\w.]{1,200})\s+import\s+([^\n]{0,500})/g)) imported.push([match[2], match[1]])
   const names = new Set()
   for (const name of PREFIXED_MARKER_NAMES) {
     if (!code.includes(name)) continue
@@ -1234,17 +1339,26 @@ function isSkipValue(masked) {
 // matching against removed lines; `label` names it in the finding.
 function markersOnLine(side, line, optionsByLine, isShadowed, file) {
   const row = side.row(line)
-  if (!row) return []
+  const place = side.place(line)
+  if (!row || !place) return []
   const markers = []
   const add = (kind, label) => markers.push({ kind, label, id: `${kind}:${label.replace(/\s+/g, "")}` })
+  // Argument heads of the call a match opens, from the run's one-pass parse.
+  const argsOf = (match) => {
+    if (!match[0].endsWith("(")) return []
+    const open = place.start + match.index + match[0].length - 1
+    return argHeads(place.run, analyzeRun(place.run).calls.get(open))
+  }
   for (const match of row.masked.matchAll(RUNNER_MARKER_CALL)) {
-    if (!match[2] && !callHasTitleAndCallback(side, line, row, match)) continue
-    add(match[1] === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+    const [, receiver, verb, each] = match
+    if (!each && !qualifiesAsTestCall(argsOf(match), TITLE_RECEIVERS.has(receiver))) continue
+    add(verb === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
   }
   for (const match of row.masked.matchAll(PREFIXED_MARKER_CALL)) {
-    if (isShadowed(match[1])) continue
-    if (!match[2] && !callHasTitleAndCallback(side, line, row, match)) continue
-    add(match[1].startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+    const [, name, each] = match
+    if (isShadowed(name)) continue
+    if (!each && !qualifiesAsTestCall(argsOf(match), TITLE_RECEIVERS.has(name))) continue
+    add(name.startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
   }
   for (const property of optionsByLine.get(line) ?? []) {
     if (property.key === "only" && property.masked === "true") add("focus", "only: true")
@@ -1263,8 +1377,8 @@ function markersOnLine(side, line, optionsByLine, isShadowed, file) {
 // file; hunk-by-hunk masking can mistake a string or comment for code.
 function scanTestMarkers(entry, view, newOptions) {
   let shadowed = null
-  const isShadowed = (name) => (shadowed ??= shadowedMarkerNames(entry, view.new)).has(name)
-  const oldOptions = testOptionProperties(entry, view.old, "old")
+  const isShadowed = (name) => (shadowed ??= shadowedMarkerNames(view.new)).has(name)
+  const oldOptions = sideOptionProperties(view.old)
   const out = []
   for (const hunk of entry.hunks) {
     if (hunk.added.length === 0) continue
@@ -1772,12 +1886,19 @@ function lineItems(text, file, matchers) {
   return items
 }
 
+// A multiset of items, for takeFresh.
+function itemPool(items) {
+  const pool = new Map()
+  for (const item of items) pool.set(item, (pool.get(item) ?? 0) + 1)
+  return pool
+}
+
 // Items not found in the pool; the ones found are used up.
 function takeFresh(items, pool) {
   return items.filter((item) => {
-    const index = pool.indexOf(item)
-    if (index < 0) return true
-    pool.splice(index, 1)
+    const count = pool.get(item) ?? 0
+    if (count === 0) return true
+    pool.set(item, count - 1)
     return false
   })
 }
@@ -1786,13 +1907,8 @@ function takeFresh(items, pool) {
 // that only moved or was re-indented is not new.
 function claimRemovedTwin(hunk, text, file, claimed) {
   const normalize = (value) => normalizeItem(maskLine(value, createMaskState(file)).code)
-  const wanted = normalize(text)
-  const used = claimed.get(hunk) ?? new Set()
-  claimed.set(hunk, used)
-  const index = hunk.removed.findIndex((removed, i) => !used.has(i) && normalize(removed.text) === wanted)
-  if (index < 0) return false
-  used.add(index)
-  return true
+  if (!claimed.has(hunk)) claimed.set(hunk, itemPool(hunk.removed.map((removed) => normalize(removed.text))))
+  return takeFresh([normalize(text)], claimed.get(hunk)).length === 0
 }
 
 function isListEntry(masked) {
@@ -1811,7 +1927,7 @@ function scanIgnoreListEntries(entry, keys, fileContentsByPath) {
   }
   // Every item a removed line held. An added entry that matches one was
   // reformatted, requoted or moved rather than added.
-  const removedItems = entry.removed.flatMap((removed) => lineItems(removed.text, entry.file, matchers))
+  const removedItems = itemPool(entry.removed.flatMap((removed) => lineItems(removed.text, entry.file, matchers)))
   // Whole-file contents find lists that open above the hunk; without them
   // each hunk's new side is scanned on its own.
   const runs = typeof loaded === "string"
@@ -1909,7 +2025,7 @@ function scanWeakenedTests(entry, options) {
   if (entry.status === "deleted" || DOC_FILE.test(entry.file)) return out
   const view = createSideView(entry, options)
   const testFile = isTestFilePath(entry.file)
-  const testOptions = testFile ? testOptionProperties(entry, view.new, "new") : new Map()
+  const testOptions = testFile ? sideOptionProperties(view.new) : new Map()
   if (testFile) {
     out.push(
       ...scanRemovedAssertion(entry, view),
