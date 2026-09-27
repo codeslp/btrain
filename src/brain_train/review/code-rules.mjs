@@ -15,20 +15,28 @@
 //                                 requirements.txt, pyproject.toml, Cargo.toml
 //
 // Weakened-test rules. These also read removed lines and file headers, and
-// scan code with string, regex and comment contents masked out:
+// scan code with string, regex and comment contents masked out. Masking runs
+// over whole files when their contents are loaded (reviewCode loads them);
+// otherwise each hunk is masked on its own.
 //   deleted-test-file   (warn)  — test file deleted, or renamed to a
 //                                 non-test path
 //   removed-assertion   (warn)  — a hunk of a surviving test file removes
-//                                 more assertion lines than it adds
+//                                 more assertion lines than it adds, after
+//                                 lines that moved within the file cancel out
 //   skipped-test        (warn)  — new unconditional skip, todo or fixme
-//   focused-test        (hard)  — new focused test (only / fit / fdescribe)
+//   focused-test        (hard)  — new focused test (only / fit / fdescribe);
+//                                 warn when the file was masked hunk by hunk
 //   loosened-assertion  (warn)  — in one hunk, a strict check on a subject is
 //                                 replaced by a looser check on that subject
 //   lowered-threshold   (warn)  — otherwise identical lines where a run
 //                                 count, coverage floor or lower bound drops,
-//                                 or a retry count or upper bound rises
+//                                 or a runner retry count or upper bound rises
 //   test-ignore-added   (warn)  — new entry in an existing test ignore list,
 //                                 or a new --deselect / --test-skip-pattern
+//
+// Config, in `[review_code]` of .btrain/project.toml (single-line arrays):
+//   ignore_list_keys = ["NAME"]  more test-ignore-added list names
+//   run_count_keys = ["NAME"]    more lowered-threshold run-count names
 //
 // Per-line allow markers suppress violations for that rule on that line:
 //   // btrain-allow: hardcoded-secret
@@ -37,7 +45,7 @@
 // A finding about removed lines sits on the new-file line where the removal
 // happened, so the marker goes there (or on the line above it).
 
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import { promisify } from "node:util"
 import path from "node:path"
@@ -132,10 +140,14 @@ const PYTHON_FILE = /\.pyi?$/
 // Files whose comments start with `#`; every other file uses // and /* */.
 const HASH_COMMENT_FILE =
   /(?:\.(?:py|pyi|rb|sh|bash|zsh|toml|ya?ml|ini|cfg|conf|mk|r|pl)|(?:^|\/)(?:Makefile|makefile|GNUmakefile|justfile|Justfile|Dockerfile|\.coveragerc))$/
-// JS test-runner and coverage config, the only place `exclude` drops tests.
+// Test-runner and coverage config. `exclude` counts only in the JS ones.
 const JS_TEST_CONFIG_BASENAME =
   /^(?:(?:jest|vitest|vite|playwright|cypress|karma|wdio|ava|mocha)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|karma\.conf\.[cm]?js|\.(?:mocharc|nycrc|c8rc)(?:\.(?:json|ya?ml|[cm]?js))?|package\.json)$/
 const PYTHON_TEST_CONFIG_BASENAME = /^(?:\.coveragerc|\.?codecov\.ya?ml|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|conftest\.py)$/
+// Config shared with non-test tools (vite optimizeDeps, package.json
+// fields). There `exclude` counts only under one of these parent keys.
+const SHARED_CONFIG_BASENAME = /^(?:(?:vite|vitest)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|package\.json)$/
+const EXCLUDE_PARENT_KEYS = new Set(["test", "coverage", "nyc", "c8", "mocha", "ava"])
 // Files that carry test commands: package scripts, CI, shell, make, ini, toml.
 const COMMAND_FILE =
   /(?:\.(?:ya?ml|toml|ini|cfg|sh|bash|zsh|mk)|(?:^|\/)(?:package\.json|Makefile|makefile|GNUmakefile|justfile|Justfile|Dockerfile))$/
@@ -143,29 +155,32 @@ const COMMAND_FILE =
 // ---- weakened-test rules: patterns ----
 
 // removed-assertion counts lines with assert…( / expect( / self.assert…(
-// (Rust assert_eq!( included) and Python's bare `assert` statement.
-const ASSERTION_CALL = /(?<![\w$])(?:assert(?:\.\w+|[A-Z_]\w*)*!?\s*\(|expect(?:\.\w+)?\s*\()/
+// (Rust assert_eq!( included) and Python's bare `assert` statement. A single
+// character class after `assert` keeps the match linear: nested groups there
+// backtrack exponentially on a long identifier such as assert_A_A_A.
+const ASSERTION_CALL = /(?<![\w$])(?:assert(?=[A-Z_.!(\s])[\w.]*!?\s*\(|expect(?:\.\w+)?\s*\()/
 const PYTHON_ASSERT_STATEMENT = /^\s*assert\b(?!\s*\.)/
 
-// Unconditional skips. Conditional forms (t.skip() inside a test,
-// skip: !ENABLED, skipIf / skipif, test.skip(condition, ...)) do not match.
-// Bare xit( / fit( need a title string, so a helper named fit() is ignored.
-const SKIP_MARKERS = [
-  { regex: /(?<![\w$.])(?:it|test|describe|suite|context|specify)(?:\.describe)?\.(?:skip|todo|fixme)\s*\(\s*["'`]/ },
-  { regex: /(?<![\w$.])x(?:it|test|describe|context|specify)\s*\(\s*["'`]/ },
-  { regex: /(?<![\w$])(?:skip|todo)\s*:\s*(?:true\b|(["'`])(?!\1))/, optionsOnly: true },
-  { regex: /\bpytest\.mark\.skip\b/ },
-  { regex: /@unittest\.skip\s*\(/ },
-]
-const FOCUS_MARKERS = [
-  { regex: /(?<![\w$.])(?:it|test|describe|suite|context|specify)(?:\.describe)?\.only\s*\(/ },
-  { regex: /(?<![\w$.])f(?:it|describe)\s*\(\s*["'`]/ },
-  { regex: /(?<![\w$])only\s*:\s*true\b/, optionsOnly: true },
-]
-// `skip: true` / `only: true` count only as test options: on the line of a
-// test call, or on a line holding nothing but the options object.
-const TEST_CALL = /(?<![\w$])(?:[\w$]+\.)?(?:it|test|describe|suite|context|specify)\s*\(/
-const OPTIONS_OBJECT_LINE = /^\s*\{[^{}]*\}\s*[,)]*\s*$/
+// Focus and skip calls: it.only(, describe.skip(, test.concurrent.only(,
+// test.describe.serial.only(, it.only.each(, and fit( / xit( / xdescribe(
+// with an optional .each. Without .each a call also needs a title and a
+// callback, so context.only("tenant") or a fit("linear", points) helper is
+// not one; neither is a Jest test.todo("title") placeholder.
+const RUNNER_MARKER_CALL =
+  /(?<![\w$.])(?:it|test|describe|suite|context|specify)(?:\.(?:concurrent|serial|parallel|sequential|describe))*\.(only|skip|todo|fixme)(\.each)?\s*[(`]/g
+const PREFIXED_MARKER_CALL = /(?<![\w$.])(f(?:it|describe)|x(?:it|test|describe|context|specify))(\.each)?\s*[(`]/g
+const PREFIXED_MARKER_NAMES = ["fit", "fdescribe", "xit", "xtest", "xdescribe", "xcontext", "xspecify"]
+// A fit or xit that the file defines, or imports from a non-test module, is a helper.
+const TEST_FRAMEWORK_MODULES = new Set(["@jest/globals", "vitest", "bun:test", "jasmine", "jasmine-core", "mocha", "@playwright/test"])
+// Test calls whose top-level options object can set only, skip, todo or
+// retry: test("name", { only: true }, fn). Other receivers are not test calls
+// (pattern.test(x)), except node:test's `t`.
+const TEST_OPTIONS_CALL = /(?<![\w$.])(?:t\.)?(?:test|it|describe|suite)\s*\(/g
+const CALLBACK_ARG = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)/
+const CALL_LOOKAHEAD_LINES = 12
+// Runner-level retry settings in a test file. Anything else there named
+// retries is usually the code under test.
+const RUNNER_RETRY_CALL = /\bthis\.retries\s*\(|\bjest\.retryTimes\s*\(|\btest(?:\.describe)?\.configure\s*\(/
 
 // loosened-assertion grades each assertion as strict (a specific value,
 // pattern or error) or loose (truthiness, a bound, a negation) and compares
@@ -199,27 +214,28 @@ const MAX_STATEMENT_LINES = 12
 
 // lowered-threshold: a number attached to one of these settings (the text
 // just before it matches `before`). `loosens` is the direction that weakens
-// the suite. Scope: any = every non-doc file, test = test files and test
-// config, testConfig = test config only.
+// the suite. Scopes: config = test config and command files, testConfig =
+// test config only, runner = test config, or a runner retry line in a test.
+// Run counts (DEFAULT_RUN_COUNT_KEYS plus run_count_keys) apply in any
+// non-doc file.
 const NUMBER_LITERAL = /(?<![\w$.])\d[\d_]*(?:\.\d+)?(?![\w$])/g
+const DEFAULT_RUN_COUNT_KEYS = ["numRuns", "max_examples"]
 const THRESHOLD_SETTINGS = [
-  { name: "numRuns", loosens: "lowered", scope: "any", before: /\bnumRuns["']?\s*[:=]\s*$/ },
-  { name: "FORMAL_RUNS", loosens: "lowered", scope: "any", before: /FORMAL_RUNS["']?\s*(?:[:=]|\|\||\?\?)\s*["']?$/ },
-  { name: "coverage", loosens: "lowered", scope: "any", before: /[\w-]*coverage[\w-]*["']?\s*[:=\s]\s*["']?$/i },
-  { name: "fail_under", loosens: "lowered", scope: "any", before: /fail[_-]?under["']?\s*[:=\s]\s*["']?$/i },
+  { name: "coverage", loosens: "lowered", scope: "config", before: /[\w-]*coverage[\w-]*["']?(?:\s*[:=]\s*|\s+)["']?$/i },
+  { name: "fail_under", loosens: "lowered", scope: "config", before: /fail[_-]?under["']?(?:\s*[:=]\s*|\s+)["']?$/i },
   { name: "coverage threshold", loosens: "lowered", scope: "testConfig", before: /\b(?:branches|functions|lines|statements)["']?\s*[:=]?\s*$/ },
-  { name: "retries", loosens: "raised", scope: "test", before: /\bretries["']?\s*(?:[:=(]|\s)\s*$/ },
-  { name: "retryTimes", loosens: "raised", scope: "test", before: /\bretryTimes\s*\(\s*$/ },
+  { name: "retries", loosens: "raised", scope: "runner", before: /\bretr(?:ies|y)["']?\s*(?:[:=(]|\s)\s*$/ },
+  { name: "retryTimes", loosens: "raised", scope: "runner", before: /\bretryTimes\s*\(\s*$/ },
 ]
-const LOWER_BOUND_CALL = /\b(?:toBeGreaterThan(?:OrEqual)?|assertGreater(?:Equal)?)\(\s*(?:[^,()]*(?:\([^()]*\))?[^,()]*,\s*)?$/
-const UPPER_BOUND_CALL = /\b(?:toBeLessThan(?:OrEqual)?|assertLess(?:Equal)?)\(\s*(?:[^,()]*(?:\([^()]*\))?[^,()]*,\s*)?$/
+// Only this much text on each side of a number is examined, which bounds
+// the polynomial regexes above on very long lines.
+const THRESHOLD_WINDOW = 200
+const LOWER_BOUND_CALL = /\b(?:toBeGreaterThan(?:OrEqual)?|assertGreater(?:Equal)?)\(\s*(?:[^,()]*(?:\([^()]*\)[^,()]*)?,\s*)?$/
+const UPPER_BOUND_CALL = /\b(?:toBeLessThan(?:OrEqual)?|assertLess(?:Equal)?)\(\s*(?:[^,()]*(?:\([^()]*\)[^,()]*)?,\s*)?$/
 
-// test-ignore-added list names. The btrain entries are this repo's formal
-// harness drift ledgers; they belong in `[review_code] ignore_list_keys` in
-// .btrain/project.toml and stay here until that file carries them.
+// test-ignore-added list names; `[review_code] ignore_list_keys` adds more.
 const DEFAULT_IGNORE_LIST_KEYS = ["testPathIgnorePatterns", "testIgnore", "exclude", "collect_ignore", "collect_ignore_glob"]
-const BTRAIN_IGNORE_LIST_KEYS = ["CANDIDATE_REASON_LABELS", "KNOWN_DRIFTS"]
-const IGNORE_LIST_KEY = /^[A-Za-z_$][\w$-]*$/
+const CONFIG_KEY_NAME = /^[A-Za-z_$][\w$-]*$/
 const IGNORE_FLAG = /(?:^|[\s"'`=,[(])(--deselect|--test-skip-pattern)(?![\w-])(?:=|\s+|["'`]?\s*,\s*["'`]?)?([^\s"'`,\]]*)/g
 
 // ---- diff parsing ----
@@ -248,9 +264,7 @@ export function parseUnifiedDiff(diff) {
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff --git ")) {
       // start a new file
-      const match = /\sb\/(.+)$/.exec(raw)
-      const quoted = match ? null : /\s"b\/((?:[^"\\]|\\.)*)"$/.exec(raw)
-      const file = match ? match[1] : quoted ? unquoteGitPath(`"${quoted[1]}"`) : ""
+      const file = diffGitPath(raw)
       currentFile = { file, added: [], lines: [], oldFile: file, status: "modified", removed: [], hunks: [] }
       files.push(currentFile)
       currentHunk = null
@@ -300,11 +314,31 @@ export function parseUnifiedDiff(diff) {
   return files.filter((f) => f.file)
 }
 
+// The b/ path of a `diff --git a/<old> b/<new>` line. When both sides are
+// the same path the split is exact even if the path contains " b/"; the
+// ---/+++ and rename headers that follow correct any other case.
+function diffGitPath(raw) {
+  const same = /^diff --git a\/(.+) b\/\1$/.exec(raw)
+  if (same) return same[1]
+  const match = /\sb\/(.+)$/.exec(raw)
+  if (match) return match[1]
+  const quoted = /\s"b\/((?:[^"\\]|\\.)*)"$/.exec(raw)
+  return quoted ? unquoteGitPath(`"${quoted[1]}"`) : ""
+}
+
+// The path in a `--- a/<path>` or `+++ b/<path>` header, or null for
+// /dev/null. Git ends the header with a tab when the path has a space.
+function headerPath(value, prefix) {
+  const text = unquoteGitPath(value.replace(/\t$/, ""))
+  if (text === "/dev/null") return null
+  return text.startsWith(prefix) ? text.slice(prefix.length) : text
+}
+
 // Extended header lines between `diff --git` and the first hunk.
 function readFileHeader(entry, raw) {
-  if (raw.startsWith("new file mode ") || raw === "--- /dev/null") {
+  if (raw.startsWith("new file mode ")) {
     entry.status = "added"
-  } else if (raw.startsWith("deleted file mode ") || raw === "+++ /dev/null") {
+  } else if (raw.startsWith("deleted file mode ")) {
     entry.status = "deleted"
   } else if (raw.startsWith("rename from ")) {
     entry.status = "renamed"
@@ -312,6 +346,18 @@ function readFileHeader(entry, raw) {
   } else if (raw.startsWith("rename to ")) {
     entry.status = "renamed"
     entry.file = unquoteGitPath(raw.slice("rename to ".length))
+  } else if (raw.startsWith("--- ")) {
+    const oldPath = headerPath(raw.slice(4), "a/")
+    if (oldPath === null) entry.status = "added"
+    else entry.oldFile = oldPath
+  } else if (raw.startsWith("+++ ")) {
+    const newPath = headerPath(raw.slice(4), "b/")
+    if (newPath === null) {
+      entry.status = "deleted"
+      entry.file = entry.oldFile
+    } else {
+      entry.file = newPath
+    }
   }
 }
 
@@ -358,6 +404,10 @@ function lineIsAllowed(text, line, lines, ruleId) {
 
 // ---- code masking (weakened-test rules) ----
 
+const MAX_SCANNED_LINE = 5000
+// Joined call text examined for a title, callback or options object.
+const CALL_TEXT_LIMIT = 2000
+
 // Blank comments and fill string, template and regex literal contents with
 // "x", keeping every other character in its column. Structural scans (call
 // starts, brackets, commas) then never read text inside a literal or a
@@ -370,6 +420,12 @@ function createMaskState(file) {
 }
 
 function maskLine(text, state, keepString = null) {
+  // A very long line is data (minified or generated). Scanning it costs more
+  // than it can find, so it reads as blank and leaves the state alone.
+  if (text.length > MAX_SCANNED_LINE) {
+    const blank = " ".repeat(text.length)
+    return { code: blank, masked: blank }
+  }
   const code = text.split("")
   const masked = text.split("")
   const blank = (from, to) => {
@@ -459,11 +515,14 @@ function findClosingQuote(text, from, quote) {
   return -1
 }
 
-// A slash starts a regex literal where an expression can begin.
+// A slash starts a regex literal where an expression can begin. Only the
+// previous token is examined, so long lines stay linear.
 function regexLiteralCanStart(text, index) {
-  const before = text.slice(0, index).trimEnd()
-  if (!before || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before)) return true
-  return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(before)
+  let j = index - 1
+  while (j >= 0 && /\s/.test(text[j])) j--
+  if (j < 0 || /[(,=:[!&|?{};+\-*%<>~^]/.test(text[j])) return true
+  const tail = text.slice(Math.max(0, j - 7), j + 1)
+  return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(tail)
 }
 
 function findRegexLiteralEnd(text, from) {
@@ -493,13 +552,13 @@ function bracketDelta(masked) {
 }
 
 // Slice code and masked text together, trimmed by the masked whitespace so
-// both stay aligned column for column.
+// both stay aligned column for column. `start` is the slice's offset.
 function trimmedSlice(code, masked, start, end) {
   let from = start
   let to = end
   while (from < to && /\s/.test(masked[from])) from++
   while (to > from && /\s/.test(masked[to - 1])) to--
-  return { code: code.slice(from, to), masked: masked.slice(from, to) }
+  return { code: code.slice(from, to), masked: masked.slice(from, to), start: from }
 }
 
 // Split the bracketed list opened at openIndex into top-level items.
@@ -966,7 +1025,71 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
 
 // ---- weakened-test scanners ----
 
-// A deleted file has no surviving line, so the finding is file-level
+// Masked rows for one side ("new" or "old") of a file diff. Whole-file
+// contents give exact masking; without them each hunk is masked from its own
+// first line, which is exact only for a hunk that starts at line 1.
+function createSide(entry, sideName, content) {
+  const lineKey = sideName === "new" ? "newLine" : "oldLine"
+  const otherKind = sideName === "new" ? "removed" : "added"
+  const hunkLines = entry.hunks.map((hunk) => hunk.entries.filter((e) => e.kind !== otherKind))
+  if (typeof content === "string") {
+    const texts = content.split("\n")
+    // Use the file only when it is the text the diff describes.
+    if (hunkLines.every((entries) => entries.every((e) => texts[e[lineKey] - 1] === e.text))) {
+      const rows = maskLines(texts, entry.file)
+      return { whole: true, rows, row: (line) => rows[line - 1] ?? null, exact: () => true }
+    }
+  }
+  const byLine = new Map()
+  const exactLines = new Set()
+  for (const [index, hunk] of entry.hunks.entries()) {
+    const entries = hunkLines[index]
+    const rows = maskLines(entries.map((e) => e.text), entry.file)
+    const startsAtTop = (sideName === "new" ? hunk.newStart : hunk.oldStart) <= 1
+    for (const [i, e] of entries.entries()) {
+      byLine.set(e[lineKey], rows[i])
+      if (startsAtTop) exactLines.add(e[lineKey])
+    }
+  }
+  return { whole: false, rows: null, row: (line) => byLine.get(line) ?? null, exact: (line) => exactLines.has(line) }
+}
+
+function createSideView(entry, options) {
+  return {
+    new: createSide(entry, "new", options.fileContentsByPath?.[entry.file]),
+    old: createSide(entry, "old", options.baseFileContentsByPath?.[entry.oldFile]),
+  }
+}
+
+// Line numbers to scan on one side: the whole file, or each hunk's lines.
+function sideRuns(entry, side, sideName) {
+  if (side.whole) return [side.rows.map((_, index) => index + 1)]
+  const lineKey = sideName === "new" ? "newLine" : "oldLine"
+  const otherKind = sideName === "new" ? "removed" : "added"
+  return entry.hunks.map((hunk) => hunk.entries.filter((e) => e.kind !== otherKind).map((e) => e[lineKey]))
+}
+
+// A call's text from its opening bracket, joined across the following lines
+// of the side until it closes (at most maxLines). lineAt maps an offset in
+// the joined text back to its line.
+function joinCall(side, line, row, openIndex, maxLines) {
+  let code = row.code.slice(openIndex, openIndex + CALL_TEXT_LIMIT)
+  let masked = row.masked.slice(openIndex, openIndex + CALL_TEXT_LIMIT)
+  const starts = [{ offset: 0, line }]
+  let depth = bracketDelta(masked)
+  for (let next = line + 1; depth > 0 && next < line + maxLines && code.length < CALL_TEXT_LIMIT; next++) {
+    const nextRow = side.row(next)
+    if (!nextRow) break
+    starts.push({ offset: code.length + 1, line: next })
+    code += `\n${nextRow.code}`
+    masked += `\n${nextRow.masked}`
+    depth += bracketDelta(nextRow.masked)
+  }
+  const lineAt = (offset) => starts.filter((start) => start.offset <= offset).at(-1).line
+  return { code, masked, lineAt }
+}
+
+// Deleted files have no surviving line, so the finding is file-level
 // (line 0) and cannot carry an allow marker; justify it in the handoff.
 function scanDeletedTestFile(entry) {
   if (entry.status === "deleted" && isTestFilePath(entry.file)) {
@@ -994,22 +1117,47 @@ function scanDeletedTestFile(entry) {
   return []
 }
 
-// Assertion lines of one kind ("removed" or "added"), masked in side order so
-// multi-line strings and comments are skipped.
-function assertionEntries(hunk, kind, file) {
-  const side = hunk.entries.filter((entry) => entry.kind === "context" || entry.kind === kind)
-  const rows = maskLines(side.map((entry) => entry.text), file)
-  return side.filter((entry, index) => entry.kind === kind && isAssertionCode(rows[index].masked, file))
+function assertionKey(code) {
+  return code.trim().replace(/\s+/g, " ")
 }
 
-function scanRemovedAssertion(entry) {
+// Per hunk, assertion lines removed versus added. Identical lines cancel
+// out, first within a hunk and then anywhere in the file, so a test that
+// only moved is not a removal.
+function scanRemovedAssertion(entry, view) {
+  const hunks = entry.hunks.map((hunk) => {
+    const removed = []
+    for (const e of hunk.entries) {
+      if (e.kind !== "removed") continue
+      const row = view.old.row(e.oldLine)
+      if (row && isAssertionCode(row.masked, entry.file)) removed.push({ entry: e, key: assertionKey(row.code), moved: false })
+    }
+    const added = []
+    for (const { line } of hunk.added) {
+      const row = view.new.row(line)
+      if (row && isAssertionCode(row.masked, entry.file)) added.push({ key: assertionKey(row.code), used: false })
+    }
+    return { removed, added }
+  })
+  const cancel = (removed, candidates) => {
+    const twin = candidates.find((added) => !added.used && added.key === removed.key)
+    if (!twin) return
+    twin.used = true
+    removed.moved = true
+  }
+  for (const { removed, added } of hunks) {
+    for (const r of removed) cancel(r, added)
+  }
+  const allAdded = hunks.flatMap(({ added }) => added)
+  for (const { removed } of hunks) {
+    for (const r of removed) if (!r.moved) cancel(r, allAdded)
+  }
   const out = []
-  for (const hunk of entry.hunks) {
-    if (hunk.removed.length === 0) continue
-    const removed = assertionEntries(hunk, "removed", entry.file)
-    const added = assertionEntries(hunk, "added", entry.file)
-    if (removed.length <= added.length) continue
-    const [first] = removed
+  for (const { removed, added } of hunks) {
+    const lost = removed.filter((r) => !r.moved)
+    const gained = added.filter((a) => !a.used).length
+    if (lost.length <= gained) continue
+    const first = lost[0].entry
     if (lineIsAllowed(textAtNewLine(entry, first.newLine), first.newLine, entry.lines, "removed-assertion")) continue
     out.push({
       rule: "removed-assertion",
@@ -1017,68 +1165,147 @@ function scanRemovedAssertion(entry) {
       file: entry.file,
       line: first.newLine,
       preview: first.text.trim().slice(0, 200),
-      detail: `Hunk removes ${plural(removed.length, "assertion line")} and adds ${added.length} (old line ${first.oldLine}).`,
+      detail: `Hunk removes ${plural(lost.length, "assertion line")} and adds ${gained} (old line ${first.oldLine}).`,
     })
   }
   return out
 }
 
-function findMarkers(masked, markers) {
-  const found = []
-  for (const { regex, optionsOnly } of markers) {
-    const match = regex.exec(masked)
-    if (!match) continue
-    if (optionsOnly && !TEST_CALL.test(masked) && !OPTIONS_OBJECT_LINE.test(masked)) continue
-    found.push(match[0].replace(/\s+/g, ""))
+// Top-level properties of test-call options objects on one side, by line:
+// test("name", { only: true, retry: 2 }, fn). Arguments after the callback
+// are not options, and nested objects never count.
+function testOptionProperties(entry, side, sideName) {
+  const byLine = new Map()
+  for (const run of sideRuns(entry, side, sideName)) {
+    for (const line of run) {
+      const row = side.row(line)
+      if (!row) continue
+      for (const match of row.masked.matchAll(TEST_OPTIONS_CALL)) {
+        const call = joinCall(side, line, row, match.index + match[0].length - 1, CALL_LOOKAHEAD_LINES)
+        for (const arg of splitTopLevel(call.code, call.masked, 0).items.slice(1)) {
+          if (CALLBACK_ARG.test(arg.masked)) break
+          if (!arg.masked.startsWith("{")) continue
+          for (const property of splitTopLevel(arg.code, arg.masked, 0).items) {
+            const key = /^["']?([\w$]+)["']?\s*:/.exec(property.code)
+            if (!key) continue
+            const value = trimmedSlice(property.code, property.masked, key[0].length, property.code.length)
+            const at = call.lineAt(arg.start + property.start)
+            if (!byLine.has(at)) byLine.set(at, [])
+            byLine.get(at).push({ key: key[1], code: value.code, masked: value.masked })
+          }
+        }
+      }
+    }
   }
-  return found
+  return byLine
 }
 
-// Report added lines that carry a marker no removed line of the same hunk
-// carried, so a moved or re-indented skip is not new.
-function scanNewMarkers(entry, markers, rule, severity, describe) {
+function callHasTitleAndCallback(side, line, row, match) {
+  if (!match[0].endsWith("(")) return false
+  const call = joinCall(side, line, row, match.index + match[0].length - 1, CALL_LOOKAHEAD_LINES)
+  const args = splitTopLevel(call.code, call.masked, 0).items
+  return args.length >= 2 && args.slice(1).some((arg) => CALLBACK_ARG.test(arg.masked))
+}
+
+// Names such as fit or xit that the file defines, or imports from a module
+// that is not a test framework: calls to them are helpers, not focus.
+function shadowedMarkerNames(entry, side) {
+  const code = sideRuns(entry, side, "new").flat().map((line) => side.row(line)?.code ?? "").join("\n")
+  const imported = []
+  for (const match of code.matchAll(/\bimport\s+([^;'"]*?)\bfrom\s*(["'])([^"'\n]+)\2/g)) imported.push([match[1], match[3]])
+  for (const match of code.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\s*\(\s*(["'])([^"'\n]+)\2/g)) imported.push([match[1], match[3]])
+  for (const match of code.matchAll(/\bfrom\s+([\w.]+)\s+import\s+([^\n]*)/g)) imported.push([match[2], match[1]])
+  const names = new Set()
+  for (const name of PREFIXED_MARKER_NAMES) {
+    if (!code.includes(name)) continue
+    const word = new RegExp(`\\b${name}\\b`)
+    const defined = new RegExp(`\\b(?:function\\s*\\*?\\s*|def\\s+|class\\s+)${name}\\b|\\b(?:const|let|var)\\s+${name}\\s*=`).test(code)
+    const importedHelper = imported.some(([clause, module]) => word.test(clause) && !TEST_FRAMEWORK_MODULES.has(module))
+    if (defined || importedHelper) names.add(name)
+  }
+  return names
+}
+
+function isSkipValue(masked) {
+  return masked === "true" || (/^["'`]/.test(masked) && masked.length > 2)
+}
+
+// Focus and skip markers on one line of a side. `id` identifies a marker for
+// matching against removed lines; `label` names it in the finding.
+function markersOnLine(side, line, optionsByLine, isShadowed, file) {
+  const row = side.row(line)
+  if (!row) return []
+  const markers = []
+  const add = (kind, label) => markers.push({ kind, label, id: `${kind}:${label.replace(/\s+/g, "")}` })
+  for (const match of row.masked.matchAll(RUNNER_MARKER_CALL)) {
+    if (!match[2] && !callHasTitleAndCallback(side, line, row, match)) continue
+    add(match[1] === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+  }
+  for (const match of row.masked.matchAll(PREFIXED_MARKER_CALL)) {
+    if (isShadowed(match[1])) continue
+    if (!match[2] && !callHasTitleAndCallback(side, line, row, match)) continue
+    add(match[1].startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+  }
+  for (const property of optionsByLine.get(line) ?? []) {
+    if (property.key === "only" && property.masked === "true") add("focus", "only: true")
+    if ((property.key === "skip" || property.key === "todo") && isSkipValue(property.masked)) add("skip", `${property.key}:`)
+  }
+  if (PYTHON_FILE.test(file)) {
+    if (/\bpytest\.mark\.skip\b/.test(row.masked)) add("skip", "@pytest.mark.skip")
+    if (/@unittest\.skip\s*\(/.test(row.masked)) add("skip", "@unittest.skip")
+  }
+  return markers
+}
+
+// skipped-test and focused-test: markers on added lines that no removed line
+// of the same hunk carried, so a moved or re-indented marker is not new. A
+// focused test is hard only when both sides were masked from the top of the
+// file; hunk-by-hunk masking can mistake a string or comment for code.
+function scanTestMarkers(entry, view, newOptions) {
+  let shadowed = null
+  const isShadowed = (name) => (shadowed ??= shadowedMarkerNames(entry, view.new)).has(name)
+  const oldOptions = testOptionProperties(entry, view.old, "old")
   const out = []
   for (const hunk of entry.hunks) {
     if (hunk.added.length === 0) continue
-    const oldSide = hunk.entries.filter((e) => e.kind !== "added")
-    const oldRows = maskLines(oldSide.map((e) => e.text), entry.file)
-    const existing = oldSide.flatMap((e, index) => (e.kind === "removed" ? findMarkers(oldRows[index].masked, markers) : []))
-    const newSide = hunk.entries.filter((e) => e.kind !== "removed")
-    const newRows = maskLines(newSide.map((e) => e.text), entry.file)
-    for (const [index, e] of newSide.entries()) {
-      if (e.kind !== "added") continue
-      let fresh = null
-      for (const marker of findMarkers(newRows[index].masked, markers)) {
-        const seen = existing.indexOf(marker)
+    const existing = hunk.removed.flatMap(({ line }) => markersOnLine(view.old, line, oldOptions, isShadowed, entry.file).map((m) => m.id))
+    const oldExact = hunk.removed.every(({ line }) => view.old.exact(line))
+    for (const { line, text } of hunk.added) {
+      const fresh = {}
+      for (const marker of markersOnLine(view.new, line, newOptions, isShadowed, entry.file)) {
+        const seen = existing.indexOf(marker.id)
         if (seen >= 0) existing.splice(seen, 1)
-        else fresh ??= marker
+        else fresh[marker.kind] ??= marker
       }
-      if (!fresh || lineIsAllowed(e.text, e.newLine, entry.lines, rule)) continue
-      out.push({
-        rule,
-        severity,
-        file: entry.file,
-        line: e.newLine,
-        preview: e.text.trim().slice(0, 200),
-        detail: describe(fresh.replace(/["'`]+$/, "")),
-      })
+      const preview = text.trim().slice(0, 200)
+      if (fresh.focus && !lineIsAllowed(text, line, entry.lines, "focused-test")) {
+        const exact = view.new.exact(line) && oldExact
+        out.push({
+          rule: "focused-test",
+          severity: exact ? "hard" : "warn",
+          file: entry.file,
+          line,
+          preview,
+          detail: `Focused test \`${fresh.focus.label}\` makes the runner skip every other test.` +
+            (exact ? "" : " Warn only: the file was masked hunk by hunk, so this may sit in a string or comment."),
+        })
+      }
+      if (fresh.skip && !lineIsAllowed(text, line, entry.lines, "skipped-test")) {
+        const label = fresh.skip.label
+        out.push({
+          rule: "skipped-test",
+          severity: "warn",
+          file: entry.file,
+          line,
+          preview,
+          detail: /todo/.test(label)
+            ? `Test marked todo (\`${label}\`): it still runs, but its failures no longer fail the suite.`
+            : `New unconditional skip \`${label}\`.`,
+        })
+      }
     }
   }
   return out
-}
-
-function scanSkippedTest(entry) {
-  return scanNewMarkers(entry, SKIP_MARKERS, "skipped-test", "warn", (marker) => `New unconditional skip \`${marker}\`.`)
-}
-
-function scanFocusedTest(entry) {
-  return scanNewMarkers(
-    entry,
-    FOCUS_MARKERS,
-    "focused-test",
-    "hard",
-    (marker) => `Focused test \`${marker}\` makes the runner skip every other test.`,
-  )
 }
 
 function normalizeSubject(text) {
@@ -1105,7 +1332,7 @@ function splitComparison(part, python) {
     else if (ch === ")" || ch === "]" || ch === "}") depth--
     if (depth !== 0) continue
     if (python) {
-      const word = /^\s+(is\s+not|is)\s+/.exec(masked.slice(i))
+      const word = /^\s+(is\s+not|is)\s+/.exec(masked.slice(i, i + 24))
       if (word && i > 0) return { left: code.slice(0, i).trim(), op: word[1].replace(/\s+/g, " ") }
     }
     const op = COMPARISON_OPERATORS.find((candidate) => masked.startsWith(candidate, i))
@@ -1237,12 +1464,13 @@ function findAssertionStart(masked, file) {
 }
 
 // Assertion statements on one side of a hunk (context plus removed, or
-// context plus added). A statement joins following lines of that side until
-// its brackets balance, and an expect() whose matcher sits on the next line.
-function extractAssertionStatements(side, file) {
-  const rows = maskLines(side.map((entry) => entry.text), file)
+// context plus added). `rows` are the masked rows of those entries. A
+// statement joins following lines of the side until its brackets balance,
+// and an expect() whose matcher sits on the next line.
+function extractAssertionStatements(side, rows, file) {
   const statements = []
   for (let index = 0; index < rows.length; index++) {
+    if (!rows[index]) continue
     const start = findAssertionStart(rows[index].masked, file)
     if (start < 0) continue
     let code = rows[index].code.slice(start)
@@ -1250,16 +1478,17 @@ function extractAssertionStatements(side, file) {
     let depth = bracketDelta(masked)
     let end = index
     const last = Math.min(rows.length - 1, index + MAX_STATEMENT_LINES - 1)
+    const canExtend = () => end < last && rows[end + 1]
     const extend = () => {
       end++
       code += `\n${rows[end].code}`
       masked += `\n${rows[end].masked}`
       depth += bracketDelta(rows[end].masked)
     }
-    while (depth > 0 && end < last) extend()
-    while (depth <= 0 && end < last && awaitsExpectMatcher(masked, rows[end + 1].masked)) {
+    while (depth > 0 && canExtend()) extend()
+    while (depth <= 0 && canExtend() && awaitsExpectMatcher(masked, rows[end + 1].masked)) {
       extend()
-      while (depth > 0 && end < last) extend()
+      while (depth > 0 && canExtend()) extend()
     }
     const parsed = parseAssertion(code, masked, file)
     if (parsed) statements.push({ ...parsed, start: side[index], entries: side.slice(index, end + 1) })
@@ -1276,14 +1505,16 @@ function statementAllows(entry, statement, ruleId) {
 
 // A strict check on a subject is removed in a hunk, and the only checks on
 // that subject the hunk adds (or rewrites in place) are loose.
-function scanLoosenedAssertion(entry) {
+function scanLoosenedAssertion(entry, view) {
   const out = []
   for (const hunk of entry.hunks) {
     if (hunk.removed.length === 0) continue
-    const oldStatements = extractAssertionStatements(hunk.entries.filter((e) => e.kind !== "added"), entry.file)
+    const oldSide = hunk.entries.filter((e) => e.kind !== "added")
+    const oldStatements = extractAssertionStatements(oldSide, oldSide.map((e) => view.old.row(e.oldLine)), entry.file)
     const changedOld = oldStatements.filter((s) => s.entries.some((e) => e.kind === "removed"))
     if (!changedOld.some((s) => s.strict)) continue
-    const newStatements = extractAssertionStatements(hunk.entries.filter((e) => e.kind !== "removed"), entry.file)
+    const newSide = hunk.entries.filter((e) => e.kind !== "removed")
+    const newStatements = extractAssertionStatements(newSide, newSide.map((e) => view.new.row(e.newLine)), entry.file)
     // A multi-line statement can change without an added line (its matcher
     // line was only removed); pair it by the context line it starts on.
     const rewrittenStarts = new Set(changedOld.map((s) => s.start).filter((start) => start.kind === "context"))
@@ -1310,11 +1541,10 @@ function scanLoosenedAssertion(entry) {
   return out
 }
 
-// A line with numbers replaced by NUL, comments dropped, so two lines that
-// differ only in numbers (or a trailing comment) share a key.
-function numberTemplate(text, file) {
-  const { code, masked } = maskLine(text, createMaskState(file))
-  const line = trimmedSlice(code, masked, 0, code.length)
+// A row's code with numbers replaced by NUL (comments already dropped), so
+// two lines that differ only in numbers, or in a trailing comment, share a key.
+function numberTemplate(row) {
+  const line = trimmedSlice(row.code, row.masked, 0, row.code.length)
   const numbers = []
   const key = line.code.replace(NUMBER_LITERAL, (raw, offset) => {
     numbers.push({ raw, offset, value: Number(raw.replaceAll("_", "")), inCode: /\d/.test(line.masked[offset]) })
@@ -1331,30 +1561,44 @@ function comparisonBound(prefix, suffix) {
   return null
 }
 
-// The THRESHOLD_SETTINGS scopes that apply to a file.
+function runCountSettings(keys) {
+  return keys.map((key) => ({
+    name: key,
+    loosens: "lowered",
+    scope: "any",
+    before: new RegExp(`(?:^|[^\\w$])${escapeRegExp(key)}["']?\\s*(?:[:=]|\\|\\||\\?\\?)\\s*["']?$`),
+  }))
+}
+
+// The THRESHOLD_SETTINGS scopes that apply to every line of a file.
 function thresholdScopes(file) {
   const scopes = new Set(["any"])
   const testConfig = isTestConfigFile(file)
-  if (testConfig || isTestFilePath(file)) scopes.add("test")
-  if (testConfig) scopes.add("testConfig")
+  if (testConfig || COMMAND_FILE.test(file)) scopes.add("config")
+  if (testConfig) scopes.add("testConfig").add("runner")
   return scopes
+}
+
+function isRunnerRetryLine(row, optionProperties = []) {
+  return RUNNER_RETRY_CALL.test(row.masked) || optionProperties.some(({ key }) => key === "retry" || key === "retries")
 }
 
 // The first differing number that loosens a setting, or (when checkBounds)
 // a comparison bound. Null when no number loosens anything.
-function thresholdChange(before, after, scopes, checkBounds) {
+function thresholdChange(before, after, settings, scopes, checkBounds) {
   for (let index = 0; index < after.numbers.length; index++) {
     const from = before.numbers[index]
     const to = after.numbers[index]
     if (from.value === to.value) continue
     const lowered = to.value < from.value
-    const prefix = after.code.slice(0, to.offset)
-    const setting = THRESHOLD_SETTINGS.find((candidate) => scopes.has(candidate.scope) && candidate.before.test(prefix))
+    const prefix = after.code.slice(Math.max(0, to.offset - THRESHOLD_WINDOW), to.offset)
+    const setting = settings.find((candidate) => scopes.has(candidate.scope) && candidate.before.test(prefix))
     let name = null
     if (setting) {
       if ((setting.loosens === "lowered") === lowered) name = setting.name
     } else if (checkBounds && to.inCode) {
-      const bound = comparisonBound(prefix, after.code.slice(to.offset + to.raw.length))
+      const suffixStart = to.offset + to.raw.length
+      const bound = comparisonBound(prefix, after.code.slice(suffixStart, suffixStart + THRESHOLD_WINDOW))
       if ((bound === "lower" && lowered) || (bound === "upper" && !lowered)) name = `${bound} bound`
     }
     if (name) return { name, direction: lowered ? "lowered" : "raised", from: from.raw, to: to.raw }
@@ -1362,27 +1606,35 @@ function thresholdChange(before, after, scopes, checkBounds) {
   return null
 }
 
-function scanLoweredThreshold(entry) {
-  const scopes = thresholdScopes(entry.file)
-  // Bare comparisons (>= 10, <= 100) only count on assertion lines of tests.
+function scanLoweredThreshold(entry, view, testOptions, options) {
+  const fileScopes = thresholdScopes(entry.file)
   const testFile = isTestFilePath(entry.file)
+  const settings = [...options.runCountSettings, ...THRESHOLD_SETTINGS]
   const out = []
   for (const hunk of entry.hunks) {
     if (hunk.removed.length === 0 || hunk.added.length === 0) continue
     // Removed lines with numbers, by template; each pairs with one added line.
     const removedByKey = new Map()
     for (const removed of hunk.removed) {
-      const template = numberTemplate(removed.text, entry.file)
+      const row = view.old.row(removed.line)
+      if (!row) continue
+      const template = numberTemplate(row)
       if (template.numbers.length === 0) continue
       if (!removedByKey.has(template.key)) removedByKey.set(template.key, [])
       removedByKey.get(template.key).push(template)
     }
     for (const added of hunk.added) {
-      const after = numberTemplate(added.text, entry.file)
+      const row = view.new.row(added.line)
+      if (!row) continue
+      const after = numberTemplate(row)
       const before = after.numbers.length > 0 ? removedByKey.get(after.key)?.shift() : undefined
       if (!before) continue
-      const checkBounds = testFile && isAssertionCode(after.masked, entry.file)
-      const change = thresholdChange(before, after, scopes, checkBounds)
+      // In a test file only runner retry settings count as retries, and bare
+      // comparisons (>= 10, <= 100) only on assertion lines.
+      const runnerLine = testFile && isRunnerRetryLine(row, testOptions.get(added.line))
+      const scopes = runnerLine ? new Set([...fileScopes, "runner"]) : fileScopes
+      const checkBounds = testFile && isAssertionCode(row.masked, entry.file)
+      const change = thresholdChange(before, after, settings, scopes, checkBounds)
       if (!change || lineIsAllowed(added.text, added.line, entry.lines, "lowered-threshold")) continue
       out.push({
         rule: "lowered-threshold",
@@ -1397,11 +1649,12 @@ function scanLoweredThreshold(entry) {
   return out
 }
 
-function resolveIgnoreListKeys(configured) {
+// Defaults plus configured names, deduplicated; invalid names are dropped.
+function resolveKeyList(defaults, configured) {
   const extra = Array.isArray(configured) ? configured : []
-  const keys = [...DEFAULT_IGNORE_LIST_KEYS, ...BTRAIN_IGNORE_LIST_KEYS, ...extra]
+  const keys = [...defaults, ...extra]
     .map((key) => String(key ?? "").trim())
-    .filter((key) => IGNORE_LIST_KEY.test(key))
+    .filter((key) => CONFIG_KEY_NAME.test(key))
   return [...new Set(keys)]
 }
 
@@ -1445,36 +1698,82 @@ function findIgnoreListBlocks(run, file, matchers) {
     if (!match) continue
     const keyIndex = match.index + match[0].indexOf(match[1])
     const depth = bracketDelta(masked.slice(keyIndex))
-    const block = {
-      key: match[1],
-      opener: { line, text, code, masked, bracketIndex: match.index + match[0].length - 1 },
-      entryDepth: depth,
-      depth,
-      members: [],
-    }
+    const block = { key: match[1], keyIndex, opener: { index, line, text, code }, entryDepth: depth, depth, members: [] }
     if (depth > 0) open = block
     else blocks.push(block)
   }
   if (open) blocks.push(open)
-  return blocks
+  return { blocks, rows }
 }
 
-function openerOn(text, file, matchers) {
+const EXCLUDE_PARENT_ON_LINE = new RegExp(`(?:^|[^\\w$])["']?(?:${[...EXCLUDE_PARENT_KEYS].join("|")})["']?\\s*:\\s*\\{[^{}]*$`)
+
+// `exclude` in shared config counts only under a test or coverage key: on
+// the opener line before the key, or on a less indented line above it.
+function hasTestParentKey(rows, block) {
+  if (EXCLUDE_PARENT_ON_LINE.test(block.opener.code.slice(0, block.keyIndex))) return true
+  let indent = leadingSpaces(block.opener.code)
+  for (let index = block.opener.index - 1; index >= 0 && indent > 0; index--) {
+    const { code } = rows[index]
+    if (!code.trim()) continue
+    const lineIndent = leadingSpaces(code)
+    if (lineIndent >= indent) continue
+    indent = lineIndent
+    const key = /^\s*["']?([\w$-]+)["']?\s*:\s*[{[]/.exec(code)
+    if (key && EXCLUDE_PARENT_KEYS.has(key[1])) return true
+  }
+  return false
+}
+
+function leadingSpaces(text) {
+  return text.length - text.trimStart().length
+}
+
+function openerKeyOn(text, file, matchers) {
+  const match = matchers.opener.exec(maskLine(text, createMaskState(file), matchers.keepKey).masked)
+  return match ? match[1] : null
+}
+
+// A list item compared without whitespace, with quotes unified and trailing
+// commas before a closer dropped, so reformatting and requoting match.
+function normalizeItem(code) {
+  return code.replace(/\s+/g, "").replace(/'/g, "\"").replace(/,(?=[\]})]|$)/g, "")
+}
+
+// Top-level items on one line of a list: `"a", "b",` gives two. A line that
+// opens a list gives the items after its bracket.
+function lineItems(text, file, matchers) {
   const { code, masked } = maskLine(text, createMaskState(file), matchers.keepKey)
-  const match = matchers.opener.exec(masked)
-  return match ? { key: match[1], code, masked, bracketIndex: match.index + match[0].length - 1 } : null
+  const opener = matchers.opener.exec(masked)
+  const start = opener ? opener.index + opener[0].length : 0
+  const items = []
+  let depth = 0
+  let from = start
+  const push = (end) => {
+    const item = normalizeItem(code.slice(from, end))
+    if (item) items.push(item)
+  }
+  for (let i = start; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) {
+        push(i)
+        return items
+      }
+      depth--
+    } else if (ch === "," && depth === 0) {
+      push(i)
+      from = i + 1
+    }
+  }
+  push(masked.length)
+  return items
 }
 
-function normalizeEntry(text, file) {
-  return maskLine(text, createMaskState(file)).code.trim().replace(/,$/, "").replace(/\s+/g, " ")
-}
-
-function inlineItems(opener, file) {
-  return splitTopLevel(opener.code, opener.masked, opener.bracketIndex).items.map((item) => normalizeEntry(item.code, file))
-}
-
-function multisetMinus(items, others) {
-  const pool = [...others]
+// Items not found in the pool; the ones found are used up.
+function takeFresh(items, pool) {
   return items.filter((item) => {
     const index = pool.indexOf(item)
     if (index < 0) return true
@@ -1483,13 +1782,14 @@ function multisetMinus(items, others) {
   })
 }
 
-// Claim a removed line of the hunk with the same entry text, so an entry
+// Claim a removed line of the hunk with the same statement, so an append
 // that only moved or was re-indented is not new.
 function claimRemovedTwin(hunk, text, file, claimed) {
-  const wanted = normalizeEntry(text, file)
+  const normalize = (value) => normalizeItem(maskLine(value, createMaskState(file)).code)
+  const wanted = normalize(text)
   const used = claimed.get(hunk) ?? new Set()
   claimed.set(hunk, used)
-  const index = hunk.removed.findIndex((removed, i) => !used.has(i) && normalizeEntry(removed.text, file) === wanted)
+  const index = hunk.removed.findIndex((removed, i) => !used.has(i) && normalize(removed.text) === wanted)
   if (index < 0) return false
   used.add(index)
   return true
@@ -1501,17 +1801,23 @@ function isListEntry(masked) {
 }
 
 function scanIgnoreListEntries(entry, keys, fileContentsByPath) {
+  const loaded = fileContentsByPath?.[entry.file]
+  // A loaded file that never names a key holds no list to add to.
+  if (typeof loaded === "string" && !keys.some((key) => loaded.includes(key))) return []
   const matchers = ignoreListMatchers(keys)
   const hunkByAddedLine = new Map()
   for (const hunk of entry.hunks) {
     for (const { line } of hunk.added) hunkByAddedLine.set(line, hunk)
   }
+  // Every item a removed line held. An added entry that matches one was
+  // reformatted, requoted or moved rather than added.
+  const removedItems = entry.removed.flatMap((removed) => lineItems(removed.text, entry.file, matchers))
   // Whole-file contents find lists that open above the hunk; without them
   // each hunk's new side is scanned on its own.
-  const content = fileContentsByPath?.[entry.file]
-  const runs = typeof content === "string"
-    ? [content.split("\n").map((text, index) => ({ line: index + 1, text }))]
+  const runs = typeof loaded === "string"
+    ? [loaded.split("\n").map((text, index) => ({ line: index + 1, text }))]
     : entry.hunks.map((hunk) => hunk.entries.filter((e) => e.kind !== "removed").map((e) => ({ line: e.newLine, text: e.text })))
+  const sharedConfig = SHARED_CONFIG_BASENAME.test(path.posix.basename(entry.file))
   const claimed = new Map()
   const reported = new Set()
   const out = []
@@ -1521,24 +1827,23 @@ function scanIgnoreListEntries(entry, keys, fileContentsByPath) {
     out.push({ rule: "test-ignore-added", severity: "warn", file: entry.file, line, preview: text.trim().slice(0, 200), detail })
   }
   for (const run of runs) {
-    for (const block of findIgnoreListBlocks(run, entry.file, matchers)) {
+    const { blocks, rows } = findIgnoreListBlocks(run, entry.file, matchers)
+    for (const block of blocks) {
+      if (block.key === "exclude" && sharedConfig && !hasTestParentKey(rows, block)) continue
       const openerHunk = hunkByAddedLine.get(block.opener.line)
       if (openerHunk) {
         // A rewritten opener line is an existing list only when a removed
         // line of the same hunk opened the same key; otherwise the list is new.
-        const previous = openerHunk.removed
-          .map((removed) => openerOn(removed.text, entry.file, matchers))
-          .find((opener) => opener?.key === block.key)
-        if (!previous) continue
-        const fresh = multisetMinus(inlineItems(block.opener, entry.file), inlineItems(previous, entry.file))
+        if (!openerHunk.removed.some((removed) => openerKeyOn(removed.text, entry.file, matchers) === block.key)) continue
+        const fresh = takeFresh(lineItems(block.opener.text, entry.file, matchers), removedItems)
         if (fresh.length > 0) {
           report(block.opener.line, block.opener.text, `Adds ${plural(fresh.length, "entry", "entries")} to the existing \`${block.key}\` list.`)
         }
       }
       for (const member of block.members) {
         if (member.startDepth !== block.entryDepth || !isListEntry(member.masked)) continue
-        const hunk = hunkByAddedLine.get(member.line)
-        if (!hunk || claimRemovedTwin(hunk, member.text, entry.file, claimed)) continue
+        if (!hunkByAddedLine.has(member.line)) continue
+        if (takeFresh(lineItems(member.text, entry.file, matchers), removedItems).length === 0) continue
         report(member.line, member.text, `New entry in the existing \`${block.key}\` list (opened at line ${block.opener.line}).`)
       }
     }
@@ -1602,28 +1907,35 @@ function scanTestIgnoreAdded(entry, options) {
 function scanWeakenedTests(entry, options) {
   const out = scanDeletedTestFile(entry)
   if (entry.status === "deleted" || DOC_FILE.test(entry.file)) return out
-  if (isTestFilePath(entry.file)) {
+  const view = createSideView(entry, options)
+  const testFile = isTestFilePath(entry.file)
+  const testOptions = testFile ? testOptionProperties(entry, view.new, "new") : new Map()
+  if (testFile) {
     out.push(
-      ...scanRemovedAssertion(entry),
-      ...scanSkippedTest(entry),
-      ...scanFocusedTest(entry),
-      ...scanLoosenedAssertion(entry),
+      ...scanRemovedAssertion(entry, view),
+      ...scanTestMarkers(entry, view, testOptions),
+      ...scanLoosenedAssertion(entry, view),
     )
   }
-  out.push(...scanLoweredThreshold(entry), ...scanTestIgnoreAdded(entry, options))
+  out.push(...scanLoweredThreshold(entry, view, testOptions, options), ...scanTestIgnoreAdded(entry, options))
   return out
 }
 
 // ---- public scan entry ----
 
-// options.fileContentsByPath: new-side contents keyed by path (dependency
-// manifests and files that hold ignore lists). options.ignoreListKeys: extra
-// test-ignore-added list names on top of the defaults.
+// Options:
+//   fileContentsByPath      new-side contents by path (dependency manifests,
+//                           ignore-list files, test files)
+//   baseFileContentsByPath  old-side contents by old path (test files)
+//   ignoreListKeys          test-ignore-added list names beyond the defaults
+//   runCountKeys            lowered-threshold run-count names beyond the defaults
 export function scanDiff(diff, options = {}) {
   const files = parseUnifiedDiff(diff)
   const weakenedTestOptions = {
     fileContentsByPath: options.fileContentsByPath,
-    ignoreListKeys: resolveIgnoreListKeys(options.ignoreListKeys),
+    baseFileContentsByPath: options.baseFileContentsByPath,
+    ignoreListKeys: resolveKeyList(DEFAULT_IGNORE_LIST_KEYS, options.ignoreListKeys),
+    runCountSettings: runCountSettings(resolveKeyList(DEFAULT_RUN_COUNT_KEYS, options.runCountKeys)),
   }
   const violations = []
   for (const entry of files) {
@@ -1746,30 +2058,57 @@ async function getLaneDiff(repoRoot, { base, head, lane }) {
   return execDiff(repoRoot, args)
 }
 
-async function readFileForReview(repoRoot, file, head) {
-  if (head) {
+// Contents of `paths` at `ref`, read with one `git cat-file --batch`, or
+// from the worktree when ref is null. Files that are missing are left out.
+async function readContents(repoRoot, ref, paths) {
+  const files = [...new Set(paths)].filter((file) => file && !file.includes("\n"))
+  if (files.length === 0) return {}
+  if (ref) return readBlobsAtRef(repoRoot, ref, files)
+  const contents = {}
+  for (const file of files) {
     try {
-      const { stdout } = await execFileAsync("git", ["show", `${head}:${file}`], {
-        cwd: repoRoot,
-        maxBuffer: DIFF_MAX_BUFFER,
-      })
-      return stdout
+      contents[file] = await fs.readFile(path.join(repoRoot, file), "utf8")
     } catch {
-      return null
+      // Deleted or unreadable: the rules fall back to hunk-by-hunk masking.
     }
   }
+  return contents
+}
 
-  try {
-    return await fs.readFile(path.join(repoRoot, file), "utf8")
-  } catch {
-    return null
+function readBlobsAtRef(repoRoot, ref, files) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["cat-file", "--batch"], { cwd: repoRoot, stdio: ["pipe", "pipe", "ignore"] })
+    const chunks = []
+    child.stdout.on("data", (chunk) => chunks.push(chunk))
+    child.on("error", () => resolve({}))
+    child.on("close", () => resolve(parseCatFileBatch(Buffer.concat(chunks), files)))
+    child.stdin.on("error", () => {})
+    child.stdin.end(files.map((file) => `${ref}:${file}\n`).join(""))
+  })
+}
+
+// `git cat-file --batch` answers each request with "<oid> <type> <size>\n"
+// and the content plus "\n", or with "<name> missing\n".
+function parseCatFileBatch(buffer, files) {
+  const contents = {}
+  let offset = 0
+  for (const file of files) {
+    const newline = buffer.indexOf(10, offset)
+    if (newline < 0) break
+    const header = /^\S+ (\S+) (\d+)$/.exec(buffer.toString("utf8", offset, newline))
+    offset = newline + 1
+    if (!header) continue
+    const size = Number(header[2])
+    if (header[1] === "blob") contents[file] = buffer.toString("utf8", offset, offset + size)
+    offset += size + 1
   }
+  return contents
 }
 
 const GREP_PATH_CHUNK = 200
 
 // Paths among `files` whose content at `ref` contains any needle. One
-// `git grep` per chunk instead of one `git show` per file.
+// `git grep` per chunk instead of a read per file.
 async function filesMentioningAtRef(repoRoot, ref, files, needles) {
   const found = []
   for (let index = 0; index < files.length; index += GREP_PATH_CHUNK) {
@@ -1788,45 +2127,65 @@ async function filesMentioningAtRef(repoRoot, ref, files, needles) {
   return found
 }
 
-// New-side contents for rules that need more than the hunk: dependency
-// manifests, and files that mention an ignore-list key (a list can open
-// above the hunk that adds to it).
-async function readReviewFileContents(repoRoot, diff, head, ignoreListKeys) {
-  const files = parseUnifiedDiff(diff)
-  const contents = {}
-  for (const { file } of files) {
-    if (!DEPENDENCY_FILES.some((entry) => entry.name === path.basename(file))) continue
-    const content = await readFileForReview(repoRoot, file, head)
-    if (typeof content === "string") {
-      contents[file] = content
-    }
+// Contents of the files that mention an ignore-list key that applies to
+// them (`exclude` only in JS test config), grepped once per key set.
+async function readIgnoreListContents(repoRoot, ref, files, keys) {
+  const groups = new Map()
+  for (const file of files) {
+    const needles = ignoreListKeysFor(file, keys)
+    if (needles.length === 0) continue
+    const id = needles.join("\0")
+    if (!groups.has(id)) groups.set(id, { needles, files: [] })
+    groups.get(id).files.push(file)
   }
-  const candidates = files
-    .filter(({ file, status, added }) => status !== "deleted" && added.length > 0 && !DOC_FILE.test(file) && !(file in contents))
-    .map(({ file }) => file)
-  const listFiles = head ? await filesMentioningAtRef(repoRoot, head, candidates, ignoreListKeys) : candidates
-  for (const file of listFiles) {
-    const keys = ignoreListKeysFor(file, ignoreListKeys)
-    const content = await readFileForReview(repoRoot, file, head)
-    if (typeof content === "string" && keys.some((key) => content.includes(key))) {
-      contents[file] = content
+  const contents = {}
+  for (const { needles, files: group } of groups.values()) {
+    const mentioning = ref ? await filesMentioningAtRef(repoRoot, ref, group, needles) : group
+    for (const [file, content] of Object.entries(await readContents(repoRoot, ref, mentioning))) {
+      if (needles.some((needle) => content.includes(needle))) contents[file] = content
     }
   }
   return contents
 }
 
-function getReviewContentRef({ base, head }) {
-  if (base && head) return head
-  return null
+// File contents the rules need beyond the hunks. New side: dependency
+// manifests, ignore-list files, and test files (masked whole, since a string
+// or comment can open above a hunk). Old side: test files with removals.
+async function readReviewFileContents(repoRoot, diff, { newRef, oldRef }, ignoreListKeys) {
+  const newPaths = new Set()
+  const oldPaths = new Set()
+  const listCandidates = []
+  for (const entry of parseUnifiedDiff(diff)) {
+    if (DEPENDENCY_FILES.some((dependency) => dependency.name === path.basename(entry.file))) newPaths.add(entry.file)
+    if (entry.status === "deleted") continue
+    if (isTestFilePath(entry.file)) {
+      if (entry.hunks.some((hunk) => hunk.newStart > 1)) newPaths.add(entry.file)
+      if (entry.hunks.some((hunk) => hunk.removed.length > 0 && hunk.oldStart > 1)) oldPaths.add(entry.oldFile)
+    }
+    if (entry.added.length > 0 && !DOC_FILE.test(entry.file) && !newPaths.has(entry.file)) listCandidates.push(entry.file)
+  }
+  const newContents = await readContents(repoRoot, newRef, [...newPaths])
+  Object.assign(newContents, await readIgnoreListContents(repoRoot, newRef, listCandidates, ignoreListKeys))
+  const oldContents = oldRef ? await readContents(repoRoot, oldRef, [...oldPaths]) : {}
+  return { newContents, oldContents }
 }
 
-// `[review_code] ignore_list_keys = ["NAME", ...]` in .btrain/project.toml.
-async function readConfiguredIgnoreListKeys(repoRoot) {
+// Where the diff's two sides live. The new side is `head` for a base..head
+// range and the worktree otherwise; the old side is what the diff compares
+// against.
+async function getReviewContentRefs(repoRoot, { base, head }) {
+  const newRef = base && head ? head : null
+  const oldRef = base || head || ((await hasHeadCommit(repoRoot)) ? "HEAD" : null)
+  return { newRef, oldRef }
+}
+
+// `[review_code]` in .btrain/project.toml, or {} when there is none.
+async function readReviewCodeConfig(repoRoot) {
   try {
     const config = await readProjectConfig(repoRoot)
-    return config?.review_code?.ignore_list_keys
+    return config?.review_code ?? {}
   } catch {
-    return undefined
+    return {}
   }
 }
 
@@ -1859,13 +2218,20 @@ export async function reviewCode(repoRoot, options = {}) {
     head: options.head,
     lane: options.lane,
   })
-  const ignoreListKeys = resolveIgnoreListKeys(await readConfiguredIgnoreListKeys(repoRoot))
-  const fileContentsByPath = await readReviewFileContents(
+  const config = await readReviewCodeConfig(repoRoot)
+  const ignoreListKeys = resolveKeyList(DEFAULT_IGNORE_LIST_KEYS, config.ignore_list_keys)
+  const runCountKeys = resolveKeyList(DEFAULT_RUN_COUNT_KEYS, config.run_count_keys)
+  const { newContents, oldContents } = await readReviewFileContents(
     repoRoot,
     diff,
-    getReviewContentRef(options),
+    await getReviewContentRefs(repoRoot, options),
     ignoreListKeys,
   )
-  const result = scanDiff(diff, { fileContentsByPath, ignoreListKeys })
+  const result = scanDiff(diff, {
+    fileContentsByPath: newContents,
+    baseFileContentsByPath: oldContents,
+    ignoreListKeys,
+    runCountKeys,
+  })
   return result
 }

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { execFile } from "node:child_process"
+import { execFile, execFileSync } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -708,6 +708,7 @@ const T = {
   xit: "x" + "it",
   fit: "f" + "it",
   fdescribe: "f" + "describe",
+  xdescribe: "x" + "describe",
   pytestSkip: "@pytest.mark." + "skip",
   unittestSkip: "@unittest." + "skip",
 }
@@ -972,7 +973,7 @@ describe("skipped-test rule", () => {
     const lines = [
       `it.${T.skip}("drops the cache", () => {})`,
       `describe.${T.skip}("legacy flow", () => {})`,
-      `test.${T.todo}("covers the retry path")`,
+      `test.${T.todo}("covers the retry path", () => {})`,
       `${T.xit}("reconnects", () => {})`,
       `test.${T.fixme}("flaky upload", async () => {})`,
       `test("slow path", { ${T.skip}: true }, () => {})`,
@@ -1147,10 +1148,7 @@ describe("lowered-threshold rule", () => {
   it("flags lowered run counts and coverage floors", () => {
     const diffs = [
       makeHunkDiff("test/formal/props.test.mjs", ["-      { numRuns: 200, seed },", "+      { numRuns: 50, seed },"]),
-      makeHunkDiff("test/formal/harness.test.mjs", [
-        "-const NUM_RUNS = Number(process.env.BTRAIN_FORMAL_RUNS || 15)",
-        "+const NUM_RUNS = Number(process.env.BTRAIN_FORMAL_RUNS || 5)",
-      ]),
+      makeHunkDiff("tests/test_props.py", ["-@settings(max_examples=500)", "+@settings(max_examples=50)"]),
       makeHunkDiff("pyproject.toml", [" [tool.coverage.report]", "-fail_under = 90", "+fail_under = 80"]),
       makeHunkDiff("jest.config.js", ["   coverageThreshold: {", "     global: {", "-      branches: 80,", "+      branches: 70,"]),
       makeHunkDiff("package.json", [
@@ -1257,8 +1255,12 @@ describe("test-ignore-added rule", () => {
       '   ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],',
       " ])",
     ], { oldStart: 2, newStart: 2 })
-    assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added"), [])
-    const withContents = scanDiff(diff, { fileContentsByPath: { "test/formal/harness.test.mjs": content } })
+    const fileContentsByPath = { "test/formal/harness.test.mjs": content }
+    const ignoreListKeys = ["CANDIDATE_REASON_LABELS"]
+    assert.deepEqual(findingsFor(scanDiff(diff, { ignoreListKeys }), "test-ignore-added"), [])
+    // btrain's own list names are configuration, not built-in defaults.
+    assert.deepEqual(findingsFor(scanDiff(diff, { fileContentsByPath }), "test-ignore-added"), [])
+    const withContents = scanDiff(diff, { fileContentsByPath, ignoreListKeys })
     assert.deepEqual(findingsFor(withContents, "test-ignore-added").map((finding) => finding.line), [5, 7])
   })
 
@@ -1393,10 +1395,13 @@ describe("reviewCode weakened-test rules in real git repos", () => {
       await fs.writeFile(path.join(repo, "test", "gone.test.mjs"), body("gone"))
       await fs.writeFile(path.join(repo, "test", "moved.test.mjs"), body("moved"))
       await fs.writeFile(path.join(repo, "test", "renamed.test.mjs"), body("renamed"))
+      // A path containing " b/" makes the `diff --git a/… b/…` line ambiguous.
+      await fs.mkdir(path.join(repo, "test", "odd b"), { recursive: true })
+      await fs.writeFile(path.join(repo, "test", "odd b", "name.test.mjs"), body("odd"))
       await git(repo, ["add", "."])
       await git(repo, ["commit", "-m", "baseline"])
 
-      await git(repo, ["rm", "-q", "test/gone.test.mjs"])
+      await git(repo, ["rm", "-q", "test/gone.test.mjs", "test/odd b/name.test.mjs"])
       await git(repo, ["mv", "test/moved.test.mjs", "test/moved-helper.mjs"])
       await git(repo, ["mv", "test/renamed.test.mjs", "test/renamed-again.test.mjs"])
       await fs.writeFile(
@@ -1412,16 +1417,17 @@ describe("reviewCode weakened-test rules in real git repos", () => {
         [
           ["deleted-test-file", "test/gone.test.mjs"],
           ["deleted-test-file", "test/moved.test.mjs"],
+          ["deleted-test-file", "test/odd b/name.test.mjs"],
           ["removed-assertion", "test/renamed-again.test.mjs"],
         ],
       )
-      assert.deepEqual(result.summary, { hard: 0, warn: 3 })
+      assert.deepEqual(result.summary, { hard: 0, warn: 4 })
     } finally {
       await fs.rm(repo, { recursive: true, force: true })
     }
   })
 
-  it("reads [review_code] ignore_list_keys and finds list openers above the hunk", async () => {
+  it("reads [review_code] ignore_list_keys and run_count_keys, and finds list openers above the hunk", async () => {
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-ignore-list-"))
     try {
       await git(repo, ["init"])
@@ -1431,21 +1437,36 @@ describe("reviewCode weakened-test rules in real git repos", () => {
       await fs.mkdir(path.join(repo, "test"), { recursive: true })
       await fs.writeFile(
         path.join(repo, ".btrain", "project.toml"),
-        ["[project]", 'name = "review-code-ignore-list"', "", "[review_code]", 'ignore_list_keys = ["FLAKY_TESTS"]', ""].join("\n"),
+        [
+          "[project]",
+          'name = "review-code-ignore-list"',
+          "",
+          "[review_code]",
+          'ignore_list_keys = ["FLAKY_TESTS"]',
+          'run_count_keys = ["MY_FORMAL_RUNS"]',
+          "",
+        ].join("\n"),
       )
       const listFile = path.join(repo, "test", "flaky-list.mjs")
       const entries = ["one", "two", "three", "four", "five", "six", "seven", "eight"].map((name) => `  "${name}",`)
       const writeList = (extra) => fs.writeFile(listFile, ["export const FLAKY_TESTS = [", ...entries, ...extra, "]", ""].join("\n"))
+      const runsFile = path.join(repo, "test", "formal.test.mjs")
+      const writeRuns = (runs) => fs.writeFile(runsFile, `const RUNS = Number(process.env.MY_FORMAL_RUNS || ${runs})\n`)
       await writeList([])
+      await writeRuns(40)
       await git(repo, ["add", "."])
       await git(repo, ["commit", "-m", "baseline"])
 
       await writeList(['  "nine",'])
+      await writeRuns(10)
       await git(repo, ["commit", "-am", "skip another flaky test"])
       const committed = await reviewCode(repo, { base: "HEAD~1", head: "HEAD" })
       assert.deepEqual(
         committed.violations.map((violation) => [violation.rule, violation.file, violation.line]),
-        [["test-ignore-added", "test/flaky-list.mjs", 10]],
+        [
+          ["test-ignore-added", "test/flaky-list.mjs", 10],
+          ["lowered-threshold", "test/formal.test.mjs", 1],
+        ],
       )
 
       await writeList(['  "nine",', '  "ten",'])
@@ -1466,5 +1487,381 @@ describe("formatSummary file-level findings", () => {
     const out = formatSummary(result)
     assert.match(out, /0 hard, 1 warn/)
     assert.match(out, /⚠ \[deleted-test-file\] test\/cache\.test\.mjs$/m)
+  })
+})
+
+// ---- review round 1: regex safety, whole-file masking, call structure ----
+
+const CODE_RULES_URL = new URL("../src/brain_train/review/code-rules.mjs", import.meta.url).href
+
+describe("scan time on pathological lines", () => {
+  it("scans long adversarial lines well inside a time bound", () => {
+    // A child process, because a catastrophic regex blocks the event loop:
+    // only a separate process can be stopped at the timeout.
+    const script = `
+      import { scanDiff } from ${JSON.stringify(CODE_RULES_URL)}
+      const lines = [
+        "const assert" + "_A".repeat(20),
+        "const assert" + "_A".repeat(5000),
+        "assert.".repeat(2000),
+        "expect(".repeat(2000),
+        "coverage".repeat(1000) + ": 80",
+        "a-".repeat(5000) + "coverage: 80",
+        " ".repeat(10000) + "x",
+        "(/".repeat(5000),
+        "{".repeat(10000),
+        "it.${T.only}(".repeat(1500),
+        "${T.fit}(".repeat(2000),
+        "x = " + "9".repeat(10000),
+        "assert.".repeat(15000),
+      ]
+      const hunk = lines.flatMap((line) => ["-" + line + " 1", "+" + line + " 2"])
+      const header = [
+        "diff --git a/test/slow.test.mjs b/test/slow.test.mjs",
+        "--- a/test/slow.test.mjs",
+        "+++ b/test/slow.test.mjs",
+        "@@ -1," + lines.length + " +1," + lines.length + " @@",
+      ]
+      const started = Date.now()
+      scanDiff([...header, ...hunk].join("\\n") + "\\n")
+      process.stdout.write(String(Date.now() - started))
+    `
+    const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 30_000 })
+    const elapsed = Number(output)
+    assert.ok(elapsed < 5000, `scan took ${elapsed} ms`)
+  })
+})
+
+describe("whole-file masking", () => {
+  it("hides a focused test inside a template literal opened above the hunk", () => {
+    const file = "test/fixtures.test.mjs"
+    const content = [
+      'import { it } from "node:test"',
+      "const fixture = `",
+      "describe('generated', () => {",
+      "  it('a', () => {})",
+      "  it('b', () => {})",
+      "  it('c', () => {})",
+      `  it.${T.only}('d', () => {})`,
+      "})",
+      "`",
+    ].join("\n")
+    const diff = makeHunkDiff(file, [
+      "   it('a', () => {})",
+      "   it('b', () => {})",
+      "   it('c', () => {})",
+      `+  it.${T.only}('d', () => {})`,
+      " })",
+    ], { oldStart: 4, newStart: 4 })
+    assert.deepEqual(scanDiff(diff, { fileContentsByPath: { [file]: content } }).violations, [])
+    // Without the file the hunk is masked on its own, so the finding is only a warning.
+    const [finding, ...rest] = scanDiff(diff).violations
+    assert.equal(rest.length, 0)
+    assert.equal(finding.rule, "focused-test")
+    assert.equal(finding.severity, "warn")
+  })
+
+  it("hides a focused test inside a doc comment opened above the hunk", () => {
+    const file = "test/usage.test.mjs"
+    const content = [
+      "/**",
+      " * Usage:",
+      " *",
+      " *   it('first', () => {})",
+      " *   it('second', () => {})",
+      ` *   it.${T.only}('focus', () => {})`,
+      " */",
+      "export const x = 1",
+    ].join("\n")
+    const diff = makeHunkDiff(file, [
+      "  *",
+      "  *   it('first', () => {})",
+      "  *   it('second', () => {})",
+      `+ *   it.${T.only}('focus', () => {})`,
+      "  */",
+      " export const x = 1",
+    ], { oldStart: 3, newStart: 3 })
+    assert.deepEqual(scanDiff(diff, { fileContentsByPath: { [file]: content } }).violations, [])
+  })
+
+  it("sees a focused test below a hunk that starts on a closing backtick", () => {
+    const file = "test/after-fixture.test.mjs"
+    const content = [
+      'import { it } from "node:test"',
+      "const fixture = `",
+      "line one",
+      "line two",
+      "`",
+      "",
+      "it('keeps', () => {})",
+      `it.${T.only}('focus', () => {})`,
+    ].join("\n")
+    const diff = makeHunkDiff(file, [" `", " ", " it('keeps', () => {})", `+it.${T.only}('focus', () => {})`], { oldStart: 5, newStart: 5 })
+    const result = scanDiff(diff, { fileContentsByPath: { [file]: content } })
+    assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 8]])
+  })
+
+  it("reads the base file so a removal below a closing backtick is counted", () => {
+    const file = "test/doc.test.mjs"
+    const base = [
+      'import assert from "node:assert"',
+      "const doc = `",
+      "text",
+      "`",
+      'it("x", () => {',
+      "  assert.equal(size(), 1)",
+      "})",
+    ].join("\n")
+    const diff = makeHunkDiff(file, [" `", ' it("x", () => {', "-  assert.equal(size(), 1)", " })"], { oldStart: 4, newStart: 4 })
+    const result = scanDiff(diff, { baseFileContentsByPath: { [file]: base } })
+    assert.deepEqual(findingsFor(result, "removed-assertion").map((finding) => finding.line), [6])
+  })
+})
+
+describe("focused-test and skipped-test call structure", () => {
+  it("only counts only / skip options that are top-level arguments of a test call", () => {
+    const lines = [
+      `it("parses --only", () => assert.deepEqual(parse(["--only"]), { ${T.only}: true }))`,
+      "assert.deepEqual(parse(argv),",
+      `  { ${T.only}: true })`,
+      `if (pattern.test(line)) flags.push({ ${T.only}: true })`,
+      `if (pattern.test(line)) flags.push({ ${T.skip}: true })`,
+    ]
+    assert.deepEqual(scanDiff(makeDiff("test/cli.test.mjs", lines)).violations, [])
+  })
+
+  it("flags only / skip set on their own line of a multi-line options object", () => {
+    const call = (flag) => ["test(", '  "slow path",', "  {", `    ${flag},`, "    timeout: 5_000,", "  },", "  async () => {},", ")"]
+    const focused = scanDiff(makeDiff("test/slow.test.mjs", call(`${T.only}: true`)))
+    assert.deepEqual(focused.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 4]])
+    const skipped = scanDiff(makeDiff("test/slow.test.mjs", call(`${T.skip}: "needs a GPU"`)))
+    assert.deepEqual(skipped.violations.map((v) => [v.rule, v.severity, v.line]), [["skipped-test", "warn", 4]])
+  })
+
+  it("needs a title and a callback, and ignores fit helpers the file defines or imports", () => {
+    const lookAlikes = [
+      `context.${T.only}("tenant")`,
+      `suite.${T.only}("fast")`,
+      `${T.fit}("linear", points)`,
+      `test.${T.todo}("write the retry test")`,
+    ]
+    assert.deepEqual(scanDiff(makeDiff("test/curve.test.mjs", lookAlikes)).violations, [])
+    const definedHelper = [`function ${T.fit}(name, build) { return build(name) }`, `${T.fit}("linear", () => model)`]
+    assert.deepEqual(scanDiff(makeDiff("test/curve.test.mjs", definedHelper)).violations, [])
+    const importedHelper = [`import { ${T.fit} } from "./curve-helpers.mjs"`, `${T.fit}("linear", () => model)`]
+    assert.deepEqual(scanDiff(makeDiff("test/curve.test.mjs", importedHelper)).violations, [])
+    const frameworkImport = [`import { ${T.fit} } from "@jest/globals"`, `${T.fit}("focus", () => {})`]
+    assert.deepEqual(scanDiff(makeDiff("test/curve.test.mjs", frameworkImport)).summary, { hard: 1, warn: 0 })
+  })
+
+  it("flags each, concurrent and serial forms", () => {
+    const focused = [
+      `it.${T.only}.each([[1, 2]])("adds %i", (a, b) => {})`,
+      `describe.${T.only}.each([["a"]])("suite %s", () => {})`,
+      `test.concurrent.${T.only}("parallel", async () => {})`,
+      `test.describe.serial.${T.only}("ordered", () => {})`,
+      `${T.fit}.each([1])("case %i", (n) => {})`,
+    ]
+    for (const line of focused) {
+      assert.deepEqual(scanDiff(makeDiff("test/forms.test.mjs", [line])).summary, { hard: 1, warn: 0 }, line)
+    }
+    const skipped = [`it.${T.skip}.each([1])("case %i", (n) => {})`, `${T.xdescribe}.each([1])("suite %i", () => {})`]
+    for (const line of skipped) {
+      assert.deepEqual(scanDiff(makeDiff("test/forms.test.mjs", [line])).violations.map((v) => v.rule), ["skipped-test"], line)
+    }
+  })
+})
+
+describe("removed-assertion across hunks", () => {
+  const twoHunks = (secondAdded) => [
+    "diff --git a/test/cache.test.mjs b/test/cache.test.mjs",
+    "--- a/test/cache.test.mjs",
+    "+++ b/test/cache.test.mjs",
+    "@@ -10,4 +10,2 @@",
+    '   it("reads", () => {',
+    '-    assert.equal(cache.get("a"), 1)',
+    '-    assert.ok(cache.has("a"))',
+    "   })",
+    "@@ -40,2 +38,4 @@",
+    '   it("writes", () => {',
+    ...secondAdded.map((line) => `+    ${line}`),
+    "   })",
+  ].join("\n") + "\n"
+
+  it("does not flag assertions that moved to another hunk of the same file", () => {
+    const diff = twoHunks(['assert.equal(cache.get("a"), 1)', 'assert.ok(cache.has("a"))'])
+    assert.deepEqual(scanDiff(diff).violations, [])
+  })
+
+  it("still flags a hunk that loses assertions while another hunk adds different ones", () => {
+    const diff = twoHunks(["assert.equal(cache.size, 1)", "assert.ok(cache.isFresh())"])
+    assert.deepEqual(findingsFor(scanDiff(diff), "removed-assertion").map((finding) => finding.line), [11])
+  })
+})
+
+describe("test-ignore-added reformatting and scope", () => {
+  it("does not flag an ignore list reformatted between one line and many, or requoted", () => {
+    const expand = makeHunkDiff("jest.config.js", [
+      " module.exports = {",
+      '-  testPathIgnorePatterns: ["/node_modules/", "/legacy/"],',
+      "+  testPathIgnorePatterns: [",
+      '+    "/node_modules/",',
+      '+    "/legacy/",',
+      "+  ],",
+      " }",
+    ])
+    const collapse = makeHunkDiff("jest.config.js", [
+      " module.exports = {",
+      "-  testPathIgnorePatterns: [",
+      '-    "/node_modules/",',
+      '-    "/legacy/",',
+      "-  ],",
+      '+  testPathIgnorePatterns: ["/node_modules/", "/legacy/"],',
+      " }",
+    ])
+    const requote = makeHunkDiff("jest.config.js", [
+      "   testPathIgnorePatterns: [",
+      "-    '/legacy/',",
+      '+    "/legacy/",',
+      "   ],",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(expand + collapse + requote), "test-ignore-added"), [])
+  })
+
+  it("flags an entry added while the list is reformatted", () => {
+    const diff = makeHunkDiff("jest.config.js", [
+      " module.exports = {",
+      '-  testPathIgnorePatterns: ["/node_modules/"],',
+      "+  testPathIgnorePatterns: [",
+      '+    "/node_modules/",',
+      '+    "/test/flaky/",',
+      "+  ],",
+      " }",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added").map((finding) => finding.line), [4])
+  })
+
+  it("counts exclude in vite config only under a test or coverage key", () => {
+    const optimizeDeps = makeHunkDiff("vite.config.ts", [
+      " export default defineConfig({",
+      "   optimizeDeps: {",
+      "     exclude: [",
+      '       "fsevents",',
+      '+      "lightningcss",',
+      "     ],",
+    ])
+    const testExclude = makeHunkDiff("vite.config.ts", [
+      " export default defineConfig({",
+      "   test: {",
+      "     exclude: [",
+      '       "node_modules",',
+      '+      "test/e2e/**",',
+      "     ],",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(optimizeDeps), "test-ignore-added"), [])
+    assert.equal(findingsFor(scanDiff(testExclude), "test-ignore-added").length, 1)
+  })
+})
+
+describe("lowered-threshold defaults and scope", () => {
+  it("treats a harness run-count name as configuration, not a default", () => {
+    const diff = makeHunkDiff("test/formal/harness.test.mjs", [
+      "-const NUM_RUNS = Number(process.env.BTRAIN_FORMAL_RUNS || 15)",
+      "+const NUM_RUNS = Number(process.env.BTRAIN_FORMAL_RUNS || 5)",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(diff), "lowered-threshold"), [])
+    const configured = scanDiff(diff, { runCountKeys: ["BTRAIN_FORMAL_RUNS"] })
+    assert.deepEqual(findingsFor(configured, "lowered-threshold").map((finding) => finding.detail), ["BTRAIN_FORMAL_RUNS lowered from 15 to 5."])
+  })
+
+  it("does not flag coverage-named numbers in source or retries of a client under test", () => {
+    const diffs = [
+      makeHunkDiff("src/metrics.mjs", ["-const coverageTarget = 80", "+const coverageTarget = 70"]),
+      makeHunkDiff("test/client.test.mjs", ["-  const client = new Client({ retries: 2 })", "+  const client = new Client({ retries: 5 })"]),
+    ]
+    for (const diff of diffs) {
+      assert.deepEqual(findingsFor(scanDiff(diff), "lowered-threshold"), [], diff)
+    }
+  })
+
+  it("flags runner retries (vitest retry, test options) and coverage floors in CI", () => {
+    const diffs = [
+      makeHunkDiff("vitest.config.ts", ["   test: {", "-    retry: 0,", "+    retry: 3,"]),
+      makeHunkDiff("test/upload.test.mjs", ['-test("upload", { retry: 1 }, async () => {})', '+test("upload", { retry: 3 }, async () => {})']),
+      makeHunkDiff(".github/workflows/ci.yml", ["-      - run: pytest --cov-fail-under=90", "+      - run: pytest --cov-fail-under=80"]),
+    ]
+    for (const diff of diffs) {
+      assert.equal(findingsFor(scanDiff(diff), "lowered-threshold").length, 1, diff)
+    }
+  })
+})
+
+describe("parseUnifiedDiff paths containing ' b/'", () => {
+  it("takes paths from the ---/+++ headers and strips git's trailing tab", () => {
+    const diff = [
+      "diff --git a/test/a b/c.test.mjs b/test/a b/c.test.mjs",
+      "index 1111111..2222222 100644",
+      "--- a/test/a b/c.test.mjs\t",
+      "+++ b/test/a b/c.test.mjs\t",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "diff --git a/test/x b/y.test.mjs b/test/x b/y.test.mjs",
+      "deleted file mode 100644",
+      "index 3333333..0000000",
+      "--- a/test/x b/y.test.mjs\t",
+      "+++ /dev/null",
+      "@@ -1,1 +0,0 @@",
+      "-gone",
+    ].join("\n")
+    assert.deepEqual(
+      parseUnifiedDiff(`${diff}\n`).map(({ file, oldFile, status }) => [file, oldFile, status]),
+      [
+        ["test/a b/c.test.mjs", "test/a b/c.test.mjs", "modified"],
+        ["test/x b/y.test.mjs", "test/x b/y.test.mjs", "deleted"],
+      ],
+    )
+  })
+})
+
+describe("reviewCode masks whole test files in a commit range", () => {
+  it("ignores a focused test added inside a fixture string and flags a real one", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-masking-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await fs.mkdir(path.join(repo, "test"), { recursive: true })
+      const file = path.join(repo, "test", "fixture.test.mjs")
+      const fixture = ["  it('a', () => {})", "  it('b', () => {})", "  it('c', () => {})", "  it('d', () => {})"]
+      const write = (inside, after) => fs.writeFile(file, [
+        'import { it } from "node:test"',
+        "const fixture = `",
+        "describe('generated', () => {",
+        ...fixture,
+        ...inside,
+        "})",
+        "`",
+        "",
+        "it('real', () => {})",
+        ...after,
+        "",
+      ].join("\n"))
+      await write([], [])
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      await write([`  it.${T.only}('e', () => {})`], [])
+      await git(repo, ["commit", "-am", "extend the fixture"])
+      const insideString = await reviewCode(repo, { base: "HEAD~1", head: "HEAD" })
+      assert.deepEqual(insideString.violations, [])
+
+      await write([`  it.${T.only}('e', () => {})`], [`it.${T.only}('focus', () => {})`])
+      await git(repo, ["commit", "-am", "focus a real test"])
+      const realFocus = await reviewCode(repo, { base: "HEAD~1", head: "HEAD" })
+      assert.deepEqual(realFocus.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 13]])
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
   })
 })
