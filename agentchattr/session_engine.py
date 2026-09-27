@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 
-from session_store import validate_cast
+from session_store import template_fingerprint, validate_cast
 
 log = logging.getLogger(__name__)
 
@@ -135,19 +135,32 @@ class SessionEngine:
                          session["current_phase"], session["current_turn"])
                 self._trigger_current(session)
 
-    @staticmethod
-    def _resume_blocker(session: dict, tmpl: dict) -> str:
+    def _resume_blocker(self, session: dict, tmpl: dict) -> str:
         """Why a saved session must not resume on ``tmpl``, or "" if it may.
 
         The id can resolve to a different template than the one the session
-        started on: a custom template that shared a built-in id is renamed at
-        load, and the id then names the built-in. The saved name catches that.
+        started on. A custom template that shared a built-in id is renamed at
+        load, so the id then names the built-in; and a custom template can be
+        edited in place. A run saved with its template's fingerprint settles
+        this exactly. An older run has only the display name, which the renamed
+        copy may share, so an older run on an id a custom template shared is
+        not resumed at all.
         """
+        template_id = session.get("template_id")
         saved_name = session.get("template_name")
-        current_name = tmpl.get("name", session.get("template_id"))
+        current_name = tmpl.get("name", template_id)
         if saved_name and saved_name != current_name:
-            return (f"Template '{session.get('template_id')}' changed since the session started "
+            return (f"Template '{template_id}' changed since the session started "
                     f"(was '{saved_name}', now '{current_name}').")
+        saved_fingerprint = session.get("template_fingerprint")
+        if saved_fingerprint:
+            if saved_fingerprint != template_fingerprint(tmpl):
+                return f"Template '{template_id}' changed since the session started."
+        else:
+            renamed_to = self._store.custom_renamed_from(template_id)
+            if renamed_to:
+                return (f"A custom template shared the id '{template_id}' and is now '{renamed_to}'; "
+                        "the session may have started on either, so it was not resumed.")
         return " ".join(validate_cast(tmpl, session.get("cast", {})))
 
     def _is_agent(self, name: str) -> bool:

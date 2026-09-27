@@ -1,5 +1,6 @@
 """Session store — persists active session runs to JSON."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -39,6 +40,22 @@ def _write_json_atomic(path: Path, data) -> None:
 # Longest phase prompt or per-role prompt a template may carry.
 MAX_PROMPT_CHARS = 200
 
+# Template keys that never shape a run: shown only on proposal cards, or set by the loader.
+_FINGERPRINT_IGNORED_KEYS = ("description", "is_custom")
+
+
+def template_fingerprint(tmpl: dict) -> str:
+    """A digest of everything in ``tmpl`` that shapes a run.
+
+    Each run saves it, so a restart can tell whether the run's template id
+    still names the template it started on. The id alone can't: a custom
+    template that shared a built-in id is renamed at load, and a custom
+    template can be edited in place.
+    """
+    shaped = {k: v for k, v in tmpl.items() if k not in _FINGERPRINT_IGNORED_KEYS}
+    canonical = json.dumps(shaped, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 class SessionStore:
     def __init__(self, path: str, templates_dir: str | None = None):
@@ -49,6 +66,8 @@ class SessionStore:
         self._lock = threading.Lock()
         self._callbacks: list = []
         self._templates: dict[str, dict] = {}
+        # Built-in id -> the id a custom template that shared it was renamed to at load.
+        self._renamed_custom_ids: dict[str, str] = {}
         self._load()
 
         # Warn about legacy file
@@ -126,6 +145,7 @@ class SessionStore:
                 while new_id in taken:
                     new_id, n = f"{tid}-custom-{n}", n + 1
                 log.warning("Custom template %s shares a built-in id; renamed it to %s", tid, new_id)
+                self._renamed_custom_ids[tid] = new_id
                 tmpl["id"] = tid = new_id
                 taken.add(new_id)
                 renamed = True
@@ -146,6 +166,10 @@ class SessionStore:
 
     def get_template(self, template_id: str) -> dict | None:
         return self._templates.get(template_id)
+
+    def custom_renamed_from(self, template_id: str) -> str | None:
+        """The id a custom template that shared built-in ``template_id`` was renamed to at load, if any."""
+        return self._renamed_custom_ids.get(template_id)
 
     def is_builtin_template(self, template_id: str) -> bool:
         """True for a template shipped in session_templates/.
@@ -236,6 +260,7 @@ class SessionStore:
                 "id": self._next_id,
                 "template_id": template_id,
                 "template_name": tmpl.get("name", template_id),
+                "template_fingerprint": template_fingerprint(tmpl),
                 "channel": channel,
                 "cast": cast,
                 "state": "active",

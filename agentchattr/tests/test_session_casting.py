@@ -307,6 +307,76 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(instruction_of(trigger.calls[0]["prompt"]).startswith("Try to break it"))
         self.assertEqual(sessions.get(1)["state"], "waiting")
 
+    def started_run(self, template_id="code-review", cast=None):
+        """A run saved by today's store, so it carries everything create() records."""
+        sessions = SessionStore(str(self.root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+        return sessions.create(template_id, "one", cast or self.DISTINCT, "user")
+
+    def tuned_code_review(self):
+        """A custom copy of code-review that kept the built-in id and name but changed a prompt."""
+        mine = load_template("code-review")
+        review = next(p for p in mine["phases"] if p["name"] == "Review")
+        review["role_prompts"]["red_team"] = "Only look at the tests."
+        return mine
+
+    def test_a_legacy_run_on_an_id_a_custom_template_shared_is_ended(self):
+        # gh-codex P2 on #77: the custom copy kept the built-in's name, so the
+        # name can't tell which of the two a run saved before fingerprints
+        # started on. It may have run on either, so it is not resumed.
+        (self.root / "custom_templates.json").write_text(json.dumps([self.tuned_code_review()]), "utf-8")
+
+        sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one"),
+                                          self.saved_run(2, self.DISTINCT, "waiting", "two")])
+
+        self.assertEqual(sessions.get_template("code-review-custom")["name"], "Code Review")
+        self.assertEqual(trigger.calls, [])
+        for run_id in (1, 2):
+            run = sessions.get(run_id)
+            self.assertEqual(run["state"], "interrupted")
+            self.assertEqual(
+                run["interrupt_reason"],
+                "A custom template shared the id 'code-review' and is now 'code-review-custom'; "
+                "the session may have started on either, so it was not resumed.",
+            )
+
+    def test_a_run_started_on_the_builtin_resumes_after_a_custom_copy_is_renamed(self):
+        # The fingerprint settles what the name can't: this run started on the
+        # built-in, which the id still names after the copy is renamed away.
+        run = self.started_run()
+        (self.root / "custom_templates.json").write_text(json.dumps([self.tuned_code_review()]), "utf-8")
+
+        sessions, trigger = self.restart([run])
+
+        first = load_template("code-review")["phases"][0]["participants"][0]
+        self.assertEqual([call["agent"] for call in trigger.calls], [self.DISTINCT[first]])
+        self.assertIn("code-review-custom", [t["id"] for t in sessions.get_templates()])
+
+    def test_a_run_whose_template_was_edited_since_it_started_is_ended(self):
+        custom = self.root / "custom_templates.json"
+        custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        run = self.started_run("pair-review", {"builder": "alpha", "reviewer": "beta"})
+        custom.write_text(json.dumps([pair_review_template(phases=[
+            {"name": "Review", "participants": ["reviewer"], "prompt": "Review it.", "is_output": True},
+        ])]), "utf-8")
+
+        sessions, trigger = self.restart([run])
+
+        self.assertEqual(trigger.calls, [])
+        self.assertEqual(sessions.get(run["id"])["state"], "interrupted")
+        self.assertEqual(sessions.get(run["id"])["interrupt_reason"],
+                         "Template 'pair-review' changed since the session started.")
+
+    def test_a_description_edit_does_not_end_a_run(self):
+        # The description is only shown on proposal cards; it never reaches a prompt.
+        custom = self.root / "custom_templates.json"
+        custom.write_text(json.dumps([pair_review_template(description="Two passes.")]), "utf-8")
+        run = self.started_run("pair-review", {"builder": "alpha", "reviewer": "beta"})
+        custom.write_text(json.dumps([pair_review_template(description="Reworded.")]), "utf-8")
+
+        _, trigger = self.restart([run])
+
+        self.assertEqual([call["agent"] for call in trigger.calls], ["alpha"])
+
 
 class TemplateValidationTests(unittest.TestCase):
     def test_bundled_templates_are_valid(self):
