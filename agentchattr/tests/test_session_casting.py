@@ -34,6 +34,7 @@ from session_store import (
     CastError,
     SessionStore,
     auto_cast,
+    template_fingerprint,
     validate_cast,
     validate_session_template,
 )
@@ -221,9 +222,9 @@ class ResumeTests(unittest.TestCase):
             "updated_at": 0.0, "last_message_id": None, "output_message_id": None, "goal": "",
         }
 
-    def restart(self, runs):
+    def restart(self, runs, templates_dir=TEMPLATES_DIR):
         (self.root / "session_runs.json").write_text(json.dumps(runs), "utf-8")
-        sessions = SessionStore(str(self.root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))
+        sessions = SessionStore(str(self.root / "session_runs.json"), templates_dir=str(templates_dir))
         trigger = RecordingTrigger()
         engine = SessionEngine(sessions, MessageStore(str(self.root / "messages.jsonl")), trigger,
                                FakeRegistry(["alpha", "beta"]))
@@ -296,9 +297,12 @@ class ResumeTests(unittest.TestCase):
         # to nothing, and resuming raised AttributeError as the server started.
         run = dict(self.saved_run(1, self.DISTINCT, "active", "one"), template_id="draft-7", template_name="A draft")
 
-        _, trigger = self.restart([run])
+        sessions, trigger = self.restart([run])
 
         self.assertEqual(trigger.calls, [])
+        # Ended, not left waiting: a later draft that reuses the id must not pick the run up.
+        self.assertEqual(sessions.get(1)["state"], "interrupted")
+        self.assertEqual(sessions.get(1)["interrupt_reason"], "template not found")
 
     def test_a_valid_saved_run_still_resumes(self):
         sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one")])
@@ -339,6 +343,22 @@ class ResumeTests(unittest.TestCase):
                 "the session may have started on either, so it was not resumed.",
             )
 
+    def test_a_legacy_run_is_still_ended_when_the_first_start_after_the_rename_aborts(self):
+        # Review of 3725a1f: the store rewrites the custom file when it is
+        # built, and a start can exit before resuming (the network-risk
+        # prompt, say). The next start sees no rename, so the run must carry it.
+        (self.root / "custom_templates.json").write_text(json.dumps([self.tuned_code_review()]), "utf-8")
+        (self.root / "session_runs.json").write_text(
+            json.dumps([self.saved_run(1, self.DISTINCT, "active", "one")]), "utf-8")
+        SessionStore(str(self.root / "session_runs.json"), templates_dir=str(TEMPLATES_DIR))  # aborted start
+        runs = json.loads((self.root / "session_runs.json").read_text("utf-8"))
+
+        sessions, trigger = self.restart(runs)
+
+        self.assertEqual(trigger.calls, [])
+        self.assertEqual(sessions.get(1)["state"], "interrupted")
+        self.assertIn("A custom template shared the id 'code-review'", sessions.get(1)["interrupt_reason"])
+
     def test_a_run_started_on_the_builtin_resumes_after_a_custom_copy_is_renamed(self):
         # The fingerprint settles what the name can't: this run started on the
         # built-in, which the id still names after the copy is renamed away.
@@ -365,6 +385,64 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(sessions.get(run["id"])["state"], "interrupted")
         self.assertEqual(sessions.get(run["id"])["interrupt_reason"],
                          "Template 'pair-review' changed since the session started.")
+
+    def test_any_edit_that_shapes_a_run_ends_it(self):
+        base = self.tuned_code_review()
+        base["id"] = "tuned"
+        review = next(i for i, p in enumerate(base["phases"]) if p["name"] == "Review")
+
+        def edited(change):
+            tmpl = json.loads(json.dumps(base))
+            change(tmpl)
+            return tmpl
+
+        edits = {
+            "a role prompt": lambda t: t["phases"][review]["role_prompts"].update(red_team="Only read the docs."),
+            "a phase prompt": lambda t: t["phases"][review].update(prompt="Review it briefly."),
+            "distinct_roles": lambda t: t.pop("distinct_roles"),
+            "the participants": lambda t: t["phases"][review]["participants"].reverse(),
+            "the name": lambda t: t.update(name="Tuned"),
+        }
+        for label, change in edits.items():
+            with self.subTest(edit=label):
+                for f in ("custom_templates.json", "session_runs.json"):
+                    (self.root / f).unlink(missing_ok=True)
+                (self.root / "custom_templates.json").write_text(json.dumps([base]), "utf-8")
+                run = self.started_run("tuned")
+                (self.root / "custom_templates.json").write_text(json.dumps([edited(change)]), "utf-8")
+
+                sessions, trigger = self.restart([run])
+
+                self.assertEqual(trigger.calls, [])
+                self.assertEqual(sessions.get(run["id"])["state"], "interrupted")
+
+    def test_a_run_on_a_builtin_an_upgrade_changed_is_ended(self):
+        # Ending it is the price of never running a turn the run didn't start with.
+        upgraded = self.root / "templates"
+        shutil.copytree(TEMPLATES_DIR, upgraded)
+        (upgraded / "code-review.json").write_text(json.dumps(self.tuned_code_review()), "utf-8")
+        run = self.started_run()
+
+        sessions, trigger = self.restart([run], templates_dir=upgraded)
+
+        self.assertEqual(trigger.calls, [])
+        self.assertEqual(sessions.get(run["id"])["interrupt_reason"],
+                         "Template 'code-review' changed since the session started.")
+
+    def test_a_run_with_a_matching_fingerprint_is_still_held_to_the_casting_rules(self):
+        # Waiting, so only the resume check stands between it and the broken turn:
+        # an active run would also be stopped when its turn is triggered.
+        run = dict(self.started_run(cast=self.CONFLICT), state="waiting")
+
+        sessions, trigger = self.restart([run])
+
+        self.assertEqual(trigger.calls, [])
+        self.assertIn("'builder' and 'red_team' must be different agents",
+                      sessions.get(run["id"])["interrupt_reason"])
+
+    def test_a_lone_surrogate_does_not_break_the_fingerprint(self):
+        # json.loads accepts "\ud83d" in a hand-edited file; the digest must not raise on it.
+        self.assertRegex(template_fingerprint({"name": "\ud83d"}), r"^[0-9a-f]{64}$")
 
     def test_a_description_edit_does_not_end_a_run(self):
         # The description is only shown on proposal cards; it never reaches a prompt.

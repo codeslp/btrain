@@ -53,7 +53,8 @@ def template_fingerprint(tmpl: dict) -> str:
     template can be edited in place.
     """
     shaped = {k: v for k, v in tmpl.items() if k not in _FINGERPRINT_IGNORED_KEYS}
-    canonical = json.dumps(shaped, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    # ASCII escapes, so a lone surrogate from a hand-edited file can't fail the encode.
+    canonical = json.dumps(shaped, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -66,8 +67,6 @@ class SessionStore:
         self._lock = threading.Lock()
         self._callbacks: list = []
         self._templates: dict[str, dict] = {}
-        # Built-in id -> the id a custom template that shared it was renamed to at load.
-        self._renamed_custom_ids: dict[str, str] = {}
         self._load()
 
         # Warn about legacy file
@@ -130,11 +129,13 @@ class SessionStore:
         One that reuses a built-in id (saved before drafts were kept off
         built-in ids, or edited by hand) is renamed to ``<id>-custom`` and the
         file rewritten, so it stays listed, runnable and deletable without
-        replacing the built-in. Entries without a string id are skipped.
+        replacing the built-in. Unfinished runs on that id are marked first
+        (see ``_mark_runs_on_renamed_ids``). Entries without a string id are
+        skipped.
         """
         saved_ids = {t.get("id") for t in custom if isinstance(t, dict) and isinstance(t.get("id"), str)}
         taken = set(self._templates) | saved_ids
-        renamed = False
+        renamed: dict[str, str] = {}
         for tmpl in custom:
             tid = tmpl.get("id") if isinstance(tmpl, dict) else None
             if not isinstance(tid, str) or not tid:
@@ -145,15 +146,15 @@ class SessionStore:
                 while new_id in taken:
                     new_id, n = f"{tid}-custom-{n}", n + 1
                 log.warning("Custom template %s shares a built-in id; renamed it to %s", tid, new_id)
-                self._renamed_custom_ids[tid] = new_id
+                renamed[tid] = new_id
                 tmpl["id"] = tid = new_id
                 taken.add(new_id)
-                renamed = True
             tmpl["is_custom"] = True
             self._templates[tid] = tmpl
             log.info("Loaded custom template: %s", tid)
         if renamed:
             try:
+                self._mark_runs_on_renamed_ids(renamed)
                 _write_json_atomic(custom_path, custom)
             except OSError as exc:
                 # Starting matters more than persisting: the rename holds in
@@ -167,9 +168,24 @@ class SessionStore:
     def get_template(self, template_id: str) -> dict | None:
         return self._templates.get(template_id)
 
-    def custom_renamed_from(self, template_id: str) -> str | None:
-        """The id a custom template that shared built-in ``template_id`` was renamed to at load, if any."""
-        return self._renamed_custom_ids.get(template_id)
+    def _mark_runs_on_renamed_ids(self, renamed: dict[str, str]):
+        """Record the rename on each unfinished run that has no template fingerprint.
+
+        Such a run may have started on the built-in or on the copy, and only
+        this load knows the copy existed: once the rewritten custom file is on
+        disk, a later start sees no rename. So the runs are saved first, and a
+        start that exits before resuming leaves the mark for the next one.
+        """
+        with self._lock:
+            marked = False
+            for s in self._sessions:
+                new_id = renamed.get(s.get("template_id"))
+                if (new_id and not s.get("template_fingerprint")
+                        and s.get("state") in ("active", "waiting", "paused")):
+                    s["template_copy_renamed_to"] = new_id
+                    marked = True
+            if marked:
+                self._save()
 
     def is_builtin_template(self, template_id: str) -> bool:
         """True for a template shipped in session_templates/.

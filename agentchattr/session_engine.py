@@ -114,7 +114,10 @@ class SessionEngine:
         A session whose cast breaks its template's rules (saved before the
         builder/red_team check existed, say) is ended with the reason rather
         than resumed, whatever its state: a waiting one would reach the
-        broken turn as soon as its agent answers.
+        broken turn as soon as its agent answers. So is one whose template
+        is gone (a draft, which lives only in memory) or changed since it
+        started, including a built-in changed by an upgrade: resuming it
+        could run a role, phase or prompt it didn't start with.
 
         Only re-trigger 'active' sessions. 'waiting' sessions already had
         their trigger sent before the restart — re-triggering would
@@ -124,7 +127,7 @@ class SessionEngine:
             if session.get("state") not in ("active", "waiting", "paused"):
                 continue
             tmpl = self._store.get_template(session.get("template_id", ""))
-            reason = self._resume_blocker(session, tmpl) if tmpl else ""
+            reason = self._resume_blocker(session, tmpl) if tmpl else "template not found"
             if reason:
                 log.warning("Session %d not resumed: %s", session["id"], reason)
                 self._store.interrupt(session["id"], reason)
@@ -144,7 +147,7 @@ class SessionEngine:
         edited in place. A run saved with its template's fingerprint settles
         this exactly. An older run has only the display name, which the renamed
         copy may share, so an older run on an id a custom template shared is
-        not resumed at all.
+        not resumed at all; the store marks such runs when it renames.
         """
         template_id = session.get("template_id")
         saved_name = session.get("template_name")
@@ -156,11 +159,10 @@ class SessionEngine:
         if saved_fingerprint:
             if saved_fingerprint != template_fingerprint(tmpl):
                 return f"Template '{template_id}' changed since the session started."
-        else:
-            renamed_to = self._store.custom_renamed_from(template_id)
-            if renamed_to:
-                return (f"A custom template shared the id '{template_id}' and is now '{renamed_to}'; "
-                        "the session may have started on either, so it was not resumed.")
+        elif session.get("template_copy_renamed_to"):
+            return (f"A custom template shared the id '{template_id}' and is now "
+                    f"'{session['template_copy_renamed_to']}'; "
+                    "the session may have started on either, so it was not resumed.")
         return " ".join(validate_cast(tmpl, session.get("cast", {})))
 
     def _is_agent(self, name: str) -> bool:
