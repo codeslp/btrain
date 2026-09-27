@@ -1977,3 +1977,182 @@ describe("scan time on packed lines", () => {
     assert.ok(elapsed < 3000, `scan took ${elapsed} ms`)
   })
 })
+
+// ---- review round 3: argument heads, JSX, literal titles, surviving mutants ----
+
+// Four comment lines, about 300 characters, between two arguments.
+const LONG_COMMENT = [
+  "    // Covers the regression from the tracker where the parser dropped the",
+  "    // trailing comma. It stays on its own because it needs a fresh fixture",
+  "    // and the setup is slow, so please do not fold it into the list test.",
+  "    // See the linked issue for the reproduction and the chosen fix.",
+]
+
+describe("argument heads after long comments", () => {
+  it("still sees a callback, an options object or an only: property after a long comment", () => {
+    const callback = [`it.${T.only}(`, '  "handles the edge case",', ...LONG_COMMENT, "  async () => {},", ")"]
+    const optionsObject = ["test(", '  "slow path",', ...LONG_COMMENT, `  { ${T.only}: true },`, "  async () => {},", ")"]
+    const property = ["test(", '  "slow path",', "  {", ...LONG_COMMENT, `    ${T.only}: true,`, "  },", "  async () => {},", ")"]
+    for (const [name, lines, line] of [["callback", callback, 1], ["options object", optionsObject, 7], ["property", property, 8]]) {
+      const result = scanDiff(makeDiff("test/comments.test.mjs", lines))
+      assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", line]], name)
+    }
+  })
+})
+
+describe("options objects with many properties", () => {
+  it("reads every property of an options object, not just the first few", () => {
+    const line = `test("x", { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, ${T.only}: true }, () => {})`
+    assert.deepEqual(scanDiff(makeDiff("test/props.test.mjs", [line])).summary, { hard: 1, warn: 0 })
+  })
+
+  it("puts a property that starts a line on that line", () => {
+    const lines = ['test("x", {', `${T.only}: true,`, "}, () => {})"]
+    const result = scanDiff(makeDiff("test/props.test.mjs", lines))
+    assert.deepEqual(result.violations.map((v) => [v.rule, v.line]), [["focused-test", 2]])
+  })
+})
+
+describe("regex literals after a spaced < or <<", () => {
+  it("still starts a regex after a comparison or shift with a space before the slash", () => {
+    const leads = ["const ok = a < /`/.test(s)", "const v = a << /`/.lastIndex", "const ok = a <= /`/.test(s)"]
+    for (const lead of leads) {
+      const lines = [
+        'import { it } from "node:test"',
+        lead,
+        "const fixture = `",
+        `  it.${T.only}("inside the fixture", () => {})`,
+        "`",
+        `it.${T.only}("real", () => {})`,
+      ]
+      const result = scanDiff(makeDiff("test/compare.test.mjs", lines))
+      assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 6]], lead)
+    }
+  })
+})
+
+describe("JSX self-closing tags in the masker", () => {
+  it("does not start a regex at /> after an expression container", () => {
+    const leads = [
+      "render(<Link to={route} />); expect(href).toBe(`/home`)",
+      "render(<Link to={route}/>); expect(href).toBe(`/home`)",
+      "render(<Foo {...props} />); expect(url).toBe(`/a`)",
+    ]
+    for (const lead of leads) {
+      const lines = [
+        'import { it } from "node:test"',
+        lead,
+        "const fixture = `",
+        `  it.${T.only}("inside the fixture", () => {})`,
+        "`",
+        `it.${T.only}("real", () => {})`,
+      ]
+      const result = scanDiff(makeDiff("test/link.test.tsx", lines))
+      assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 6]], lead)
+    }
+  })
+})
+
+describe("title arguments", () => {
+  it("needs the whole first argument to be a string or template literal", () => {
+    const lines = [
+      `test.${T.skip}("webkit" === browserName, "flaky on webkit")`,
+      `test.${T.skip}(\`\${browser}\` === "webkit", "flaky on webkit")`,
+    ]
+    assert.deepEqual(scanDiff(makeDiff("test/browser.test.ts", lines)).violations, [])
+    const titled = scanDiff(makeDiff("test/browser.test.ts", [`test.${T.skip}(\`slow on \${browser}\`, runCase)`]))
+    assert.deepEqual(titled.violations.map((v) => v.rule), ["skipped-test"])
+  })
+})
+
+describe("mutation guards", () => {
+  it("accepts a TypeScript return type on a look-alike receiver's callback", () => {
+    const line = `context.${T.only}("typed", async (): Promise<void> => {})`
+    assert.deepEqual(scanDiff(makeDiff("test/typed.test.ts", [line])).summary, { hard: 1, warn: 0 })
+  })
+
+  it("treats fdescribe, xdescribe and xtest as title receivers", () => {
+    const focused = scanDiff(makeDiff("test/suites.test.mjs", [`${T.fdescribe}("suite", sharedSuite)`]))
+    assert.deepEqual(focused.summary, { hard: 1, warn: 0 })
+    for (const line of [`${T.xdescribe}("suite", sharedSuite)`, `x${"test"}("case", runCase)`]) {
+      assert.deepEqual(scanDiff(makeDiff("test/suites.test.mjs", [line])).violations.map((v) => v.rule), ["skipped-test"], line)
+    }
+  })
+
+  it("keeps the callback of a call whose body runs past the hunk", () => {
+    const diff = makeHunkDiff("test/top.test.mjs", [
+      ' import { it } from "node:test"',
+      '-it("x", () => {',
+      `+it.${T.only}("x", () => {`,
+      "   const a = 1",
+      "   const b = 2",
+      "   const c = 3",
+    ])
+    assert.deepEqual(scanDiff(diff).violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 2]])
+  })
+
+  it("reads a test call's title, options and callback, and nothing after them", () => {
+    const threeArguments = scanDiff(makeDiff("test/suite.test.mjs", [`suite.${T.only}("fast", { timeout: 100 }, () => {})`]))
+    assert.deepEqual(threeArguments.summary, { hard: 1, warn: 0 })
+    // No framework takes a test body as its fourth argument.
+    const fourArguments = scanDiff(makeDiff("test/suite.test.mjs", [`suite.${T.only}("fast", first, second, () => {})`]))
+    assert.deepEqual(fourArguments.violations, [])
+  })
+
+  it("counts an ignore-list entry that is added twice but was there once", () => {
+    const listed = makeHunkDiff("jest.config.js", [
+      " module.exports = {",
+      '-  testPathIgnorePatterns: ["/legacy/"],',
+      "+  testPathIgnorePatterns: [",
+      '+    "/legacy/",',
+      '+    "/legacy/",',
+      "+  ],",
+      " }",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(listed), "test-ignore-added").map((finding) => finding.line), [4])
+    const appended = makeHunkDiff("conftest.py", [
+      ' collect_ignore = ["setup.py"]',
+      '-collect_ignore.append("legacy.py")',
+      '+collect_ignore.append("legacy.py")',
+      '+collect_ignore.append("legacy.py")',
+    ])
+    assert.deepEqual(findingsFor(scanDiff(appended), "test-ignore-added").map((finding) => finding.line), [3])
+  })
+})
+
+describe("scan time on nested typed callbacks and packed imports", () => {
+  const timeScan = (body) => {
+    const script = `
+      import { scanDiff } from ${JSON.stringify(CODE_RULES_URL)}
+      const lines = []
+      ${body}
+      const file = "test/packed.test.mjs"
+      const diff = [
+        "diff --git a/" + file + " b/" + file,
+        "--- a/" + file,
+        "+++ b/" + file,
+        "@@ -0,0 +1," + lines.length + " @@",
+        ...lines.map((line) => "+" + line),
+      ].join("\\n") + "\\n"
+      const started = Date.now()
+      scanDiff(diff, { fileContentsByPath: { [file]: lines.join("\\n") } })
+      process.stdout.write(String(Date.now() - started))
+    `
+    return Number(execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 120_000 }))
+  }
+
+  it("reads only the head of each argument", () => {
+    // Each second argument starts a typed arrow with no "=" after it, so an
+    // unbounded head would run the callback pattern to the end of the line.
+    const elapsed = timeScan(`for (let i = 0; i < 300; i++) lines.push('context.${T.only}("x", (): '.repeat(200))`)
+    assert.ok(elapsed < 3000, `scan took ${elapsed} ms`)
+  })
+
+  it("scans packed import lines behind a fit call", () => {
+    const elapsed = timeScan(`
+      for (let i = 0; i < 100; i++) lines.push("import ".repeat(700))
+      lines.push('${T.fit}("focus", () => {})')
+    `)
+    assert.ok(elapsed < 3000, `scan took ${elapsed} ms`)
+  })
+})

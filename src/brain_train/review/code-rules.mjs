@@ -163,12 +163,15 @@ const PYTHON_ASSERT_STATEMENT = /^\s*assert\b(?!\s*\.)/
 
 // Focus and skip calls: it.only(, describe.skip(, test.concurrent.only(,
 // test.describe.serial.only(, it.only.each(, and fit( / xit( / xdescribe(
-// with an optional .each. Without .each a call needs two arguments: a string
-// title for it / test / describe (and fdescribe, xdescribe, xtest), so
-// it.only("x", runCase) counts; a literal callback for the look-alike names
-// (context, suite, specify, fit, xit), so context.only("tenant") and a
-// fit("linear", points) helper do not. A Jest test.todo("title") placeholder
-// and a Playwright test.skip(condition, "reason") never count.
+// with an optional .each. Without .each a call needs two arguments, and:
+// - for it / test / describe (and fdescribe, xdescribe, xtest), a title that
+//   is a whole string or template literal, so it.only("x", runCase) counts;
+// - for the look-alike names (context, suite, specify, fit, xit), a literal
+//   callback, so context.only("tenant") and a fit("linear", points) helper
+//   do not.
+// A Jest test.todo("title") placeholder and a Playwright
+// test.skip(condition, "reason") never count, and neither does
+// test.skip("webkit" === browserName, "flaky").
 const RUNNER_MARKER_CALL =
   /(?<![\w$.])(it|test|describe|suite|context|specify)(?:\.(?:concurrent|serial|parallel|sequential|describe))*\.(only|skip|todo|fixme)(\.each)?\s*[(`]/g
 const PREFIXED_MARKER_CALL = /(?<![\w$.])(f(?:it|describe)|x(?:it|test|describe|context|specify))(\.each)?\s*[(`]/g
@@ -183,8 +186,10 @@ const TEST_OPTIONS_CALL = /(?<![\w$.])(?:t\.)?(?:test|it|describe|suite)\s*\(/g
 // A literal callback, with an optional TypeScript return type:
 // async (): Promise<void> => {}.
 const CALLBACK_ARG = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*(?::[^=]*?)?=>|[\w$]+\s*=>)/
-// Arguments read per call, and characters read from the start of each one.
-const MAX_CALL_ARGS = 6
+// Arguments read per call: a test declaration takes at most a title, an
+// options object and a callback. Options objects are read in full.
+const MAX_CALL_ARGS = 3
+// Characters read from each argument, after its leading blanks.
 const ARG_HEAD_LENGTH = 300
 // Runner-level retry settings in a test file. Anything else there named
 // retries is usually the code under test.
@@ -527,11 +532,14 @@ function regexLiteralCanStart(text, index) {
   let j = index - 1
   while (j >= 0 && /\s/.test(text[j])) j--
   if (j < 0) return true
-  // `</p>` closes a JSX tag and `i++ / 2` divides. Starting a regex there
-  // would swallow the next quote and flip every later string.
-  if (text[j] === "<") return false
+  // Not a regex: `</p>` closes a JSX tag (a `<` right against the slash;
+  // `a < /re/` with a space still compares), `{expr} />` closes one too, and
+  // `i++ / 2` divides. Starting a regex there would swallow the next quote
+  // and flip every later string.
+  if (text[j] === "<" && j === index - 1) return false
+  if (text[j] === "}" && text[index + 1] === ">") return false
   if ((text[j] === "+" || text[j] === "-") && text[j - 1] === text[j]) return false
-  if (/[(,=:[!&|?{};+\-*%>~^]/.test(text[j])) return true
+  if (/[(,=:[!&|?{};+\-*%<>~^]/.test(text[j])) return true
   const tail = text.slice(Math.max(0, j - 7), j + 1)
   return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(tail)
 }
@@ -1128,15 +1136,15 @@ function lineAtOffset(run, offset) {
 }
 
 // Top-level argument spans of every bracket opened at one of `openers`, in a
-// single pass over the text (at most MAX_CALL_ARGS each). An unclosed call's
-// last span runs to the end of the text.
-function collectArgSpans(masked, openers) {
+// single pass over the text (at most maxArgs each). An unclosed call's last
+// span runs to the end of the text.
+function collectArgSpans(masked, openers, maxArgs = MAX_CALL_ARGS) {
   const spans = new Map()
   if (openers.size === 0) return spans
   const stack = []
   const add = (frame, end) => {
     const list = spans.get(frame.index)
-    if (list.length < MAX_CALL_ARGS) list.push({ start: frame.argStart, end })
+    if (list.length < maxArgs) list.push({ start: frame.argStart, end })
   }
   for (let i = 0; i < masked.length; i++) {
     const ch = masked[i]
@@ -1161,12 +1169,35 @@ function collectArgSpans(masked, openers) {
   return spans
 }
 
-// The trimmed start of each argument span: enough to read a title, an
-// options object or the head of a callback.
+// The start of each argument span, from its first non-blank character:
+// enough to read a title, an options object or the head of a callback.
+// Blanked comments count as blanks, so skipping them first keeps an
+// argument after a long comment visible. The skip stays linear: the leading
+// blank runs of different spans never overlap. `end` is the span's end.
 function argHeads(run, spans = []) {
-  return spans
-    .map(({ start, end }) => trimmedSlice(run.code, run.masked, start, Math.min(end, start + ARG_HEAD_LENGTH)))
-    .filter((arg) => arg.masked)
+  const heads = []
+  for (const { start, end } of spans) {
+    let from = start
+    while (from < end && /\s/.test(run.masked[from])) from++
+    const head = trimmedSlice(run.code, run.masked, from, Math.min(end, from + ARG_HEAD_LENGTH))
+    if (head.masked) heads.push({ ...head, end })
+  }
+  return heads
+}
+
+// Whether run.masked[start, end) is one complete string or template literal
+// and nothing else: "title", but not "webkit" === browserName. Masking left
+// only the delimiting quotes, so the literal closes at the next one.
+function isCompleteLiteral(run, start, end) {
+  const quote = run.masked[start]
+  if (quote !== "\"" && quote !== "'" && quote !== "`") return false
+  let close = start + 1
+  while (close < end && run.masked[close] !== quote) close++
+  if (close >= end) return false
+  for (let i = close + 1; i < end; i++) {
+    if (!/\s/.test(run.masked[i])) return false
+  }
+  return true
 }
 
 // Every focus, skip or options call in a run with its argument spans, and
@@ -1195,7 +1226,7 @@ function analyzeRun(run) {
     }
   }
   const optionsByLine = new Map()
-  for (const spans of collectArgSpans(run.masked, objectOpeners).values()) {
+  for (const spans of collectArgSpans(run.masked, objectOpeners, Infinity).values()) {
     for (const property of argHeads(run, spans)) {
       const key = /^["']?([\w$]+)["']?\s*:/.exec(property.code)
       if (!key) continue
@@ -1302,11 +1333,12 @@ function sideOptionProperties(side) {
 
 // Whether a focus or skip call's arguments look like a test declaration
 // (see RUNNER_MARKER_CALL): two arguments, with a literal callback, or a
-// string title when the receiver is a real test function.
-function qualifiesAsTestCall(args, titleReceiver) {
+// title that is a whole string or template literal when the receiver is a
+// real test function.
+function qualifiesAsTestCall(run, args, titleReceiver) {
   if (args.length < 2) return false
   if (args.slice(1).some((arg) => CALLBACK_ARG.test(arg.masked))) return true
-  return titleReceiver && /^["'`]/.test(args[0].masked)
+  return titleReceiver && isCompleteLiteral(run, args[0].start, args[0].end)
 }
 
 // Names such as fit or xit that the file defines, or imports from a module
@@ -1351,13 +1383,13 @@ function markersOnLine(side, line, optionsByLine, isShadowed, file) {
   }
   for (const match of row.masked.matchAll(RUNNER_MARKER_CALL)) {
     const [, receiver, verb, each] = match
-    if (!each && !qualifiesAsTestCall(argsOf(match), TITLE_RECEIVERS.has(receiver))) continue
+    if (!each && !qualifiesAsTestCall(place.run, argsOf(match), TITLE_RECEIVERS.has(receiver))) continue
     add(verb === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
   }
   for (const match of row.masked.matchAll(PREFIXED_MARKER_CALL)) {
     const [, name, each] = match
     if (isShadowed(name)) continue
-    if (!each && !qualifiesAsTestCall(argsOf(match), TITLE_RECEIVERS.has(name))) continue
+    if (!each && !qualifiesAsTestCall(place.run, argsOf(match), TITLE_RECEIVERS.has(name))) continue
     add(name.startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
   }
   for (const property of optionsByLine.get(line) ?? []) {
