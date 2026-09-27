@@ -142,6 +142,15 @@ class SessionEngine:
                 log.warning("Session %d held: template '%s' is missing and the custom templates "
                             "failed to load", session["id"], session.get("template_id"))
                 self._held.add(session["id"])
+                self._messages.add(
+                    sender="system",
+                    text=(f"Session on hold: {session.get('template_name', '?')}. Its template is missing and "
+                          "custom_templates.json couldn't be read. Fix the file and restart to continue it, "
+                          "or end it."),
+                    msg_type="system",
+                    channel=session.get("channel", "general"),
+                    metadata={"session_id": session["id"], "held": True},
+                )
                 continue
             else:
                 reason = "template not found"
@@ -409,6 +418,10 @@ class SessionEngine:
 
     def _enrich(self, session: dict) -> dict:
         """Add computed fields to a session dict for the frontend."""
+        if session.get("id") in self._held:
+            # Whatever the id names now is not the template the run started on.
+            session["held"] = True
+            return session
         tmpl = self._store.get_template(session["template_id"])
         if tmpl:
             phases = tmpl.get("phases", [])

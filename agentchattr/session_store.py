@@ -91,7 +91,7 @@ class SessionStore:
                     self._custom_templates_unreadable = True
                     log.warning("Failed to load custom templates: %s is not a list", custom_path.name)
                 self._load_custom_templates(custom if isinstance(custom, list) else [], custom_path)
-            except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
+            except (json.JSONDecodeError, KeyError, UnicodeDecodeError, OSError) as exc:
                 self._custom_templates_unreadable = True
                 log.warning("Failed to load custom templates: %s", exc)
 
@@ -225,13 +225,19 @@ class SessionStore:
 
         Raises CustomTemplatesUnreadable rather than start from an empty list
         when the file can't be read: the rewrite would replace every template
-        in it.
+        in it. Also for the rest of a start whose load failed, even once the
+        file is repaired: its templates were never loaded, so a save could
+        replace one the user never saw.
         """
+        if self._custom_templates_unreadable:
+            raise CustomTemplatesUnreadable(
+                f"{custom_path.name} couldn't be read when agentchattr started; "
+                "fix it and restart before changing templates")
         if not custom_path.exists():
             return []
         try:
             custom = json.loads(custom_path.read_text("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
             raise CustomTemplatesUnreadable(
                 f"{custom_path.name} can't be read ({exc}); fix it before changing templates") from exc
         if not isinstance(custom, list):

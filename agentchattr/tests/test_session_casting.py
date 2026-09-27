@@ -227,8 +227,8 @@ class ResumeTests(unittest.TestCase):
         (self.root / "session_runs.json").write_text(json.dumps(runs), "utf-8")
         sessions = SessionStore(str(self.root / "session_runs.json"), templates_dir=str(templates_dir))
         trigger = RecordingTrigger()
-        engine = SessionEngine(sessions, MessageStore(str(self.root / "messages.jsonl")), trigger,
-                               FakeRegistry(["alpha", "beta"]))
+        self.messages = MessageStore(str(self.root / "messages.jsonl"))
+        engine = SessionEngine(sessions, self.messages, trigger, FakeRegistry(["alpha", "beta"]))
         engine.resume_active_sessions()
         self.engine = engine
         return sessions, trigger
@@ -403,6 +403,25 @@ class ResumeTests(unittest.TestCase):
         self.assertIsNone(self.engine.get_allowed_agent("one"))
         self.assertEqual(sessions.get(run["id"])["state"], "waiting")
         self.assertEqual(sessions.get(run["id"])["current_phase"], 0)
+        # The session bar must not show the redraft's phases for it.
+        shown = next(s for s in self.engine.list_active() if s["id"] == run["id"])
+        self.assertTrue(shown["held"])
+        self.assertNotIn("phase_name", shown)
+        self.assertNotIn("current_agent", shown)
+
+    def test_a_held_run_is_announced_in_its_channel(self):
+        custom = self.root / "custom_templates.json"
+        custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        run = dict(self.started_run("pair-review", {"builder": "alpha", "reviewer": "beta"}), state="waiting")
+        custom.write_text("[{", "utf-8")
+
+        self.restart([run])
+
+        notices = [json.loads(line) for line in (self.root / "messages.jsonl").read_text("utf-8").splitlines()]
+        held = [m for m in notices if m.get("channel") == "one" and m.get("sender") == "system"]
+        self.assertEqual(len(held), 1)
+        self.assertIn("custom_templates.json", held[0]["text"])
+        self.assertIn("end", held[0]["text"])
 
     def test_a_non_list_custom_file_counts_as_unreadable(self):
         custom = self.root / "custom_templates.json"
@@ -577,6 +596,25 @@ class UnreadableCustomTemplatesTests(unittest.TestCase):
             sessions.save_custom_template(pair_review_template(id="fresh"))
 
         self.assertEqual(self.custom.read_text("utf-8"), '{"id": "mine"}')
+
+    def test_changes_stay_refused_after_the_file_is_repaired_mid_start(self):
+        # Review of 5e23251: the templates in the repaired file were never
+        # loaded, so a save could replace one the user never saw.
+        self.custom.write_text("[{", "utf-8")
+        sessions = self.store()
+        self.custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.save_custom_template(pair_review_template(name="Redraft"))
+
+        self.assertEqual(json.loads(self.custom.read_text("utf-8"))[0]["name"], "Pair Review")
+
+    def test_a_custom_file_it_may_not_read_does_not_stop_the_store(self):
+        self.custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        self.custom.chmod(0)
+        self.addCleanup(self.custom.chmod, 0o644)
+
+        self.assertTrue(self.store().custom_templates_unreadable())
 
     def test_a_file_cut_mid_character_does_not_stop_the_store(self):
         self.custom.write_bytes(b'[{"id": "caf\xc3')
