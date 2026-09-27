@@ -621,6 +621,24 @@ class UnreadableCustomTemplatesTests(unittest.TestCase):
 
         self.assertEqual(json.loads(self.custom.read_text("utf-8"))[0]["name"], "Pair Review")
 
+    def test_changes_are_refused_when_a_rename_at_load_could_not_be_saved(self):
+        # Codex on 92c87da: the file still holds the old id, so a delete would
+        # miss the entry and report success, and a save would write both ids.
+        mine = dict(load_template("code-review"), name="My tuned review")
+        self.custom.write_text(json.dumps([mine]), "utf-8")
+        self.custom.chmod(0o444)
+        self.addCleanup(self.custom.chmod, 0o644)
+        sessions = self.store()
+        self.assertEqual(sessions.get_template("code-review-custom")["name"], "My tuned review")
+
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.delete_custom_template("code-review-custom")
+        with self.assertRaises(CustomTemplatesUnreadable):
+            sessions.save_custom_template(dict(mine, id="code-review-custom", name="Redraft"))
+
+        self.assertEqual([t["id"] for t in json.loads(self.custom.read_text("utf-8"))], ["code-review"])
+        self.assertEqual(sessions.get_template("code-review-custom")["name"], "My tuned review")
+
     def test_a_custom_file_it_may_not_read_does_not_stop_the_store(self):
         self.custom.write_text(json.dumps([pair_review_template()]), "utf-8")
         self.custom.chmod(0)

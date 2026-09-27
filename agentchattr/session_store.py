@@ -59,7 +59,8 @@ def template_fingerprint(tmpl: dict) -> str:
 
 
 class CustomTemplatesUnreadable(RuntimeError):
-    """custom_templates.json exists but can't be read, so writing it would lose what it holds."""
+    """custom_templates.json can't safely be rewritten: it couldn't be read, so
+    writing it would lose what it holds, or it still has ids renamed only in memory."""
 
 
 class SessionStore:
@@ -72,6 +73,7 @@ class SessionStore:
         self._callbacks: list = []
         self._templates: dict[str, dict] = {}
         self._custom_templates_unreadable = False
+        self._custom_templates_rename_unsaved = False
         self._load()
 
         # Warn about legacy file
@@ -167,9 +169,12 @@ class SessionStore:
                 _write_json_atomic(custom_path, custom)
             except OSError as exc:
                 # Starting matters more than persisting: the rename holds in
-                # memory and is tried again at the next load.
+                # memory and is tried again at the next load. Until then the
+                # file still has the old ids, so a delete would miss the entry
+                # and a save would write both ids; _read_custom_file refuses both.
+                self._custom_templates_rename_unsaved = True
                 log.warning("Could not save the rename of custom templates that shared a built-in id (%s); "
-                            "it holds until restart", exc)
+                            "it holds until restart, and template changes are refused until then", exc)
 
     def get_templates(self) -> list[dict]:
         return list(self._templates.values())
@@ -233,6 +238,11 @@ class SessionStore:
             raise CustomTemplatesUnreadable(
                 f"{custom_path.name} couldn't be read when agentchattr started; "
                 "fix it and restart before changing templates")
+        if self._custom_templates_rename_unsaved:
+            raise CustomTemplatesUnreadable(
+                f"{custom_path.name} couldn't be updated when agentchattr started, so it still has "
+                "template ids that were renamed only in memory; make it writable and restart "
+                "before changing templates")
         if not custom_path.exists():
             return []
         try:
