@@ -117,7 +117,9 @@ class SessionEngine:
         broken turn as soon as its agent answers. So is one whose template
         is gone (a draft, which lives only in memory) or changed since it
         started, including a built-in changed by an upgrade: resuming it
-        could run a role, phase or prompt it didn't start with.
+        could run a role, phase or prompt it didn't start with. A run whose
+        template is missing while custom_templates.json can't be read is left
+        alone for a later start.
 
         Only re-trigger 'active' sessions. 'waiting' sessions already had
         their trigger sent before the restart — re-triggering would
@@ -127,7 +129,16 @@ class SessionEngine:
             if session.get("state") not in ("active", "waiting", "paused"):
                 continue
             tmpl = self._store.get_template(session.get("template_id", ""))
-            reason = self._resume_blocker(session, tmpl) if tmpl else "template not found"
+            if tmpl:
+                reason = self._resume_blocker(session, tmpl)
+            elif self._store.custom_templates_unreadable():
+                # Its template may be in the file that didn't load, and ending
+                # the run can't be undone once the file is repaired.
+                log.warning("Session %d left as is: template '%s' is missing and the custom templates "
+                            "failed to load", session["id"], session.get("template_id"))
+                continue
+            else:
+                reason = "template not found"
             if reason:
                 log.warning("Session %d not resumed: %s", session["id"], reason)
                 self._store.interrupt(session["id"], reason)

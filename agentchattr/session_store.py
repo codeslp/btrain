@@ -67,6 +67,7 @@ class SessionStore:
         self._lock = threading.Lock()
         self._callbacks: list = []
         self._templates: dict[str, dict] = {}
+        self._custom_templates_unreadable = False
         self._load()
 
         # Warn about legacy file
@@ -82,8 +83,12 @@ class SessionStore:
         if custom_path.exists():
             try:
                 custom = json.loads(custom_path.read_text("utf-8"))
+                if not isinstance(custom, list):
+                    self._custom_templates_unreadable = True
+                    log.warning("Failed to load custom templates: %s is not a list", custom_path.name)
                 self._load_custom_templates(custom if isinstance(custom, list) else [], custom_path)
             except (json.JSONDecodeError, KeyError) as exc:
+                self._custom_templates_unreadable = True
                 log.warning("Failed to load custom templates: %s", exc)
 
     # --- Persistence ---
@@ -159,14 +164,18 @@ class SessionStore:
             except OSError as exc:
                 # Starting matters more than persisting: the rename holds in
                 # memory and is tried again at the next load.
-                log.warning("Could not save renamed custom templates to %s (%s); "
-                            "the rename holds until restart", custom_path, exc)
+                log.warning("Could not save the rename of custom templates that shared a built-in id (%s); "
+                            "it holds until restart", exc)
 
     def get_templates(self) -> list[dict]:
         return list(self._templates.values())
 
     def get_template(self, template_id: str) -> dict | None:
         return self._templates.get(template_id)
+
+    def custom_templates_unreadable(self) -> bool:
+        """True when custom_templates.json exists but couldn't be read as a list of templates."""
+        return self._custom_templates_unreadable
 
     def _mark_runs_on_renamed_ids(self, renamed: dict[str, str]):
         """Record the rename on each unfinished run that has no template fingerprint.
@@ -185,7 +194,8 @@ class SessionStore:
                     s["template_copy_renamed_to"] = new_id
                     marked = True
             if marked:
-                self._save()
+                # Atomic: a crash mid-write must not cost every saved run.
+                _write_json_atomic(self._path, self._sessions)
 
     def is_builtin_template(self, template_id: str) -> bool:
         """True for a template shipped in session_templates/.

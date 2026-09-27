@@ -295,14 +295,35 @@ class ResumeTests(unittest.TestCase):
         # R7 (round 3). Dropping the `if tmpl` guard survived. A draft run's
         # template lives only in memory, so after any restart its id resolves
         # to nothing, and resuming raised AttributeError as the server started.
-        run = dict(self.saved_run(1, self.DISTINCT, "active", "one"), template_id="draft-7", template_name="A draft")
+        runs = [dict(self.saved_run(1, self.DISTINCT, "active", "one"), template_id="draft-7", template_name="A draft"),
+                dict(self.saved_run(2, self.DISTINCT, "waiting", "two"), template_id="draft-8", template_name="A draft")]
+
+        sessions, trigger = self.restart(runs)
+
+        self.assertEqual(trigger.calls, [])
+        # Ended, not left waiting: a later draft that reuses the id must not pick the run up.
+        for run_id in (1, 2):
+            self.assertEqual(sessions.get(run_id)["state"], "interrupted")
+            self.assertEqual(sessions.get(run_id)["interrupt_reason"], "template not found")
+
+    def test_a_run_is_kept_while_the_custom_templates_fail_to_load(self):
+        # Review of 160f172: its template may be in the file that didn't load,
+        # and ending the run can't be undone once the file is repaired.
+        custom = self.root / "custom_templates.json"
+        custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        run = dict(self.started_run("pair-review", {"builder": "alpha", "reviewer": "beta"}), state="waiting")
+        custom.write_text("[{", "utf-8")  # a hand-edit typo
 
         sessions, trigger = self.restart([run])
 
         self.assertEqual(trigger.calls, [])
-        # Ended, not left waiting: a later draft that reuses the id must not pick the run up.
-        self.assertEqual(sessions.get(1)["state"], "interrupted")
-        self.assertEqual(sessions.get(1)["interrupt_reason"], "template not found")
+        self.assertEqual(sessions.get(run["id"])["state"], "waiting")
+
+        custom.write_text(json.dumps([pair_review_template()]), "utf-8")
+        sessions, _ = self.restart([sessions.get(run["id"])])
+
+        self.assertEqual(sessions.get(run["id"])["state"], "waiting")
+        self.assertNotIn("interrupt_reason", sessions.get(run["id"]))
 
     def test_a_valid_saved_run_still_resumes(self):
         sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one")])
@@ -330,11 +351,12 @@ class ResumeTests(unittest.TestCase):
         (self.root / "custom_templates.json").write_text(json.dumps([self.tuned_code_review()]), "utf-8")
 
         sessions, trigger = self.restart([self.saved_run(1, self.DISTINCT, "active", "one"),
-                                          self.saved_run(2, self.DISTINCT, "waiting", "two")])
+                                          self.saved_run(2, self.DISTINCT, "waiting", "two"),
+                                          self.saved_run(3, self.DISTINCT, "paused", "three")])
 
         self.assertEqual(sessions.get_template("code-review-custom")["name"], "Code Review")
         self.assertEqual(trigger.calls, [])
-        for run_id in (1, 2):
+        for run_id in (1, 2, 3):
             run = sessions.get(run_id)
             self.assertEqual(run["state"], "interrupted")
             self.assertEqual(
@@ -357,6 +379,25 @@ class ResumeTests(unittest.TestCase):
 
         self.assertEqual(trigger.calls, [])
         self.assertEqual(sessions.get(1)["state"], "interrupted")
+        self.assertIn("A custom template shared the id 'code-review'", sessions.get(1)["interrupt_reason"])
+
+    def test_a_legacy_run_is_ended_when_its_mark_could_not_be_saved_at_first(self):
+        # If the rewrite went first, a start that couldn't save the mark would
+        # still rename the copy on disk, and the next start would see neither.
+        custom = self.root / "custom_templates.json"
+        runs_file = self.root / "session_runs.json"
+        custom.write_text(json.dumps([self.tuned_code_review()]), "utf-8")
+        runs_file.write_text(json.dumps([self.saved_run(1, self.DISTINCT, "waiting", "one")]), "utf-8")
+        runs_file.chmod(0o444)
+        try:
+            SessionStore(str(runs_file), templates_dir=str(TEMPLATES_DIR))  # a start that can't save the mark
+        finally:
+            runs_file.chmod(0o644)
+        self.assertEqual([t["id"] for t in json.loads(custom.read_text("utf-8"))], ["code-review"])
+
+        sessions, trigger = self.restart(json.loads(runs_file.read_text("utf-8")))
+
+        self.assertEqual(trigger.calls, [])
         self.assertIn("A custom template shared the id 'code-review'", sessions.get(1)["interrupt_reason"])
 
     def test_a_run_started_on_the_builtin_resumes_after_a_custom_copy_is_renamed(self):
@@ -402,6 +443,9 @@ class ResumeTests(unittest.TestCase):
             "distinct_roles": lambda t: t.pop("distinct_roles"),
             "the participants": lambda t: t["phases"][review]["participants"].reverse(),
             "the name": lambda t: t.update(name="Tuned"),
+            "the roles": lambda t: t["roles"].append("observer"),
+            "the output phase": lambda t: t["phases"][review].update(is_output=not t["phases"][review].get("is_output", False)),
+            "a phase name": lambda t: t["phases"][review].update(name="Critique"),
         }
         for label, change in edits.items():
             with self.subTest(edit=label):
