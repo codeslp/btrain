@@ -1,0 +1,145 @@
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
+import { contextManifestHash, contextSourceHash, selectContext } from "../../src/brain_train/jev/context.mjs"
+
+const ref = "https://example.test/artifacts/1"
+const answer = (choice) => ({
+  ok: true,
+  model: "local-fixture",
+  answers: { signal: { choice, probabilities: Object.fromEntries(
+    ["full", "reference", "omit"].map((value) => [value, value === choice ? 1 : 0]),
+  ) } },
+})
+const item = (id, kind, extra = {}) => {
+  const value = {
+    id, kind, sourceRef: ref, content: `private ${id}`, tokens: 100,
+    evidenceClass: kind === "artifact" ? "low-risk-artifact" : kind === "transcript" ? "older-transcript" : undefined,
+    ...extra,
+  }
+  return value
+}
+const frozen = (items) => items.map((value) => ({
+  id: value.id, sourceRef: value.sourceRef, sourceSnapshotHash: contextSourceHash(value),
+  kind: value.kind, evidenceClass: value.evidenceClass ?? "unclassified", pinned: value.pinned === true,
+}))
+const offline = (options) => {
+  const frozenSources = options.frozenSources ?? frozen(options.items)
+  return selectContext({
+    ...options, frozenSources,
+    expectedManifestHash: options.expectedManifestHash ?? contextManifestHash(frozenSources),
+    mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+  })
+}
+
+describe("offline context selection", () => {
+  it("never calls a provider for required evidence and keeps it full", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const items = ["instruction", "task", "constraint", "lock", "state", "finding", "error"].map((kind) => item(kind, kind))
+    const plan = await offline({ kind: "dispatch", items, provider })
+    assert.deepEqual(plan.selections.map(({ selection }) => selection), Array(items.length).fill("full"))
+    assert.equal(calls, 0)
+    assert.equal(plan.traces.length, 0)
+  })
+
+  it("treats explicit pins and unknown kinds as required", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const plan = await offline({ kind: "dispatch", items: [item("a", "artifact", { pinned: true }), item("b", "unknown")], provider })
+    assert.deepEqual(plan.selections.map(({ selection }) => selection), ["full", "full"])
+    assert.equal(calls, 0)
+  })
+
+  it("permits recoverable optional artifact references only offline", async () => {
+    const source = item("a", "artifact")
+    const plan = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => answer("reference") } })
+    assert.deepEqual(plan.selections, [{ id: "a", selection: "reference", sourceSnapshotHash: contextSourceHash(source) }])
+    assert.equal(plan.traces[0].outcome, "decision")
+    assert.equal(JSON.stringify(plan).includes("private a"), false)
+  })
+
+  it("retains full content on invalid output, low confidence, and provider failure", async () => {
+    const cases = [
+      { ok: false, reason: "timeout" },
+      answer("delete"),
+      { ...answer("omit"), answers: { signal: { choice: "omit", probabilities: { full: 0.05, reference: 0.2, omit: 0.75 } } } },
+    ]
+    for (const response of cases) {
+      const plan = await offline({ kind: "dispatch", items: [item("a", "artifact")], provider: { localOnly: true, decide: async () => response } })
+      assert.equal(plan.selections[0].selection, "full")
+    }
+  })
+
+  it("keeps full content when off, private provider is remote, or a source reference is absent", async () => {
+    let calls = 0
+    const provider = { decide: async () => { calls += 1; return answer("omit") } }
+    for (const [mode, currentProvider, sourceRef] of [["off", provider, ref], ["offline", provider, ref], ["offline", { localOnly: true, decide: provider.decide }, null]]) {
+      const plan = await selectContext({ kind: "dispatch", items: [item("a", "artifact", { sourceRef })], provider: currentProvider, mode, modelPin: "local-fixture", codeRevision: "a".repeat(40) })
+      assert.equal(plan.selections[0].selection, "full")
+    }
+    assert.equal(calls, 0)
+  })
+
+  it("keeps transcript selection distinct and pins mismatched optional kinds", async () => {
+    const provider = { localOnly: true, decide: async () => answer("omit") }
+    const transcript = await offline({ kind: "transcript", items: [item("turn-1", "transcript")], provider })
+    const dispatch = await offline({ kind: "dispatch", items: [item("turn-1", "transcript")], provider })
+    assert.equal(transcript.selections[0].selection, "omit")
+    assert.equal(dispatch.selections[0].selection, "full")
+    assert.notEqual(transcript.familyPolicyHash, dispatch.familyPolicyHash)
+  })
+
+  it("caps total provider calls and keeps later optional items full", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const items = Array.from({ length: 20 }, (_, index) => item(String(index), "artifact"))
+    const plan = await offline({ kind: "dispatch", items, provider })
+    assert.equal(calls, 16)
+    assert.deepEqual(plan.selections.map(({ selection }) => selection), [
+      ...Array(16).fill("omit"), ...Array(4).fill("full"),
+    ])
+    assert.equal(plan.traces[16].reason, "ineligible")
+  })
+
+  it("rejects duplicate IDs, unbounded inputs, and invalid estimates", async () => {
+    const provider = { localOnly: true, decide: async () => answer("omit") }
+    for (const items of [[item("a", "artifact"), item("a", "artifact")], [item("a", "artifact", { tokens: -1 })], Array(257).fill(0).map((_, i) => item(String(i), "artifact"))]) {
+      await assert.rejects(() => offline({ kind: "dispatch", items, provider }))
+    }
+  })
+
+  it("pins mandatory content despite an optional surface label", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const items = [item("current", "artifact", { evidenceClass: "current-state" }), item("error", "transcript", { evidenceClass: "recent-error" }), item("unknown", "artifact", { evidenceClass: undefined })]
+    const dispatch = await offline({ kind: "dispatch", items, provider })
+    const transcript = await offline({ kind: "transcript", items, provider })
+    assert.deepEqual(dispatch.selections.map(({ selection }) => selection), ["full", "full", "full"])
+    assert.deepEqual(transcript.selections.map(({ selection }) => selection), ["full", "full", "full"])
+    assert.equal(calls, 0)
+    const original = item("current", "artifact", { evidenceClass: "current-state" })
+    const tampered = { ...original, evidenceClass: "low-risk-artifact" }
+    const manifest = frozen([original])
+    const relabeled = await offline({ kind: "dispatch", items: [tampered], frozenSources: manifest, expectedManifestHash: contextManifestHash(manifest), provider })
+    assert.equal(relabeled.selections[0].selection, "full")
+    assert.equal(calls, 0)
+  })
+
+  it("fails closed on changed source content and a mismatched model pin", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const source = item("a", "artifact")
+    const originalSources = frozen([source])
+    const originalManifestHash = contextManifestHash(originalSources)
+    const changed = await offline({ kind: "dispatch", items: [{ ...source, content: "changed after snapshot", sourceSnapshotHash: contextSourceHash({ ...source, content: "changed after snapshot" }) }], frozenSources: originalSources, expectedManifestHash: originalManifestHash, provider })
+    assert.equal(changed.selections[0].selection, "full")
+    assert.equal(calls, 0)
+    const changedManifest = await offline({ kind: "dispatch", items: [source], frozenSources: [{ ...originalSources[0], sourceRef: "https://example.test/mutable" }], expectedManifestHash: originalManifestHash, provider })
+    assert.equal(changedManifest.selections[0].selection, "full")
+    assert.equal(calls, 0)
+    const wrongModel = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => ({ ...answer("omit"), model: "other-model" }) } })
+    assert.equal(wrongModel.selections[0].selection, "full")
+    assert.equal(wrongModel.traces[0].reason, "model-mismatch")
+    await assert.rejects(() => selectContext({ kind: "dispatch", items: [source], provider, mode: "offline" }), /pinned model/)
+  })
+})
