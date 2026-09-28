@@ -36,6 +36,12 @@ describe("frozen Jev label manifest", () => {
     assert.throws(() => freezeLabeledManifest({ sources, cases: [entry("s1", 1, "a", "train"), entry("s3", 2, "a", "test")], pins, labels: ["feedback"] }), /Template group crosses splits/)
   })
 
+  it("keeps the same template in one split across repositories", () => {
+    const sources = [snapshot("s1", 1), { ...snapshot("s2", 1), repository: "other/repo" }]
+    const second = { ...entry("s2", 1, "shared", "test"), repository: "other/repo" }
+    assert.throws(() => freezeLabeledManifest({ sources, cases: [entry("s1", 1, "shared", "train"), second], pins, labels: ["feedback"] }), /Template group crosses splits/)
+  })
+
   it("requires two independent annotations and explicit adjudication", () => {
     const sources = [snapshot("s1", 1)]
     const bad = entry("s1", 1, "a")

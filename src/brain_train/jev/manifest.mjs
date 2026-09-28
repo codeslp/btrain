@@ -66,7 +66,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     if (item.annotations.some((a) => !a.by || !labels.includes(a.label))) throw new Error("Invalid annotation")
     if (!item.adjudication?.by || item.adjudication.label !== item.label || !item.adjudication.reason) throw new Error("Explicit adjudication is required")
     const prGroup = `${item.repository}#${item.prNumber}`
-    const templateGroup = `${item.repository}:${item.templateGroup}`
+    const templateGroup = item.templateGroup
     if (prSplits.has(prGroup) && prSplits.get(prGroup) !== item.split) throw new Error("PR group crosses splits")
     if (templateSplits.has(templateGroup) && templateSplits.get(templateGroup) !== item.split) throw new Error("Template group crosses splits")
     prSplits.set(prGroup, item.split)

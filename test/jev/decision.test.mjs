@@ -55,6 +55,15 @@ describe("offline decision gateway", () => {
     assert.deepEqual([timeout.outcome, timeout.reason, timeout.prediction], ["failure", "timeout", undefined])
   })
 
+  it("keeps malformed provider latency out of returned traces", async () => {
+    const args = { family, candidate, mode: "offline", provider: fakeProvider({ ...answer(), latencyMs: { privateText: "secret latency" } }) }
+    const decided = await decideCandidate(args)
+    const failed = await decideCandidate({ ...args, provider: fakeProvider({ ok: false, reason: "timeout", latencyMs: "secret latency" }) })
+    assert.equal(decided.latencyMs, null)
+    assert.equal(failed.latencyMs, null)
+    assert.equal(JSON.stringify([decided, failed]).includes("secret latency"), false)
+  })
+
   it("fails closed when input or action policy code throws", async () => {
     const inputFailure = createDecisionFamily({ ...family, inputBuilder: () => { throw new Error("bad input") } })
     const skipped = await decideCandidate({ family: inputFailure, candidate, provider: fakeProvider(answer()), mode: "offline" })

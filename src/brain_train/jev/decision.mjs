@@ -7,6 +7,7 @@ const hash = (value) => createHash("sha256").update(JSON.stringify(value)).diges
 const outcomes = new Set(["off", "offline"])
 const failureReasons = new Set(["timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled"])
 const traceReasons = new Set(["mode-off", "ineligible", "invalid-baseline", "privacy-denied", "call-budget", "invalid-source-reference", "invalid-input", "input-budget", "provider-unavailable", "timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled", "model-mismatch", "invalid-answer", "below-threshold", "no-permitted-action"])
+const nonnegative = (value) => Number.isFinite(value) && value >= 0 ? value : null
 
 function opaqueId(value) {
   if (typeof value !== "string" || !value) return null
@@ -57,7 +58,6 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     || traceRefs.some((ref) => !verifiedRefs.has(ref))) {
     throw new Error("Trace source provenance does not match frozen evidence")
   }
-  const nonnegative = (value) => Number.isFinite(value) && value >= 0 ? value : null
   const record = {
     family: family.id,
     questionVersion: family.questionVersion,
@@ -123,7 +123,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   if (!encoded || Buffer.byteLength(encoded) > family.maxInputBytes) return skip("input-budget")
   const inputHash = hash(boundedState)
   const attempted = { ...base, inputHash, provider: opaqueId(provider?.id || "injected"), modelPin: opaqueId(modelPin), attemptedCall: true }
-  const fail = (reason, latencyMs = null) => ({ ...attempted, outcome: "failure", reason, failureClass: reason === "invalid-answer" ? "response-shape" : "provider", latencyMs, actionTaken: "none" })
+  const fail = (reason, latencyMs = null) => ({ ...attempted, outcome: "failure", reason, failureClass: reason === "invalid-answer" ? "response-shape" : "provider", latencyMs: nonnegative(latencyMs), actionTaken: "none" })
   if (typeof provider?.decide !== "function") return fail("provider-unavailable")
   let response
   let timer
@@ -142,7 +142,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   try { proposedAction = family.actionPolicy(answer.choice) } catch { return fail("invalid-answer", response.latencyMs ?? null) }
   if (proposedAction !== null && !family.allowedActions.includes(proposedAction)) return fail("invalid-answer", response.latencyMs ?? null)
   const confidence = answer.probabilities[answer.choice]
-  const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: opaqueId(response.model), latencyMs: response.latencyMs ?? null, inputTokens: Number.isFinite(response.usage?.input_tokens) ? response.usage.input_tokens : null, cost: Number.isFinite(response.usage?.cost) ? response.usage.cost : null }
+  const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: opaqueId(response.model), latencyMs: nonnegative(response.latencyMs), inputTokens: nonnegative(response.usage?.input_tokens), cost: nonnegative(response.usage?.cost) }
   return proposedAction && confidence >= family.threshold
     ? { ...common, outcome: "decision", suggestedAction: proposedAction, actionTaken: "none" }
     : { ...common, outcome: "abstain", reason: proposedAction ? "below-threshold" : "no-permitted-action", actionTaken: "none" }
