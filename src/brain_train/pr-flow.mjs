@@ -454,6 +454,16 @@ function normalizedSourceRef(value) {
   } catch { return null }
 }
 
+function frozenReviewedCommitMatches(source, body, headSha) {
+  const attested = source.reviewedCommit
+  if (!commitMatches(attested, headSha)) return false
+  if (attested.length === 40) return true
+  return source.surface === "issue"
+    && source.eventAt && source.updatedAt
+    && Date.parse(source.eventAt) === Date.parse(source.updatedAt)
+    && extractReviewedCommit(body).toLowerCase() === attested.toLowerCase()
+}
+
 // Build source-bound cases for offline replay. A captured full reviewed-commit
 // attestation can prove the evaluated commit without claiming an event-time head.
 // A later polling-time head alone never makes an unknown event head current.
@@ -462,6 +472,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
   const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
   if (["merged", "closed", "draft"].includes(baseline.overall)) return { candidates: [], excluded: [] }
   const headSha = baseline.pr.headSha
+  if (!/^[a-f0-9]{40}$/i.test(headSha || "")) throw new Error("A full PR head SHA is required for offline replay")
   const repository = sourceRepository(pr)
   const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
   const selected = bots.flatMap((bot) => semanticCandidatesForBot({
@@ -480,8 +491,8 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     else if (!repository || source.repository !== repository || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
     else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
     else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
-    else if (source.reviewedCommit && source.reviewedCommit !== headSha) reason = "stale-reviewed-commit"
-    else if ((!source.eventHead || source.eventHead === "unknown") && source.reviewedCommit !== headSha) reason = "unknown-event-head"
+    else if (source.reviewedCommit && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "stale-reviewed-commit"
+    else if ((!source.eventHead || source.eventHead === "unknown") && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "unknown-event-head"
     else if (!candidateSourceRef || candidateSourceRef !== source.sourceRef) reason = "source-ref-mismatch"
     else if (crypto.createHash("sha256").update(candidate.body).digest("hex") !== source.sourceHash) reason = "source-hash-mismatch"
     if (reason) {
@@ -499,7 +510,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
       privacyClass: "private",
       callIndex: 0,
       reviewedCommit: headSha,
-      headEvidence: source.eventHead === headSha ? "event-head" : "reviewed-commit",
+      headEvidence: source.eventHead === headSha ? "event-head" : source.reviewedCommit.length === 40 ? "reviewed-commit" : "reviewed-commit-prefix",
     })
   }
   return { candidates, excluded }

@@ -1,9 +1,10 @@
 import { decideCandidate } from "./decision.mjs"
-import { datasetHashFor, sourceSnapshotHashFor } from "./manifest.mjs"
+import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
 import { createHash } from "node:crypto"
 
 const ratio = (numerator, denominator) => denominator ? numerator / denominator : null
-const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor((values.length - 1) * fraction))] : null
+// Nearest rank includes the slowest observation in p95 for small samples.
+const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.ceil(fraction * values.length) - 1] : null
 
 function verifiedCandidate(item, source, candidate) {
   const contentHash = typeof candidate.sourceContent === "string"
@@ -77,10 +78,13 @@ export function summarizeReplay(rows, labels) {
 export async function replayManifest({ manifest, family, candidates, provider }) {
   if (!manifest?.datasetHash || !Array.isArray(manifest.cases) || !Array.isArray(manifest.labels)) throw new Error("Frozen manifest is required")
   if (manifest.sourceSnapshotHash !== sourceSnapshotHashFor(manifest.sources)) throw new Error("Manifest source snapshot hash does not match provenance")
-  if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash)) throw new Error("Manifest dataset hash does not match frozen cases")
   if (manifest.pins?.policyHash !== family.policyHash) throw new Error("Manifest policy hash does not match family")
   if (manifest.pins?.family !== family.id || manifest.pins?.questionVersion !== family.questionVersion) throw new Error("Manifest family version does not match")
   if (!manifest.pins?.model || !manifest.pins?.codeRevision) throw new Error("Manifest model and code revision pins are required")
+  if (!validCodeRevision(manifest.pins.codeRevision)) throw new Error("Invalid code revision pin")
+  if (manifest.labels.length !== family.choices.length || new Set(manifest.labels).size !== family.choices.length
+    || manifest.labels.some((label) => !family.choices.includes(label))) throw new Error("Manifest label catalog does not match family choices")
+  if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash, manifest.pins)) throw new Error("Manifest dataset hash does not match frozen cases and pins")
   const sources = new Map(manifest.sources.map((source) => [source.id, source]))
   for (const item of manifest.cases) {
     const source = sources.get(item.sourceId)
@@ -92,12 +96,14 @@ export async function replayManifest({ manifest, family, candidates, provider })
     if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
     const source = sources.get(item.sourceId)
     const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
-    rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: item.eligible, trace })
+    rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: item.eligible, privacyClass: item.privacyClass, trace })
   }
   const splits = {}
+  const syntheticControls = {}
   for (const split of ["train", "calibration", "test", "all"]) {
     const selected = split === "all" ? rows : rows.filter((row) => row.split === split)
-    splits[split] = summarizeReplay(selected, manifest.labels)
+    splits[split] = summarizeReplay(selected.filter((row) => row.privacyClass !== "synthetic"), manifest.labels)
+    syntheticControls[split] = summarizeReplay(selected.filter((row) => row.privacyClass === "synthetic"), manifest.labels)
   }
-  return { schemaVersion: 1, datasetHash: manifest.datasetHash, pins: manifest.pins, splits, rows }
+  return { schemaVersion: 1, datasetHash: manifest.datasetHash, pins: manifest.pins, splits, syntheticControls, rows }
 }
