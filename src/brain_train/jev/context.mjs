@@ -88,18 +88,23 @@ export async function selectContext({ kind, items, objective = "", provider, mod
   }
   validateItems(items)
   const sourceMap = frozenSourceMap(frozenSources, expectedManifestHash, objective)
+  const optionalClass = kind === "dispatch" ? "low-risk-artifact" : "older-transcript"
+  const itemIds = new Set(items.map((item) => item.id))
+  if ([...sourceMap.values()].some((source) => !itemIds.has(source.id)
+    && (source.pinned || source.kind !== optionalKind[kind] || source.evidenceClass !== optionalClass))) {
+    throw new Error("A required context item is missing from the frozen packet")
+  }
   const decisionFamily = kind === "dispatch" ? dispatchContextFamily : transcriptContextFamily
   const selections = []
   const traces = []
   let calls = 0
   for (const item of items) {
-    const optionalClass = kind === "dispatch" ? "low-risk-artifact" : "older-transcript"
     const frozenSource = sourceMap.get(item.id)
     const required = item.pinned === true || item.kind !== optionalKind[kind]
       || item.evidenceClass !== optionalClass || frozenSource?.kind !== item.kind
       || frozenSource?.evidenceClass !== optionalClass || frozenSource?.pinned !== false
     let selection = "full"
-    const eligible = !required && calls < maxCalls && frozenSource?.sourceRef === item.sourceRef
+    const eligible = !required && frozenSource?.sourceRef === item.sourceRef
       && frozenSource?.sourceSnapshotHash === contextSourceHash(item)
     const trace = await decideCandidate({
       family: decisionFamily,

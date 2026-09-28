@@ -61,6 +61,19 @@ describe("offline context selection", () => {
     assert.equal(calls, 0)
   })
 
+  it("rejects a packet missing required frozen evidence", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const optional = item("optional", "artifact")
+    for (const required of [item("pinned", "artifact", { pinned: true }), item("instruction", "instruction")]) {
+      const frozenSources = frozen([required, optional])
+      await assert.rejects(() => offline({
+        kind: "dispatch", items: [optional], frozenSources, provider,
+      }), /required context item is missing/)
+    }
+    assert.equal(calls, 0)
+  })
+
   it("permits recoverable optional artifact references only offline", async () => {
     const source = item("a", "artifact")
     const plan = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => answer("reference") } })
@@ -110,7 +123,7 @@ describe("offline context selection", () => {
     assert.deepEqual(plan.selections.map(({ selection }) => selection), [
       ...Array(16).fill("omit"), ...Array(4).fill("full"),
     ])
-    assert.equal(plan.traces[16].reason, "ineligible")
+    assert.equal(plan.traces[16].reason, "call-budget")
   })
 
   it("rejects duplicate IDs, unbounded inputs, and invalid estimates", async () => {
