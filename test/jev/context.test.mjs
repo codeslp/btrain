@@ -52,6 +52,15 @@ describe("offline context selection", () => {
     assert.equal(calls, 0)
   })
 
+  it("rejects a malformed pin marker before consulting the provider", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    await assert.rejects(() => offline({
+      kind: "dispatch", items: [item("a", "artifact", { pinned: "true" })], provider,
+    }), /pin marker/)
+    assert.equal(calls, 0)
+  })
+
   it("permits recoverable optional artifact references only offline", async () => {
     const source = item("a", "artifact")
     const plan = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => answer("reference") } })

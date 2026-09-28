@@ -66,6 +66,9 @@ function validateItems(items) {
   if (!Array.isArray(items) || items.length > maxItems) throw new Error("A bounded item list is required")
   const ids = new Set()
   for (const item of items) {
+    if (item && Object.hasOwn(item, "pinned") && typeof item.pinned !== "boolean") {
+      throw new Error("Context pin marker must be boolean")
+    }
     if (!item || typeof item.id !== "string" || !item.id || ids.has(item.id)
       || typeof item.kind !== "string" || !item.kind
       || typeof item.content !== "string"
