@@ -431,6 +431,73 @@ function semanticCandidatesForBot({ bot, headSha, rawComments, baselineState }) 
     }))
 }
 
+function sourceRepository(pr) {
+  try {
+    const parts = new URL(pr?.url || pr?.html_url || "").pathname.split("/").filter(Boolean)
+    if (parts.length < 4 || parts[2] !== "pull" || String(pr?.number) !== parts[3]) return null
+    return `${parts[0]}/${parts[1]}`
+  } catch { return null }
+}
+
+function normalizedSourceRef(value) {
+  try {
+    const url = new URL(value)
+    if (!["https:", "http:"].includes(url.protocol)) return null
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.hash = ""
+    return url.toString()
+  } catch { return null }
+}
+
+// Build source-bound cases for the offline PR seam. Unknown event-time heads
+// remain excluded even when a later poll observed the same current PR head.
+export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowConfig, sourceSnapshots }) {
+  if (!Array.isArray(sourceSnapshots)) throw new Error("Source snapshots are required for PR replay")
+  const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
+  if (["merged", "closed", "draft"].includes(baseline.overall)) return { candidates: [], excluded: [] }
+  const headSha = baseline.pr.headSha
+  const repository = sourceRepository(pr)
+  const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
+  const selected = bots.flatMap((bot) => semanticCandidatesForBot({
+    bot, headSha, rawComments,
+    baselineState: baseline.bots.find((result) => result.id === bot.id)?.state,
+  }))
+  const candidates = []
+  const excluded = []
+  for (const candidate of selected) {
+    const matches = sourceSnapshots.filter((source) => source.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
+    const source = matches.length === 1 ? matches[0] : null
+    const sourceId = source?.id || candidate.sourceId
+    const candidateSourceRef = normalizedSourceRef(candidate.url)
+    let reason = null
+    if (!source) reason = matches.length ? "ambiguous-source-snapshot" : "missing-source-snapshot"
+    else if (!repository || source.repository !== repository || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
+    else if (!source.eventHead || source.eventHead === "unknown") reason = "unknown-event-head"
+    else if (source.eventHead !== headSha) reason = "stale-event-head"
+    else if (source.reviewedCommit && !commitMatches(source.reviewedCommit, headSha)) reason = "stale-reviewed-commit"
+    else if (!candidateSourceRef || candidateSourceRef !== source.sourceRef) reason = "source-ref-mismatch"
+    else if (crypto.createHash("sha256").update(candidate.body).digest("hex") !== source.sourceHash) reason = "source-hash-mismatch"
+    if (reason) {
+      excluded.push({ sourceId, reason })
+      continue
+    }
+    candidates.push({
+      sourceId: source.id,
+      sourceRef: source.sourceRef,
+      sourceRefs: [source.sourceRef],
+      sourceHash: source.sourceHash,
+      sourceContent: candidate.body,
+      baseline: "uncertain",
+      eligible: true,
+      privacyClass: "private",
+      reviewedCommit: headSha,
+    })
+  }
+  return { candidates, excluded }
+}
+
 function noulProbability(answer) {
   const value = answer?.noul ?? answer?.probability
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null

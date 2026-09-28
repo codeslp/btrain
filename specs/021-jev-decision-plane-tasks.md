@@ -15,7 +15,7 @@ The numbered workstreams in the [implementation plan](021-jev-decision-plane-imp
 
 ## Phase 2: Measured PR and handoff seams (WS3–4)
 
-- [ ] T007 [US3] Reconcile current-head PR candidate selection with source snapshots and trace the existing semantic seam in `src/brain_train/pr-flow.mjs` and its tests.
+- [x] T007 [US3] Reconcile current-head PR candidate selection with source snapshots for offline replay in `src/brain_train/pr-flow.mjs` and its tests; preserve the existing semantic decision trace and live authority behavior.
 - [ ] T008 [US1] Assemble at least 200 independently labeled provenance-complete PR cases and freeze train/calibration/test groups in `experiments/jev-btrain/`.
 - [ ] T009 [US2] Add a bounded, nonblocking handoff evidence warning after hard preflight checks in `src/brain_train/core.mjs` with composition tests.
 - [ ] T010 [US4] Freeze the G4 handoff benchmark and compare warning quality and reviewer time in `experiments/jev-btrain/`.

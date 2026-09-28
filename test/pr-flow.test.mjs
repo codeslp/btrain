@@ -7,8 +7,10 @@ import os from "node:os"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
+import { createHash } from "node:crypto"
 import {
   applyPrStatusToHandoff,
+  buildPrSemanticReplayCandidates,
   classifyPrReviewState,
   classifyPrReviewStateWithSemantic,
   formatPrStatusSummary,
@@ -340,6 +342,51 @@ describe("PR review flow classification", () => {
       },
     }
   }
+
+  it("reconciles current-head semantic candidates with exact source evidence for offline replay", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null,
+    }
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+    assert.deepEqual(result.excluded, [])
+    assert.equal(result.candidates.length, 1)
+    assert.deepEqual(result.candidates[0], {
+      sourceId: snapshot.id, sourceRef: snapshot.sourceRef, sourceRefs: [snapshot.sourceRef],
+      sourceHash: snapshot.sourceHash, sourceContent: comment.body, baseline: "uncertain",
+      eligible: true, privacyClass: "private", reviewedCommit: input.pr.headRefOid,
+    })
+  })
+
+  it("excludes unknown, stale, and changed source evidence before offline replay", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12", sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid,
+    }
+    for (const [changed, reason] of [
+      [{ ...snapshot, eventHead: "unknown" }, "unknown-event-head"],
+      [{ ...snapshot, eventHead: "c".repeat(40) }, "stale-event-head"],
+      [{ ...snapshot, reviewedCommit: "c".repeat(40) }, "stale-reviewed-commit"],
+      [{ ...snapshot, sourceRef: "https://github.com/o/r/pull/other" }, "source-ref-mismatch"],
+      [{ ...snapshot, sourceHash: "d".repeat(64) }, "source-hash-mismatch"],
+      [{ ...snapshot, repository: "other/repo" }, "source-identity-mismatch"],
+    ]) {
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [changed] })
+      assert.deepEqual(result.candidates, [])
+      assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason }])
+    }
+  })
 
   it("keeps a typed clear result advisory on otherwise ambiguous current-head bot text", async () => {
     const input = ambiguousCurrentHeadComment("Everything checks out on this revision; it is ready to ship.")
