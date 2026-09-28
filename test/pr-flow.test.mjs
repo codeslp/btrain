@@ -27,6 +27,7 @@ import {
   patchHandoff,
 } from "../src/brain_train/core.mjs"
 import { createSystemOneClient } from "../src/brain_train/system-one.mjs"
+import { createSourceSnapshot } from "../src/brain_train/jev/evidence.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -360,8 +361,30 @@ describe("PR review flow classification", () => {
     assert.deepEqual(result.candidates[0], {
       sourceId: snapshot.id, sourceRef: snapshot.sourceRef, sourceRefs: [snapshot.sourceRef],
       sourceHash: snapshot.sourceHash, sourceContent: comment.body, baseline: "uncertain",
-      eligible: true, privacyClass: "private", reviewedCommit: input.pr.headRefOid,
+      eligible: true, privacyClass: "private", callIndex: 0, reviewedCommit: input.pr.headRefOid,
+      headEvidence: "event-head",
     })
+  })
+
+  it("uses a full reviewed-commit attestation without claiming an event-time head", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://api.github.com/repos/o/r/pulls/12"
+    input.pr.html_url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.body = comment.body.replace(input.pr.headRefOid.slice(0, 10), input.pr.headRefOid)
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, url: comment.html_url, body: comment.body },
+      captureHead: input.pr.headRefOid,
+    })
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+    assert.deepEqual(result.excluded, [])
+    assert.equal(result.candidates[0].headEvidence, "reviewed-commit")
+    assert.equal(result.candidates[0].callIndex, 0)
+    assert.equal(snapshot.eventHead, "unknown")
+    const restOnly = buildPrSemanticReplayCandidates({ ...input, pr: { ...input.pr, html_url: null }, sourceSnapshots: [snapshot] })
+    assert.equal(restOnly.candidates.length, 1)
   })
 
   it("excludes unknown, stale, and changed source evidence before offline replay", () => {
