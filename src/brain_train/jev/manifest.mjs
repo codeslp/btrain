@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const splits = new Set(["train", "calibration", "test"])
 const eventHeadSha = /^[a-f0-9]{40}$/i
+export const validCodeRevision = (value) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value)
 const sourceFields = ["id", "repository", "prNumber", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "updatedAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "formalState", "deterministicDisposition"]
 
 function canonicalSources(sources) {
@@ -46,6 +47,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
   for (const key of ["family", "questionVersion", "policyHash", "model", "codeRevision", "baseline", "thresholds"]) {
     if (!pins?.[key]) throw new Error(`Missing evaluation pin: ${key}`)
   }
+  if (!validCodeRevision(pins.codeRevision)) throw new Error("Invalid code revision pin")
   const sourceById = new Map(sources.map((source) => [source.id, source]))
   if (sourceById.size !== sources.length) throw new Error("Duplicate source IDs")
   const prSplits = new Map()

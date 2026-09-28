@@ -23,6 +23,13 @@ describe("frozen Jev label manifest", () => {
     assert.throws(() => freezeLabeledManifest({ sources: [malformed], cases: [entry("bad", 1, "a")], pins, labels: ["feedback"], requireEventHead: true }), /Invalid event-time head/)
   })
 
+  it("rejects a revision pin that cannot appear in decision traces", () => {
+    assert.throws(() => freezeLabeledManifest({
+      sources: [snapshot("s1", 1)], cases: [entry("s1", 1, "a")],
+      pins: { ...pins, codeRevision: "rev" }, labels: ["feedback"],
+    }), /code revision/)
+  })
+
   it("freezes reproducibly with source and label hashes", () => {
     const sources = [snapshot("s1", 1), snapshot("s2", 2)]
     const cases = [entry("s1", 1, "template-a", "train"), entry("s2", 2, "template-b", "test")]

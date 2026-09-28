@@ -13,7 +13,7 @@ const family = createDecisionFamily({
   actionPolicy: (choice) => choice === "feedback" ? "flag-feedback" : null,
   fallback: (baseline) => baseline,
 })
-const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain" }
+const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain", callIndex: 0 }
 const answer = (choice = "feedback", scores = { clear: 0.05, feedback: 0.9, unavailable: 0.03, uncertain: 0.02 }) => ({ ok: true, model: "jev-pinned", answers: { signal: { choice, probabilities: scores } }, latencyMs: 12, usage: { input_tokens: 10 } })
 const sourceProof = (refs) => {
   const sources = refs.map((sourceRef, index) => ({ id: `source-${index}`, sourceRef, sourceHash: "a".repeat(64) }))
@@ -59,9 +59,28 @@ describe("offline decision gateway", () => {
     const args = { family, candidate, mode: "offline", provider: fakeProvider({ ...answer(), latencyMs: { privateText: "secret latency" } }) }
     const decided = await decideCandidate(args)
     const failed = await decideCandidate({ ...args, provider: fakeProvider({ ok: false, reason: "timeout", latencyMs: "secret latency" }) })
-    assert.equal(decided.latencyMs, null)
-    assert.equal(failed.latencyMs, null)
+    assert.ok(Number.isFinite(decided.latencyMs) && decided.latencyMs >= 0)
+    assert.ok(Number.isFinite(failed.latencyMs) && failed.latencyMs >= 0)
     assert.equal(JSON.stringify([decided, failed]).includes("secret latency"), false)
+  })
+
+  it("measures call latency locally even when the provider lies or times out", async () => {
+    const lied = await decideCandidate({ family, candidate, provider: fakeProvider({ ...answer(), latencyMs: 1_000_000 }), mode: "offline" })
+    assert.ok(Number.isFinite(lied.latencyMs) && lied.latencyMs < 10_000)
+    const shortTimeout = createDecisionFamily({ ...family, timeoutMs: 5 })
+    const timedOut = await decideCandidate({ family: shortTimeout, candidate, provider: { localOnly: true, decide: () => new Promise(() => {}) }, mode: "offline" })
+    assert.deepEqual([timedOut.outcome, timedOut.reason], ["failure", "timeout"])
+    assert.ok(Number.isFinite(timedOut.latencyMs) && timedOut.latencyMs >= 0)
+  })
+
+  it("skips malformed call indices before invoking a provider", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    for (const callIndex of [undefined, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const trace = await decideCandidate({ family, candidate: { ...candidate, callIndex }, provider, mode: "offline" })
+      assert.deepEqual([trace.outcome, trace.reason, trace.attemptedCall], ["skipped", "invalid-call-index", false])
+    }
+    assert.equal(calls, 0)
   })
 
   it("fails closed when input or action policy code throws", async () => {
