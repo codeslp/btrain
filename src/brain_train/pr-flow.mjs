@@ -481,7 +481,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
     else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
     else if (source.reviewedCommit && source.reviewedCommit !== headSha) reason = "stale-reviewed-commit"
-    else if ((!source.eventHead || source.eventHead === "unknown") && (source.reviewedCommit || candidate.reviewedCommit) !== headSha) reason = "unknown-event-head"
+    else if ((!source.eventHead || source.eventHead === "unknown") && source.reviewedCommit !== headSha) reason = "unknown-event-head"
     else if (!candidateSourceRef || candidateSourceRef !== source.sourceRef) reason = "source-ref-mismatch"
     else if (crypto.createHash("sha256").update(candidate.body).digest("hex") !== source.sourceHash) reason = "source-hash-mismatch"
     if (reason) {

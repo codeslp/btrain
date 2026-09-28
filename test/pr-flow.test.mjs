@@ -28,6 +28,9 @@ import {
 } from "../src/brain_train/core.mjs"
 import { createSystemOneClient } from "../src/brain_train/system-one.mjs"
 import { createSourceSnapshot } from "../src/brain_train/jev/evidence.mjs"
+import { freezeLabeledManifest, sourceSnapshotHashFor } from "../src/brain_train/jev/manifest.mjs"
+import { replayManifest } from "../src/brain_train/jev/replay.mjs"
+import { createDecisionFamily } from "../src/brain_train/jev/decision.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -375,7 +378,7 @@ describe("PR review flow classification", () => {
     comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
     const snapshot = createSourceSnapshot({
       repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
-      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, url: comment.html_url, body: comment.body },
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
       captureHead: input.pr.headRefOid,
     })
     const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
@@ -383,8 +386,42 @@ describe("PR review flow classification", () => {
     assert.equal(result.candidates[0].headEvidence, "reviewed-commit")
     assert.equal(result.candidates[0].callIndex, 0)
     assert.equal(snapshot.eventHead, "unknown")
+    assert.equal(snapshot.reviewedCommit, input.pr.headRefOid)
     const restOnly = buildPrSemanticReplayCandidates({ ...input, pr: { ...input.pr, html_url: null }, sourceSnapshots: [snapshot] })
     assert.equal(restOnly.candidates.length, 1)
+    const unverified = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [{ ...snapshot, reviewedCommit: null }] })
+    assert.deepEqual(unverified.excluded, [{ sourceId: snapshot.id, reason: "unknown-event-head" }])
+    const edited = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: "2026-09-20T20:00:30Z", url: comment.html_url, body: comment.body },
+    })
+    assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: snapshot.id, reason: "unknown-event-head" }])
+  })
+
+  it("freezes the captured reviewed commit before replaying a PR candidate", async () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.html_url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.body = comment.body.replace(input.pr.headRefOid.slice(0, 10), input.pr.headRefOid)
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const source = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
+    })
+    const candidate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }).candidates[0]
+    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+    const labels = [...family.choices]
+    const manifest = freezeLabeledManifest({
+      sources: [source],
+      cases: [{ sourceId: source.id, repository: "o/r", prNumber: 12, templateGroup: source.templateGroup, split: "test", label: "uncertain", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0, annotations: [{ by: "one", label: "uncertain" }, { by: "two", label: "uncertain" }], adjudication: { by: "three", label: "uncertain", reason: "confirmed" } }],
+      pins: { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, model: "local", codeRevision: "a".repeat(40), baseline: "deterministic", thresholds: { feedback: 0.8 } },
+      labels,
+    })
+    assert.equal(manifest.sources[0].reviewedCommit, input.pr.headRefOid)
+    assert.notEqual(sourceSnapshotHashFor([{ ...manifest.sources[0], reviewedCommit: "c".repeat(40) }]), manifest.sourceSnapshotHash)
+    const provider = { localOnly: true, decide: async () => ({ ok: true, model: "local", answers: { signal: { choice: "uncertain", probabilities: { clear: 0, feedback: 0, unavailable: 0, uncertain: 1 } } } }) }
+    const replay = await replayManifest({ manifest, family, candidates: { [source.id]: candidate }, provider })
+    assert.equal(replay.splits.test.counts.attempted, 1)
   })
 
   it("excludes unknown, stale, and changed source evidence before offline replay", () => {

@@ -64,6 +64,22 @@ describe("comment capture and Jev evidence composition", () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  it("pins an unedited issue comment's full reviewed commit through the capture pipeline", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-evidence-"))
+    try {
+      const at = "2026-09-01T10:00:00Z"
+      const raw = { issueComments: [{ id: 9, user: { login: "bot" }, body: `**Reviewed commit:** \`${"c".repeat(40)}\``, html_url: "https://example.test/9", created_at: at, updated_at: at }] }
+      const comments = shapeComments(raw)
+      await persistCapturedComments(root, { identity: { owner: "o", repo: "r" }, laneId: "a", prNumber: "7", comments, captureHead: { head: "d".repeat(40), observedAt: "2026-09-01T10:05:00Z" }, capturedAt: "2026-09-01T10:05:01Z" })
+      const { snapshots } = await readEvidence(root)
+      assert.equal(snapshots[0].reviewedCommit, "c".repeat(40))
+      assert.equal(snapshots[0].updatedAt, at)
+      assert.equal(snapshots[0].eventHead, "unknown")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("shapeComments", () => {
