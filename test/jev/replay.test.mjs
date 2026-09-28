@@ -5,7 +5,7 @@ import { summarizeReplay, replayManifest } from "../../src/brain_train/jev/repla
 import { createDecisionFamily } from "../../src/brain_train/jev/decision.mjs"
 import { datasetHashFor, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
-const family = createDecisionFamily({ id: "sample", questionVersion: "1", choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+const family = createDecisionFamily({ id: "sample", questionVersion: "1", policyVersion: "1", policyConfig: {}, choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
 const sourceContent = "frozen review text"
 const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
 const rows = [
@@ -44,19 +44,38 @@ describe("Jev replay metrics", () => {
     assert.equal(metrics.model.perClass.feedback.f1, 0)
   })
 
+  it("uses nearest rank for tail latency with two observations", () => {
+    const measured = [10, 1000].map((latencyMs) => ({ label: "clear", baseline: "clear", eligible: true, trace: { outcome: "decision", prediction: "clear", attemptedCall: true, latencyMs } }))
+    assert.equal(summarizeReplay(measured, ["clear"]).latencyMs.p95, 1000)
+  })
+
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
     const cases = [{ sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]
     const sources = [{ id: "a", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
-    const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash), sourceSnapshotHash, sources, labels, pins: { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "rev" }, cases }
+    const pins = { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
+    const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins), sourceSnapshotHash, sources, labels, pins, cases }
     const candidates = { a: { eligible: true, sourceRefs: ["https://example.test/a"], sourceContent, sourceHash, baseline: "uncertain", privacyClass: "synthetic", callIndex: 0 } }
     let providerCalls = 0
     const provider = { decide: async () => { providerCalls += 1; return { ok: true, model: "pinned", answers: { signal: { choice: "feedback", probabilities: { clear: 0.05, feedback: 0.9, uncertain: 0.05 } } }, latencyMs: 10 } } }
     const first = await replayManifest({ manifest, family, candidates, provider })
     const second = await replayManifest({ manifest, family, candidates, provider })
-    assert.deepEqual(first, second)
-    assert.equal(first.splits.test.model.correct, 1)
+    const withoutTiming = (result) => {
+      const copy = structuredClone(result)
+      for (const row of copy.rows) delete row.trace.latencyMs
+      for (const group of [copy.splits, copy.syntheticControls]) {
+        for (const metrics of Object.values(group)) delete metrics.latencyMs
+      }
+      return copy
+    }
+    assert.deepEqual(withoutTiming(first), withoutTiming(second))
+    assert.equal(first.syntheticControls.test.model.correct, 1)
+    assert.ok(Number.isFinite(first.rows[0].trace.latencyMs))
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, labels: ["feedback"], datasetHash: datasetHashFor(cases, ["feedback"], sourceSnapshotHash, pins) }, family, candidates, provider }), /label catalog/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, baseline: "changed" } }, family, candidates, provider }), /dataset hash/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /dataset hash/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, codeRevision: "rev" } }, family, candidates, provider }), /code revision/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, policyHash: "wrong" } }, family, candidates, provider }), /policy hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, cases: [{ ...cases[0], label: "clear" }] }, family, candidates, provider }), /dataset hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, sources: [{ ...sources[0], sourceRef: "https://example.test/tampered" }] }, family, candidates, provider }), /source snapshot hash/)
@@ -77,5 +96,31 @@ describe("Jev replay metrics", () => {
       await assert.rejects(() => replayManifest({ manifest, family, candidates: { a: { ...candidates.a, ...changed } }, provider }), /candidate evaluation inputs/)
       assert.equal(providerCalls, before)
     }
+  })
+
+  it("reports synthetic controls separately from real replay metrics", async () => {
+    const labels = ["clear", "feedback", "uncertain"]
+    const sources = ["real", "synthetic"].map((id) => ({ id, sourceRef: `https://example.test/${id}`, sourceHash }))
+    const cases = [
+      { sourceId: "real", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0 },
+      { sourceId: "synthetic", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 },
+    ]
+    const sourceSnapshotHash = sourceSnapshotHashFor(sources)
+    const pins = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
+    const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins), sourceSnapshotHash, sources, cases, labels, pins }
+    const candidates = Object.fromEntries(sources.map((source) => [source.id, {
+      sourceContent, sourceHash, sourceRefs: [source.sourceRef], baseline: "uncertain", eligible: true,
+      privacyClass: source.id === "real" ? "private" : "synthetic", callIndex: 0,
+    }]))
+    const provider = { localOnly: true, decide: async ({ state }) => ({
+      ok: true, model: "pinned", answers: { signal: { choice: state.id === "real" ? "clear" : "feedback", probabilities: state.id === "real"
+        ? { clear: 1, feedback: 0, uncertain: 0 } : { clear: 0, feedback: 1, uncertain: 0 } } },
+    }) }
+    const result = await replayManifest({ manifest, family, candidates, provider })
+    assert.equal(result.splits.test.counts.cases, 1)
+    assert.equal(result.splits.test.model.correct, 0)
+    assert.equal(result.syntheticControls.test.counts.cases, 1)
+    assert.equal(result.syntheticControls.test.model.correct, 1)
+    assert.deepEqual(result.rows.map((row) => row.privacyClass), ["private", "synthetic"])
   })
 })
