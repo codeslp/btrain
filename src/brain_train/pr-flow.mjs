@@ -426,17 +426,20 @@ function semanticCandidatesForBot({ bot, headSha, rawComments, baselineState }) 
       sourceId: selected.item.id || null,
       body: String(selected.item.body || ""),
       url: selected.item.html_url || selected.item.url || "",
-      reviewedCommit: headSha,
+      reviewedCommit: reviewCommit(selected.item),
       at: selected.item.submitted_at || selected.item.created_at || selected.item.updated_at || "",
     }))
 }
 
 function sourceRepository(pr) {
-  try {
-    const parts = new URL(pr?.url || pr?.html_url || "").pathname.split("/").filter(Boolean)
-    if (parts.length < 4 || parts[2] !== "pull" || String(pr?.number) !== parts[3]) return null
-    return `${parts[0]}/${parts[1]}`
-  } catch { return null }
+  for (const value of [pr?.html_url, pr?.url]) {
+    try {
+      const parts = new URL(value).pathname.split("/").filter(Boolean)
+      if (parts.length === 4 && parts[2] === "pull" && parts[3] === String(pr?.number)) return `${parts[0]}/${parts[1]}`
+      if (parts.length === 5 && parts[0] === "repos" && parts[3] === "pulls" && parts[4] === String(pr?.number)) return `${parts[1]}/${parts[2]}`
+    } catch { /* Try the other GitHub URL shape. */ }
+  }
+  return null
 }
 
 function normalizedSourceRef(value) {
@@ -451,8 +454,9 @@ function normalizedSourceRef(value) {
   } catch { return null }
 }
 
-// Build source-bound cases for the offline PR seam. Unknown event-time heads
-// remain excluded even when a later poll observed the same current PR head.
+// Build source-bound cases for offline replay. A captured full reviewed-commit
+// attestation can prove the evaluated commit without claiming an event-time head.
+// A later polling-time head alone never makes an unknown event head current.
 export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowConfig, sourceSnapshots }) {
   if (!Array.isArray(sourceSnapshots)) throw new Error("Source snapshots are required for PR replay")
   const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
@@ -474,9 +478,10 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     let reason = null
     if (!source) reason = matches.length ? "ambiguous-source-snapshot" : "missing-source-snapshot"
     else if (!repository || source.repository !== repository || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
-    else if (!source.eventHead || source.eventHead === "unknown") reason = "unknown-event-head"
-    else if (source.eventHead !== headSha) reason = "stale-event-head"
-    else if (source.reviewedCommit && !commitMatches(source.reviewedCommit, headSha)) reason = "stale-reviewed-commit"
+    else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
+    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
+    else if (source.reviewedCommit && source.reviewedCommit !== headSha) reason = "stale-reviewed-commit"
+    else if ((!source.eventHead || source.eventHead === "unknown") && (source.reviewedCommit || candidate.reviewedCommit) !== headSha) reason = "unknown-event-head"
     else if (!candidateSourceRef || candidateSourceRef !== source.sourceRef) reason = "source-ref-mismatch"
     else if (crypto.createHash("sha256").update(candidate.body).digest("hex") !== source.sourceHash) reason = "source-hash-mismatch"
     if (reason) {
@@ -492,7 +497,9 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
       baseline: "uncertain",
       eligible: true,
       privacyClass: "private",
+      callIndex: 0,
       reviewedCommit: headSha,
+      headEvidence: source.eventHead === headSha ? "event-head" : "reviewed-commit",
     })
   }
   return { candidates, excluded }
