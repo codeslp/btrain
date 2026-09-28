@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { contextManifestHash, contextSourceHash, selectContext } from "../../src/brain_train/jev/context.mjs"
+import { contextManifestHash, contextSourceHash, dispatchContextFamily, selectContext } from "../../src/brain_train/jev/context.mjs"
 
 const ref = "https://example.test/artifacts/1"
 const answer = (choice) => ({
@@ -90,6 +90,7 @@ describe("offline context selection", () => {
   })
 
   it("caps total provider calls and keeps later optional items full", async () => {
+    assert.equal(dispatchContextFamily.maxCalls, 16)
     let calls = 0
     const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
     const items = Array.from({ length: 20 }, (_, index) => item(String(index), "artifact"))

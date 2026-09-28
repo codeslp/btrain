@@ -39,7 +39,7 @@ function family(id) {
     privacyClass: "private",
     allowedActions: ["select:full", "select:reference", "select:omit"],
     threshold: 0.8,
-    maxCalls: 1,
+    maxCalls,
     maxInputBytes: 16 * 1024,
     inputBuilder: (candidate) => ({
       objective: candidate.objective,
@@ -106,7 +106,7 @@ export async function selectContext({ kind, items, objective = "", provider, mod
           sourceRefs: eligible ? [item.sourceRef] : [],
           baseline: "full",
           privacyClass: "private",
-          callIndex: 0,
+          callIndex: calls,
           objective,
           itemKind: item.kind,
           content: item.content,
