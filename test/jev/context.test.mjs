@@ -126,6 +126,17 @@ describe("offline context selection", () => {
     assert.equal(plan.traces[16].reason, "call-budget")
   })
 
+  it("selects the same bounded items regardless of caller order", async () => {
+    const items = Array.from({ length: 17 }, (_, index) => item(String(index).padStart(2, "0"), "artifact"))
+    const frozenSources = frozen(items)
+    const provider = { localOnly: true, decide: async () => answer("omit") }
+    const first = await offline({ kind: "dispatch", items, frozenSources, provider })
+    const reversed = await offline({ kind: "dispatch", items: [...items].reverse(), frozenSources, provider })
+    assert.deepEqual(reversed.selections, first.selections)
+    assert.deepEqual(reversed.traces.map(({ outcome, reason }) => [outcome, reason]), first.traces.map(({ outcome, reason }) => [outcome, reason]))
+    assert.deepEqual(first.selections[16], { id: "16", selection: "full" })
+  })
+
   it("rejects duplicate IDs, unbounded inputs, and invalid estimates", async () => {
     const provider = { localOnly: true, decide: async () => answer("omit") }
     for (const items of [[item("a", "artifact"), item("a", "artifact")], [item("a", "artifact", { tokens: -1 })], Array(257).fill(0).map((_, i) => item(String(i), "artifact"))]) {

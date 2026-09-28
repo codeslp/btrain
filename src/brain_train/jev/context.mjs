@@ -98,7 +98,7 @@ export async function selectContext({ kind, items, objective = "", provider, mod
   const selections = []
   const traces = []
   let calls = 0
-  for (const item of items) {
+  for (const item of [...items].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
     const frozenSource = sourceMap.get(item.id)
     const required = item.pinned === true || item.kind !== optionalKind[kind]
       || item.evidenceClass !== optionalClass || frozenSource?.kind !== item.kind
