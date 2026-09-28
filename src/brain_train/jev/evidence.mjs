@@ -26,7 +26,7 @@ const outcomesPath = (root) => path.join(evidenceDir(root), "source-outcomes.jso
 function reviewedCommitFor(comment) {
   if (comment.surface !== "issue") return SHA.test(comment.reviewedCommit || "") ? comment.reviewedCommit : null
   if (!comment.updatedAt || Date.parse(comment.updatedAt) !== Date.parse(comment.at)) return null
-  const match = /reviewed commit:\s*(?:\*\*)?\s*`?([a-f0-9]{40})(?![a-f0-9])/i.exec(String(comment.body || ""))
+  const match = /reviewed commit:\s*(?:\*\*)?\s*`?([a-f0-9]{10,40})(?![a-f0-9])/i.exec(String(comment.body || ""))
   return match?.[1] || null
 }
 
