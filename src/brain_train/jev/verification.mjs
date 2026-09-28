@@ -42,6 +42,8 @@ export function mandatoryVerificationChecks(change) {
 export const verificationFamily = createDecisionFamily({
   id: "verification-planner",
   questionVersion: "1",
+  policyVersion: "1",
+  policyConfig: {},
   questionId: "signal",
   choices: [...VERIFICATION_CATALOG, "none"],
   privacyClass: "private",
