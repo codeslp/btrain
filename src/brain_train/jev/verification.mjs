@@ -52,9 +52,9 @@ export const verificationFamily = createDecisionFamily({
   inputBuilder: (candidate) => ({
     changedPaths: candidate.changedPaths,
     contractTags: candidate.contractTags,
-    selectedChecks: candidate.selectedChecks,
+    selectedChecks: [...candidate.selectedChecks],
   }),
-  actionPolicy: (choice) => choice === "none" ? null : `check:${choice}`,
+  actionPolicy: (choice, candidate) => choice === "none" || candidate.selectedChecks.includes(choice) ? null : `check:${choice}`,
   fallback: (baseline) => baseline,
 })
 

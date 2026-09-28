@@ -139,7 +139,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   const answer = validAnswer(response, family)
   if (!answer) return fail("invalid-answer", response.latencyMs ?? null)
   let proposedAction
-  try { proposedAction = family.actionPolicy(answer.choice) } catch { return fail("invalid-answer", response.latencyMs ?? null) }
+  try { proposedAction = family.actionPolicy(answer.choice, candidate) } catch { return fail("invalid-answer", response.latencyMs ?? null) }
   if (proposedAction !== null && !family.allowedActions.includes(proposedAction)) return fail("invalid-answer", response.latencyMs ?? null)
   const confidence = answer.probabilities[answer.choice]
   const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: opaqueId(response.model), latencyMs: nonnegative(response.latencyMs), inputTokens: nonnegative(response.usage?.input_tokens), cost: nonnegative(response.usage?.cost) }
