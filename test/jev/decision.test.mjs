@@ -8,6 +8,7 @@ import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
 const family = createDecisionFamily({
   id: "pr-signal", questionVersion: "1", choices: ["clear", "feedback", "unavailable", "uncertain"],
+  policyVersion: "1", policyConfig: {},
   privacyClass: "private", allowedActions: ["flag-feedback"], threshold: 0.8,
   inputBuilder: (candidate) => ({ reviewText: candidate.text }),
   actionPolicy: (choice) => choice === "feedback" ? "flag-feedback" : null,
@@ -27,6 +28,16 @@ describe("offline decision gateway", () => {
     assert.equal((await decideCandidate({ family, candidate, provider })).outcome, "skipped")
     assert.equal((await decideCandidate({ family, candidate: { ...candidate, eligible: false }, provider, mode: "offline", privacyApproved: true })).reason, "ineligible")
     assert.equal((await decideCandidate({ family, candidate, provider, mode: "offline" })).reason, "privacy-denied")
+    assert.equal(calls, 0)
+  })
+
+  it("rejects non-boolean eligibility before calling the provider", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    for (const eligible of ["false", 1, null, undefined]) {
+      const trace = await decideCandidate({ family, candidate: { ...candidate, eligible }, provider, mode: "offline" })
+      assert.deepEqual([trace.outcome, trace.reason], ["skipped", "ineligible"])
+    }
     assert.equal(calls, 0)
   })
 
@@ -95,6 +106,32 @@ describe("offline decision gateway", () => {
   it("changes the policy hash when action or threshold changes", () => {
     const changed = createDecisionFamily({ ...family, threshold: 0.9 })
     assert.notEqual(changed.policyHash, family.policyHash)
+  })
+
+  it("pins captured policy configuration independently of caller mutation", async () => {
+    const policyConfig = { action: "flag-feedback" }
+    const create = (config) => createDecisionFamily({
+      ...family, policyVersion: "2", policyConfig: config,
+      actionPolicy: (choice, _candidate, policy) => choice === "feedback" ? policy.action : null,
+    })
+    const first = create(policyConfig)
+    const second = create({ action: "other-action" })
+    assert.notEqual(first.policyHash, second.policyHash)
+    policyConfig.action = "other-action"
+    assert.equal(first.policyConfig.action, "flag-feedback")
+    const trace = await decideCandidate({ family: first, candidate, provider: fakeProvider(answer()), mode: "offline" })
+    assert.deepEqual([trace.outcome, trace.suggestedAction], ["decision", "flag-feedback"])
+    assert.throws(() => createDecisionFamily({ ...family, policyConfig: undefined }), /policy configuration/)
+  })
+
+  it("validates resource budgets and honors an explicit zero-call budget", async () => {
+    for (const changes of [{ maxCalls: Infinity }, { maxCalls: -1 }, { maxInputBytes: Infinity }, { timeoutMs: 0 }]) {
+      assert.throws(() => createDecisionFamily({ ...family, ...changes }), /budget/)
+    }
+    let calls = 0
+    const zero = createDecisionFamily({ ...family, maxCalls: 0 })
+    const trace = await decideCandidate({ family: zero, candidate, provider: { localOnly: true, decide: async () => { calls += 1; return answer() } }, mode: "offline" })
+    assert.deepEqual([trace.outcome, trace.reason, calls], ["skipped", "call-budget", 0])
   })
 
   it("does not allow a family catalog to drift after hashing", () => {

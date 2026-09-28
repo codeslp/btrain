@@ -30,14 +30,43 @@ function opaqueRefs(refs) {
   })
 }
 
+function frozenPolicyConfig(value) {
+  const valid = (entry) => {
+    if (entry === null || typeof entry === "string" || typeof entry === "boolean") return true
+    if (typeof entry === "number") return Number.isFinite(entry)
+    if (Array.isArray(entry)) return entry.every(valid)
+    if (!entry || typeof entry !== "object" || Object.getPrototypeOf(entry) !== Object.prototype) return false
+    return Object.values(entry).every(valid)
+  }
+  if (!value || Array.isArray(value) || !valid(value)) throw new Error("A serializable policy configuration is required")
+  let copy
+  try { copy = JSON.parse(JSON.stringify(value)) } catch { throw new Error("A serializable policy configuration is required") }
+  const freeze = (entry) => {
+    if (entry && typeof entry === "object") {
+      for (const child of Object.values(entry)) freeze(child)
+      Object.freeze(entry)
+    }
+  }
+  freeze(copy)
+  return copy
+}
+
+function resourceBudget(value, fallback, min, max) {
+  const budget = value ?? fallback
+  if (!Number.isSafeInteger(budget) || budget < min || budget > max) throw new Error("Invalid family resource budget")
+  return budget
+}
+
 export function createDecisionFamily(config) {
   const { id, questionVersion, choices, privacyClass, allowedActions, threshold, inputBuilder, actionPolicy, fallback } = config
   if (!id || !questionVersion || !Array.isArray(choices) || choices.length < 2 || new Set(choices).size !== choices.length) throw new Error("A versioned closed choice family is required")
   if (!["public", "synthetic", "private"].includes(privacyClass)) throw new Error("A privacy class is required")
   if (!Array.isArray(allowedActions) || typeof inputBuilder !== "function" || typeof actionPolicy !== "function" || typeof fallback !== "function") throw new Error("Family input, action, and fallback policies are required")
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new Error("Invalid decision threshold")
-  const family = { id, questionVersion, choices: Object.freeze([...choices]), privacyClass, allowedActions: Object.freeze([...allowedActions]), threshold, inputBuilder, actionPolicy, fallback, questionId: config.questionId || "signal", timeoutMs: config.timeoutMs || 2000, maxInputBytes: config.maxInputBytes || 16 * 1024, maxCalls: config.maxCalls || 1 }
-  family.policyHash = hash({ id, questionVersion, choices, privacyClass, allowedActions, threshold, questionId: family.questionId, timeoutMs: family.timeoutMs, maxInputBytes: family.maxInputBytes, maxCalls: family.maxCalls, inputBuilder: inputBuilder.toString(), actionPolicy: actionPolicy.toString(), fallback: fallback.toString() })
+  if (typeof config.policyVersion !== "string" || !config.policyVersion) throw new Error("A policy version is required")
+  const policyConfig = frozenPolicyConfig(config.policyConfig)
+  const family = { id, questionVersion, policyVersion: config.policyVersion, policyConfig, choices: Object.freeze([...choices]), privacyClass, allowedActions: Object.freeze([...allowedActions]), threshold, inputBuilder, actionPolicy, fallback, questionId: config.questionId || "signal", timeoutMs: resourceBudget(config.timeoutMs, 2000, 1, 60000), maxInputBytes: resourceBudget(config.maxInputBytes, 16 * 1024, 0, 1024 * 1024), maxCalls: resourceBudget(config.maxCalls, 1, 0, 256) }
+  family.policyHash = hash({ id, questionVersion, policyVersion: family.policyVersion, policyConfig, choices, privacyClass, allowedActions, threshold, questionId: family.questionId, timeoutMs: family.timeoutMs, maxInputBytes: family.maxInputBytes, maxCalls: family.maxCalls, inputBuilder: inputBuilder.toString(), actionPolicy: actionPolicy.toString(), fallback: fallback.toString() })
   return Object.freeze(family)
 }
 
@@ -104,13 +133,13 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   const sourceRefs = opaqueRefs(candidate?.sourceRefs)
   let baseline
   try {
-    const result = family.fallback(candidate?.baseline)
+    const result = family.fallback(candidate?.baseline, family.policyConfig)
     baseline = family.choices.includes(result) ? result : null
   } catch { baseline = null }
   const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision: /^[a-f0-9]{40}$/.test(codeRevision || "") ? codeRevision : null, sourceRefs, baseline, actionTaken: "none" }
   const skip = (reason) => ({ ...base, outcome: "skipped", reason, attemptedCall: false })
   if (mode === "off") return skip("mode-off")
-  if (!candidate?.eligible) return skip("ineligible")
+  if (candidate?.eligible !== true) return skip("ineligible")
   if (!baseline) return skip("invalid-baseline")
   if (!Number.isSafeInteger(candidate.callIndex) || candidate.callIndex < 0) return skip("invalid-call-index")
   if ((family.privacyClass === "private" || candidate.privacyClass === "private") && !privacyApproved && provider?.localOnly !== true) return skip("privacy-denied")
@@ -119,7 +148,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   let boundedState
   let encoded
   try {
-    boundedState = family.inputBuilder(candidate)
+    boundedState = family.inputBuilder(candidate, family.policyConfig)
     encoded = JSON.stringify(boundedState)
   } catch { return skip("invalid-input") }
   if (!encoded || Buffer.byteLength(encoded) > family.maxInputBytes) return skip("input-budget")
@@ -144,7 +173,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   const answer = validAnswer(response, family)
   if (!answer) return fail("invalid-answer")
   let proposedAction
-  try { proposedAction = family.actionPolicy(answer.choice) } catch { return fail("invalid-answer") }
+  try { proposedAction = family.actionPolicy(answer.choice, candidate, family.policyConfig) } catch { return fail("invalid-answer") }
   if (proposedAction !== null && !family.allowedActions.includes(proposedAction)) return fail("invalid-answer")
   const confidence = answer.probabilities[answer.choice]
   const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: opaqueId(response.model), latencyMs: elapsed(), inputTokens: nonnegative(response.usage?.input_tokens), cost: nonnegative(response.usage?.cost) }

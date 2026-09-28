@@ -5,7 +5,7 @@ import { summarizeReplay, replayManifest } from "../../src/brain_train/jev/repla
 import { createDecisionFamily } from "../../src/brain_train/jev/decision.mjs"
 import { datasetHashFor, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
-const family = createDecisionFamily({ id: "sample", questionVersion: "1", choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+const family = createDecisionFamily({ id: "sample", questionVersion: "1", policyVersion: "1", policyConfig: {}, choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
 const sourceContent = "frozen review text"
 const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
 const rows = [
