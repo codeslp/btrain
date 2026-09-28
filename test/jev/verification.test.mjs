@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { fakeProvider } from "../../src/brain_train/jev/decision.mjs"
+import { createDecisionFamily, fakeProvider } from "../../src/brain_train/jev/decision.mjs"
 import { mandatoryVerificationChecks, planVerification, verificationFamily } from "../../src/brain_train/jev/verification.mjs"
 
 const sourceRefs = ["https://example.test/changes/42"]
@@ -12,6 +12,14 @@ const answer = (choice) => ({
 })
 
 describe("offline verification planner", () => {
+  it("pins deterministic planner settings into the family policy", () => {
+    assert.equal(verificationFamily.policyConfig.maxPaths, 256)
+    assert.deepEqual(verificationFamily.policyConfig.contractTags, ["cross-component", "negative-path", "migration", "security", "formal-impact"])
+    assert.ok(verificationFamily.policyConfig.mandatoryRules.includes("mandatoryVerificationChecks"))
+    const changed = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, maxPaths: 257 } })
+    assert.notEqual(changed.policyHash, verificationFamily.policyHash)
+  })
+
   it("retains mandatory migration, security, formal, and cross-component checks", () => {
     const checks = mandatoryVerificationChecks({
       changedPaths: ["src/brain_train/auth.mjs", "migrations/pg/042.sql", "formal/handoff.tla"],

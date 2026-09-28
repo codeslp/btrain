@@ -43,7 +43,11 @@ export const verificationFamily = createDecisionFamily({
   id: "verification-planner",
   questionVersion: "1",
   policyVersion: "1",
-  policyConfig: {},
+  policyConfig: {
+    maxPaths,
+    contractTags: [...contractTags],
+    mandatoryRules: [changePaths, tagsFor, mandatoryVerificationChecks].map((rule) => rule.toString()).join("\n"),
+  },
   questionId: "signal",
   choices: [...VERIFICATION_CATALOG, "none"],
   privacyClass: "private",
