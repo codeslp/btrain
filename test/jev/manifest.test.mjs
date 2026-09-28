@@ -4,7 +4,7 @@ import { annotationCandidates, freezeLabeledManifest, sourceSnapshotHashFor } fr
 
 const snapshot = (id, prNumber, eventHead = "a".repeat(40)) => ({ id, repository: "o/r", prNumber, eventHead, sourceHash: "b".repeat(64), sourceRef: `https://example.test/${id}`, surface: "review", author: "bot" })
 const entry = (id, prNumber, templateGroup, split = "test") => ({
-  sourceId: id, repository: "o/r", prNumber, templateGroup, split, label: "feedback",
+  sourceId: id, repository: "o/r", prNumber, templateGroup, split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0,
   annotations: [{ by: "one", label: "feedback" }, { by: "two", label: "feedback" }],
   adjudication: { by: "three", label: "feedback", reason: "confirmed" },
 })
@@ -17,6 +17,12 @@ describe("frozen Jev label manifest", () => {
     assert.deepEqual(result.excluded, [{ sourceId: "old", reason: "unknown-event-head" }])
   })
 
+  it("rejects malformed event heads from exact-head annotation and freezing", () => {
+    const malformed = snapshot("bad", 1, "known")
+    assert.deepEqual(annotationCandidates([malformed], { requireEventHead: true }).excluded, [{ sourceId: "bad", reason: "invalid-event-head" }])
+    assert.throws(() => freezeLabeledManifest({ sources: [malformed], cases: [entry("bad", 1, "a")], pins, labels: ["feedback"], requireEventHead: true }), /Invalid event-time head/)
+  })
+
   it("freezes reproducibly with source and label hashes", () => {
     const sources = [snapshot("s1", 1), snapshot("s2", 2)]
     const cases = [entry("s1", 1, "template-a", "train"), entry("s2", 2, "template-b", "test")]
@@ -27,6 +33,7 @@ describe("frozen Jev label manifest", () => {
     assert.equal(first.cases.length, 2)
     assert.equal(first.sources.length, 2)
     assert.equal(first.sources[0].sourceRef, "https://example.test/s1")
+    assert.deepEqual([first.cases[0].baseline, first.cases[0].eligible, first.cases[0].privacyClass, first.cases[0].callIndex], ["uncertain", true, "synthetic", 0])
     assert.equal(sourceSnapshotHashFor(first.sources), first.sourceSnapshotHash)
   })
 

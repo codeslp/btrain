@@ -21,6 +21,14 @@ describe("Jev source evidence", () => {
     assert.equal(sanitized.sourceRef, "https://example.test/42")
   })
 
+  it("groups review-request templates across volatile lane and head markers", () => {
+    const base = { ...comment, body: "Please review.\n\n<!-- btrain-pr-review bot=codex lane=a head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->" }
+    const first = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: base, capturedAt: "2026-09-01T10:05:00Z" })
+    const second = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "b", comment: { ...base, id: 43, body: "Please review.\n\n<!-- btrain-pr-review bot=codex lane=b head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->" }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(first.templateGroup, second.templateGroup)
+    assert.notEqual(first.sourceHash, second.sourceHash)
+  })
+
   it("appends each source once and records later outcomes without rewriting the source", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-evidence-"))
     try {
