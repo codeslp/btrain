@@ -17,7 +17,7 @@ export function contextSourceHash(item) {
 
 export function contextManifestHash(sources) {
   if (!Array.isArray(sources)) throw new Error("Frozen context sources are required")
-  return digest([...sources].sort((a, b) => a.id.localeCompare(b.id)))
+  return digest([...sources].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
 function frozenSourceMap(sources, expectedHash) {
@@ -96,31 +96,29 @@ export async function selectContext({ kind, items, objective = "", provider, mod
       || item.evidenceClass !== optionalClass || frozenSource?.kind !== item.kind
       || frozenSource?.evidenceClass !== optionalClass || frozenSource?.pinned !== false
     let selection = "full"
-    if (!required) {
-      const eligible = calls < maxCalls && frozenSource?.sourceRef === item.sourceRef
-        && frozenSource?.sourceSnapshotHash === contextSourceHash(item)
-      const trace = await decideCandidate({
-        family: decisionFamily,
-        candidate: {
-          eligible,
-          sourceRefs: eligible ? [item.sourceRef] : [],
-          baseline: "full",
-          privacyClass: "private",
-          callIndex: calls,
-          objective,
-          itemKind: item.kind,
-          content: item.content,
-          tokens: item.tokens,
-        },
-        provider,
-        mode,
-        modelPin,
-        codeRevision,
-      })
-      traces.push(trace)
-      if (trace.attemptedCall) calls += 1
-      if (trace.outcome === "decision") selection = trace.suggestedAction.slice("select:".length)
-    }
+    const eligible = !required && calls < maxCalls && frozenSource?.sourceRef === item.sourceRef
+      && frozenSource?.sourceSnapshotHash === contextSourceHash(item)
+    const trace = await decideCandidate({
+      family: decisionFamily,
+      candidate: {
+        eligible,
+        sourceRefs: validSourceRef(item.sourceRef) ? [item.sourceRef] : [],
+        baseline: "full",
+        privacyClass: "private",
+        callIndex: calls,
+        objective,
+        itemKind: item.kind,
+        content: item.content,
+        tokens: item.tokens,
+      },
+      provider,
+      mode,
+      modelPin,
+      codeRevision,
+    })
+    traces.push(trace)
+    if (trace.attemptedCall) calls += 1
+    if (!required && trace.outcome === "decision") selection = trace.suggestedAction.slice("select:".length)
     selections.push(selection === "full"
       ? { id: item.id, selection }
       : { id: item.id, selection, sourceSnapshotHash: sourceMap.get(item.id).sourceSnapshotHash })

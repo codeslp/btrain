@@ -39,7 +39,9 @@ describe("offline context selection", () => {
     const plan = await offline({ kind: "dispatch", items, provider })
     assert.deepEqual(plan.selections.map(({ selection }) => selection), Array(items.length).fill("full"))
     assert.equal(calls, 0)
-    assert.equal(plan.traces.length, 0)
+    assert.equal(plan.traces.length, items.length)
+    assert.deepEqual(plan.traces.map(({ outcome, reason, attemptedCall }) => [outcome, reason, attemptedCall]),
+      Array(items.length).fill(["skipped", "ineligible", false]))
   })
 
   it("treats explicit pins and unknown kinds as required", async () => {
@@ -142,5 +144,12 @@ describe("offline context selection", () => {
     assert.equal(wrongModel.selections[0].selection, "full")
     assert.equal(wrongModel.traces[0].reason, "model-mismatch")
     await assert.rejects(() => selectContext({ kind: "dispatch", items: [source], provider, mode: "offline" }), /pinned model/)
+  })
+
+  it("hashes the same frozen source set identically across Unicode ID orderings", () => {
+    const composed = { id: "é", sourceRef: ref, sourceSnapshotHash: "a".repeat(64), kind: "artifact", evidenceClass: "low-risk-artifact", pinned: false }
+    const decomposed = { ...composed, id: "e\u0301" }
+    assert.notEqual(composed.id, decomposed.id)
+    assert.equal(contextManifestHash([composed, decomposed]), contextManifestHash([decomposed, composed]))
   })
 })
