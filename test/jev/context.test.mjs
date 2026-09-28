@@ -61,15 +61,15 @@ describe("offline context selection", () => {
     assert.equal(calls, 0)
   })
 
-  it("rejects a packet missing required frozen evidence", async () => {
+  it("rejects a packet missing any frozen evidence", async () => {
     let calls = 0
     const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
     const optional = item("optional", "artifact")
-    for (const required of [item("pinned", "artifact", { pinned: true }), item("instruction", "instruction")]) {
-      const frozenSources = frozen([required, optional])
+    for (const missing of [item("pinned", "artifact", { pinned: true }), item("instruction", "instruction"), item("other-optional", "artifact")]) {
+      const frozenSources = frozen([missing, optional])
       await assert.rejects(() => offline({
         kind: "dispatch", items: [optional], frozenSources, provider,
-      }), /required context item is missing/)
+      }), /context item is missing/)
     }
     assert.equal(calls, 0)
   })

@@ -35,6 +35,8 @@ function family(id) {
   return createDecisionFamily({
     id,
     questionVersion: "1",
+    policyVersion: "1",
+    policyConfig: {},
     choices: ["full", "reference", "omit"],
     privacyClass: "private",
     allowedActions: ["select:full", "select:reference", "select:omit"],
@@ -90,9 +92,8 @@ export async function selectContext({ kind, items, objective = "", provider, mod
   const sourceMap = frozenSourceMap(frozenSources, expectedManifestHash, objective)
   const optionalClass = kind === "dispatch" ? "low-risk-artifact" : "older-transcript"
   const itemIds = new Set(items.map((item) => item.id))
-  if ([...sourceMap.values()].some((source) => !itemIds.has(source.id)
-    && (source.pinned || source.kind !== optionalKind[kind] || source.evidenceClass !== optionalClass))) {
-    throw new Error("A required context item is missing from the frozen packet")
+  if ([...sourceMap.values()].some((source) => !itemIds.has(source.id))) {
+    throw new Error("A frozen context item is missing from the packet")
   }
   const decisionFamily = kind === "dispatch" ? dispatchContextFamily : transcriptContextFamily
   const selections = []
