@@ -50,8 +50,8 @@ export const verificationFamily = createDecisionFamily({
   maxCalls: 3,
   maxInputBytes: 16 * 1024,
   inputBuilder: (candidate) => ({
-    changedPaths: candidate.changedPaths,
-    contractTags: candidate.contractTags,
+    changedPaths: [...candidate.changedPaths],
+    contractTags: [...candidate.contractTags],
     selectedChecks: [...candidate.selectedChecks],
   }),
   actionPolicy: (choice, candidate) => choice === "none" || candidate.selectedChecks.includes(choice) ? null : `check:${choice}`,

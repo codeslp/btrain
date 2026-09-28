@@ -100,6 +100,20 @@ describe("offline verification planner", () => {
     assert.deepEqual([plan.traces[0].outcome, plan.traces[0].reason], ["abstain", "no-permitted-action"])
   })
 
+  it("keeps changed paths immutable across provider calls", async () => {
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }
+    let calls = 0
+    const provider = { localOnly: true, decide: async ({ state }) => {
+      calls += 1
+      if (calls === 1) state.changedPaths.push(...Array(256).fill("src/injected.mjs"))
+      return answer(calls === 1 ? "integration" : "negative-path")
+    } }
+    const plan = await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(change.changedPaths, ["src/brain_train/core.mjs"])
+    assert.deepEqual(plan.suggested, ["integration", "negative-path"])
+    assert.deepEqual(plan.traces.map((trace) => trace.outcome), ["decision", "decision", "abstain"])
+  })
+
   it("keeps private change metadata local and bounds provider calls", async () => {
     let calls = 0
     const provider = { decide: async () => { calls += 1; return answer("integration") } }
