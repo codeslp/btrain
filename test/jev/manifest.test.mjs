@@ -44,6 +44,17 @@ describe("frozen Jev label manifest", () => {
     assert.equal(sourceSnapshotHashFor(first.sources), first.sourceSnapshotHash)
   })
 
+  it("copies threshold pins and binds them into the dataset hash", () => {
+    const supplied = { ...pins, thresholds: { feedback: 0.8 } }
+    const options = { sources: [snapshot("s1", 1)], cases: [entry("s1", 1, "a")], pins: supplied, labels: ["feedback"] }
+    const manifest = freezeLabeledManifest(options)
+    supplied.thresholds.feedback = 0.1
+    assert.equal(manifest.pins.thresholds.feedback, 0.8)
+    const changed = freezeLabeledManifest({ ...options, pins: supplied })
+    assert.notEqual(manifest.datasetHash, changed.datasetHash)
+    assert.notEqual(manifest.datasetHash, freezeLabeledManifest({ ...options, pins: { ...pins, baseline: "other" } }).datasetHash)
+  })
+
   it("rejects a PR or normalized template across splits", () => {
     const sources = [snapshot("s1", 1), snapshot("s2", 1), snapshot("s3", 2)]
     assert.throws(() => freezeLabeledManifest({ sources, cases: [entry("s1", 1, "a", "train"), entry("s2", 1, "b", "test")], pins, labels: ["feedback"] }), /PR group crosses splits/)

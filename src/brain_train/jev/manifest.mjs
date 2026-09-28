@@ -18,9 +18,26 @@ export function sourceSnapshotHashFor(sources) {
   return hash(canonicalSources(sources))
 }
 
-export function datasetHashFor(cases, labels, sourceSnapshotHash) {
+export function evaluationPinsFor(pins) {
+  const fields = ["family", "questionVersion", "policyHash", "model", "codeRevision", "baseline", "thresholds"]
+  if (!pins || Object.keys(pins).some((key) => !fields.includes(key))) throw new Error("Invalid evaluation pins")
+  for (const key of fields.slice(0, -1)) {
+    if (typeof pins[key] !== "string" || !pins[key]) throw new Error(`Missing evaluation pin: ${key}`)
+  }
+  if (!validCodeRevision(pins.codeRevision)) throw new Error("Invalid code revision pin")
+  const thresholds = pins.thresholds
+  if (!thresholds || Object.getPrototypeOf(thresholds) !== Object.prototype || !Object.keys(thresholds).length
+    || Object.entries(thresholds).some(([key, value]) => !key || !Number.isFinite(value) || value < 0 || value > 1)) {
+    throw new Error("Invalid threshold pins")
+  }
+  return { family: pins.family, questionVersion: pins.questionVersion, policyHash: pins.policyHash,
+    model: pins.model, codeRevision: pins.codeRevision, baseline: pins.baseline,
+    thresholds: Object.fromEntries(Object.entries(thresholds).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) }
+}
+
+export function datasetHashFor(cases, labels, sourceSnapshotHash, pins) {
   if (!sourceSnapshotHash) throw new Error("Source snapshot hash is required")
-  return hash({ cases: [...cases].sort((a, b) => a.sourceId.localeCompare(b.sourceId)), labels, sourceSnapshotHash })
+  return hash({ cases: [...cases].sort((a, b) => a.sourceId.localeCompare(b.sourceId)), labels, sourceSnapshotHash, pins: evaluationPinsFor(pins) })
 }
 
 export function annotationCandidates(sources, { requireEventHead = false } = {}) {
@@ -44,10 +61,7 @@ export function annotationCandidates(sources, { requireEventHead = false } = {})
 export function freezeLabeledManifest({ sources, cases, pins, labels, requireEventHead = false }) {
   if (!Array.isArray(sources) || !Array.isArray(cases) || !cases.length) throw new Error("Sources and nonempty cases are required")
   if (!Array.isArray(labels) || !labels.length || new Set(labels).size !== labels.length) throw new Error("A closed label set is required")
-  for (const key of ["family", "questionVersion", "policyHash", "model", "codeRevision", "baseline", "thresholds"]) {
-    if (!pins?.[key]) throw new Error(`Missing evaluation pin: ${key}`)
-  }
-  if (!validCodeRevision(pins.codeRevision)) throw new Error("Invalid code revision pin")
+  const frozenPins = evaluationPinsFor(pins)
   const sourceById = new Map(sources.map((source) => [source.id, source]))
   if (sourceById.size !== sources.length) throw new Error("Duplicate source IDs")
   const prSplits = new Map()
@@ -88,6 +102,6 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     return { id, repository: s.repository, prNumber: s.prNumber, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, updatedAt: s.updatedAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
   }))
   const sourceSnapshotHash = sourceSnapshotHashFor(selectedSources)
-  const datasetHash = datasetHashFor(frozenCases, labels, sourceSnapshotHash)
-  return { schemaVersion: 1, pins: { ...pins }, labels: [...labels], sourceSnapshotHash, datasetHash, sources: selectedSources, cases: frozenCases }
+  const datasetHash = datasetHashFor(frozenCases, labels, sourceSnapshotHash, frozenPins)
+  return { schemaVersion: 1, pins: frozenPins, labels: [...labels], sourceSnapshotHash, datasetHash, sources: selectedSources, cases: frozenCases }
 }
