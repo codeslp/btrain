@@ -12,22 +12,22 @@ function digest(value) {
 }
 
 export function contextSourceHash(item) {
-  return digest({ sourceRef: item.sourceRef, content: item.content })
+  return digest({ sourceRef: item.sourceRef, content: item.content, tokens: item.tokens })
 }
 
-export function contextManifestHash(sources) {
+export function contextManifestHash(sources, objective = "") {
   if (!Array.isArray(sources)) throw new Error("Frozen context sources are required")
-  return digest([...sources].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return digest({ objective, sources: [...sources].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) })
 }
 
-function frozenSourceMap(sources, expectedHash) {
+function frozenSourceMap(sources, expectedHash, objective) {
   if (!Array.isArray(sources) || !hashPattern.test(expectedHash || "")) return new Map()
   if (sources.some((source) => typeof source?.id !== "string" || !source.id
     || !validSourceRef(source.sourceRef) || !hashPattern.test(source.sourceSnapshotHash || "")
     || typeof source.kind !== "string" || typeof source.evidenceClass !== "string"
     || typeof source.pinned !== "boolean")) return new Map()
   if (new Set(sources.map((source) => source.id)).size !== sources.length) return new Map()
-  if (contextManifestHash(sources) !== expectedHash) return new Map()
+  if (contextManifestHash(sources, objective) !== expectedHash) return new Map()
   return new Map(sources.map((source) => [source.id, source]))
 }
 
@@ -78,13 +78,13 @@ function validateItems(items) {
 
 // This returns an offline selection proposal. The caller retains and renders its own full packet.
 export async function selectContext({ kind, items, objective = "", provider, mode = "off", modelPin = null, codeRevision = null, frozenSources, expectedManifestHash }) {
-  if (!(kind in optionalKind) || !["off", "offline"].includes(mode)) throw new Error("Only offline dispatch or transcript selection is supported")
+  if (!Object.hasOwn(optionalKind, kind) || !["off", "offline"].includes(mode)) throw new Error("Only offline dispatch or transcript selection is supported")
   if (typeof objective !== "string" || Buffer.byteLength(objective) > 1024) throw new Error("A bounded objective is required")
   if (mode === "offline" && (typeof modelPin !== "string" || !modelPin || !revisionPattern.test(codeRevision || ""))) {
     throw new Error("Offline selection requires a pinned model and code revision")
   }
   validateItems(items)
-  const sourceMap = frozenSourceMap(frozenSources, expectedManifestHash)
+  const sourceMap = frozenSourceMap(frozenSources, expectedManifestHash, objective)
   const decisionFamily = kind === "dispatch" ? dispatchContextFamily : transcriptContextFamily
   const selections = []
   const traces = []

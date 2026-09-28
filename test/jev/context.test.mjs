@@ -26,7 +26,7 @@ const offline = (options) => {
   const frozenSources = options.frozenSources ?? frozen(options.items)
   return selectContext({
     ...options, frozenSources,
-    expectedManifestHash: options.expectedManifestHash ?? contextManifestHash(frozenSources),
+    expectedManifestHash: options.expectedManifestHash ?? contextManifestHash(frozenSources, options.objective ?? ""),
     mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
   })
 }
@@ -140,6 +140,12 @@ describe("offline context selection", () => {
     const changedManifest = await offline({ kind: "dispatch", items: [source], frozenSources: [{ ...originalSources[0], sourceRef: "https://example.test/mutable" }], expectedManifestHash: originalManifestHash, provider })
     assert.equal(changedManifest.selections[0].selection, "full")
     assert.equal(calls, 0)
+    const changedTokens = await offline({ kind: "dispatch", items: [{ ...source, tokens: 101 }], frozenSources: originalSources, expectedManifestHash: originalManifestHash, provider })
+    assert.equal(changedTokens.selections[0].selection, "full")
+    assert.equal(calls, 0)
+    const changedObjective = await offline({ kind: "dispatch", items: [source], objective: "changed objective", frozenSources: originalSources, expectedManifestHash: originalManifestHash, provider })
+    assert.equal(changedObjective.selections[0].selection, "full")
+    assert.equal(calls, 0)
     const wrongModel = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => ({ ...answer("omit"), model: "other-model" }) } })
     assert.equal(wrongModel.selections[0].selection, "full")
     assert.equal(wrongModel.traces[0].reason, "model-mismatch")
@@ -151,5 +157,11 @@ describe("offline context selection", () => {
     const decomposed = { ...composed, id: "e\u0301" }
     assert.notEqual(composed.id, decomposed.id)
     assert.equal(contextManifestHash([composed, decomposed]), contextManifestHash([decomposed, composed]))
+  })
+
+  it("rejects inherited Object property names as unsupported context kinds", async () => {
+    for (const kind of ["toString", "constructor", "__proto__"]) {
+      await assert.rejects(() => offline({ kind, items: [] }), /Only offline dispatch or transcript/)
+    }
   })
 })
