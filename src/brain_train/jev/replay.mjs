@@ -46,7 +46,7 @@ function predictionMetrics(rows, labels, pick, supportRows = rows) {
     const actual = support[label]
     const precision = ratio(tp, predicted)
     const recall = ratio(tp, actual)
-    return [label, { support: support[label], precision, recall, f1: precision !== null && recall !== null && precision + recall ? 2 * precision * recall / (precision + recall) : null }]
+    return [label, { support: support[label], precision, recall, f1: ratio(2 * tp, actual + predicted) }]
   }))
   return { support, confusion, evaluated: evaluated.length, correct, accuracy: ratio(correct, evaluated.length), perClass }
 }

@@ -202,6 +202,7 @@ export function shapeComments({ issueComments, reviewComments, reviews }) {
       body: c.body || "",
       url: c.html_url,
       at: c.created_at,
+      updatedAt: c.updated_at || null,
     })
   }
   for (const c of reviewComments || []) {

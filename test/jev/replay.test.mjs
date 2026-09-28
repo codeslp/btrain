@@ -34,6 +34,16 @@ describe("Jev replay metrics", () => {
     assert.deepEqual(result.failures, [{ sourceId: "b", reason: "invalid-answer", failureClass: "response-shape" }])
   })
 
+  it("reports zero F1 when supported classes are predicted entirely incorrectly", () => {
+    const wrong = [
+      { sourceId: "clear", label: "clear", baseline: "clear", eligible: true, trace: { outcome: "decision", prediction: "feedback", attemptedCall: true } },
+      { sourceId: "feedback", label: "feedback", baseline: "feedback", eligible: true, trace: { outcome: "decision", prediction: "clear", attemptedCall: true } },
+    ]
+    const metrics = summarizeReplay(wrong, ["clear", "feedback"])
+    assert.equal(metrics.model.perClass.clear.f1, 0)
+    assert.equal(metrics.model.perClass.feedback.f1, 0)
+  })
+
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
     const cases = [{ sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]

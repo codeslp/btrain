@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const splits = new Set(["train", "calibration", "test"])
 const eventHeadSha = /^[a-f0-9]{40}$/i
-const sourceFields = ["id", "repository", "prNumber", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "formalState", "deterministicDisposition"]
+const sourceFields = ["id", "repository", "prNumber", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "updatedAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "formalState", "deterministicDisposition"]
 
 function canonicalSources(sources) {
   if (!Array.isArray(sources)) throw new Error("Source snapshots are required")
@@ -83,7 +83,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
   frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
   const selectedSources = canonicalSources([...sourceIds].map((id) => {
     const s = sourceById.get(id)
-    return { id, repository: s.repository, prNumber: s.prNumber, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
+    return { id, repository: s.repository, prNumber: s.prNumber, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, updatedAt: s.updatedAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
   }))
   const sourceSnapshotHash = sourceSnapshotHashFor(selectedSources)
   const datasetHash = datasetHashFor(frozenCases, labels, sourceSnapshotHash)
