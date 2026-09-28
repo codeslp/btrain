@@ -8,12 +8,13 @@ import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
 const family = createDecisionFamily({
   id: "pr-signal", questionVersion: "1", choices: ["clear", "feedback", "unavailable", "uncertain"],
+  policyVersion: "1", policyConfig: {},
   privacyClass: "private", allowedActions: ["flag-feedback"], threshold: 0.8,
   inputBuilder: (candidate) => ({ reviewText: candidate.text }),
   actionPolicy: (choice) => choice === "feedback" ? "flag-feedback" : null,
   fallback: (baseline) => baseline,
 })
-const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain" }
+const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain", callIndex: 0 }
 const answer = (choice = "feedback", scores = { clear: 0.05, feedback: 0.9, unavailable: 0.03, uncertain: 0.02 }) => ({ ok: true, model: "jev-pinned", answers: { signal: { choice, probabilities: scores } }, latencyMs: 12, usage: { input_tokens: 10 } })
 const sourceProof = (refs) => {
   const sources = refs.map((sourceRef, index) => ({ id: `source-${index}`, sourceRef, sourceHash: "a".repeat(64) }))
@@ -27,6 +28,16 @@ describe("offline decision gateway", () => {
     assert.equal((await decideCandidate({ family, candidate, provider })).outcome, "skipped")
     assert.equal((await decideCandidate({ family, candidate: { ...candidate, eligible: false }, provider, mode: "offline", privacyApproved: true })).reason, "ineligible")
     assert.equal((await decideCandidate({ family, candidate, provider, mode: "offline" })).reason, "privacy-denied")
+    assert.equal(calls, 0)
+  })
+
+  it("rejects non-boolean eligibility before calling the provider", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    for (const eligible of ["false", 1, null, undefined]) {
+      const trace = await decideCandidate({ family, candidate: { ...candidate, eligible }, provider, mode: "offline" })
+      assert.deepEqual([trace.outcome, trace.reason], ["skipped", "ineligible"])
+    }
     assert.equal(calls, 0)
   })
 
@@ -59,9 +70,28 @@ describe("offline decision gateway", () => {
     const args = { family, candidate, mode: "offline", provider: fakeProvider({ ...answer(), latencyMs: { privateText: "secret latency" } }) }
     const decided = await decideCandidate(args)
     const failed = await decideCandidate({ ...args, provider: fakeProvider({ ok: false, reason: "timeout", latencyMs: "secret latency" }) })
-    assert.equal(decided.latencyMs, null)
-    assert.equal(failed.latencyMs, null)
+    assert.ok(Number.isFinite(decided.latencyMs) && decided.latencyMs >= 0)
+    assert.ok(Number.isFinite(failed.latencyMs) && failed.latencyMs >= 0)
     assert.equal(JSON.stringify([decided, failed]).includes("secret latency"), false)
+  })
+
+  it("measures call latency locally even when the provider lies or times out", async () => {
+    const lied = await decideCandidate({ family, candidate, provider: fakeProvider({ ...answer(), latencyMs: 1_000_000 }), mode: "offline" })
+    assert.ok(Number.isFinite(lied.latencyMs) && lied.latencyMs < 10_000)
+    const shortTimeout = createDecisionFamily({ ...family, timeoutMs: 5 })
+    const timedOut = await decideCandidate({ family: shortTimeout, candidate, provider: { localOnly: true, decide: () => new Promise(() => {}) }, mode: "offline" })
+    assert.deepEqual([timedOut.outcome, timedOut.reason], ["failure", "timeout"])
+    assert.ok(Number.isFinite(timedOut.latencyMs) && timedOut.latencyMs >= 0)
+  })
+
+  it("skips malformed call indices before invoking a provider", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    for (const callIndex of [undefined, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const trace = await decideCandidate({ family, candidate: { ...candidate, callIndex }, provider, mode: "offline" })
+      assert.deepEqual([trace.outcome, trace.reason, trace.attemptedCall], ["skipped", "invalid-call-index", false])
+    }
+    assert.equal(calls, 0)
   })
 
   it("fails closed when input or action policy code throws", async () => {
@@ -76,6 +106,45 @@ describe("offline decision gateway", () => {
   it("changes the policy hash when action or threshold changes", () => {
     const changed = createDecisionFamily({ ...family, threshold: 0.9 })
     assert.notEqual(changed.policyHash, family.policyHash)
+  })
+
+  it("applies candidate action eligibility under one stable family policy", async () => {
+    const conditional = createDecisionFamily({
+      ...family,
+      actionPolicy: (choice, currentCandidate) => choice === "feedback" && !currentCandidate.blocked ? "flag-feedback" : null,
+    })
+    const provider = fakeProvider(answer())
+    const decided = await decideCandidate({ family: conditional, candidate: { ...candidate, blocked: false }, provider, mode: "offline" })
+    const blocked = await decideCandidate({ family: conditional, candidate: { ...candidate, blocked: true }, provider, mode: "offline" })
+    assert.equal(decided.outcome, "decision")
+    assert.deepEqual([blocked.outcome, blocked.reason, blocked.suggestedAction], ["abstain", "no-permitted-action", undefined])
+    assert.equal(blocked.policyHash, decided.policyHash)
+  })
+
+  it("pins captured policy configuration independently of caller mutation", async () => {
+    const policyConfig = { action: "flag-feedback" }
+    const create = (config) => createDecisionFamily({
+      ...family, policyVersion: "2", policyConfig: config,
+      actionPolicy: (choice, _candidate, policy) => choice === "feedback" ? policy.action : null,
+    })
+    const first = create(policyConfig)
+    const second = create({ action: "other-action" })
+    assert.notEqual(first.policyHash, second.policyHash)
+    policyConfig.action = "other-action"
+    assert.equal(first.policyConfig.action, "flag-feedback")
+    const trace = await decideCandidate({ family: first, candidate, provider: fakeProvider(answer()), mode: "offline" })
+    assert.deepEqual([trace.outcome, trace.suggestedAction], ["decision", "flag-feedback"])
+    assert.throws(() => createDecisionFamily({ ...family, policyConfig: undefined }), /policy configuration/)
+  })
+
+  it("validates resource budgets and honors an explicit zero-call budget", async () => {
+    for (const changes of [{ maxCalls: Infinity }, { maxCalls: -1 }, { maxInputBytes: Infinity }, { timeoutMs: 0 }]) {
+      assert.throws(() => createDecisionFamily({ ...family, ...changes }), /budget/)
+    }
+    let calls = 0
+    const zero = createDecisionFamily({ ...family, maxCalls: 0 })
+    const trace = await decideCandidate({ family: zero, candidate, provider: { localOnly: true, decide: async () => { calls += 1; return answer() } }, mode: "offline" })
+    assert.deepEqual([trace.outcome, trace.reason, calls], ["skipped", "call-budget", 0])
   })
 
   it("does not allow a family catalog to drift after hashing", () => {

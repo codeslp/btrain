@@ -29,16 +29,19 @@ describe("Jev source evidence", () => {
     assert.notEqual(first.sourceHash, second.sourceHash)
   })
 
-  it("captures only an unedited issue comment's full reviewed-commit attestation", () => {
+  it("captures an unedited issue comment's reviewed-commit attestation", () => {
     const at = "2026-09-01T10:00:00Z"
     const issue = { ...comment, surface: "issue", at, updatedAt: at, reviewedCommit: null, body: `Review done. **Reviewed commit:** \`${"c".repeat(40)}\`` }
     const captured = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: issue, capturedAt: "2026-09-01T10:05:00Z" })
     assert.equal(captured.reviewedCommit, "c".repeat(40))
     assert.equal(captured.updatedAt, at)
+    const short = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...issue, body: `Review done. **Reviewed commit:** \`${"c".repeat(10)}\`` }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(short.reviewedCommit, "c".repeat(10))
     for (const changed of [
       { updatedAt: "2026-09-01T10:01:00Z" },
       { updatedAt: null },
-      { body: `Review done. **Reviewed commit:** \`${"c".repeat(10)}\`` },
+      { body: `Review done. **Reviewed commit:** \`${"c".repeat(7)}\`` },
+      { body: `Review done. **Reviewed commit:** \`${"c".repeat(9)}\`` },
     ]) {
       const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...issue, ...changed }, capturedAt: "2026-09-01T10:05:00Z" })
       assert.equal(row.reviewedCommit, null)

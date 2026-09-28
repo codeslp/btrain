@@ -42,6 +42,12 @@ export function mandatoryVerificationChecks(change) {
 export const verificationFamily = createDecisionFamily({
   id: "verification-planner",
   questionVersion: "1",
+  policyVersion: "1",
+  policyConfig: {
+    maxPaths,
+    contractTags: [...contractTags],
+    mandatoryRules: [changePaths, tagsFor, mandatoryVerificationChecks].map((rule) => rule.toString()).join("\n"),
+  },
   questionId: "signal",
   choices: [...VERIFICATION_CATALOG, "none"],
   privacyClass: "private",
@@ -50,11 +56,11 @@ export const verificationFamily = createDecisionFamily({
   maxCalls: 3,
   maxInputBytes: 16 * 1024,
   inputBuilder: (candidate) => ({
-    changedPaths: candidate.changedPaths,
-    contractTags: candidate.contractTags,
-    selectedChecks: candidate.selectedChecks,
+    changedPaths: [...candidate.changedPaths],
+    contractTags: [...candidate.contractTags],
+    selectedChecks: [...candidate.selectedChecks],
   }),
-  actionPolicy: (choice) => choice === "none" ? null : `check:${choice}`,
+  actionPolicy: (choice, candidate) => choice === "none" || candidate.selectedChecks.includes(choice) ? null : `check:${choice}`,
   fallback: (baseline) => baseline,
 })
 

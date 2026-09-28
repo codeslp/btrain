@@ -398,6 +398,35 @@ describe("PR review flow classification", () => {
     assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: snapshot.id, reason: "unknown-event-head" }])
   })
 
+  it("uses a frozen unedited short reviewed-commit attestation for normal bot comments", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.html_url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const source = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
+    })
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] })
+    assert.equal(source.eventHead, "unknown")
+    assert.equal(source.reviewedCommit, input.pr.headRefOid.slice(0, 10))
+    assert.equal(result.candidates.length, 1)
+    assert.equal(result.candidates[0].headEvidence, "reviewed-commit-prefix")
+    assert.notEqual(sourceSnapshotHashFor([source]), sourceSnapshotHashFor([{ ...source, reviewedCommit: "b".repeat(10) }]))
+    const edited = { ...source, updatedAt: "2026-09-20T20:00:30Z" }
+    assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: source.id, reason: "stale-reviewed-commit" }])
+  })
+
+  it("requires a full current PR head before accepting a short attestation", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.", "a".repeat(10))
+    const comment = input.rawComments.issueComments[0]
+    const source = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: "https://github.com/o/r/pull/12#issuecomment-100", body: comment.body },
+    })
+    assert.throws(() => buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }), /full PR head/)
+  })
+
   it("freezes the captured reviewed commit before replaying a PR candidate", async () => {
     const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
     input.pr.html_url = "https://github.com/o/r/pull/12"
@@ -409,7 +438,7 @@ describe("PR review flow classification", () => {
       comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
     })
     const candidate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }).candidates[0]
-    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", policyVersion: "1", policyConfig: {}, choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
     const labels = [...family.choices]
     const manifest = freezeLabeledManifest({
       sources: [source],

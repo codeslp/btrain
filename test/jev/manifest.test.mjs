@@ -23,6 +23,13 @@ describe("frozen Jev label manifest", () => {
     assert.throws(() => freezeLabeledManifest({ sources: [malformed], cases: [entry("bad", 1, "a")], pins, labels: ["feedback"], requireEventHead: true }), /Invalid event-time head/)
   })
 
+  it("rejects a revision pin that cannot appear in decision traces", () => {
+    assert.throws(() => freezeLabeledManifest({
+      sources: [snapshot("s1", 1)], cases: [entry("s1", 1, "a")],
+      pins: { ...pins, codeRevision: "rev" }, labels: ["feedback"],
+    }), /code revision/)
+  })
+
   it("freezes reproducibly with source and label hashes", () => {
     const sources = [snapshot("s1", 1), snapshot("s2", 2)]
     const cases = [entry("s1", 1, "template-a", "train"), entry("s2", 2, "template-b", "test")]
@@ -35,6 +42,17 @@ describe("frozen Jev label manifest", () => {
     assert.equal(first.sources[0].sourceRef, "https://example.test/s1")
     assert.deepEqual([first.cases[0].baseline, first.cases[0].eligible, first.cases[0].privacyClass, first.cases[0].callIndex], ["uncertain", true, "synthetic", 0])
     assert.equal(sourceSnapshotHashFor(first.sources), first.sourceSnapshotHash)
+  })
+
+  it("copies threshold pins and binds them into the dataset hash", () => {
+    const supplied = { ...pins, thresholds: { feedback: 0.8 } }
+    const options = { sources: [snapshot("s1", 1)], cases: [entry("s1", 1, "a")], pins: supplied, labels: ["feedback"] }
+    const manifest = freezeLabeledManifest(options)
+    supplied.thresholds.feedback = 0.1
+    assert.equal(manifest.pins.thresholds.feedback, 0.8)
+    const changed = freezeLabeledManifest({ ...options, pins: supplied })
+    assert.notEqual(manifest.datasetHash, changed.datasetHash)
+    assert.notEqual(manifest.datasetHash, freezeLabeledManifest({ ...options, pins: { ...pins, baseline: "other" } }).datasetHash)
   })
 
   it("rejects a PR or normalized template across splits", () => {
