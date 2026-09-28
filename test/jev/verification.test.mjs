@@ -24,6 +24,20 @@ describe("offline verification planner", () => {
     assert.deepEqual(mandatoryVerificationChecks({ changedPaths: ["src/api/auth/routes.mjs"] }), ["unit", "security-boundary"])
   })
 
+  it("skips the provider when mandatory checks exhaust the catalog", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("unit") } }
+    const change = {
+      changedPaths: ["src/brain_train/auth.mjs", "migrations/pg/042.sql", "formal/handoff.tla"],
+      contractTags: ["cross-component", "negative-path"], sourceRefs,
+    }
+    const plan = await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(plan.checks, mandatoryVerificationChecks(change))
+    assert.deepEqual(plan.suggested, [])
+    assert.deepEqual(plan.traces.map((trace) => [trace.outcome, trace.reason]), [["skipped", "ineligible"]])
+    assert.equal(calls, 0)
+  })
+
   it("rejects an empty change rather than requesting a model suggestion", async () => {
     await assert.rejects(() => planVerification({ change: { changedPaths: [], sourceRefs }, provider: fakeProvider(answer("unit")), mode: "offline" }), /Changed paths are required/)
   })

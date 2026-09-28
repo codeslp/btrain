@@ -64,15 +64,16 @@ export async function planVerification({ change, provider, mode = "off" }) {
   const suggested = []
   const traces = []
   for (let callIndex = 0; callIndex < verificationFamily.maxCalls; callIndex += 1) {
+    const selectedChecks = [...mandatory, ...suggested]
     const candidate = {
-      eligible: paths.length <= maxPaths,
+      eligible: paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check)),
       sourceRefs: change.sourceRefs,
       baseline: "none",
       privacyClass: "private",
       callIndex,
       changedPaths: paths,
       contractTags: tagsFor(change),
-      selectedChecks: [...mandatory, ...suggested],
+      selectedChecks,
     }
     const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode })
     traces.push(trace)
