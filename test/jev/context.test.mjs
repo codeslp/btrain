@@ -32,6 +32,13 @@ const offline = (options) => {
 }
 
 describe("offline context selection", () => {
+  it("pins selector limits and rules in each family policy", () => {
+    assert.equal(dispatchContextFamily.policyConfig.maxItems, 256)
+    assert.equal(dispatchContextFamily.policyConfig.maxCalls, 16)
+    assert.equal(dispatchContextFamily.policyConfig.optionalKind.dispatch, "artifact")
+    assert.ok(dispatchContextFamily.policyConfig.selectionRules.includes("selectContext"))
+  })
+
   it("never calls a provider for required evidence and keeps it full", async () => {
     let calls = 0
     const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }

@@ -36,7 +36,13 @@ function family(id) {
     id,
     questionVersion: "1",
     policyVersion: "1",
-    policyConfig: {},
+    policyConfig: {
+      maxItems,
+      maxCalls,
+      optionalKind,
+      selectionRules: [contextSourceHash, contextManifestHash, frozenSourceMap, validateItems, selectContext]
+        .map((rule) => rule.toString()).join("\n"),
+    },
     choices: ["full", "reference", "omit"],
     privacyClass: "private",
     allowedActions: ["select:full", "select:reference", "select:omit"],
