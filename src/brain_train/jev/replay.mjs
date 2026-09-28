@@ -17,15 +17,20 @@ function verifiedCandidate(item, source, candidate) {
     && candidate.sourceRefs[0] === source.sourceRef
     && (candidate.text === undefined || candidate.text === candidate.sourceContent)
   if (!sourceMatches) throw new Error(`Replay candidate source provenance mismatch: ${item.sourceId}`)
+  const inputsMatch = candidate.baseline === item.baseline
+    && candidate.eligible === item.eligible
+    && candidate.privacyClass === item.privacyClass
+    && candidate.callIndex === item.callIndex
+  if (!inputsMatch) throw new Error(`Replay candidate evaluation inputs mismatch: ${item.sourceId}`)
   return {
     sourceId: item.sourceId,
     sourceContent: candidate.sourceContent,
     text: candidate.sourceContent,
     sourceRefs: [source.sourceRef],
-    baseline: candidate.baseline,
-    eligible: candidate.eligible === true,
-    privacyClass: candidate.privacyClass,
-    callIndex: candidate.callIndex,
+    baseline: item.baseline,
+    eligible: item.eligible,
+    privacyClass: item.privacyClass,
+    callIndex: item.callIndex,
   }
 }
 
@@ -87,7 +92,7 @@ export async function replayManifest({ manifest, family, candidates, provider })
     if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
     const source = sources.get(item.sourceId)
     const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
-    rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: !!candidate.eligible, trace })
+    rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: item.eligible, trace })
   }
   const splits = {}
   for (const split of ["train", "calibration", "test", "all"]) {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const splits = new Set(["train", "calibration", "test"])
+const eventHeadSha = /^[a-f0-9]{40}$/i
 const sourceFields = ["id", "repository", "prNumber", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "formalState", "deterministicDisposition"]
 
 function canonicalSources(sources) {
@@ -25,8 +26,9 @@ export function annotationCandidates(sources, { requireEventHead = false } = {})
   const eligible = []
   const excluded = []
   for (const source of sources) {
-    if (requireEventHead && (!source.eventHead || source.eventHead === "unknown")) {
-      excluded.push({ sourceId: source.id, reason: "unknown-event-head" })
+    if (requireEventHead && !eventHeadSha.test(source.eventHead || "")) {
+      const reason = !source.eventHead || source.eventHead === "unknown" ? "unknown-event-head" : "invalid-event-head"
+      excluded.push({ sourceId: source.id, reason })
       continue
     }
     if (!source.sourceRef || !source.sourceHash || !source.repository || !source.id) {
@@ -55,10 +57,15 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     if (!source) throw new Error(`Unknown source: ${item.sourceId}`)
     if (sourceIds.has(item.sourceId)) throw new Error(`Duplicate case source: ${item.sourceId}`)
     sourceIds.add(item.sourceId)
-    if (requireEventHead && (!source.eventHead || source.eventHead === "unknown")) throw new Error("Unknown event-time head cannot enter exact-head evaluation")
+    if (requireEventHead && !eventHeadSha.test(source.eventHead || "")) throw new Error("Invalid event-time head cannot enter exact-head evaluation")
     if (!source.sourceHash || !source.sourceRef || !source.repository) throw new Error("Incomplete source provenance")
     if (!splits.has(item.split)) throw new Error("Invalid split")
     if (!labels.includes(item.label)) throw new Error("Out-of-catalog label")
+    const validEvaluationInputs = typeof item.baseline === "string" && item.baseline
+      && typeof item.eligible === "boolean"
+      && ["public", "synthetic", "private"].includes(item.privacyClass)
+      && Number.isSafeInteger(item.callIndex) && item.callIndex >= 0
+    if (!validEvaluationInputs) throw new Error("Case evaluation inputs are required")
     if (source.repository !== item.repository || source.prNumber !== item.prNumber) throw new Error("Case source identity mismatch")
     if (!item.templateGroup) throw new Error("Template group is required")
     if (source.templateGroup && source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
@@ -71,7 +78,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     if (templateSplits.has(templateGroup) && templateSplits.get(templateGroup) !== item.split) throw new Error("Template group crosses splits")
     prSplits.set(prGroup, item.split)
     templateSplits.set(templateGroup, item.split)
-    frozenCases.push({ sourceId: item.sourceId, repository: item.repository, prNumber: item.prNumber, templateGroup: item.templateGroup, split: item.split, label: item.label, annotations: item.annotations.map((a) => ({ by: a.by, label: a.label })), adjudication: { by: item.adjudication.by, label: item.adjudication.label, reason: item.adjudication.reason }, sourceHash: source.sourceHash })
+    frozenCases.push({ sourceId: item.sourceId, repository: item.repository, prNumber: item.prNumber, templateGroup: item.templateGroup, split: item.split, label: item.label, baseline: item.baseline, eligible: item.eligible, privacyClass: item.privacyClass, callIndex: item.callIndex, annotations: item.annotations.map((a) => ({ by: a.by, label: a.label })), adjudication: { by: item.adjudication.by, label: item.adjudication.label, reason: item.adjudication.reason }, sourceHash: source.sourceHash })
   }
   frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
   const selectedSources = canonicalSources([...sourceIds].map((id) => {

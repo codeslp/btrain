@@ -5,6 +5,7 @@ import path from "node:path"
 const SHA = /^[a-f0-9]{40}$/i
 const hash = (value) => createHash("sha256").update(value).digest("hex")
 const templateText = (value) => String(value || "")
+  .replace(/<!--\s*btrain-pr-review\b[\s\S]*?-->/gi, "")
   .replace(/\b[a-f0-9]{7,40}\b/gi, "<commit>")
   .replace(/https?:\/\/[^\s)]+/g, "<url>")
   .replace(/\s+/g, " ")

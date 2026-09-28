@@ -35,12 +35,12 @@ describe("Jev replay metrics", () => {
   })
 
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
-    const cases = [{ sourceId: "a", split: "test", label: "feedback" }]
+    const cases = [{ sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]
     const sources = [{ id: "a", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
     const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash), sourceSnapshotHash, sources, labels, pins: { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "rev" }, cases }
-    const candidates = { a: { eligible: true, sourceRefs: ["https://example.test/a"], sourceContent, sourceHash, baseline: "uncertain" } }
+    const candidates = { a: { eligible: true, sourceRefs: ["https://example.test/a"], sourceContent, sourceHash, baseline: "uncertain", privacyClass: "synthetic", callIndex: 0 } }
     let providerCalls = 0
     const provider = { decide: async () => { providerCalls += 1; return { ok: true, model: "pinned", answers: { signal: { choice: "feedback", probabilities: { clear: 0.05, feedback: 0.9, uncertain: 0.05 } } }, latencyMs: 10 } } }
     const first = await replayManifest({ manifest, family, candidates, provider })
@@ -60,6 +60,11 @@ describe("Jev replay metrics", () => {
     ]) {
       const before = providerCalls
       await assert.rejects(() => replayManifest({ manifest, family, candidates: { a: { ...candidates.a, ...changed } }, provider }), /candidate source provenance/)
+      assert.equal(providerCalls, before)
+    }
+    for (const changed of [{ baseline: "clear" }, { eligible: false }, { privacyClass: "private" }, { callIndex: 1 }]) {
+      const before = providerCalls
+      await assert.rejects(() => replayManifest({ manifest, family, candidates: { a: { ...candidates.a, ...changed } }, provider }), /candidate evaluation inputs/)
       assert.equal(providerCalls, before)
     }
   })
