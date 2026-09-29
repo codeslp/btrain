@@ -18,6 +18,9 @@ describe("offline verification planner", () => {
     assert.ok(verificationFamily.policyConfig.mandatoryRules.includes("mandatoryVerificationChecks"))
     const changed = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, maxPaths: 257 } })
     assert.notEqual(changed.policyHash, verificationFamily.policyHash)
+    assert.ok(verificationFamily.policyConfig.eligibilityRule.includes("VERIFICATION_CATALOG.some"))
+    const changedEligibility = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, eligibilityRule: "different predicate" } })
+    assert.notEqual(changedEligibility.policyHash, verificationFamily.policyHash)
   })
 
   it("retains mandatory migration, security, formal, and cross-component checks", () => {
@@ -142,5 +145,15 @@ describe("offline verification planner", () => {
     assert.equal(calls, 3)
     assert.deepEqual(oversized.mandatory, ["unit"])
     assert.equal(oversized.traces[0].outcome, "skipped")
+  })
+
+  it("starts a fresh call budget for each independent change", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    for (const id of ["first", "second"]) {
+      const plan = await planVerification({ change: { changedPaths: [`src/${id}.mjs`], sourceRefs }, provider, mode: "offline" })
+      assert.equal(plan.traces[0].outcome, "abstain")
+    }
+    assert.equal(calls, 2)
   })
 })

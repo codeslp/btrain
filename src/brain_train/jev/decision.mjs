@@ -9,6 +9,20 @@ const outcomes = new Set(["off", "offline"])
 const failureReasons = new Set(["timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled"])
 const traceReasons = new Set(["mode-off", "ineligible", "invalid-baseline", "invalid-call-index", "privacy-denied", "call-budget", "invalid-source-reference", "invalid-input", "input-budget", "provider-unavailable", "timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled", "model-mismatch", "invalid-answer", "below-threshold", "no-permitted-action"])
 const nonnegative = (value) => Number.isFinite(value) && value >= 0 ? value : null
+const explicitRuns = new WeakMap()
+
+export function createDecisionRun(family) {
+  const run = Object.freeze({})
+  explicitRuns.set(run, { family, calls: 0 })
+  return run
+}
+
+function consumeCallBudget(family, run) {
+  const state = explicitRuns.get(run)
+  if (state.calls >= family.maxCalls) return false
+  state.calls += 1
+  return true
+}
 
 function opaqueId(value) {
   if (typeof value !== "string" || !value) return null
@@ -117,19 +131,24 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
   return record
 }
 
+export function validProbabilityVector(probabilities, choices) {
+  if (!probabilities || typeof probabilities !== "object" || Array.isArray(probabilities)) return false
+  const keys = Object.keys(probabilities)
+  if (keys.length !== choices.length || keys.some((key) => !choices.includes(key))) return false
+  const values = choices.map((choice) => probabilities[choice])
+  if (values.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) return false
+  return Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) <= 0.02
+}
+
 function validAnswer(response, family) {
   const answer = response?.answers?.[family.questionId]
-  if (!answer || !family.choices.includes(answer.choice) || !answer.probabilities || typeof answer.probabilities !== "object" || Array.isArray(answer.probabilities)) return null
-  const keys = Object.keys(answer.probabilities)
-  if (keys.length !== family.choices.length || keys.some((key) => !family.choices.includes(key))) return null
-  const values = family.choices.map((choice) => answer.probabilities[choice])
-  if (values.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) return null
-  if (Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) > 0.02) return null
+  if (!answer || !family.choices.includes(answer.choice) || !validProbabilityVector(answer.probabilities, family.choices)) return null
   return { choice: answer.choice, probabilities: Object.fromEntries(family.choices.map((choice) => [choice, answer.probabilities[choice]])) }
 }
 
-export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null }) {
+export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null, run }) {
   if (!outcomes.has(mode)) throw new Error("Decision gateway supports only off or offline mode")
+  if (mode === "offline" && (!explicitRuns.has(run) || explicitRuns.get(run).family !== family)) throw new Error("Decision run is required and must match the family")
   const sourceRefs = opaqueRefs(candidate?.sourceRefs)
   let baseline
   try {
@@ -152,29 +171,35 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
     encoded = JSON.stringify(boundedState)
   } catch { return skip("invalid-input") }
   if (!encoded || Buffer.byteLength(encoded) > family.maxInputBytes) return skip("input-budget")
+  if (typeof provider?.decide === "function" && !consumeCallBudget(family, run)) return skip("call-budget")
   const inputHash = hash(boundedState)
   const attempted = { ...base, inputHash, provider: opaqueId(provider?.id || "injected"), modelPin: opaqueId(modelPin), attemptedCall: true }
   let startedAt
   const elapsed = () => startedAt === undefined ? null : nonnegative(performance.now() - startedAt)
-  const fail = (reason) => ({ ...attempted, outcome: "failure", reason, failureClass: reason === "invalid-answer" ? "response-shape" : "provider", latencyMs: elapsed(), actionTaken: "none" })
+  const fail = (reason, providerResponse) => ({ ...attempted,
+    ...(providerResponse ? { model: opaqueId(providerResponse.model), inputTokens: nonnegative(providerResponse.usage?.input_tokens), cost: nonnegative(providerResponse.usage?.cost) } : {}),
+    outcome: "failure", reason, failureClass: reason === "invalid-answer" ? "response-shape" : "provider", latencyMs: elapsed(), actionTaken: "none" })
   if (typeof provider?.decide !== "function") return fail("provider-unavailable")
   let response
   let timer
+  let timedOut = false
+  const controller = new AbortController()
   try {
     startedAt = performance.now()
     response = await Promise.race([
-      provider.decide({ state: boundedState, questions: { [family.questionId]: { type: "choice", instructions: `Classify ${family.id} evidence.`, criteria: Object.fromEntries(family.choices.map((choice) => [choice, choice])) } } }),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timeout")), family.timeoutMs) }),
+      provider.decide({ state: boundedState, signal: controller.signal, questions: { [family.questionId]: { type: "choice", instructions: `Classify ${family.id} evidence.`, criteria: Object.fromEntries(family.choices.map((choice) => [choice, choice])) } } }),
+      new Promise((_, reject) => { timer = setTimeout(() => { timedOut = true; controller.abort(); reject(new Error("timeout")) }, family.timeoutMs) }),
     ])
-  } catch (error) { return fail(error?.message === "timeout" ? "timeout" : "provider-error") }
+  } catch (error) { return fail(timedOut || error?.message === "timeout" ? "timeout" : "provider-error") }
   finally { clearTimeout(timer) }
-  if (!response?.ok) return fail(failureReasons.has(response?.reason) ? response.reason : "provider-error")
-  if (modelPin && response.model !== modelPin) return fail("model-mismatch")
+  if (timedOut) return fail("timeout")
+  if (!response?.ok) return fail(failureReasons.has(response?.reason) ? response.reason : "provider-error", response)
+  if (modelPin && response.model !== modelPin) return fail("model-mismatch", response)
   const answer = validAnswer(response, family)
-  if (!answer) return fail("invalid-answer")
+  if (!answer) return fail("invalid-answer", response)
   let proposedAction
-  try { proposedAction = family.actionPolicy(answer.choice, candidate, family.policyConfig) } catch { return fail("invalid-answer") }
-  if (proposedAction !== null && !family.allowedActions.includes(proposedAction)) return fail("invalid-answer")
+  try { proposedAction = family.actionPolicy(answer.choice, candidate, family.policyConfig) } catch { return fail("invalid-answer", response) }
+  if (proposedAction !== null && !family.allowedActions.includes(proposedAction)) return fail("invalid-answer", response)
   const confidence = answer.probabilities[answer.choice]
   const common = { ...attempted, prediction: answer.choice, probabilities: answer.probabilities, model: opaqueId(response.model), latencyMs: elapsed(), inputTokens: nonnegative(response.usage?.input_tokens), cost: nonnegative(response.usage?.cost) }
   return proposedAction && confidence >= family.threshold

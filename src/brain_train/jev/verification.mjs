@@ -1,4 +1,4 @@
-import { createDecisionFamily, decideCandidate } from "./decision.mjs"
+import { createDecisionFamily, createDecisionRun, decideCandidate } from "./decision.mjs"
 
 export const VERIFICATION_CATALOG = Object.freeze([
   "unit",
@@ -39,6 +39,10 @@ export function mandatoryVerificationChecks(change) {
   return VERIFICATION_CATALOG.filter((check) => required.has(check))
 }
 
+function verificationEligible(paths, selectedChecks) {
+  return paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check))
+}
+
 export const verificationFamily = createDecisionFamily({
   id: "verification-planner",
   questionVersion: "1",
@@ -47,6 +51,7 @@ export const verificationFamily = createDecisionFamily({
     maxPaths,
     contractTags: [...contractTags],
     mandatoryRules: [changePaths, tagsFor, mandatoryVerificationChecks].map((rule) => rule.toString()).join("\n"),
+    eligibilityRule: verificationEligible.toString(),
   },
   questionId: "signal",
   choices: [...VERIFICATION_CATALOG, "none"],
@@ -69,10 +74,11 @@ export async function planVerification({ change, provider, mode = "off" }) {
   const mandatory = mandatoryVerificationChecks(change)
   const suggested = []
   const traces = []
+  const run = createDecisionRun(verificationFamily)
   for (let callIndex = 0; callIndex < verificationFamily.maxCalls; callIndex += 1) {
     const selectedChecks = [...mandatory, ...suggested]
     const candidate = {
-      eligible: paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check)),
+      eligible: verificationEligible(paths, selectedChecks),
       sourceRefs: change.sourceRefs,
       baseline: "none",
       privacyClass: "private",
@@ -81,7 +87,7 @@ export async function planVerification({ change, provider, mode = "off" }) {
       contractTags: tagsFor(change),
       selectedChecks,
     }
-    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode })
+    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode, run })
     traces.push(trace)
     if (trace.outcome !== "decision") break
     const check = trace.suggestedAction?.slice("check:".length)
