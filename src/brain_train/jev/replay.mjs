@@ -1,4 +1,4 @@
-import { decideCandidate } from "./decision.mjs"
+import { createDecisionRun, decideCandidate, validProbabilityVector } from "./decision.mjs"
 import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
 import { createHash } from "node:crypto"
 
@@ -52,6 +52,15 @@ function predictionMetrics(rows, labels, pick, supportRows = rows) {
   return { support, confusion, evaluated: evaluated.length, correct, accuracy: ratio(correct, evaluated.length), perClass }
 }
 
+function calibrationMetrics(rows, labels) {
+  const complete = rows.filter((row) => validProbabilityVector(row.trace.probabilities, labels))
+  const total = complete.reduce((sum, row) => sum + labels.reduce((score, label) => {
+    const target = label === row.label ? 1 : 0
+    return score + (row.trace.probabilities[label] - target) ** 2
+  }, 0), 0)
+  return { evaluated: complete.length, multiclassBrier: ratio(total, complete.length) }
+}
+
 export function summarizeReplay(rows, labels) {
   if (!Array.isArray(rows) || !Array.isArray(labels) || !labels.length) throw new Error("Replay rows and labels are required")
   const attempted = rows.filter((row) => row.trace.attemptedCall)
@@ -66,7 +75,7 @@ export function summarizeReplay(rows, labels) {
     counts: { cases: rows.length, eligible: eligible.length, attempted: attempted.length, skipped: skipped.length, validPredictions: valid.length, actionableDecisions: decisions.length, abstentions: rows.filter((row) => row.trace.outcome === "abstain").length, failures: failures.length },
     coverage: { validPrediction: ratio(valid.length, attempted.length), actionable: ratio(decisions.length, eligible.length) },
     baseline: predictionMetrics(rows, labels, (row) => row.baseline),
-    model: predictionMetrics(valid, labels, (row) => row.trace.prediction, rows),
+    model: { ...predictionMetrics(valid, labels, (row) => row.trace.prediction, rows), calibration: calibrationMetrics(valid, labels) },
     failures: failures.map((row) => ({ sourceId: row.sourceId, reason: row.trace.reason, failureClass: row.trace.failureClass })),
     skips: skipped.map((row) => ({ sourceId: row.sourceId, reason: row.trace.reason })),
     abstentions: rows.filter((row) => row.trace.outcome === "abstain").map((row) => ({ sourceId: row.sourceId, reason: row.trace.reason })),
@@ -95,7 +104,7 @@ export async function replayManifest({ manifest, family, candidates, provider })
     const candidate = candidates[item.sourceId]
     if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
     const source = sources.get(item.sourceId)
-    const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
+    const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision, run: createDecisionRun(family) })
     rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: item.eligible, privacyClass: item.privacyClass, trace })
   }
   const splits = {}

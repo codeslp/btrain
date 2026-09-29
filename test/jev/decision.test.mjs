@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { createDecisionFamily, decideCandidate, fakeProvider, appendDecisionTrace } from "../../src/brain_train/jev/decision.mjs"
+import { createDecisionFamily, createDecisionRun, decideCandidate as decideWithRun, fakeProvider, appendDecisionTrace } from "../../src/brain_train/jev/decision.mjs"
 import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
 const family = createDecisionFamily({
@@ -15,6 +15,7 @@ const family = createDecisionFamily({
   fallback: (baseline) => baseline,
 })
 const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain", callIndex: 0 }
+const decideCandidate = (options) => decideWithRun({ ...options, run: options.run ?? createDecisionRun(options.family) })
 const answer = (choice = "feedback", scores = { clear: 0.05, feedback: 0.9, unavailable: 0.03, uncertain: 0.02 }) => ({ ok: true, model: "jev-pinned", answers: { signal: { choice, probabilities: scores } }, latencyMs: 12, usage: { input_tokens: 10 } })
 const sourceProof = (refs) => {
   const sources = refs.map((sourceRef, index) => ({ id: `source-${index}`, sourceRef, sourceHash: "a".repeat(64) }))
@@ -82,6 +83,45 @@ describe("offline decision gateway", () => {
     const timedOut = await decideCandidate({ family: shortTimeout, candidate, provider: { localOnly: true, decide: () => new Promise(() => {}) }, mode: "offline" })
     assert.deepEqual([timedOut.outcome, timedOut.reason], ["failure", "timeout"])
     assert.ok(Number.isFinite(timedOut.latencyMs) && timedOut.latencyMs >= 0)
+  })
+
+  it("aborts a provider request when its timeout expires", async () => {
+    const shortTimeout = createDecisionFamily({ ...family, timeoutMs: 5 })
+    let aborted = false
+    const provider = { localOnly: true, decide: ({ signal }) => new Promise(() => {
+      signal?.addEventListener("abort", () => { aborted = true }, { once: true })
+    }) }
+    const trace = await decideCandidate({ family: shortTimeout, candidate, provider, mode: "offline" })
+    assert.deepEqual([trace.outcome, trace.reason, aborted], ["failure", "timeout", true])
+  })
+
+  it("keeps sanitized billed usage when a provider response is invalid", async () => {
+    const malformed = { ...answer("feedback", { feedback: 1 }), usage: { input_tokens: 10, cost: 0.25 } }
+    const trace = await decideCandidate({ family, candidate, provider: fakeProvider(malformed), mode: "offline" })
+    assert.deepEqual([trace.outcome, trace.reason, trace.inputTokens, trace.cost], ["failure", "invalid-answer", 10, 0.25])
+  })
+
+  it("enforces the provider call budget when callers reuse an index", async () => {
+    const bounded = createDecisionFamily({ ...family, maxCalls: 2 })
+    const run = createDecisionRun(bounded)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    const traces = []
+    for (let index = 0; index < 3; index += 1) {
+      traces.push(await decideCandidate({ family: bounded, candidate, provider, mode: "offline", run }))
+    }
+    assert.equal(calls, 2)
+    assert.deepEqual(traces.map((trace) => [trace.outcome, trace.reason]), [
+      ["decision", undefined], ["decision", undefined], ["skipped", "call-budget"],
+    ])
+  })
+
+  it("requires an explicit run boundary for offline calls", async () => {
+    const provider = fakeProvider(answer())
+    await assert.rejects(() => decideWithRun({ family, candidate, provider, mode: "offline" }), /Decision run is required/)
+    const first = await decideCandidate({ family, candidate, provider, mode: "offline", run: createDecisionRun(family) })
+    const second = await decideCandidate({ family, candidate: { ...candidate, text: "another review" }, provider, mode: "offline", run: createDecisionRun(family) })
+    assert.deepEqual([first.outcome, second.outcome], ["decision", "decision"])
   })
 
   it("skips malformed call indices before invoking a provider", async () => {
