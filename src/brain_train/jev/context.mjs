@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { createDecisionFamily, decideCandidate } from "./decision.mjs"
+import { createDecisionFamily, createDecisionRun, decideCandidate } from "./decision.mjs"
 
 const optionalKind = { dispatch: "artifact", transcript: "transcript" }
 const maxItems = 256
@@ -104,6 +104,7 @@ export async function selectContext({ kind, items, objective = "", provider, mod
     throw new Error("A frozen context item is missing from the packet")
   }
   const decisionFamily = kind === "dispatch" ? dispatchContextFamily : transcriptContextFamily
+  const run = createDecisionRun(decisionFamily)
   const selections = []
   const traces = []
   let calls = 0
@@ -130,6 +131,7 @@ export async function selectContext({ kind, items, objective = "", provider, mod
       },
       provider,
       mode,
+      run,
       modelPin,
       codeRevision,
     })
