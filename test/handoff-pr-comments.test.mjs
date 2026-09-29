@@ -47,6 +47,23 @@ describe("parseConcatenatedJsonArrays", () => {
 })
 
 describe("comment capture and Jev evidence composition", () => {
+  it("keeps submitted comments when GitHub also returns a pending review", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-pending-"))
+    try {
+      const at = "2026-09-01T10:00:00Z"
+      const comments = shapeComments({
+        issueComments: [{ id: 9, user: { login: "bot" }, body: "Review done", html_url: "https://example.test/9", created_at: at }],
+        reviewComments: [{ id: 11, user: { login: "reviewer" }, body: "draft inline", html_url: "https://example.test/11", created_at: at, pull_request_review_id: 10 }],
+        reviews: [{ id: 10, user: { login: "reviewer" }, body: "draft", state: "PENDING", html_url: "https://example.test/10", submitted_at: null }],
+      })
+      await persistCapturedComments(root, { identity: { owner: "o", repo: "r" }, laneId: "a", prNumber: "7", comments, captureHead: { head: "a".repeat(40), observedAt: at }, capturedAt: at })
+      assert.deepEqual((await readEvidence(root)).snapshots.map((row) => row.eventId), ["9"])
+      assert.deepEqual((await readComments(root, "a", "7")).map((row) => row.id), [9])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("writes provenance and the original comment once across repeated pulls", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-evidence-"))
     try {
