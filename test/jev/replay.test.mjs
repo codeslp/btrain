@@ -85,6 +85,12 @@ describe("Jev replay metrics", () => {
     assert.deepEqual(withoutTiming(first), withoutTiming(second))
     assert.equal(first.syntheticControls.test.model.correct, 1)
     assert.ok(Number.isFinite(first.rows[0].trace.latencyMs))
+    const billedFailure = await replayManifest({ manifest, family, candidates, provider: { localOnly: true, decide: async () => ({
+      ok: true, model: "pinned", usage: { input_tokens: 7, cost: 0.25 },
+      answers: { signal: { choice: "feedback", probabilities: { feedback: 1 } } },
+    }) } })
+    assert.equal(billedFailure.syntheticControls.test.counts.failures, 1)
+    assert.deepEqual(billedFailure.syntheticControls.test.cost, { observedCalls: 1, total: 0.25 })
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, labels: ["feedback"], datasetHash: datasetHashFor(cases, ["feedback"], sourceSnapshotHash, pins) }, family, candidates, provider }), /label catalog/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, baseline: "changed" } }, family, candidates, provider }), /dataset hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /dataset hash/)

@@ -1,4 +1,4 @@
-import { decideCandidate, validProbabilityVector } from "./decision.mjs"
+import { createDecisionRun, decideCandidate, validProbabilityVector } from "./decision.mjs"
 import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
 import { createHash } from "node:crypto"
 
@@ -104,7 +104,7 @@ export async function replayManifest({ manifest, family, candidates, provider })
     const candidate = candidates[item.sourceId]
     if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
     const source = sources.get(item.sourceId)
-    const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision })
+    const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision, run: createDecisionRun(family) })
     rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: item.eligible, privacyClass: item.privacyClass, trace })
   }
   const splits = {}
