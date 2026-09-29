@@ -49,6 +49,19 @@ describe("Jev replay metrics", () => {
     assert.equal(summarizeReplay(measured, ["clear"]).latencyMs.p95, 1000)
   })
 
+  it("reports multiclass calibration from complete probability vectors", () => {
+    const scored = [
+      { label: "feedback", baseline: "feedback", eligible: true, trace: { outcome: "decision", prediction: "feedback", probabilities: { feedback: 0.9, clear: 0.1 }, attemptedCall: true } },
+      { label: "clear", baseline: "clear", eligible: true, trace: { outcome: "decision", prediction: "feedback", probabilities: { feedback: 0.6, clear: 0.4 }, attemptedCall: true } },
+    ]
+    const result = summarizeReplay(scored, ["clear", "feedback"])
+    assert.equal(result.model.calibration.evaluated, 2)
+    assert.ok(Math.abs(result.model.calibration.multiclassBrier - 0.37) < 1e-12)
+    const rounded = [{ ...scored[0], trace: { ...scored[0].trace, probabilities: { feedback: 0.9, clear: 0.09 } } }]
+    assert.equal(summarizeReplay(rounded, ["clear", "feedback"]).model.calibration.evaluated, 1)
+    assert.equal(summarizeReplay(rows, ["clear", "feedback", "uncertain"]).model.calibration.multiclassBrier, null)
+  })
+
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
     const cases = [{ sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]
@@ -72,6 +85,12 @@ describe("Jev replay metrics", () => {
     assert.deepEqual(withoutTiming(first), withoutTiming(second))
     assert.equal(first.syntheticControls.test.model.correct, 1)
     assert.ok(Number.isFinite(first.rows[0].trace.latencyMs))
+    const billedFailure = await replayManifest({ manifest, family, candidates, provider: { localOnly: true, decide: async () => ({
+      ok: true, model: "pinned", usage: { input_tokens: 7, cost: 0.25 },
+      answers: { signal: { choice: "feedback", probabilities: { feedback: 1 } } },
+    }) } })
+    assert.equal(billedFailure.syntheticControls.test.counts.failures, 1)
+    assert.deepEqual(billedFailure.syntheticControls.test.cost, { observedCalls: 1, total: 0.25 })
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, labels: ["feedback"], datasetHash: datasetHashFor(cases, ["feedback"], sourceSnapshotHash, pins) }, family, candidates, provider }), /label catalog/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, baseline: "changed" } }, family, candidates, provider }), /dataset hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /dataset hash/)

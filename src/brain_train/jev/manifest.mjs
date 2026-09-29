@@ -4,7 +4,7 @@ const hash = (value) => createHash("sha256").update(JSON.stringify(value)).diges
 const splits = new Set(["train", "calibration", "test"])
 const eventHeadSha = /^[a-f0-9]{40}$/i
 export const validCodeRevision = (value) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value)
-const sourceFields = ["id", "repository", "prNumber", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "updatedAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "formalState", "deterministicDisposition"]
+const sourceFields = ["id", "repository", "prNumber", "laneId", "eventId", "sourceRef", "sourceHash", "templateGroup", "surface", "author", "eventAt", "updatedAt", "capturedAt", "reviewedCommit", "eventHead", "captureHead", "captureHeadObservedAt", "formalState", "deterministicDisposition"]
 
 function canonicalSources(sources) {
   if (!Array.isArray(sources)) throw new Error("Source snapshots are required")
@@ -77,6 +77,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     if (!source.sourceHash || !source.sourceRef || !source.repository) throw new Error("Incomplete source provenance")
     if (!splits.has(item.split)) throw new Error("Invalid split")
     if (!labels.includes(item.label)) throw new Error("Out-of-catalog label")
+    if (!labels.includes(item.baseline)) throw new Error("Baseline is outside the label catalog")
     const validEvaluationInputs = typeof item.baseline === "string" && item.baseline
       && typeof item.eligible === "boolean"
       && ["public", "synthetic", "private"].includes(item.privacyClass)
@@ -99,7 +100,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
   frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
   const selectedSources = canonicalSources([...sourceIds].map((id) => {
     const s = sourceById.get(id)
-    return { id, repository: s.repository, prNumber: s.prNumber, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, updatedAt: s.updatedAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
+    return { id, repository: s.repository, prNumber: s.prNumber, laneId: s.laneId, eventId: s.eventId, sourceRef: s.sourceRef, sourceHash: s.sourceHash, templateGroup: s.templateGroup, surface: s.surface, author: s.author, eventAt: s.eventAt, updatedAt: s.updatedAt, capturedAt: s.capturedAt, reviewedCommit: s.reviewedCommit, eventHead: s.eventHead || "unknown", captureHead: s.captureHead, captureHeadObservedAt: s.captureHeadObservedAt, formalState: s.formalState, deterministicDisposition: s.deterministicDisposition }
   }))
   const sourceSnapshotHash = sourceSnapshotHashFor(selectedSources)
   const datasetHash = datasetHashFor(frozenCases, labels, sourceSnapshotHash, frozenPins)

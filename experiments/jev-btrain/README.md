@@ -21,6 +21,10 @@ and candidate fixtures inside their source repository.
 
 `decideCandidate` from `src/brain_train/jev/decision.mjs` defaults to `off`. In `offline`
 mode an injected local fake provider can replay private fixtures without a hosted call.
+Create a `createDecisionRun(family)` token for each independent case and pass it as `run`;
+reuse that token across retries so the gateway enforces the family's call budget.
+Providers receive an abort signal when a call times out. Failed responses retain sanitized
+billed usage when the provider returns it.
 It returns `skipped`, `decision`, `abstain`, or `failure` traces and only *suggests* an
 allowed action. `appendDecisionTrace` requires the matching family and a source manifest proof,
 then writes an allowlisted
