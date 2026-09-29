@@ -62,4 +62,19 @@ describe("Jev source evidence", () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  it("removes credentials from outcome evidence references and rejects non-HTTP URLs", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-outcome-ref-"))
+    try {
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      await appendSourceSnapshots(root, [row])
+      const outcome = { sourceId: row.id, outcome: "repaired", observedAt: "2026-09-02T10:00:00Z" }
+      await appendSourceOutcome(root, { ...outcome, evidenceRef: "https://user:pass@example.test/repair?token=secret#part" })
+      assert.equal((await readEvidence(root)).outcomes.at(-1).evidenceRef, "https://example.test/repair")
+      await assert.rejects(() => appendSourceOutcome(root, { ...outcome, evidenceRef: "file:///private/secret" }), /HTTP URL/)
+      assert.equal((await readEvidence(root)).outcomes.length, 2)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 })
