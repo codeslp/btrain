@@ -40,7 +40,9 @@ function family(id) {
       maxItems,
       maxCalls,
       optionalKind,
-      selectionRules: [contextSourceHash, contextManifestHash, frozenSourceMap, validateItems, selectContext]
+      revisionPattern: revisionPattern.source,
+      hashPattern: hashPattern.source,
+      selectionRules: [digest, validSourceRef, contextSourceHash, contextManifestHash, frozenSourceMap, validateItems, selectContext]
         .map((rule) => rule.toString()).join("\n"),
     },
     choices: ["full", "reference", "omit"],
@@ -63,7 +65,7 @@ function family(id) {
 export const dispatchContextFamily = family("dispatch-context")
 export const transcriptContextFamily = family("transcript-context")
 
-function validSourceRef(value) {
+export function validSourceRef(value) {
   try {
     const url = new URL(value)
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password

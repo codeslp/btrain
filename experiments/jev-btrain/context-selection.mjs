@@ -1,3 +1,5 @@
+import { validSourceRef } from "../../src/brain_train/jev/context.mjs"
+
 const kinds = new Set(["dispatch", "transcript"])
 
 function median(values) {
@@ -17,7 +19,7 @@ export function evaluateContextPairs(kind, pairs) {
       || typeof pair.baselineCompleted !== "boolean" || typeof pair.selectedCompleted !== "boolean"
       || !Number.isSafeInteger(pair.pinnedOmissions) || pair.pinnedOmissions < 0
       || !["real", "synthetic", "unknown"].includes(pair.origin)
-      || (pair.origin === "real" && (!/^https?:\/\//.test(pair.sourceRef || "") || !/^[a-f0-9]{64}$/.test(pair.sourceSnapshotHash || "")))) {
+      || (pair.origin === "real" && (!validSourceRef(pair.sourceRef) || !/^[a-f0-9]{64}$/.test(pair.sourceSnapshotHash || "")))) {
       throw new Error("Every case needs unique, valid paired measurements from one family")
     }
     ids.add(pair.id)

@@ -37,6 +37,8 @@ describe("offline context selection", () => {
     assert.equal(dispatchContextFamily.policyConfig.maxCalls, 16)
     assert.equal(dispatchContextFamily.policyConfig.optionalKind.dispatch, "artifact")
     assert.ok(dispatchContextFamily.policyConfig.selectionRules.includes("selectContext"))
+    assert.ok(dispatchContextFamily.policyConfig.selectionRules.includes("function digest(value)"))
+    assert.ok(dispatchContextFamily.policyConfig.selectionRules.includes("function validSourceRef(value)"))
   })
 
   it("never calls a provider for required evidence and keeps it full", async () => {

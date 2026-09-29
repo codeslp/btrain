@@ -22,6 +22,14 @@ describe("G7 offline paired accounting", () => {
     assert.equal(result.gateReady, false)
   })
 
+  it("rejects malformed real-case URLs before counting them", () => {
+    for (const sourceRef of ["https://", "https://user:pass@example.test/case", "ftp://example.test/case"]) {
+      assert.throws(() => evaluateContextPairs("dispatch", [pair("bad", "dispatch", {
+        origin: "real", sourceRef, sourceSnapshotHash: "a".repeat(64),
+      })]), /valid paired measurements/)
+    }
+  })
+
   it("rejects mixed families, duplicate IDs, and invalid paired measurements", () => {
     for (const pairs of [[pair("a", "dispatch"), pair("b", "transcript")], [pair("a", "dispatch"), pair("a", "dispatch")], [pair("a", "dispatch", { selectedTokens: -1 })], [pair("a", "dispatch", { origin: "real" })], [pair("a", "dispatch", { origin: "false" })]]) {
       assert.throws(() => evaluateContextPairs("dispatch", pairs))
