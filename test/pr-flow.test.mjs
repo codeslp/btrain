@@ -369,6 +369,28 @@ describe("PR review flow classification", () => {
     })
   })
 
+  it("retains frozen semantic candidates after the PR merges or closes", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null,
+    }
+
+    for (const state of ["MERGED", "CLOSED"]) {
+      const result = buildPrSemanticReplayCandidates({
+        ...input, pr: { ...input.pr, state }, sourceSnapshots: [snapshot],
+      })
+      assert.deepEqual(result.excluded, [])
+      assert.equal(result.candidates.length, 1, `${state} PR should retain its captured candidate`)
+      assert.equal(result.candidates[0].sourceId, snapshot.id)
+    }
+  })
+
   it("uses a full reviewed-commit attestation without claiming an event-time head", () => {
     const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
     input.pr.url = "https://api.github.com/repos/o/r/pulls/12"
@@ -438,7 +460,7 @@ describe("PR review flow classification", () => {
       comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
     })
     const candidate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }).candidates[0]
-    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", policyVersion: "1", policyConfig: {}, choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", policyVersion: "1", policyConfig: { evaluation: { baselineId: "deterministic", thresholds: { feedback: 0.8 } } }, choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
     const labels = [...family.choices]
     const manifest = freezeLabeledManifest({
       sources: [source],

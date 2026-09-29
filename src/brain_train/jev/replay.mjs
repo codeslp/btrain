@@ -91,6 +91,16 @@ export async function replayManifest({ manifest, family, candidates, provider })
   if (manifest.pins?.family !== family.id || manifest.pins?.questionVersion !== family.questionVersion) throw new Error("Manifest family version does not match")
   if (!manifest.pins?.model || !manifest.pins?.codeRevision) throw new Error("Manifest model and code revision pins are required")
   if (!validCodeRevision(manifest.pins.codeRevision)) throw new Error("Invalid code revision pin")
+  const evaluation = family.policyConfig?.evaluation
+  if (!evaluation?.baselineId || manifest.pins.baseline !== evaluation.baselineId) throw new Error("Manifest evaluation baseline pin does not match family")
+  const expectedThresholds = evaluation.thresholds
+  const pinnedThresholds = manifest.pins.thresholds
+  if (!expectedThresholds || !pinnedThresholds
+    || Object.keys(expectedThresholds).length !== Object.keys(pinnedThresholds).length
+    || Object.entries(expectedThresholds).some(([choice, value]) => !family.choices.includes(choice)
+      || value !== family.threshold || pinnedThresholds[choice] !== value)) {
+    throw new Error("Manifest evaluation threshold pins do not match family")
+  }
   if (manifest.labels.length !== family.choices.length || new Set(manifest.labels).size !== family.choices.length
     || manifest.labels.some((label) => !family.choices.includes(label))) throw new Error("Manifest label catalog does not match family choices")
   if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash, manifest.pins)) throw new Error("Manifest dataset hash does not match frozen cases and pins")
