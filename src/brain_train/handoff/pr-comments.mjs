@@ -194,6 +194,9 @@ export async function fetchCaptureHead({ owner, repo, prNumber, cwd }) {
 
 export function shapeComments({ issueComments, reviewComments, reviews }) {
   const out = []
+  const unsubmittedReviewIds = new Set((reviews || [])
+    .filter((review) => review.id != null && (review.state === "PENDING" || !review.submitted_at))
+    .map((review) => review.id))
   for (const c of issueComments || []) {
     out.push({
       surface: "issue",
@@ -206,6 +209,7 @@ export function shapeComments({ issueComments, reviewComments, reviews }) {
     })
   }
   for (const c of reviewComments || []) {
+    if (unsubmittedReviewIds.has(c.pull_request_review_id)) continue
     out.push({
       surface: "inline",
       id: c.id,
@@ -220,6 +224,7 @@ export function shapeComments({ issueComments, reviewComments, reviews }) {
     })
   }
   for (const r of reviews || []) {
+    if (r.state === "PENDING" || !r.submitted_at) continue
     // Reviews without a body and without state CHANGES_REQUESTED/APPROVED are
     // usually empty wrappers — skip those, the line comments carry the content.
     if (!r.body && r.state === "COMMENTED") continue

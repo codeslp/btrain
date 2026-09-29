@@ -5,7 +5,7 @@ import { summarizeReplay, replayManifest } from "../../src/brain_train/jev/repla
 import { createDecisionFamily } from "../../src/brain_train/jev/decision.mjs"
 import { datasetHashFor, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
-const family = createDecisionFamily({ id: "sample", questionVersion: "1", policyVersion: "1", policyConfig: {}, choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+const family = createDecisionFamily({ id: "sample", questionVersion: "1", policyVersion: "1", policyConfig: { evaluation: { baselineId: "fixture", thresholds: { feedback: 0.8 } } }, choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
 const sourceContent = "frozen review text"
 const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
 const rows = [
@@ -91,9 +91,26 @@ describe("Jev replay metrics", () => {
     }) } })
     assert.equal(billedFailure.syntheticControls.test.counts.failures, 1)
     assert.deepEqual(billedFailure.syntheticControls.test.cost, { observedCalls: 1, total: 0.25 })
+    for (const changedPins of [
+      { ...pins, thresholds: { feedback: 0.1 } },
+      { ...pins, baseline: "other-baseline" },
+    ]) {
+      const before = providerCalls
+      await assert.rejects(() => replayManifest({
+        manifest: { ...manifest, pins: changedPins, datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, changedPins) },
+        family, candidates, provider,
+      }), /evaluation (threshold|baseline) pin/)
+      assert.equal(providerCalls, before)
+    }
+    const changedFamily = createDecisionFamily({ ...family, threshold: 0.9 })
+    const changedFamilyPins = { ...pins, policyHash: changedFamily.policyHash }
+    await assert.rejects(() => replayManifest({
+      manifest: { ...manifest, pins: changedFamilyPins, datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, changedFamilyPins) },
+      family: changedFamily, candidates, provider,
+    }), /evaluation threshold pin/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, labels: ["feedback"], datasetHash: datasetHashFor(cases, ["feedback"], sourceSnapshotHash, pins) }, family, candidates, provider }), /label catalog/)
-    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, baseline: "changed" } }, family, candidates, provider }), /dataset hash/)
-    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /dataset hash/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, baseline: "changed" } }, family, candidates, provider }), /evaluation baseline pin/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /evaluation threshold pin/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, codeRevision: "rev" } }, family, candidates, provider }), /code revision/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, policyHash: "wrong" } }, family, candidates, provider }), /policy hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, cases: [{ ...cases[0], label: "clear" }] }, family, candidates, provider }), /dataset hash/)

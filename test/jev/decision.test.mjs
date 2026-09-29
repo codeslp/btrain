@@ -29,6 +29,9 @@ describe("offline decision gateway", () => {
     assert.equal((await decideCandidate({ family, candidate, provider })).outcome, "skipped")
     assert.equal((await decideCandidate({ family, candidate: { ...candidate, eligible: false }, provider, mode: "offline", privacyApproved: true })).reason, "ineligible")
     assert.equal((await decideCandidate({ family, candidate, provider, mode: "offline" })).reason, "privacy-denied")
+    for (const privacyApproved of ["false", "true", 1]) {
+      assert.equal((await decideCandidate({ family, candidate, provider, mode: "offline", privacyApproved })).reason, "privacy-denied")
+    }
     assert.equal(calls, 0)
   })
 
