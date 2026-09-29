@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { performance } from "node:perf_hooks"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { sourceSnapshotHashFor } from "./manifest.mjs"
+import { sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const outcomes = new Set(["off", "offline"])
@@ -91,6 +91,12 @@ export function fakeProvider(result) {
 export async function appendDecisionTrace(root, trace, family, sourceProof) {
   if (!trace || !["skipped", "decision", "abstain", "failure"].includes(trace.outcome)) throw new Error("A gateway trace is required")
   if (!family || trace.family !== family.id || trace.policyHash !== family.policyHash) throw new Error("A matching decision family is required")
+  if (trace.outcome !== "skipped" && (!validCodeRevision(trace.codeRevision) || !opaqueId(trace.modelPin))) {
+    throw new Error("Offline traces require a code revision and model pin")
+  }
+  if (["decision", "abstain"].includes(trace.outcome) && opaqueId(trace.model) !== opaqueId(trace.modelPin)) {
+    throw new Error("Decision model must match the model pin")
+  }
   const traceRefs = opaqueRefs(trace.sourceRefs)
   let validProof = false
   try {
@@ -106,7 +112,7 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     family: family.id,
     questionVersion: family.questionVersion,
     policyHash: family.policyHash,
-    codeRevision: /^[a-f0-9]{40}$/.test(trace.codeRevision || "") ? trace.codeRevision : null,
+    codeRevision: validCodeRevision(trace.codeRevision) ? trace.codeRevision : null,
     sourceRefs: traceRefs,
     baseline: family.choices.includes(trace.baseline) ? trace.baseline : null,
     actionTaken: trace.actionTaken === "none" || family.allowedActions.includes(trace.actionTaken) ? trace.actionTaken : "none",
@@ -149,13 +155,15 @@ function validAnswer(response, family) {
 export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null, run }) {
   if (!outcomes.has(mode)) throw new Error("Decision gateway supports only off or offline mode")
   if (mode === "offline" && (!explicitRuns.has(run) || explicitRuns.get(run).family !== family)) throw new Error("Decision run is required and must match the family")
+  if (mode === "offline" && !validCodeRevision(codeRevision)) throw new Error("Offline calls require a code revision pin")
+  if (mode === "offline" && !opaqueId(modelPin)) throw new Error("Offline calls require a model pin")
   const sourceRefs = opaqueRefs(candidate?.sourceRefs)
   let baseline
   try {
     const result = family.fallback(candidate?.baseline, family.policyConfig)
     baseline = family.choices.includes(result) ? result : null
   } catch { baseline = null }
-  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision: /^[a-f0-9]{40}$/.test(codeRevision || "") ? codeRevision : null, sourceRefs, baseline, actionTaken: "none" }
+  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision: validCodeRevision(codeRevision) ? codeRevision : null, sourceRefs, baseline, actionTaken: "none" }
   const skip = (reason) => ({ ...base, outcome: "skipped", reason, attemptedCall: false })
   if (mode === "off") return skip("mode-off")
   if (candidate?.eligible !== true) return skip("ineligible")
