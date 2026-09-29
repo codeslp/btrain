@@ -369,7 +369,7 @@ describe("PR review flow classification", () => {
     })
   })
 
-  it("retains frozen semantic candidates after the PR merges or closes", () => {
+  it("retains frozen semantic candidates after the PR merges, closes, or returns to draft", () => {
     const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
     input.pr.url = "https://github.com/o/r/pull/12"
     const comment = input.rawComments.issueComments[0]
@@ -381,12 +381,16 @@ describe("PR review flow classification", () => {
       eventHead: input.pr.headRefOid, reviewedCommit: null,
     }
 
-    for (const state of ["MERGED", "CLOSED"]) {
+    for (const [label, changes] of [
+      ["MERGED", { state: "MERGED" }],
+      ["CLOSED", { state: "CLOSED" }],
+      ["DRAFT", { draft: true }],
+    ]) {
       const result = buildPrSemanticReplayCandidates({
-        ...input, pr: { ...input.pr, state }, sourceSnapshots: [snapshot],
+        ...input, pr: { ...input.pr, ...changes }, sourceSnapshots: [snapshot],
       })
       assert.deepEqual(result.excluded, [])
-      assert.equal(result.candidates.length, 1, `${state} PR should retain its captured candidate`)
+      assert.equal(result.candidates.length, 1, `${label} PR should retain its captured candidate`)
       assert.equal(result.candidates[0].sourceId, snapshot.id)
     }
   })
