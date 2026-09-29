@@ -460,7 +460,7 @@ describe("PR review flow classification", () => {
       comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
     })
     const candidate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }).candidates[0]
-    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", policyVersion: "1", policyConfig: {}, choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", policyVersion: "1", policyConfig: { evaluation: { baselineId: "deterministic", thresholds: { feedback: 0.8 } } }, choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
     const labels = [...family.choices]
     const manifest = freezeLabeledManifest({
       sources: [source],
