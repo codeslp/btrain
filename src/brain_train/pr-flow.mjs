@@ -470,7 +470,6 @@ function frozenReviewedCommitMatches(source, body, headSha) {
 export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowConfig, sourceSnapshots }) {
   if (!Array.isArray(sourceSnapshots)) throw new Error("Source snapshots are required for PR replay")
   const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
-  if (baseline.overall === "draft") return { candidates: [], excluded: [] }
   const headSha = baseline.pr.headSha
   if (!/^[a-f0-9]{40}$/i.test(headSha || "")) throw new Error("A full PR head SHA is required for offline replay")
   const repository = sourceRepository(pr)

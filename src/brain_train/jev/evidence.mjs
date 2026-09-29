@@ -93,9 +93,10 @@ export async function appendSourceSnapshots(root, snapshots) {
 export async function appendSourceOutcome(root, { sourceId, outcome, observedAt, evidenceRef }) {
   if (!/^[a-f0-9]{64}$/.test(sourceId || "")) throw new Error("Source ID is required")
   if (!outcome || !evidenceRef || !Number.isFinite(Date.parse(observedAt))) throw new Error("Outcome, observation time, and evidence reference are required")
+  const safeEvidenceRef = safeSourceRef(evidenceRef)
   const known = (await readJsonl(snapshotsPath(root))).some((row) => row.id === sourceId)
   if (!known) throw new Error("Outcome source is unknown")
-  await appendJsonl(outcomesPath(root), [{ schemaVersion: 1, sourceId, outcome, observedAt, evidenceRef }])
+  await appendJsonl(outcomesPath(root), [{ schemaVersion: 1, sourceId, outcome, observedAt, evidenceRef: safeEvidenceRef }])
 }
 
 export async function readEvidence(root) {
