@@ -49,6 +49,19 @@ describe("Jev replay metrics", () => {
     assert.equal(summarizeReplay(measured, ["clear"]).latencyMs.p95, 1000)
   })
 
+  it("reports multiclass calibration from complete probability vectors", () => {
+    const scored = [
+      { label: "feedback", baseline: "feedback", eligible: true, trace: { outcome: "decision", prediction: "feedback", probabilities: { feedback: 0.9, clear: 0.1 }, attemptedCall: true } },
+      { label: "clear", baseline: "clear", eligible: true, trace: { outcome: "decision", prediction: "feedback", probabilities: { feedback: 0.6, clear: 0.4 }, attemptedCall: true } },
+    ]
+    const result = summarizeReplay(scored, ["clear", "feedback"])
+    assert.equal(result.model.calibration.evaluated, 2)
+    assert.ok(Math.abs(result.model.calibration.multiclassBrier - 0.37) < 1e-12)
+    const rounded = [{ ...scored[0], trace: { ...scored[0].trace, probabilities: { feedback: 0.9, clear: 0.09 } } }]
+    assert.equal(summarizeReplay(rounded, ["clear", "feedback"]).model.calibration.evaluated, 1)
+    assert.equal(summarizeReplay(rows, ["clear", "feedback", "uncertain"]).model.calibration.multiclassBrier, null)
+  })
+
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
     const cases = [{ sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]

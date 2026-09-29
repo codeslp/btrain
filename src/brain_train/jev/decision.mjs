@@ -117,14 +117,18 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
   return record
 }
 
+export function validProbabilityVector(probabilities, choices) {
+  if (!probabilities || typeof probabilities !== "object" || Array.isArray(probabilities)) return false
+  const keys = Object.keys(probabilities)
+  if (keys.length !== choices.length || keys.some((key) => !choices.includes(key))) return false
+  const values = choices.map((choice) => probabilities[choice])
+  if (values.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) return false
+  return Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) <= 0.02
+}
+
 function validAnswer(response, family) {
   const answer = response?.answers?.[family.questionId]
-  if (!answer || !family.choices.includes(answer.choice) || !answer.probabilities || typeof answer.probabilities !== "object" || Array.isArray(answer.probabilities)) return null
-  const keys = Object.keys(answer.probabilities)
-  if (keys.length !== family.choices.length || keys.some((key) => !family.choices.includes(key))) return null
-  const values = family.choices.map((choice) => answer.probabilities[choice])
-  if (values.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) return null
-  if (Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) > 0.02) return null
+  if (!answer || !family.choices.includes(answer.choice) || !validProbabilityVector(answer.probabilities, family.choices)) return null
   return { choice: answer.choice, probabilities: Object.fromEntries(family.choices.map((choice) => [choice, answer.probabilities[choice]])) }
 }
 
