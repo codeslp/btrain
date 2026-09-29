@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import { createDecisionFamily, createDecisionRun, decideCandidate as decideWithRun, fakeProvider, appendDecisionTrace } from "../../src/brain_train/jev/decision.mjs"
 import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
@@ -14,15 +15,82 @@ const family = createDecisionFamily({
   actionPolicy: (choice) => choice === "feedback" ? "flag-feedback" : null,
   fallback: (baseline) => baseline,
 })
-const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain", callIndex: 0 }
+const candidate = { eligible: true, sourceId: "1".repeat(64), sourceRefs: ["https://example.test/42?token=secret"], sourceContent: "private review text", text: "private review text", baseline: "uncertain", privacyClass: "private", callIndex: 0 }
 const decideCandidate = (options) => decideWithRun({ codeRevision: "a".repeat(40), modelPin: "jev-pinned", ...options, run: options.run ?? createDecisionRun(options.family) })
 const answer = (choice = "feedback", scores = { clear: 0.05, feedback: 0.9, unavailable: 0.03, uncertain: 0.02 }) => ({ ok: true, model: "jev-pinned", answers: { signal: { choice, probabilities: scores } }, latencyMs: 12, usage: { input_tokens: 10 } })
-const sourceProof = (refs) => {
-  const sources = refs.map((sourceRef, index) => ({ id: `source-${index}`, sourceRef, sourceHash: "a".repeat(64) }))
+const sourceProof = (refs, content = candidate.sourceContent) => {
+  const sourceHash = createHash("sha256").update(content).digest("hex")
+  const sources = refs.map((sourceRef, index) => ({ id: String(index + 1).repeat(64), sourceRef, sourceHash }))
   return { sources, sourceSnapshotHash: sourceSnapshotHashFor(sources) }
 }
 
 describe("offline decision gateway", () => {
+  it("rejects missing or malformed candidate privacy classes before a hosted provider call", async () => {
+    const publicFamily = createDecisionFamily({ ...family, privacyClass: "public" })
+    let calls = 0
+    const provider = { decide: async () => { calls += 1; return answer() } }
+    for (const privacyClass of [undefined, null, "PRIVATE", "unclassified"]) {
+      const trace = await decideCandidate({ family: publicFamily, candidate: { ...candidate, privacyClass }, provider, mode: "offline" })
+      assert.deepEqual([trace.outcome, trace.reason], ["skipped", "invalid-privacy-class"])
+    }
+    assert.equal(calls, 0)
+  })
+
+  it("binds persisted traces to the exact frozen source content", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-content-proof-"))
+    try {
+      const original = sourceProof(candidate.sourceRefs)
+      const changedSources = original.sources.map((source) => ({ ...source, sourceHash: "b".repeat(64) }))
+      const changed = { sources: changedSources, sourceSnapshotHash: sourceSnapshotHashFor(changedSources) }
+      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: original })
+      await assert.rejects(() => appendDecisionTrace(root, trace, family, changed), /source provenance/i)
+      const record = await appendDecisionTrace(root, trace, family, original)
+      assert.equal(record.sourceSnapshotHash, original.sourceSnapshotHash)
+      assert.deepEqual(record.sourceBindings, [{ sourceId: original.sources[0].id, sourceHash: original.sources[0].sourceHash }])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects candidate content that differs from its frozen source before a provider call", async () => {
+    const proof = sourceProof(candidate.sourceRefs)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    for (const changed of [
+      { sourceContent: "different source body", text: "different source body" },
+      { text: "different provider body" },
+    ]) {
+      await assert.rejects(() => decideCandidate({ family, candidate: { ...candidate, ...changed }, provider, mode: "offline", sourceProof: proof }), /source provenance/i)
+    }
+    assert.equal(calls, 0)
+  })
+
+  it("rejects a candidate source ID that differs from its frozen proof", async () => {
+    const proof = sourceProof(candidate.sourceRefs)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    await assert.rejects(() => decideCandidate({
+      family, candidate: { ...candidate, sourceId: "2".repeat(64) }, provider, mode: "offline", sourceProof: proof,
+    }), /source provenance/i)
+    assert.equal(calls, 0)
+  })
+
+  it("rejects source references that would be omitted from the frozen proof", async () => {
+    const proof = sourceProof(candidate.sourceRefs)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer() } }
+    for (const sourceRefs of [
+      [...Array(16).fill(candidate.sourceRefs[0]), "https://example.test/unproven"],
+      [candidate.sourceRefs[0], "file:///private/unproven"],
+    ]) {
+      await assert.rejects(() => decideCandidate({ family, candidate: { ...candidate, sourceRefs }, provider, mode: "offline", sourceProof: proof }), /source provenance/i)
+    }
+    assert.equal(calls, 0)
+  })
+
+
+
+
   it("rejects offline calls without a code revision and model pin before invoking the provider", async () => {
     let calls = 0
     const provider = { localOnly: true, decide: async () => { calls += 1; return { ...answer(), model: undefined } } }
@@ -225,8 +293,9 @@ describe("offline decision gateway", () => {
   it("persists only allowlisted trace fields", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-trace-"))
     try {
-      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", privacyApproved: true, modelPin: "jev-pinned" })
-      await appendDecisionTrace(root, { ...trace, privateInput: "do not write me" }, family, sourceProof(candidate.sourceRefs))
+      const proof = sourceProof(candidate.sourceRefs)
+      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", privacyApproved: true, modelPin: "jev-pinned", sourceProof: proof })
+      await appendDecisionTrace(root, { ...trace, privateInput: "do not write me" }, family, proof)
       const raw = await fs.readFile(path.join(root, ".btrain", "jev", "decision-traces.jsonl"), "utf8")
       assert.equal(raw.includes("do not write me"), false)
       assert.equal(JSON.parse(raw).outcome, "decision")
@@ -239,9 +308,10 @@ describe("offline decision gateway", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-private-trace-"))
     try {
       const privateCandidate = { ...candidate, baseline: { rawPrivateText: "secret baseline" } }
-      const trace = await decideCandidate({ family, candidate: privateCandidate, provider: fakeProvider(answer()), mode: "offline" })
+      const proof = sourceProof(candidate.sourceRefs)
+      const trace = await decideCandidate({ family, candidate: privateCandidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: proof })
       assert.equal(JSON.stringify(trace).includes("secret baseline"), false)
-      await appendDecisionTrace(root, { ...trace, baseline: { rawPrivateText: "secret baseline" }, provider: "secret provider metadata" }, family, sourceProof(candidate.sourceRefs))
+      await appendDecisionTrace(root, { ...trace, baseline: { rawPrivateText: "secret baseline" }, provider: "secret provider metadata" }, family, proof)
       const raw = await fs.readFile(path.join(root, ".btrain", "jev", "decision-traces.jsonl"), "utf8")
       assert.equal(raw.includes("secret baseline"), false)
       assert.equal(raw.includes("secret provider metadata"), false)
@@ -253,8 +323,10 @@ describe("offline decision gateway", () => {
   it("does not persist code-shaped private metadata or URL paths", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-coded-secret-"))
     try {
-      const trace = await decideCandidate({ family, candidate: { ...candidate, sourceRefs: ["https://example.test/private-customer-name"] }, provider: { id: "tenant-private-detail", localOnly: true, decide: async () => answer() }, mode: "offline", modelPin: "credential-like-secret" })
-      await appendDecisionTrace(root, { ...trace, reason: "customer-secret-123", model: "credential-like-secret" }, family, sourceProof(["https://example.test/private-customer-name"]))
+      const refs = ["https://example.test/private-customer-name"]
+      const proof = sourceProof(refs)
+      const trace = await decideCandidate({ family, candidate: { ...candidate, sourceRefs: refs }, provider: { id: "tenant-private-detail", localOnly: true, decide: async () => answer() }, mode: "offline", modelPin: "credential-like-secret", sourceProof: proof })
+      await appendDecisionTrace(root, { ...trace, reason: "customer-secret-123", model: "credential-like-secret" }, family, proof)
       const raw = await fs.readFile(path.join(root, ".btrain", "jev", "decision-traces.jsonl"), "utf8")
       for (const secret of ["private-customer-name", "tenant-private-detail", "credential-like-secret", "customer-secret-123"]) {
         assert.equal(JSON.stringify(trace).includes(secret), false)
@@ -268,7 +340,7 @@ describe("offline decision gateway", () => {
   it("rejects an unverified trace source before writing a local record", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-source-proof-"))
     try {
-      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline" })
+      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: sourceProof(candidate.sourceRefs) })
       await assert.rejects(() => appendDecisionTrace(root, trace, family, sourceProof(["https://example.test/other"])), /source provenance/)
       await assert.rejects(() => appendDecisionTrace(root, trace, family, { ...sourceProof(candidate.sourceRefs), sourceSnapshotHash: "b".repeat(64) }), /source provenance/)
       const exists = await fs.access(path.join(root, ".btrain", "jev", "decision-traces.jsonl")).then(() => true).catch(() => false)
