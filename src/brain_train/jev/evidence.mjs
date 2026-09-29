@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 
 const SHA = /^[a-f0-9]{40}$/i
 const hash = (value) => createHash("sha256").update(value).digest("hex")
@@ -46,6 +47,24 @@ async function appendJsonl(file, rows) {
   await fs.appendFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8")
 }
 
+async function withSnapshotLock(root, action) {
+  await fs.mkdir(evidenceDir(root), { recursive: true })
+  const lockPath = `${snapshotsPath(root)}.lock`
+  const deadline = Date.now() + 10_000
+  let handle
+  while (!handle) {
+    try { handle = await fs.open(lockPath, "wx") } catch (error) {
+      if (error.code !== "EEXIST") throw error
+      if (Date.now() >= deadline) throw new Error("Timed out waiting for Jev source snapshot lock")
+      await delay(20)
+    }
+  }
+  try { return await action() } finally {
+    await handle.close()
+    await fs.unlink(lockPath).catch(() => {})
+  }
+}
+
 export function createSourceSnapshot({ repository, prNumber, laneId, comment, capturedAt, captureHead = null, captureHeadObservedAt = null, deterministicDisposition = "not-evaluated" }) {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repository || "")) throw new Error("Source repository is required")
   if (!/^[1-9]\d*$/.test(String(prNumber))) throw new Error("A positive PR number is required")
@@ -79,15 +98,17 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
 }
 
 export async function appendSourceSnapshots(root, snapshots) {
-  const existing = new Set((await readJsonl(snapshotsPath(root))).map((row) => row.id))
-  const fresh = []
-  for (const snapshot of snapshots) {
-    if (existing.has(snapshot.id)) continue
-    existing.add(snapshot.id)
-    fresh.push(snapshot)
-  }
-  await appendJsonl(snapshotsPath(root), fresh)
-  return fresh.length
+  return withSnapshotLock(root, async () => {
+    const existing = new Set((await readJsonl(snapshotsPath(root))).map((row) => row.id))
+    const fresh = []
+    for (const snapshot of snapshots) {
+      if (existing.has(snapshot.id)) continue
+      existing.add(snapshot.id)
+      fresh.push(snapshot)
+    }
+    await appendJsonl(snapshotsPath(root), fresh)
+    return fresh.length
+  })
 }
 
 export async function appendSourceOutcome(root, { sourceId, outcome, observedAt, evidenceRef }) {

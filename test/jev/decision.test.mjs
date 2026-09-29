@@ -165,6 +165,12 @@ describe("offline decision gateway", () => {
     assert.deepEqual([timeout.outcome, timeout.reason, timeout.prediction], ["failure", "timeout", undefined])
   })
 
+  it("does not count a missing provider as an attempted call", async () => {
+    const trace = await decideCandidate({ family, candidate, mode: "offline", provider: null, privacyApproved: true })
+    assert.deepEqual([trace.outcome, trace.reason, trace.attemptedCall], ["failure", "provider-unavailable", false])
+  })
+
+
   it("keeps malformed provider latency out of returned traces", async () => {
     const args = { family, candidate, mode: "offline", provider: fakeProvider({ ...answer(), latencyMs: { privateText: "secret latency" } }) }
     const decided = await decideCandidate(args)
