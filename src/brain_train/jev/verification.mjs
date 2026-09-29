@@ -69,7 +69,7 @@ export const verificationFamily = createDecisionFamily({
   fallback: (baseline) => baseline,
 })
 
-export async function planVerification({ change, provider, mode = "off" }) {
+export async function planVerification({ change, provider, mode = "off", modelPin = null, codeRevision = null }) {
   const paths = changePaths(change)
   const mandatory = mandatoryVerificationChecks(change)
   const suggested = []
@@ -87,7 +87,7 @@ export async function planVerification({ change, provider, mode = "off" }) {
       contractTags: tagsFor(change),
       selectedChecks,
     }
-    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode, run })
+    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode, modelPin, codeRevision, run })
     traces.push(trace)
     if (trace.outcome !== "decision") break
     const check = trace.suggestedAction?.slice("check:".length)
