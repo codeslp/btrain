@@ -39,6 +39,10 @@ export function mandatoryVerificationChecks(change) {
   return VERIFICATION_CATALOG.filter((check) => required.has(check))
 }
 
+function verificationEligible(paths, selectedChecks) {
+  return paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check))
+}
+
 export const verificationFamily = createDecisionFamily({
   id: "verification-planner",
   questionVersion: "1",
@@ -47,6 +51,7 @@ export const verificationFamily = createDecisionFamily({
     maxPaths,
     contractTags: [...contractTags],
     mandatoryRules: [changePaths, tagsFor, mandatoryVerificationChecks].map((rule) => rule.toString()).join("\n"),
+    eligibilityRule: verificationEligible.toString(),
   },
   questionId: "signal",
   choices: [...VERIFICATION_CATALOG, "none"],
@@ -72,7 +77,7 @@ export async function planVerification({ change, provider, mode = "off" }) {
   for (let callIndex = 0; callIndex < verificationFamily.maxCalls; callIndex += 1) {
     const selectedChecks = [...mandatory, ...suggested]
     const candidate = {
-      eligible: paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check)),
+      eligible: verificationEligible(paths, selectedChecks),
       sourceRefs: change.sourceRefs,
       baseline: "none",
       privacyClass: "private",

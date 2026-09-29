@@ -18,6 +18,9 @@ describe("offline verification planner", () => {
     assert.ok(verificationFamily.policyConfig.mandatoryRules.includes("mandatoryVerificationChecks"))
     const changed = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, maxPaths: 257 } })
     assert.notEqual(changed.policyHash, verificationFamily.policyHash)
+    assert.ok(verificationFamily.policyConfig.eligibilityRule.includes("VERIFICATION_CATALOG.some"))
+    const changedEligibility = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, eligibilityRule: "different predicate" } })
+    assert.notEqual(changedEligibility.policyHash, verificationFamily.policyHash)
   })
 
   it("retains mandatory migration, security, formal, and cross-component checks", () => {
