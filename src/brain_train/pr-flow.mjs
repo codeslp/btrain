@@ -482,11 +482,15 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
   const excluded = []
   for (const candidate of selected) {
     const matches = sourceSnapshots.filter((source) => source.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
-    const source = matches.length === 1 ? matches[0] : null
+    if (matches.length > 1) {
+      excluded.push(...[...new Set(matches.map((source) => source.id))].map((sourceId) => ({ sourceId, reason: "ambiguous-source-snapshot" })))
+      continue
+    }
+    const source = matches[0] || null
     const sourceId = source?.id || candidate.sourceId
     const candidateSourceRef = normalizedSourceRef(candidate.url)
     let reason = null
-    if (!source) reason = matches.length ? "ambiguous-source-snapshot" : "missing-source-snapshot"
+    if (!source) reason = "missing-source-snapshot"
     else if (!repository || source.repository !== repository || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
     else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
     else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
@@ -511,6 +515,17 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
       reviewedCommit: headSha,
       headEvidence: source.eventHead === headSha ? "event-head" : source.reviewedCommit.length === 40 ? "reviewed-commit" : "reviewed-commit-prefix",
     })
+  }
+  const accounted = new Set([...candidates, ...excluded].map((entry) => entry.sourceId))
+  for (const source of sourceSnapshots) {
+    if (!source || source.repository !== repository || source.prNumber !== pr.number || !source.id || accounted.has(source.id)) continue
+    let reason = "not-current-semantic-candidate"
+    if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
+    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
+    else if (source.reviewedCommit && !commitMatches(source.reviewedCommit, headSha)) reason = "stale-reviewed-commit"
+    else if ((!source.eventHead || source.eventHead === "unknown") && !source.reviewedCommit) reason = "unknown-event-head"
+    excluded.push({ sourceId: source.id, reason })
+    accounted.add(source.id)
   }
   return { candidates, excluded }
 }

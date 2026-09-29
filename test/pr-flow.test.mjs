@@ -395,6 +395,46 @@ describe("PR review flow classification", () => {
     }
   })
 
+  it("reports a frozen review as stale when its comment is filtered by the current head", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.body = comment.body.replace(input.pr.headRefOid.slice(0, 10), "b".repeat(10))
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: "unknown", reviewedCommit: "b".repeat(40),
+    }
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+    assert.deepEqual(result.candidates, [])
+    assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "stale-reviewed-commit" }])
+  })
+
+  it("counts ambiguous frozen snapshots once each with the ambiguity reason", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null,
+    }
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, { ...snapshot, id: "c".repeat(64) }] })
+    assert.deepEqual(result.candidates, [])
+    assert.deepEqual(result.excluded, [
+      { sourceId: snapshot.id, reason: "ambiguous-source-snapshot" },
+      { sourceId: "c".repeat(64), reason: "ambiguous-source-snapshot" },
+    ])
+    const duplicate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, { ...snapshot }] })
+    assert.deepEqual(duplicate.excluded, [{ sourceId: snapshot.id, reason: "ambiguous-source-snapshot" }])
+  })
+
+
+
   it("uses a full reviewed-commit attestation without claiming an event-time head", () => {
     const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
     input.pr.url = "https://api.github.com/repos/o/r/pulls/12"
