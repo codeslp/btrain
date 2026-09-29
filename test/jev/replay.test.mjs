@@ -84,6 +84,10 @@ describe("Jev replay metrics", () => {
     }
     assert.deepEqual(withoutTiming(first), withoutTiming(second))
     assert.equal(first.syntheticControls.test.model.correct, 1)
+    assert.equal(first.rows[0].trace.sourceSnapshotHash, sourceSnapshotHashFor(sources))
+    assert.equal(first.rows[0].trace.sourceBindings.length, 1)
+    assert.equal(first.rows[0].trace.sourceBindings[0].sourceHash, sourceHash)
+    assert.match(first.rows[0].trace.sourceBindings[0].sourceId, /^id-sha256:[a-f0-9]{64}$/)
     assert.ok(Number.isFinite(first.rows[0].trace.latencyMs))
     const billedFailure = await replayManifest({ manifest, family, candidates, provider: { localOnly: true, decide: async () => ({
       ok: true, model: "pinned", usage: { input_tokens: 7, cost: 0.25 },

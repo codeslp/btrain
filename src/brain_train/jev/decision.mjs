@@ -7,7 +7,7 @@ import { sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
 const outcomes = new Set(["off", "offline"])
 const failureReasons = new Set(["timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled"])
-const traceReasons = new Set(["mode-off", "ineligible", "invalid-baseline", "invalid-call-index", "privacy-denied", "call-budget", "invalid-source-reference", "invalid-input", "input-budget", "provider-unavailable", "timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled", "model-mismatch", "invalid-answer", "below-threshold", "no-permitted-action"])
+const traceReasons = new Set(["mode-off", "ineligible", "invalid-baseline", "invalid-call-index", "invalid-privacy-class", "privacy-denied", "call-budget", "invalid-source-reference", "invalid-input", "input-budget", "provider-unavailable", "timeout", "authentication-error", "rate-limit", "provider-error", "http-error", "network-error", "invalid-response", "invalid-request", "disabled", "model-mismatch", "invalid-answer", "below-threshold", "no-permitted-action"])
 const nonnegative = (value) => Number.isFinite(value) && value >= 0 ? value : null
 const explicitRuns = new WeakMap()
 
@@ -42,6 +42,40 @@ function opaqueRefs(refs) {
       return [`ref-sha256:${hash(url.toString())}`]
     } catch { return [] }
   })
+}
+
+function sourceBindingFor(sourceProof, traceRefs, candidate = null) {
+  const invalid = () => { throw new Error("Trace source provenance does not match frozen evidence") }
+  if (!Array.isArray(sourceProof?.sources) || !sourceProof.sources.length || sourceProof.sources.length > 16) invalid()
+  let snapshotHash
+  try { snapshotHash = sourceSnapshotHashFor(sourceProof.sources) } catch { invalid() }
+  if (sourceProof.sourceSnapshotHash !== snapshotHash) invalid()
+  const sourceBindings = sourceProof.sources.map((source) => {
+    if (!source || typeof source !== "object") invalid()
+    const refs = opaqueRefs([source.sourceRef])
+    if (!opaqueId(source.id) || !/^[a-f0-9]{64}$/.test(source.sourceHash || "") || refs.length !== 1) invalid()
+    const sourceId = /^[a-f0-9]{64}$/.test(source.id) ? source.id : opaqueId(source.id)
+    return { sourceId, sourceHash: source.sourceHash, sourceRef: refs[0] }
+  }).sort((left, right) => left.sourceId.localeCompare(right.sourceId))
+  const expectedRefs = new Set(sourceBindings.map((source) => source.sourceRef))
+  const actualRefs = new Set(traceRefs)
+  if (!actualRefs.size || actualRefs.size !== expectedRefs.size || [...actualRefs].some((ref) => !expectedRefs.has(ref))) invalid()
+  if (candidate) {
+    const proofIds = new Set(sourceProof.sources.map((source) => source.id))
+    const candidateIds = sourceProof.sources.length === 1 ? [candidate.sourceId] : candidate.sourceIds
+    if (!Array.isArray(candidateIds) || candidateIds.length !== proofIds.size || new Set(candidateIds).size !== proofIds.size
+      || candidateIds.some((id) => !proofIds.has(id))) invalid()
+    const contents = sourceProof.sources.map((source) => sourceProof.sources.length === 1
+      ? candidate.sourceContent
+      : candidate.sourceContents?.[source.id])
+    if (contents.some((content, index) => typeof content !== "string"
+      || createHash("sha256").update(content).digest("hex") !== sourceProof.sources[index].sourceHash)) invalid()
+    if (candidate.text !== undefined && !contents.includes(candidate.text)) invalid()
+  }
+  return {
+    sourceSnapshotHash: snapshotHash,
+    sourceBindings: sourceBindings.map(({ sourceId, sourceHash }) => ({ sourceId, sourceHash })),
+  }
 }
 
 function frozenPolicyConfig(value) {
@@ -98,14 +132,12 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     throw new Error("Decision model must match the model pin")
   }
   const traceRefs = opaqueRefs(trace.sourceRefs)
-  let validProof = false
-  try {
-    validProof = Array.isArray(sourceProof?.sources)
-      && sourceProof.sourceSnapshotHash === sourceSnapshotHashFor(sourceProof.sources)
-  } catch { validProof = false }
-  const verifiedRefs = validProof ? new Set(opaqueRefs(sourceProof.sources.map((source) => source.sourceRef))) : new Set()
-  if (!validProof || (trace.outcome !== "skipped" && !traceRefs.length)
-    || traceRefs.some((ref) => !verifiedRefs.has(ref))) {
+  const binding = sourceBindingFor(sourceProof, traceRefs)
+  if (trace.sourceSnapshotHash !== binding.sourceSnapshotHash
+    || !Array.isArray(trace.sourceBindings)
+    || trace.sourceBindings.length !== binding.sourceBindings.length
+    || trace.sourceBindings.some((source, index) => !source || source.sourceId !== binding.sourceBindings[index].sourceId
+      || source.sourceHash !== binding.sourceBindings[index].sourceHash)) {
     throw new Error("Trace source provenance does not match frozen evidence")
   }
   const record = {
@@ -113,6 +145,8 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     questionVersion: family.questionVersion,
     policyHash: family.policyHash,
     codeRevision: validCodeRevision(trace.codeRevision) ? trace.codeRevision : null,
+    sourceSnapshotHash: binding.sourceSnapshotHash,
+    sourceBindings: binding.sourceBindings,
     sourceRefs: traceRefs,
     baseline: family.choices.includes(trace.baseline) ? trace.baseline : null,
     actionTaken: trace.actionTaken === "none" || family.allowedActions.includes(trace.actionTaken) ? trace.actionTaken : "none",
@@ -152,23 +186,29 @@ function validAnswer(response, family) {
   return { choice: answer.choice, probabilities: Object.fromEntries(family.choices.map((choice) => [choice, answer.probabilities[choice]])) }
 }
 
-export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null, run }) {
+export async function decideCandidate({ family, candidate, provider, mode = "off", privacyApproved = false, modelPin = null, codeRevision = null, sourceProof = null, run }) {
   if (!outcomes.has(mode)) throw new Error("Decision gateway supports only off or offline mode")
   if (mode === "offline" && (!explicitRuns.has(run) || explicitRuns.get(run).family !== family)) throw new Error("Decision run is required and must match the family")
   if (mode === "offline" && !validCodeRevision(codeRevision)) throw new Error("Offline calls require a code revision pin")
   if (mode === "offline" && !opaqueId(modelPin)) throw new Error("Offline calls require a model pin")
   const sourceRefs = opaqueRefs(candidate?.sourceRefs)
+  if (sourceProof !== null && (!Array.isArray(candidate?.sourceRefs)
+    || candidate.sourceRefs.length > 16 || sourceRefs.length !== candidate.sourceRefs.length)) {
+    throw new Error("Trace source provenance does not match frozen evidence")
+  }
+  const binding = sourceProof === null ? null : sourceBindingFor(sourceProof, sourceRefs, candidate)
   let baseline
   try {
     const result = family.fallback(candidate?.baseline, family.policyConfig)
     baseline = family.choices.includes(result) ? result : null
   } catch { baseline = null }
-  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision: validCodeRevision(codeRevision) ? codeRevision : null, sourceRefs, baseline, actionTaken: "none" }
+  const base = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, codeRevision: validCodeRevision(codeRevision) ? codeRevision : null, sourceRefs, ...(binding || {}), baseline, actionTaken: "none" }
   const skip = (reason) => ({ ...base, outcome: "skipped", reason, attemptedCall: false })
   if (mode === "off") return skip("mode-off")
   if (candidate?.eligible !== true) return skip("ineligible")
   if (!baseline) return skip("invalid-baseline")
   if (!Number.isSafeInteger(candidate.callIndex) || candidate.callIndex < 0) return skip("invalid-call-index")
+  if (!["public", "synthetic", "private"].includes(candidate.privacyClass)) return skip("invalid-privacy-class")
   if ((family.privacyClass === "private" || candidate.privacyClass === "private") && privacyApproved !== true && provider?.localOnly !== true) return skip("privacy-denied")
   if (candidate.callIndex >= family.maxCalls) return skip("call-budget")
   if (!sourceRefs.length) return skip("invalid-source-reference")
