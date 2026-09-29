@@ -146,4 +146,14 @@ describe("offline verification planner", () => {
     assert.deepEqual(oversized.mandatory, ["unit"])
     assert.equal(oversized.traces[0].outcome, "skipped")
   })
+
+  it("starts a fresh call budget for each independent change", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    for (const id of ["first", "second"]) {
+      const plan = await planVerification({ change: { changedPaths: [`src/${id}.mjs`], sourceRefs }, provider, mode: "offline" })
+      assert.equal(plan.traces[0].outcome, "abstain")
+    }
+    assert.equal(calls, 2)
+  })
 })

@@ -1,4 +1,4 @@
-import { createDecisionFamily, decideCandidate } from "./decision.mjs"
+import { createDecisionFamily, createDecisionRun, decideCandidate } from "./decision.mjs"
 
 export const VERIFICATION_CATALOG = Object.freeze([
   "unit",
@@ -74,6 +74,7 @@ export async function planVerification({ change, provider, mode = "off" }) {
   const mandatory = mandatoryVerificationChecks(change)
   const suggested = []
   const traces = []
+  const run = createDecisionRun(verificationFamily)
   for (let callIndex = 0; callIndex < verificationFamily.maxCalls; callIndex += 1) {
     const selectedChecks = [...mandatory, ...suggested]
     const candidate = {
@@ -86,7 +87,7 @@ export async function planVerification({ change, provider, mode = "off" }) {
       contractTags: tagsFor(change),
       selectedChecks,
     }
-    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode })
+    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode, run })
     traces.push(trace)
     if (trace.outcome !== "decision") break
     const check = trace.suggestedAction?.slice("check:".length)
