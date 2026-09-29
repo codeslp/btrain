@@ -161,7 +161,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   if (candidate?.eligible !== true) return skip("ineligible")
   if (!baseline) return skip("invalid-baseline")
   if (!Number.isSafeInteger(candidate.callIndex) || candidate.callIndex < 0) return skip("invalid-call-index")
-  if ((family.privacyClass === "private" || candidate.privacyClass === "private") && !privacyApproved && provider?.localOnly !== true) return skip("privacy-denied")
+  if ((family.privacyClass === "private" || candidate.privacyClass === "private") && privacyApproved !== true && provider?.localOnly !== true) return skip("privacy-denied")
   if (candidate.callIndex >= family.maxCalls) return skip("call-budget")
   if (!sourceRefs.length) return skip("invalid-source-reference")
   let boundedState
