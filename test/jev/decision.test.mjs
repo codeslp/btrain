@@ -15,7 +15,7 @@ const family = createDecisionFamily({
   fallback: (baseline) => baseline,
 })
 const candidate = { eligible: true, sourceRefs: ["https://example.test/42?token=secret"], text: "private review text", baseline: "uncertain", callIndex: 0 }
-const decideCandidate = (options) => decideWithRun({ ...options, run: options.run ?? createDecisionRun(options.family) })
+const decideCandidate = (options) => decideWithRun({ codeRevision: "a".repeat(40), modelPin: "jev-pinned", ...options, run: options.run ?? createDecisionRun(options.family) })
 const answer = (choice = "feedback", scores = { clear: 0.05, feedback: 0.9, unavailable: 0.03, uncertain: 0.02 }) => ({ ok: true, model: "jev-pinned", answers: { signal: { choice, probabilities: scores } }, latencyMs: 12, usage: { input_tokens: 10 } })
 const sourceProof = (refs) => {
   const sources = refs.map((sourceRef, index) => ({ id: `source-${index}`, sourceRef, sourceHash: "a".repeat(64) }))
@@ -23,6 +23,33 @@ const sourceProof = (refs) => {
 }
 
 describe("offline decision gateway", () => {
+  it("rejects offline calls without a code revision and model pin before invoking the provider", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return { ...answer(), model: undefined } } }
+    const run = createDecisionRun(family)
+    for (const pins of [
+      {},
+      { codeRevision: "invalid", modelPin: "jev-pinned" },
+      { codeRevision: "a".repeat(40) },
+      { codeRevision: "a".repeat(40), modelPin: "" },
+    ]) {
+      await assert.rejects(() => decideWithRun({ family, candidate, provider, mode: "offline", run, ...pins }), /revision|model pin/i)
+    }
+    assert.equal(calls, 0)
+  })
+
+  it("rejects successful traces without identity pins before writing a record", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-identity-"))
+    try {
+      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline" })
+      await assert.rejects(() => appendDecisionTrace(root, { ...trace, codeRevision: null, modelPin: null, model: null }, family, sourceProof(candidate.sourceRefs)), /revision|model pin/i)
+      const exists = await fs.access(path.join(root, ".btrain", "jev", "decision-traces.jsonl")).then(() => true).catch(() => false)
+      assert.equal(exists, false)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("is off by default and skips ineligible or privacy-denied cases before a provider call", async () => {
     let calls = 0
     const provider = { decide: async () => { calls += 1; return answer() } }
@@ -46,7 +73,7 @@ describe("offline decision gateway", () => {
   })
 
   it("records a typed suggestion without performing the action or leaking input", async () => {
-    const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", privacyApproved: true, modelPin: "jev-pinned", codeRevision: "abc" })
+    const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", privacyApproved: true, modelPin: "jev-pinned", codeRevision: "a".repeat(40) })
     assert.equal(trace.outcome, "decision")
     assert.equal(trace.suggestedAction, "flag-feedback")
     assert.equal(trace.baseline, "uncertain")

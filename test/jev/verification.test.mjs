@@ -1,9 +1,10 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { createDecisionFamily, fakeProvider } from "../../src/brain_train/jev/decision.mjs"
-import { mandatoryVerificationChecks, planVerification, verificationFamily } from "../../src/brain_train/jev/verification.mjs"
+import { mandatoryVerificationChecks, planVerification as planVerificationWithPins, verificationFamily } from "../../src/brain_train/jev/verification.mjs"
 
 const sourceRefs = ["https://example.test/changes/42"]
+const planVerification = (options) => planVerificationWithPins({ codeRevision: "a".repeat(40), modelPin: "local-fixture", ...options })
 const answer = (choice) => ({
   ok: true, model: "local-fixture",
   answers: { signal: { choice, probabilities: Object.fromEntries(
@@ -12,6 +13,14 @@ const answer = (choice) => ({
 })
 
 describe("offline verification planner", () => {
+  it("requires caller supplied identity pins for offline plans and records them in traces", async () => {
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }
+    await assert.rejects(() => planVerificationWithPins({ change, provider: fakeProvider(answer("none")), mode: "offline" }), /revision pin/)
+    const plan = await planVerification({ change, provider: fakeProvider(answer("none")), mode: "offline" })
+    assert.equal(plan.traces[0].codeRevision, "a".repeat(40))
+    assert.match(plan.traces[0].modelPin, /^id-sha256:[a-f0-9]{64}$/)
+  })
+
   it("pins deterministic planner settings into the family policy", () => {
     assert.equal(verificationFamily.policyConfig.maxPaths, 256)
     assert.deepEqual(verificationFamily.policyConfig.contractTags, ["cross-component", "negative-path", "migration", "security", "formal-impact"])
