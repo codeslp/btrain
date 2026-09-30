@@ -40,8 +40,10 @@ export function mandatoryVerificationChecks(change) {
   return VERIFICATION_CATALOG.filter((check) => required.has(check))
 }
 
-function verificationEligible(paths, selectedChecks) {
-  return paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check))
+function verificationEligible(paths, contractTags, selectedChecks) {
+  const input = verificationFamily.inputBuilder({ changedPaths: paths, contractTags, selectedChecks })
+  return paths.length <= maxPaths && Buffer.byteLength(JSON.stringify(input)) <= verificationFamily.maxInputBytes
+    && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check))
 }
 
 function verifyFrozenChange(change, sourceProof) {
@@ -104,7 +106,7 @@ export async function planVerification({ change, provider, mode = "off", modelPi
   for (let callIndex = 0; callIndex < verificationFamily.maxCalls; callIndex += 1) {
     const selectedChecks = [...mandatory, ...suggested]
     const candidate = {
-      eligible: verificationEligible(paths, selectedChecks),
+      eligible: verificationEligible(paths, contractTags, selectedChecks),
       sourceId: change.sourceId,
       sourceIds: change.sourceIds,
       sourceContent: change.sourceContent,
