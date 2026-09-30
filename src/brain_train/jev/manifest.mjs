@@ -14,6 +14,34 @@ function canonicalSources(sources) {
   return records
 }
 
+export function validateCaseGroups(cases, sources) {
+  if (!Array.isArray(cases) || !cases.length || !Array.isArray(sources)) throw new Error("Sources and nonempty cases are required")
+  const sourceById = new Map(sources.map((source) => [source.id, source]))
+  if (sourceById.size !== sources.length) throw new Error("Duplicate source IDs")
+  const sourceIds = new Set()
+  const prSplits = new Map()
+  const templateSplits = new Map()
+  for (const item of cases) {
+    const source = sourceById.get(item?.sourceId)
+    if (!source) throw new Error(`Unknown source: ${item?.sourceId}`)
+    if (sourceIds.has(item.sourceId)) throw new Error(`Duplicate case source: ${item.sourceId}`)
+    sourceIds.add(item.sourceId)
+    if (typeof item.repository !== "string" || !item.repository || !Number.isSafeInteger(item.prNumber) || item.prNumber < 1
+      || source.repository !== item.repository || source.prNumber !== item.prNumber) throw new Error("Case source identity mismatch")
+    if (typeof item.templateGroup !== "string" || !item.templateGroup) throw new Error("Template group is required")
+    if (source.templateGroup && source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
+    if (!splits.has(item.split)) throw new Error("Invalid split")
+    if (typeof item.eligible !== "boolean" || !["public", "synthetic", "private"].includes(item.privacyClass)
+      || !Number.isSafeInteger(item.callIndex) || item.callIndex < 0) throw new Error("Case evaluation inputs are required")
+    const prGroup = JSON.stringify([item.repository, item.prNumber])
+    for (const [groups, group, name] of [[prSplits, prGroup, "PR"], [templateSplits, item.templateGroup, "Template"]]) {
+      if (groups.has(group) && groups.get(group) !== item.split) throw new Error(`${name} group crosses splits`)
+      groups.set(group, item.split)
+    }
+  }
+  return sourceById
+}
+
 export function sourceSnapshotHashFor(sources) {
   return hash(canonicalSources(sources))
 }
@@ -62,39 +90,19 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
   if (!Array.isArray(sources) || !Array.isArray(cases) || !cases.length) throw new Error("Sources and nonempty cases are required")
   if (!Array.isArray(labels) || !labels.length || new Set(labels).size !== labels.length) throw new Error("A closed label set is required")
   const frozenPins = evaluationPinsFor(pins)
-  const sourceById = new Map(sources.map((source) => [source.id, source]))
-  if (sourceById.size !== sources.length) throw new Error("Duplicate source IDs")
-  const prSplits = new Map()
-  const templateSplits = new Map()
+  const sourceById = validateCaseGroups(cases, sources)
   const sourceIds = new Set()
   const frozenCases = []
   for (const item of cases) {
     const source = sourceById.get(item.sourceId)
-    if (!source) throw new Error(`Unknown source: ${item.sourceId}`)
-    if (sourceIds.has(item.sourceId)) throw new Error(`Duplicate case source: ${item.sourceId}`)
     sourceIds.add(item.sourceId)
     if (requireEventHead && !eventHeadSha.test(source.eventHead || "")) throw new Error("Invalid event-time head cannot enter exact-head evaluation")
     if (!source.sourceHash || !source.sourceRef || !source.repository) throw new Error("Incomplete source provenance")
-    if (!splits.has(item.split)) throw new Error("Invalid split")
     if (!labels.includes(item.label)) throw new Error("Out-of-catalog label")
     if (!labels.includes(item.baseline)) throw new Error("Baseline is outside the label catalog")
-    const validEvaluationInputs = typeof item.baseline === "string" && item.baseline
-      && typeof item.eligible === "boolean"
-      && ["public", "synthetic", "private"].includes(item.privacyClass)
-      && Number.isSafeInteger(item.callIndex) && item.callIndex >= 0
-    if (!validEvaluationInputs) throw new Error("Case evaluation inputs are required")
-    if (source.repository !== item.repository || source.prNumber !== item.prNumber) throw new Error("Case source identity mismatch")
-    if (!item.templateGroup) throw new Error("Template group is required")
-    if (source.templateGroup && source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
     if (!Array.isArray(item.annotations) || item.annotations.length < 2 || new Set(item.annotations.map((a) => a.by)).size < 2) throw new Error("Two independent annotators are required")
     if (item.annotations.some((a) => !a.by || !labels.includes(a.label))) throw new Error("Invalid annotation")
     if (!item.adjudication?.by || item.adjudication.label !== item.label || !item.adjudication.reason) throw new Error("Explicit adjudication is required")
-    const prGroup = `${item.repository}#${item.prNumber}`
-    const templateGroup = item.templateGroup
-    if (prSplits.has(prGroup) && prSplits.get(prGroup) !== item.split) throw new Error("PR group crosses splits")
-    if (templateSplits.has(templateGroup) && templateSplits.get(templateGroup) !== item.split) throw new Error("Template group crosses splits")
-    prSplits.set(prGroup, item.split)
-    templateSplits.set(templateGroup, item.split)
     frozenCases.push({ sourceId: item.sourceId, repository: item.repository, prNumber: item.prNumber, templateGroup: item.templateGroup, split: item.split, label: item.label, baseline: item.baseline, eligible: item.eligible, privacyClass: item.privacyClass, callIndex: item.callIndex, annotations: item.annotations.map((a) => ({ by: a.by, label: a.label })), adjudication: { by: item.adjudication.by, label: item.adjudication.label, reason: item.adjudication.reason }, sourceHash: source.sourceHash })
   }
   frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))

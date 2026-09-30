@@ -72,9 +72,10 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
   if (!Number.isFinite(Date.parse(comment.at)) || !Number.isFinite(Date.parse(capturedAt))) throw new Error("Event and capture timestamps must be valid")
   if (captureHead !== null && !SHA.test(captureHead)) throw new Error("Capture head must be a commit SHA")
   const sourceKey = `${repository}/pull/${prNumber}/${comment.surface}/${comment.id}`
+  const sourceHash = hash(String(comment.body || ""))
   return {
-    schemaVersion: 1,
-    id: hash(sourceKey),
+    schemaVersion: 2,
+    id: hash(JSON.stringify([sourceKey, comment.updatedAt || comment.at, sourceHash])),
     repository,
     prNumber: Number(prNumber),
     laneId: String(laneId),
@@ -92,18 +93,22 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
     captureHeadObservedAt: captureHead ? (captureHeadObservedAt || capturedAt) : null,
     formalState: comment.state || null,
     deterministicDisposition,
-    sourceHash: hash(String(comment.body || "")),
+    sourceHash,
     templateGroup: hash(templateText(comment.body)),
   }
 }
 
 export async function appendSourceSnapshots(root, snapshots) {
-  const existing = new Set((await readSourceSnapshots(root)).map((row) => row.id))
+  const captured = await readSourceSnapshots(root)
+  const existing = new Set(captured.map((row) => row.id))
+  const versionKey = (row) => JSON.stringify([row.repository, row.prNumber, row.surface, row.eventId,
+    row.updatedAt || row.eventAt, row.sourceHash])
+  const legacyVersions = new Set(captured.filter((row) => row.schemaVersion === 1).map(versionKey))
   await fs.mkdir(snapshotFilesDir(root), { recursive: true })
   let fresh = 0
   for (const snapshot of snapshots) {
     if (!/^[a-f0-9]{64}$/.test(snapshot?.id || "")) throw new Error("Source snapshot ID is required")
-    if (existing.has(snapshot.id)) continue
+    if (existing.has(snapshot.id) || legacyVersions.has(versionKey(snapshot))) continue
     existing.add(snapshot.id)
     const temporary = path.join(snapshotFilesDir(root), `.${randomUUID()}.tmp`)
     const target = path.join(snapshotFilesDir(root), `${snapshot.id}.json`)
