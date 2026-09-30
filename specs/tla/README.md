@@ -241,6 +241,11 @@ the harness transcription rejects agent-pool repair rescopes the same way.
   `changes-requested -> in-progress` by the owner (pre-existing); the model
   has no such action (row 14 is the repair exit only), so that path is
   undesignated and stays a mirror-only acceptance until prose speaks.
+  (f) resolved 2026-09-30: the mirror's contract-mode `resolve()` now
+  rejects a `resolved` lane for every actor (spec 015 L14), matching the
+  model, where no resolve action fires from `resolved`. It had accepted a
+  lane agent's repeat resolve, so the harness never tallied L14; the
+  candidate label is `resolve-repeat`.
 - `Reassign` is admitted only in `in-progress`, `needs-review`, and
   `changes-requested`, in each case without a linked PR (spec 005 FR-5 as
   designated 2026-09-09); the registry owner label is not modeled. `Resync` fires only from the force-release

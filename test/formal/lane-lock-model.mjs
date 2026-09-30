@@ -423,10 +423,19 @@ export class LaneLockModel {
   resolve({ lane, actor, final }) {
     const s = this.lane(lane)
     // The implementation still resolves from statuses outside the designated
-    // review path, including idle. During L8's advisory window, implementation
-    // mode also accepts non-reviewer approval while contract mode rejects it.
+    // review path, including idle and resolved. During L8's advisory window,
+    // implementation mode also accepts non-reviewer approval while contract
+    // mode rejects it.
     if (this.mode === "contract" && s.status === "idle") {
       return this.#reject("resolve-from-idle")
+    }
+    // spec 002 CLI Commands resolve authority (designated 2026-09-09):
+    // resolving a `resolved` lane again is rejected for every actor, and
+    // LaneLock.tla has no resolve action from `resolved`. The implementation
+    // accepts it with a `transition-advisory: L14` record during the spec 015
+    // FR-5 window, so the implementation mirror still does.
+    if (this.mode === "contract" && s.status === "resolved") {
+      return this.#reject("resolve-from-resolved")
     }
 
     // spec 002 v1.1.2: `--final` is the merge path, not a review bypass —
