@@ -1,5 +1,11 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { appendDecisionTrace } from "../../src/brain_train/jev/decision.mjs"
+import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 import { contextManifestHash, contextSourceHash, dispatchContextFamily, selectContext } from "../../src/brain_train/jev/context.mjs"
 
 const ref = "https://example.test/artifacts/1"
@@ -89,6 +95,23 @@ describe("offline context selection", () => {
     assert.deepEqual(plan.selections, [{ id: "a", selection: "reference", sourceSnapshotHash: contextSourceHash(source) }])
     assert.equal(plan.traces[0].outcome, "decision")
     assert.equal(JSON.stringify(plan).includes("private a"), false)
+  })
+
+  it("binds an optional selection trace to its frozen source for persistence", async () => {
+    const source = item("a", "artifact")
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-context-trace-"))
+    try {
+      const plan = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => answer("reference") } })
+      const trace = plan.traces[0]
+      const sourceProof = { sources: [{ id: source.id, sourceRef: source.sourceRef, sourceHash: createHash("sha256").update(source.content).digest("hex") }] }
+      sourceProof.sourceSnapshotHash = sourceSnapshotHashFor(sourceProof.sources)
+      assert.equal(trace.sourceSnapshotHash, sourceProof.sourceSnapshotHash)
+      const record = await appendDecisionTrace(root, trace, dispatchContextFamily, sourceProof)
+      assert.equal(record.sourceBindings.length, 1)
+      assert.equal(JSON.stringify(record).includes(source.content), false)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
   it("retains full content on invalid output, low confidence, and provider failure", async () => {

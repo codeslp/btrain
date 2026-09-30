@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { createDecisionFamily, createDecisionRun, decideCandidate } from "./decision.mjs"
+import { sourceSnapshotHashFor } from "./manifest.mjs"
 
 const optionalKind = { dispatch: "artifact", transcript: "transcript" }
 const maxItems = 256
@@ -116,10 +117,15 @@ export async function selectContext({ kind, items, objective = "", provider, mod
     let selection = "full"
     const eligible = !required && frozenSource?.sourceRef === item.sourceRef
       && frozenSource?.sourceSnapshotHash === contextSourceHash(item)
+    const source = eligible ? { id: item.id, sourceRef: item.sourceRef,
+      sourceHash: createHash("sha256").update(item.content).digest("hex") } : null
+    const sourceProof = source ? { sources: [source], sourceSnapshotHash: sourceSnapshotHashFor([source]) } : null
     const trace = await decideCandidate({
       family: decisionFamily,
       candidate: {
         eligible,
+        sourceId: item.id,
+        sourceContent: item.content,
         sourceRefs: validSourceRef(item.sourceRef) ? [item.sourceRef] : [],
         baseline: "full",
         privacyClass: "private",
@@ -134,6 +140,7 @@ export async function selectContext({ kind, items, objective = "", provider, mod
       run,
       modelPin,
       codeRevision,
+      sourceProof,
     })
     traces.push(trace)
     if (trace.attemptedCall) calls += 1
