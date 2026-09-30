@@ -25,6 +25,19 @@ const sourceProof = (refs, content = candidate.sourceContent) => {
 }
 
 describe("offline decision gateway", () => {
+  it("does not persist decision fields on failed or skipped traces", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-trace-outcomes-"))
+    try {
+      const proof = sourceProof(candidate.sourceRefs)
+      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: proof })
+      for (const outcome of ["failure", "skipped"]) {
+        const record = await appendDecisionTrace(root, { ...trace, outcome, reason: outcome === "failure" ? "timeout" : "ineligible" }, family, proof)
+        assert.equal(record.prediction, null)
+        assert.equal(record.suggestedAction, null)
+        assert.deepEqual(record.probabilities, {})
+      }
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
   it("rejects missing or malformed candidate privacy classes before a hosted provider call", async () => {
     const publicFamily = createDecisionFamily({ ...family, privacyClass: "public" })
     let calls = 0
