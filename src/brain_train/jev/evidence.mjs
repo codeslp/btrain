@@ -99,12 +99,16 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
 }
 
 export async function appendSourceSnapshots(root, snapshots) {
-  const existing = new Set((await readSourceSnapshots(root)).map((row) => row.id))
+  const captured = await readSourceSnapshots(root)
+  const existing = new Set(captured.map((row) => row.id))
+  const versionKey = (row) => JSON.stringify([row.repository, row.prNumber, row.surface, row.eventId,
+    row.updatedAt || row.eventAt, row.sourceHash])
+  const legacyVersions = new Set(captured.filter((row) => row.schemaVersion === 1).map(versionKey))
   await fs.mkdir(snapshotFilesDir(root), { recursive: true })
   let fresh = 0
   for (const snapshot of snapshots) {
     if (!/^[a-f0-9]{64}$/.test(snapshot?.id || "")) throw new Error("Source snapshot ID is required")
-    if (existing.has(snapshot.id)) continue
+    if (existing.has(snapshot.id) || legacyVersions.has(versionKey(snapshot))) continue
     existing.add(snapshot.id)
     const temporary = path.join(snapshotFilesDir(root), `.${randomUUID()}.tmp`)
     const target = path.join(snapshotFilesDir(root), `${snapshot.id}.json`)

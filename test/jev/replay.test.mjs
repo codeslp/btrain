@@ -193,6 +193,32 @@ describe("Jev replay metrics", () => {
       ok: true, model: "pinned", answers: { signal: { choice: state.id === "real" ? "clear" : "feedback", probabilities: state.id === "real"
         ? { clear: 1, feedback: 0, uncertain: 0 } : { clear: 0, feedback: 1, uncertain: 0 } } },
     }) }
+    let prematureCalls = 0
+    await assert.rejects(() => replayManifest({ manifest, family,
+      candidates: { ...candidates, synthetic: { ...candidates.synthetic, sourceContent: "tampered later case" } },
+      provider: { localOnly: true, decide: async () => { prematureCalls += 1; return {} } },
+    }), /candidate source provenance/)
+    assert.equal(prematureCalls, 0)
+    const mutableManifest = structuredClone(manifest)
+    const mutableCandidates = structuredClone(candidates)
+    let mutationCalls = 0
+    const isolated = await replayManifest({ manifest: mutableManifest, family, candidates: mutableCandidates,
+      provider: { localOnly: true, decide: async (input) => {
+        mutationCalls += 1
+        if (mutationCalls === 1) {
+          mutableManifest.cases[1].label = "clear"
+          mutableManifest.sources[1].sourceRef = "https://example.test/changed"
+          mutableCandidates.synthetic.baseline = "clear"
+          mutableCandidates.synthetic.sourceContent = "changed after preflight"
+        }
+        return provider.decide(input)
+      } },
+    })
+    assert.equal(mutationCalls, 2)
+    assert.equal(isolated.rows[1].label, "feedback")
+    assert.equal(isolated.rows[1].baseline, "uncertain")
+    assert.equal(isolated.rows[1].trace.sourceSnapshotHash, sourceSnapshotHashFor([sources[1]]))
+    assert.equal(isolated.syntheticControls.test.model.correct, 1)
     const result = await replayManifest({ manifest, family, candidates, provider })
     assert.equal(result.splits.test.counts.cases, 1)
     assert.equal(result.splits.test.model.correct, 0)
