@@ -44,6 +44,14 @@ function gatewayMetrics(pairs) {
     actionableDecisionCoverage: rate(decisions, eligible) }
 }
 
+function validGatewayOutcome(entry) {
+  return typeof entry?.eligible === "boolean" && typeof entry.attemptedCall === "boolean"
+    && ["decision", "abstain", "failure", "skipped"].includes(entry.outcome)
+    && (entry.eligible || entry.outcome === "skipped")
+    && (entry.outcome !== "skipped" || !entry.attemptedCall)
+    && (!["decision", "abstain"].includes(entry.outcome) || entry.attemptedCall)
+}
+
 function ruleMetrics(pairs) {
   return { cases: pairs.length, violations: pairs.filter((pair) => pair.violation).length,
     baseline: confusion(pairs, "baselineWarned"), semantic: confusion(pairs, "semanticWarned"),
@@ -57,10 +65,7 @@ export function evaluateRulePairs(kind, pairs) {
   for (const pair of pairs) {
     if (pair.kind !== kind || ["violation", "baselineWarned", "semanticWarned", "eligible", "attemptedCall"].some((key) => typeof pair[key] !== "boolean")
       || !Number.isSafeInteger(pair.inventedCitations) || pair.inventedCitations < 0
-      || !["decision", "abstain", "failure", "skipped"].includes(pair.outcome)
-      || (!pair.eligible && pair.outcome !== "skipped")
-      || (pair.outcome === "skipped" && pair.attemptedCall)
-      || (["decision", "abstain"].includes(pair.outcome) && !pair.attemptedCall)
+      || !validGatewayOutcome(pair)
       || (pair.semanticWarned && pair.outcome !== "decision")
       || (pair.inventedCitations > 0 && !pair.semanticWarned)) {
       throw new Error("Rule measurements need consistent binary labels, warnings and gateway outcomes")
@@ -80,6 +85,19 @@ function denseStringList(values) {
 
 function subset(values, catalog) {
   return denseStringList(values) && values.every((value) => catalog.includes(value))
+}
+
+function validateReviewGateway(pair) {
+  if (!Array.isArray(pair.gatewayAttempts) || pair.gatewayAttempts.length !== pair.baselineIds.length) {
+    throw new Error("Every review candidate requires a gateway measurement")
+  }
+  const ids = new Set()
+  for (const entry of pair.gatewayAttempts) {
+    if (!entry || !pair.baselineIds.includes(entry.reviewId) || ids.has(entry.reviewId) || !validGatewayOutcome(entry)) {
+      throw new Error("Review gateway measurements must cover unique known candidates with consistent outcomes")
+    }
+    ids.add(entry.reviewId)
+  }
 }
 
 function reviewMetrics(pairs) {
@@ -108,7 +126,8 @@ function reviewMetrics(pairs) {
     baselineDefectRecall: rate(baselineFound, defects), prioritizedDefectRecall: rate(prioritizedFound, defects),
     equalDefectRecall: defects ? baselineFound === prioritizedFound : null,
     baselineMinutes, prioritizedMinutes,
-    reviewerTimeChangeFraction: baselineMinutes ? (prioritizedMinutes - baselineMinutes) / baselineMinutes : null }
+    reviewerTimeChangeFraction: baselineMinutes ? (prioritizedMinutes - baselineMinutes) / baselineMinutes : null,
+    gateway: gatewayMetrics(pairs.flatMap((pair) => pair.gatewayAttempts)) }
 }
 
 export function evaluateReviewQueues(pairs) {
@@ -122,6 +141,7 @@ export function evaluateReviewQueues(pairs) {
       || !Number.isFinite(pair.prioritizedMinutes) || pair.prioritizedMinutes < 0) {
       throw new Error("Review measurements must preserve the complete queue, known findings and valid paired times")
     }
+    validateReviewGateway(pair)
   }
   return { family: "review-risk", ...Object.fromEntries(origins.map((origin) => [origin, reviewMetrics(pairs.filter((pair) => pair.origin === origin))])),
     gateReady: false, gateReason: "requires-frozen-real-benchmark" }

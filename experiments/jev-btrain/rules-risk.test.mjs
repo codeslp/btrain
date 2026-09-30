@@ -10,6 +10,7 @@ function pair(id, extra = {}) {
 function queue(id, extra = {}) {
   return { id, origin: "synthetic", baselineIds: ["a", "b", "c", "d"], prioritizedIds: ["d", "a", "b", "c"],
     defectIds: ["d"], severeIds: ["d"], baselineFoundIds: ["d"], prioritizedFoundIds: ["d"],
+    gatewayAttempts: ["a", "b", "c", "d"].map((reviewId) => ({ reviewId, eligible: true, attemptedCall: true, outcome: "decision" })),
     baselineMinutes: 10, prioritizedMinutes: 11, ...extra }
 }
 
@@ -88,4 +89,36 @@ test("sparse ID lists cannot hide removed reviews or inflate finding denominator
   delete baseline.baselineIds[3]
   baseline.prioritizedIds = baseline.baselineIds.slice()
   assert.throws(() => evaluateReviewQueues([baseline]))
+})
+
+test("G6-V reports gateway failures abstentions and eligible decision coverage per review", () => {
+  const gatewayAttempts = [
+    { reviewId: "a", eligible: true, attemptedCall: true, outcome: "decision" },
+    { reviewId: "b", eligible: true, attemptedCall: true, outcome: "abstain" },
+    { reviewId: "c", eligible: true, attemptedCall: true, outcome: "failure" },
+    { reviewId: "d", eligible: false, attemptedCall: false, outcome: "skipped" },
+  ]
+  const result = evaluateReviewQueues([queue("mixed", { gatewayAttempts })])
+  assert.deepEqual(result.synthetic.gateway, { eligible: 3, attemptedCalls: 3, decisions: 1, abstentions: 1,
+    skipped: 1, attemptedFailures: 1, failuresWithoutCall: 0, attemptedFailureRate: 1 / 3,
+    validPredictionCoverage: 2 / 3, actionableDecisionCoverage: 1 / 3 })
+  assert.equal(result.real.gateway.attemptedFailureRate, null)
+  const failuresWithoutCalls = evaluateReviewQueues([queue("no-provider", {
+    gatewayAttempts: gatewayAttempts.map((entry) => ({ ...entry, eligible: true, attemptedCall: false, outcome: "failure" })),
+  })]).synthetic.gateway
+  assert.equal(failuresWithoutCalls.attemptedCalls, 0)
+  assert.equal(failuresWithoutCalls.failuresWithoutCall, 4)
+  assert.equal(failuresWithoutCalls.attemptedFailureRate, null)
+  assert.equal(failuresWithoutCalls.actionableDecisionCoverage, 0)
+})
+
+test("G6-V rejects missing removed duplicate sparse and inconsistent gateway measurements", () => {
+  const entry = { reviewId: "a", eligible: true, attemptedCall: true, outcome: "decision" }
+  for (const gatewayAttempts of [undefined, [], [entry], [entry, entry, entry, entry],
+    [entry, { ...entry, reviewId: "b", attemptedCall: false }, { ...entry, reviewId: "c" }, { ...entry, reviewId: "d" }]]) {
+    assert.throws(() => evaluateReviewQueues([queue("bad", { gatewayAttempts })]))
+  }
+  const sparse = queue("sparse").gatewayAttempts
+  delete sparse[0]
+  assert.throws(() => evaluateReviewQueues([queue("bad", { gatewayAttempts: sparse })]))
 })

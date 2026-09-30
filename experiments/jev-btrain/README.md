@@ -137,7 +137,12 @@ synthetic, and unknown origins separate. Rule reports compare baseline and seman
 precision/recall, audit invented citations, and distinguish skipped candidates, attempted
 failures, failures without calls, valid abstentions, and actionable coverage. G6-V reports
 severe findings in the top 30% of the queue (rounded up to whole entries), defect recall,
-and total reviewer time relative to baseline. A measurement that drops a required queue
+and total reviewer time relative to baseline. Every review candidate must have one
+`gatewayAttempts` entry with its `reviewId`, boolean `eligible` and `attemptedCall`, and
+gateway `outcome`. Review reports apply the same failure, abstention, skip and coverage
+denominators as rule reports, separated by origin. Missing, duplicate, sparse, invented or
+contradictory gateway entries are rejected, so ranking and time gains cannot conceal failed
+calls. A measurement that drops a required queue
 entry or invents a labeled finding is rejected. Reports always return `gateReady: false`.
 All queue and finding ID lists must be dense arrays with unique supplied IDs; missing
 array slots cannot stand in for retained reviews or labeled findings.

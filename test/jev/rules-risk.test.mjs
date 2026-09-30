@@ -8,6 +8,7 @@ import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 import { appendDecisionTrace } from "../../src/brain_train/jev/decision.mjs"
 import { inspectRules, repositoryRuleFamily, turnRuleFamily } from "../../src/brain_train/jev/rules.mjs"
 import { prioritizeReviews, reviewRiskFamily } from "../../src/brain_train/jev/review-risk.mjs"
+import { evaluateReviewQueues } from "../../experiments/jev-btrain/rules-risk.mjs"
 
 function frozen(record) {
   const source = { id: "case-1", sourceRef: "https://example.test/cases/1", content: JSON.stringify(record) }
@@ -39,6 +40,24 @@ function review(id, extra = {}) {
 function riskRecord(reviews = [review("first"), review("second")]) {
   return { objective: "Prioritize review depth", reviews }
 }
+
+test("risk gateway traces compose with per-review G6-V accounting", async () => {
+  const record = riskRecord([review("first"), review("second"), review("excluded", { authorized: false })])
+  const result = await prioritizeReviews({ ...frozen(record), provider: { localOnly: true, decide: async ({ state }) =>
+    state.review.id === "first" ? reply(reviewRiskFamily, "high") : { ok: false, reason: "timeout" } } })
+  const report = evaluateReviewQueues([{ id: "composed", origin: "synthetic",
+    baselineIds: result.baselineIds, prioritizedIds: result.prioritizedIds,
+    defectIds: [], severeIds: [], baselineFoundIds: [], prioritizedFoundIds: [], baselineMinutes: 10, prioritizedMinutes: 10,
+    gatewayAttempts: result.traces.map((trace, index) => ({ reviewId: record.reviews[index].id,
+      eligible: record.reviews[index].authorized, attemptedCall: trace.attemptedCall, outcome: trace.outcome })),
+  }])
+  assert.equal(report.synthetic.gateway.eligible, 2)
+  assert.equal(report.synthetic.gateway.attemptedCalls, 2)
+  assert.equal(report.synthetic.gateway.attemptedFailureRate, 0.5)
+  assert.equal(report.synthetic.gateway.actionableDecisionCoverage, 0.5)
+  assert.equal(report.synthetic.gateway.skipped, 1)
+  assert.equal(report.gateReady, false)
+})
 
 test("repository and turn rules use independent policies and cite only supplied rule/evidence versions", async () => {
   assert.notEqual(repositoryRuleFamily.id, turnRuleFamily.id)
