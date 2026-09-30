@@ -248,3 +248,50 @@ Each request has a 10-second deadline, including response parsing. Set
 error with no prediction, excludes the case from classification metrics, records reduced
 coverage and a failure count, and then continues to the next case.
 Run the offline timeout regressions with `node --test experiments/jev-btrain/run.test.mjs`.
+
+### Offline history search (T016 / WS10)
+
+`searchHistory` in `src/brain_train/jev/history.mjs` accepts a frozen JSON query record
+containing `query`, a captured `principal` (`id`, `roles`), explicit `filters`
+(`repositories`, `kinds`), and a `records` catalog. Each record names its `id`,
+`repository`, `kind` (event/trace/handoff/review), `sourceRef`, bounded `text`, and
+source ACL `access` (`principalIds`, `roles`). Empty grants deny access. These are
+captured local-reader policy inputs for offline evaluation; they are not proof of
+live authorization, and the adapter is not connected to a command or status read.
+A future live reader must resolve the authenticated principal and authoritative
+source grants itself, and recheck access when returning results.
+
+Source access is checked before structured and lexical selection. The lexical
+baseline ranks by distinct query-token overlap with stable ties and retains at
+most 16 authorized records. Only query and allowlisted record fields reach a local
+provider; ACLs, principal metadata, extra fields, and filtered text are excluded.
+Every shortlisted candidate has a gateway outcome. No matches yield a persistable
+skipped trace. Reranking requires a confident decision for the entire shortlist;
+off mode, private hosted providers, oversized serialized inputs, failed responses,
+and abstentions retain the complete lexical order. Results keep captured source
+references and no canonical events are written. Each call has a 100 ms timeout;
+16 serial calls fit a bounded offline scoring budget, while measured end-to-end
+latency remains a separate G10 requirement.
+
+`evaluateHistoryPairs` in `experiments/jev-btrain/history-search.mjs` validates
+paired query measurements with principal/role metadata, authorized and judged
+relevant IDs, the same baseline and semantic shortlist, measured end-to-end
+`elapsedMs`, and one gateway outcome per shortlisted ID. Inputs are defensively
+copied; sparse arrays, duplicate IDs and disguised iterators cannot falsify call
+accounting. It reports mean Recall@5, percentage point improvement, nearest-rank
+p95 query latency, eligible/attempted/failed/skipped/abstained/actionable counts,
+and actionable coverage, separately for real, synthetic and unknown origins.
+Provider/shape failure rate uses attempted calls; failures without a call are
+reported separately. Valid-prediction coverage includes abstentions over attempts,
+while actionable coverage uses deterministic eligibility. Skips cannot dilute the
+provider-failure denominator.
+Invalid unauthorized or invented result catalogs are rejected as invalid evidence;
+the reported zero unauthorized count follows this validation and is not an
+independent live access audit. Empty relevance judgments are unsupported.
+
+G10 still requires 50 independently judged real queries with source-access roles,
+a frozen evaluation protocol, Recall@5 at least 10 percentage points above the
+lexical/structured baseline, p95 at most 2 seconds, zero unauthorized results,
+and the universal failure/coverage gates. This prototype always reports
+`gateReady: false`; synthetic controls, supplied measurements, and policy tests
+do not establish model quality or authorize live read-only search.
