@@ -238,4 +238,16 @@ describe("offline verification planner", () => {
     }
     assert.equal(calls, 2)
   })
+
+  it("classifies UTF-8 serialized input above the gateway budget as ineligible", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    const change = { changedPaths: Array.from({ length: 256 }, (_, index) => `src/${index}/${"é".repeat(40)}.mjs`), sourceRefs }
+    const plan = await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(plan.mandatory, ["unit"])
+    assert.deepEqual(plan.suggested, [])
+    assert.equal(calls, 0)
+    assert.equal(plan.traces[0].outcome, "skipped")
+    assert.equal(plan.traces[0].reason, "ineligible")
+  })
 })
