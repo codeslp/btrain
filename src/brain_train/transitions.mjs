@@ -262,6 +262,9 @@ export function getPrimaryTransition(status) {
   return TRANSITION_ROWS.find((entry) => entry.primary.includes(status)) || null
 }
 
+// options.transitionEvent comes only from btrain's own callers (pr-flow passes
+// "pr-poll" and "pr-create"). The CLI refuses it (internal_options.mjs), so a
+// caller cannot choose the row that gates its own change.
 export function classifyTransitionEvent(options, currentStatus, nextStatus) {
   if (options.transitionEvent) return options.transitionEvent
   if (options.status !== undefined && nextStatus !== currentStatus) return "handoff update --status"
