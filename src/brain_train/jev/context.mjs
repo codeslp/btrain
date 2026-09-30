@@ -122,9 +122,10 @@ export async function selectContext({ kind, items, objective = "", provider, mod
       || item.evidenceClass !== optionalClass || frozenSource?.kind !== item.kind
       || frozenSource?.evidenceClass !== optionalClass || frozenSource?.pinned !== false
     let selection = "full"
-    const eligible = !required && frozenSource?.sourceRef === item.sourceRef
+    const sourceMatches = frozenSource?.sourceRef === item.sourceRef
       && frozenSource?.sourceSnapshotHash === contextSourceHash(item)
-    const source = eligible ? { id: item.id, sourceRef: item.sourceRef,
+    const eligible = !required && sourceMatches
+    const source = sourceMatches ? { id: item.id, sourceRef: item.sourceRef,
       sourceHash: createHash("sha256").update(item.content).digest("hex") } : null
     const sourceProof = source ? { sources: [source], sourceSnapshotHash: sourceSnapshotHashFor([source]) } : null
     const trace = await decideCandidate({
