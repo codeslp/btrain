@@ -32,7 +32,7 @@ export function readFrozenRecord({ source, sourceProof, mode }) {
       || supplied.sourceHash !== createHash("sha256").update(source.content).digest("hex")) {
       throw new Error("A matching frozen source proof is required")
     }
-    const sources = [{ id: supplied.id, sourceRef: supplied.sourceRef, sourceHash: supplied.sourceHash }]
+    const sources = [structuredClone(supplied)]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
     if (sourceSnapshotHash !== sourceProof.sourceSnapshotHash) throw new Error("A matching frozen source proof is required")
     proof = { sources, sourceSnapshotHash }

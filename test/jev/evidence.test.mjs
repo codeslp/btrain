@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import { createSourceSnapshot, appendSourceSnapshots, appendSourceOutcome, readEvidence } from "../../src/brain_train/jev/evidence.mjs"
 
 describe("Jev source evidence", () => {
@@ -76,6 +77,20 @@ describe("Jev source evidence", () => {
     }
   })
 
+  it("captures edited comment versions separately while deduplicating repeated observations", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-edits-"))
+    const snapshot = (current, capturedAt) => createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: current, capturedAt })
+    try {
+      const first = snapshot(comment, "2026-09-01T10:05:00Z")
+      const next = snapshot({ ...comment, body: "Fix a different test", updatedAt: "2026-09-01T11:00:00Z" }, "2026-09-01T11:05:00Z")
+      assert.notEqual(first.id, next.id)
+      assert.equal(next.id, snapshot({ ...comment, body: "Fix a different test", updatedAt: "2026-09-01T11:00:00Z" }, "2026-09-02T11:05:00Z").id)
+      assert.equal(await appendSourceSnapshots(root, [first, next]), 2)
+      assert.equal(await appendSourceSnapshots(root, [first, next]), 0)
+      assert.equal((await readEvidence(root)).snapshots.length, 2)
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
   it("continues capture after an orphaned snapshot lock", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-orphan-"))
     try {
@@ -97,10 +112,13 @@ describe("Jev source evidence", () => {
       const snapshotDirectory = path.join(directory, "source-snapshots")
       await fs.mkdir(snapshotDirectory, { recursive: true })
       const old = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      const recaptured = { ...old }
+      old.schemaVersion = 1
+      old.id = createHash("sha256").update(`o/r/pull/7/${comment.surface}/${comment.id}`).digest("hex")
       const next = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "a", comment, capturedAt: "2026-09-01T10:06:00Z" })
       await fs.writeFile(path.join(directory, "source-snapshots.jsonl"), `${JSON.stringify(old)}\n`)
       await fs.writeFile(path.join(snapshotDirectory, ".unfinished.tmp"), "incomplete")
-      assert.equal(await appendSourceSnapshots(root, [old, next]), 1)
+      assert.equal(await appendSourceSnapshots(root, [old, recaptured, next]), 1)
       assert.deepEqual(new Set((await readEvidence(root)).snapshots.map((source) => source.id)), new Set([old.id, next.id]))
       await appendSourceOutcome(root, { sourceId: next.id, outcome: "repaired", observedAt: "2026-09-02T10:00:00Z", evidenceRef: "https://example.test/repair" })
     } finally {

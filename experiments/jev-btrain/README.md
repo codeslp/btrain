@@ -9,6 +9,9 @@ and the PR head observed during the pull. The event-time head stays `unknown`: p
 cannot prove what the head was when an earlier comment was written. Later outcomes are
 appended separately through `appendSourceOutcome`; `readEvidence` includes an initial
 `pending` outcome for every snapshot. These local records contain no comment body.
+Version 2 snapshot IDs bind the comment identity, edit timestamp (or creation time), and
+body hash. Repeated observations deduplicate; edits append a new immutable version.
+Legacy snapshots remain readable.
 
 Use `annotationCandidates` from `src/brain_train/jev/manifest.mjs` to export source
 references for independent labeling. Set `requireEventHead: true` for an exact-head PR
@@ -18,6 +21,10 @@ policy metadata, and one split per PR and normalized template group. It returns 
 source metadata, a source hash, and a dataset hash. Replay checks both hashes, so a changed
 source URL, reviewed commit, event head, or label fails before a provider call. Keep raw text
 and candidate fixtures inside their source repository.
+Freezing and replay share corpus grouping validation: duplicate case sources and PR or
+template groups crossing splits are rejected even when a caller recomputes the dataset
+hash. Replay validates every candidate before making calls and copies the frozen manifest
+before awaiting a provider.
 
 `decideCandidate` from `src/brain_train/jev/decision.mjs` defaults to `off`. In `offline`
 mode an injected local fake provider can replay private fixtures without a hosted call.
@@ -35,6 +42,8 @@ source before any provider call. It compares the pinned manifest
 with a deterministic baseline and reports skips, valid abstentions, provider failures,
 class metrics, coverage, latency, and observed cost separately. The focused executable
 examples are `test/jev/*.test.mjs`.
+Persisted failure and skipped traces have no prediction, probabilities, or suggested
+action; abstentions have no suggested action.
 
 This foundation does not enable live Jev use. Family-specific benchmarks, privacy and
 retention decisions, shadow evidence, and human promotion records are still required by
@@ -101,6 +110,8 @@ baseline and suggested destination must agree on success; identical routes canno
 an apparent benefit from contradictory labels.
 The writer saves redacted local evidence. Default-off traces omit frozen provenance
 and are not persisted by that writer.
+Frozen record adapters deeply copy the complete supplied source proof, preserving all
+canonical metadata used by the source snapshot hash through later caller mutations.
 
 ## Offline repository rules, turn rules, and review risk (T012)
 
