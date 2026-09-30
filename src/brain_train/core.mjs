@@ -5990,7 +5990,12 @@ async function patchHandoff(repoRoot, options) {
         })
       }
 
-      if (nextStatus === "resolved") {
+      // spec 015 row 19 (spec 002 update authority): a metadata-only update
+      // keeps the lane's status, `resolved` included. Entering `resolved`
+      // belongs to `handoff resolve`, and files or roles on a resolved lane
+      // wait for a fresh claim (rows 16, 17, and 20 have no resolved source).
+      const metadataOnly = options.status === undefined && transitionEvent === "handoff update --metadata"
+      if (nextStatus === "resolved" && !metadataOnly) {
         throw new BtrainError({
           message: `Cannot set status to \`resolved\` via \`handoff update\`.`,
           reason: "The resolve command handles lock cleanup and history archival that \`update\` does not.",
