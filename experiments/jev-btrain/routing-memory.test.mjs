@@ -57,3 +57,9 @@ test("routing measurements must retain the adapter's first eligible baseline des
   assert.throws(() => evaluateRoutingPairs("reviewer", [routePair("a", { baselineId: null })]))
   assert.throws(() => evaluateRoutingPairs("reviewer", [routePair("a", { baselineId: "b" })]))
 })
+
+test("identical paired destinations cannot claim contradictory success outcomes", () => {
+  assert.throws(() => evaluateRoutingPairs("reviewer", [routePair("same", { suggestedId: "a" })]))
+  const report = evaluateRoutingPairs("reviewer", [routePair("same", { suggestedId: "a", baselineSucceeded: true })])
+  assert.equal(report.synthetic.successDifferencePercentagePoints, 0)
+})

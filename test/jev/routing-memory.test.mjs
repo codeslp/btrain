@@ -66,6 +66,26 @@ test("routing ranks only eligible catalog IDs and keeps deterministic order for 
   assert.deepEqual(result.baselineIds, ["first", "second", "third"])
 })
 
+test("excluded routing entries produce persistable skipped traces without consuming ranking calls", async () => {
+  const record = routingRecord([route("excluded", { authorized: false }), route("good")])
+  const options = frozen(record)
+  const seen = []
+  const result = await rankEligibleRoutes({ ...options, provider: { localOnly: true, decide: async ({ state }) => {
+    seen.push(state.candidate.id); return response(routingFamily, "high")
+  } } })
+  assert.equal(result.traces.length, record.candidates.length)
+  assert.deepEqual(result.traces.map(({ outcome, attemptedCall }) => [outcome, attemptedCall]), [["skipped", false], ["decision", true]])
+  assert.deepEqual(result.rankedIds, ["good"])
+  assert.deepEqual(seen, ["good"])
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-routing-skips-"))
+  try {
+    for (const trace of result.traces) {
+      const entry = await appendDecisionTrace(root, trace, routingFamily, options.sourceProof)
+      assert.equal(entry.sourceSnapshotHash, options.sourceProof.sourceSnapshotHash)
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
 for (const [name, reply] of [
   ["provider failure", { ok: false, reason: "rate-limit" }],
   ["invented destination", response(routingFamily, "merge-main")],

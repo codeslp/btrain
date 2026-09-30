@@ -95,8 +95,12 @@ rtk env -- node --test test/jev/routing-memory.test.mjs experiments/jev-btrain/r
 ```
 
 Every returned gateway trace keeps `actionTaken: none`. Offline traces compose with
-`appendDecisionTrace(root, trace, family, sourceProof)` for redacted local evidence;
-default-off traces omit frozen provenance and are not persisted by that writer.
+`appendDecisionTrace(root, trace, family, sourceProof)` even for excluded routing entries: every catalog entry has
+a trace, and exclusions never consume provider calls. Paired measurements for the same
+baseline and suggested destination must agree on success; identical routes cannot create
+an apparent benefit from contradictory labels.
+The writer saves redacted local evidence. Default-off traces omit frozen provenance
+and are not persisted by that writer.
 
 ## Original PR and handoff experiment
 

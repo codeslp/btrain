@@ -70,18 +70,23 @@ export async function rankEligibleRoutes({ source, sourceProof, provider, mode =
   const baselineIds = eligible.map((candidate) => candidate.id)
   const run = createDecisionRun(routingFamily)
   const traces = []
+  const ranked = []
+  let calls = 0
   // An oversized catalog falls back as a whole; a partial ranking could distort the baseline.
   const canRank = eligible.length > 0 && eligible.length <= maxCalls
-  const candidates = canRank ? eligible : [null]
-  for (const [callIndex, route] of candidates.entries()) {
-    traces.push(await decideCandidate({
+  for (const route of record.candidates) {
+    const trace = await decideCandidate({
       family: routingFamily, run, provider, mode, modelPin, codeRevision, sourceProof: proof,
-      candidate: { ...candidateSource, eligible: canRank, baseline: "uncertain", privacyClass: "private",
-        callIndex, kind: record.kind, objective: record.objective, route },
-    }))
+      candidate: { ...candidateSource, eligible: canRank && exclusionReasons(route, record).length === 0,
+        baseline: "uncertain", privacyClass: "private",
+        callIndex: calls, kind: record.kind, objective: record.objective, route },
+    })
+    traces.push(trace)
+    if (trace.attemptedCall) calls += 1
+    if (trace.outcome === "decision") ranked.push({ id: route.id, index: ranked.length, score: scores[trace.prediction] })
   }
-  const complete = canRank && traces.every((trace) => trace.outcome === "decision")
-  const rankedIds = complete ? eligible.map((candidate, index) => ({ id: candidate.id, index, score: scores[traces[index].prediction] }))
+  const complete = canRank && ranked.length === eligible.length
+  const rankedIds = complete ? ranked
     .sort((a, b) => b.score - a.score || a.index - b.index).map((candidate) => candidate.id) : [...baselineIds]
   return { baselineIds, rankedIds, excluded, traces }
 }

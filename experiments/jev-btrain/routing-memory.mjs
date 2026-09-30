@@ -55,6 +55,7 @@ export function evaluateRoutingPairs(kind, pairs) {
       || pair.baselineId !== (pair.eligibleIds[0] ?? null)
       || (pair.suggestedId !== null && !boundedString(pair.suggestedId, 128))
       || typeof pair.baselineSucceeded !== "boolean" || typeof pair.suggestedSucceeded !== "boolean"
+      || (pair.suggestedId === pair.baselineId && pair.suggestedSucceeded !== pair.baselineSucceeded)
       || (pair.baselineId === null && pair.baselineSucceeded) || (pair.suggestedId === null && pair.suggestedSucceeded)) {
       throw new Error("Every routing pair needs the same kind, eligible baseline and boolean outcomes")
     }
