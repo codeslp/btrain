@@ -64,6 +64,19 @@ describe("Jev source evidence", () => {
     }
   })
 
+  it("deduplicates concurrent snapshot appends", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-concurrent-"))
+    try {
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      const counts = await Promise.all(Array.from({ length: 12 }, () => appendSourceSnapshots(root, [row])))
+      assert.equal(counts.reduce((sum, count) => sum + count, 0), 1)
+      assert.equal((await readEvidence(root)).snapshots.length, 1)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+
   it("removes credentials from outcome evidence references and rejects non-HTTP URLs", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-outcome-ref-"))
     try {
