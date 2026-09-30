@@ -29,7 +29,10 @@ function frozenSourceMap(sources, expectedHash, objective) {
     || typeof source.pinned !== "boolean")) return new Map()
   if (new Set(sources.map((source) => source.id)).size !== sources.length) return new Map()
   if (contextManifestHash(sources, objective) !== expectedHash) return new Map()
-  return new Map(sources.map((source) => [source.id, source]))
+  return new Map(sources.map((source) => [source.id, {
+    id: source.id, sourceRef: source.sourceRef, sourceSnapshotHash: source.sourceSnapshotHash,
+    kind: source.kind, evidenceClass: source.evidenceClass, pinned: source.pinned,
+  }]))
 }
 
 function family(id) {
@@ -98,9 +101,13 @@ export async function selectContext({ kind, items, objective = "", provider, mod
     throw new Error("Offline selection requires a pinned model and code revision")
   }
   validateItems(items)
+  const packetItems = items.map((item) => ({
+    id: item.id, kind: item.kind, sourceRef: item.sourceRef, content: item.content,
+    tokens: item.tokens, evidenceClass: item.evidenceClass, pinned: item.pinned,
+  }))
   const sourceMap = frozenSourceMap(frozenSources, expectedManifestHash, objective)
   const optionalClass = kind === "dispatch" ? "low-risk-artifact" : "older-transcript"
-  const itemIds = new Set(items.map((item) => item.id))
+  const itemIds = new Set(packetItems.map((item) => item.id))
   if ([...sourceMap.values()].some((source) => !itemIds.has(source.id))) {
     throw new Error("A frozen context item is missing from the packet")
   }
@@ -109,7 +116,7 @@ export async function selectContext({ kind, items, objective = "", provider, mod
   const selections = []
   const traces = []
   let calls = 0
-  for (const item of [...items].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+  for (const item of packetItems.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
     const frozenSource = sourceMap.get(item.id)
     const required = item.pinned === true || item.kind !== optionalKind[kind]
       || item.evidenceClass !== optionalClass || frozenSource?.kind !== item.kind

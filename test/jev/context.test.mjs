@@ -193,6 +193,38 @@ describe("offline context selection", () => {
     assert.equal(calls, 0)
   })
 
+  it("keeps later required items pinned when a provider mutates caller objects", async () => {
+    const items = [item("a", "artifact"), item("b", "artifact", { pinned: true })]
+    const frozenSources = frozen(items)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => {
+      calls += 1
+      frozenSources[1].pinned = false
+      items[1].pinned = false
+      return answer("omit")
+    } }
+    const plan = await offline({ kind: "dispatch", items, frozenSources, provider })
+    assert.equal(calls, 1)
+    assert.deepEqual(plan.selections.map(({ selection }) => selection), ["omit", "full"])
+    assert.equal(plan.traces[1].reason, "ineligible")
+  })
+
+  it("keeps later required item classes pinned across a provider call", async () => {
+    const items = [item("a", "artifact"), item("b", "artifact", { evidenceClass: "current-state" })]
+    const frozenSources = frozen(items)
+    frozenSources[1].evidenceClass = "low-risk-artifact"
+    const expectedManifestHash = contextManifestHash(frozenSources)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => {
+      calls += 1
+      items[1].evidenceClass = "low-risk-artifact"
+      return answer("omit")
+    } }
+    const plan = await offline({ kind: "dispatch", items, frozenSources, expectedManifestHash, provider })
+    assert.equal(calls, 1)
+    assert.deepEqual(plan.selections.map(({ selection }) => selection), ["omit", "full"])
+  })
+
   it("fails closed on changed source content and a mismatched model pin", async () => {
     let calls = 0
     const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
