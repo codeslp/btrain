@@ -101,6 +101,8 @@ baseline and suggested destination must agree on success; identical routes canno
 an apparent benefit from contradictory labels.
 The writer saves redacted local evidence. Default-off traces omit frozen provenance
 and are not persisted by that writer.
+Frozen record adapters deeply copy the complete supplied source proof, preserving all
+canonical metadata used by the source snapshot hash through later caller mutations.
 
 ## Original PR and handoff experiment
 

@@ -225,6 +225,27 @@ test("both adapters reject unfrozen or mismatched content before calling a provi
   }
 })
 
+test("canonical frozen proof metadata survives defensive copying and later caller mutation", async () => {
+  const options = frozen(routingRecord())
+  Object.assign(options.sourceProof.sources[0], { repository: "o/r", prNumber: 7, eventId: "42", templateGroup: "captured",
+    deterministicDisposition: { status: "captured" } })
+  options.sourceProof.sourceSnapshotHash = sourceSnapshotHashFor(options.sourceProof.sources)
+  const original = structuredClone(options.sourceProof)
+  const result = await rankEligibleRoutes({ ...options, provider: { localOnly: true, decide: async () => {
+    options.sourceProof.sources[0].repository = "changed/repo"
+    options.sourceProof.sources[0].deterministicDisposition.status = "changed"
+    return response(routingFamily, "high")
+  } } })
+  assert.equal(result.traces.length, 2)
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-canonical-proof-"))
+  try {
+    for (const trace of result.traces) {
+      assert.equal(trace.sourceSnapshotHash, original.sourceSnapshotHash)
+      await appendDecisionTrace(root, trace, routingFamily, original)
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
 test("routing and memory traces compose with the shared redacted evidence writer", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-routing-memory-"))
   try {
