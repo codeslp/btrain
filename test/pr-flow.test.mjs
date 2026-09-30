@@ -468,7 +468,7 @@ describe("PR review flow classification", () => {
       repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
       comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: "2026-09-20T20:00:30Z", url: comment.html_url, body: comment.body },
     })
-    assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: snapshot.id, reason: "unknown-event-head" }])
+    assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: edited.id, reason: "unknown-event-head" }])
   })
 
   it("uses a frozen unedited short reviewed-commit attestation for normal bot comments", () => {
