@@ -1,10 +1,22 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { createDecisionFamily, fakeProvider } from "../../src/brain_train/jev/decision.mjs"
+import { createHash } from "node:crypto"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { appendDecisionTrace, createDecisionFamily, fakeProvider } from "../../src/brain_train/jev/decision.mjs"
+import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 import { mandatoryVerificationChecks, planVerification as planVerificationWithPins, verificationFamily } from "../../src/brain_train/jev/verification.mjs"
 
 const sourceRefs = ["https://example.test/changes/42"]
-const planVerification = (options) => planVerificationWithPins({ codeRevision: "a".repeat(40), modelPin: "local-fixture", ...options })
+const sourceId = "b".repeat(64)
+const sourceContent = "frozen change evidence"
+const sources = [{ id: sourceId, sourceRef: sourceRefs[0], sourceHash: createHash("sha256").update(sourceContent).digest("hex") }]
+const sourceProof = { sources, sourceSnapshotHash: sourceSnapshotHashFor(sources) }
+const planVerification = ({ change, ...options }) => planVerificationWithPins({
+  codeRevision: "a".repeat(40), modelPin: "local-fixture", sourceProof, ...options,
+  change: { sourceId, sourceContent, ...change },
+})
 const answer = (choice) => ({
   ok: true, model: "local-fixture",
   answers: { signal: { choice, probabilities: Object.fromEntries(
@@ -14,12 +26,28 @@ const answer = (choice) => ({
 
 describe("offline verification planner", () => {
   it("requires caller supplied identity pins for offline plans and records them in traces", async () => {
-    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }
-    await assert.rejects(() => planVerificationWithPins({ change, provider: fakeProvider(answer("none")), mode: "offline" }), /revision pin/)
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId, sourceContent }
+    await assert.rejects(() => planVerificationWithPins({ change, provider: fakeProvider(answer("none")), mode: "offline", sourceProof }), /revision pin/)
     const plan = await planVerification({ change, provider: fakeProvider(answer("none")), mode: "offline" })
     assert.equal(plan.traces[0].codeRevision, "a".repeat(40))
     assert.match(plan.traces[0].modelPin, /^id-sha256:[a-f0-9]{64}$/)
   })
+
+  it("requires frozen source proof and produces persistable offline traces", async () => {
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId, sourceContent }
+    const provider = fakeProvider(answer("none"))
+    await assert.rejects(() => planVerificationWithPins({ change, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40) }), /frozen source proof/i)
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-verification-trace-"))
+    try {
+      const plan = await planVerification({ change, provider, mode: "offline" })
+      assert.equal(plan.traces[0].sourceSnapshotHash, sourceProof.sourceSnapshotHash)
+      const record = await appendDecisionTrace(root, plan.traces[0], verificationFamily, sourceProof)
+      assert.equal(record.sourceBindings[0].sourceId, sourceId)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
 
   it("pins deterministic planner settings into the family policy", () => {
     assert.equal(verificationFamily.policyConfig.maxPaths, 256)
