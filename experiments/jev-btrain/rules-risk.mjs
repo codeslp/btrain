@@ -92,8 +92,10 @@ function validateReviewGateway(pair) {
     throw new Error("Every review candidate requires a gateway measurement")
   }
   const ids = new Set()
-  for (const entry of pair.gatewayAttempts) {
-    if (!entry || !pair.baselineIds.includes(entry.reviewId) || ids.has(entry.reviewId) || !validGatewayOutcome(entry)) {
+  for (let index = 0; index < pair.gatewayAttempts.length; index += 1) {
+    const entry = pair.gatewayAttempts[index]
+    if (!Object.hasOwn(pair.gatewayAttempts, index) || !entry || !pair.baselineIds.includes(entry.reviewId)
+      || ids.has(entry.reviewId) || !validGatewayOutcome(entry)) {
       throw new Error("Review gateway measurements must cover unique known candidates with consistent outcomes")
     }
     ids.add(entry.reviewId)

@@ -121,4 +121,9 @@ test("G6-V rejects missing removed duplicate sparse and inconsistent gateway mea
   const sparse = queue("sparse").gatewayAttempts
   delete sparse[0]
   assert.throws(() => evaluateReviewQueues([queue("bad", { gatewayAttempts: sparse })]))
+  const disguisedSparse = Array(4)
+  disguisedSparse[Symbol.iterator] = function* () {
+    for (const reviewId of ["a", "b", "c", "d"]) yield { reviewId, eligible: true, attemptedCall: true, outcome: "failure" }
+  }
+  assert.throws(() => evaluateReviewQueues([queue("iterator", { gatewayAttempts: disguisedSparse })]))
 })
