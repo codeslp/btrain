@@ -146,7 +146,8 @@ and total reviewer time relative to baseline. Every review candidate must have o
 gateway `outcome`. Review reports apply the same failure, abstention, skip and coverage
 denominators as rule reports, separated by origin. Missing, duplicate, sparse, invented or
 contradictory gateway entries are rejected, so ranking and time gains cannot conceal failed
-calls. A measurement that drops a required queue
+calls. Incomplete scoring must retain the baseline order, matching the adapter fallback.
+A measurement that drops a required queue
 entry or invents a labeled finding is rejected. Reports always return `gateReady: false`.
 All queue and finding ID lists must be dense arrays with unique supplied IDs; missing
 array slots cannot stand in for retained reviews or labeled findings.

@@ -98,13 +98,14 @@ test("G6-V reports gateway failures abstentions and eligible decision coverage p
     { reviewId: "c", eligible: true, attemptedCall: true, outcome: "failure" },
     { reviewId: "d", eligible: false, attemptedCall: false, outcome: "skipped" },
   ]
-  const result = evaluateReviewQueues([queue("mixed", { gatewayAttempts })])
+  const result = evaluateReviewQueues([queue("mixed", { gatewayAttempts, prioritizedIds: ["a", "b", "c", "d"] })])
   assert.deepEqual(result.synthetic.gateway, { eligible: 3, attemptedCalls: 3, decisions: 1, abstentions: 1,
     skipped: 1, attemptedFailures: 1, failuresWithoutCall: 0, attemptedFailureRate: 1 / 3,
     validPredictionCoverage: 2 / 3, actionableDecisionCoverage: 1 / 3 })
   assert.equal(result.real.gateway.attemptedFailureRate, null)
   const failuresWithoutCalls = evaluateReviewQueues([queue("no-provider", {
     gatewayAttempts: gatewayAttempts.map((entry) => ({ ...entry, eligible: true, attemptedCall: false, outcome: "failure" })),
+    prioritizedIds: ["a", "b", "c", "d"],
   })]).synthetic.gateway
   assert.equal(failuresWithoutCalls.attemptedCalls, 0)
   assert.equal(failuresWithoutCalls.failuresWithoutCall, 4)
@@ -126,4 +127,14 @@ test("G6-V rejects missing removed duplicate sparse and inconsistent gateway mea
     for (const reviewId of ["a", "b", "c", "d"]) yield { reviewId, eligible: true, attemptedCall: true, outcome: "failure" }
   }
   assert.throws(() => evaluateReviewQueues([queue("iterator", { gatewayAttempts: disguisedSparse })]))
+})
+
+test("incomplete review scoring cannot claim ranking benefit contrary to the adapter fallback", () => {
+  const value = queue("fallback")
+  value.gatewayAttempts[1] = { reviewId: "b", eligible: true, attemptedCall: true, outcome: "failure" }
+  assert.throws(() => evaluateReviewQueues([value]), /baseline order/)
+  value.prioritizedIds = [...value.baselineIds]
+  const result = evaluateReviewQueues([value])
+  assert.equal(result.synthetic.severeRecallInTopThirtyPercent, result.synthetic.baselineSevereRecallInTopThirtyPercent)
+  assert.equal(result.synthetic.gateway.attemptedFailureRate, 0.25)
 })

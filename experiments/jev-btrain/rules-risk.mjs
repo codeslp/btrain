@@ -144,6 +144,10 @@ export function evaluateReviewQueues(pairs) {
       throw new Error("Review measurements must preserve the complete queue, known findings and valid paired times")
     }
     validateReviewGateway(pair)
+    if (pair.gatewayAttempts.some((entry) => entry.outcome !== "decision")
+      && pair.prioritizedIds.some((id, index) => id !== pair.baselineIds[index])) {
+      throw new Error("Incomplete review scoring must retain the baseline order")
+    }
   }
   return { family: "review-risk", ...Object.fromEntries(origins.map((origin) => [origin, reviewMetrics(pairs.filter((pair) => pair.origin === origin))])),
     gateReady: false, gateReason: "requires-frozen-real-benchmark" }
