@@ -157,14 +157,18 @@ describe("handoff update on a resolved lane (spec 015 row 19)", () => {
     })
   })
 
-  it("still refuses files and roles on a resolved lane: rows 16, 17 and 20 have no resolved source", async () => {
+  it("still refuses files and roles on a resolved lane, however the update is labeled: rows 16, 17 and 20 have no resolved source", async () => {
     await withResolvedLane(async (repo) => {
       for (const change of [{ files: "src/b/" }, { owner: "gamma" }, { reviewer: "gamma" }]) {
-        await assert.rejects(
-          asAgent("alpha", () => patchHandoff(repo, { lane: "x", actor: "alpha", "no-dispatch": true, ...change })),
-          BtrainError,
-          `update ${JSON.stringify(change)} on a resolved lane`,
-        )
+        // A caller can pass transitionEvent (the CLI forwards any --key), so a
+        // forged metadata label must not exempt a files or role change.
+        for (const label of [{}, { transitionEvent: "handoff update --metadata" }]) {
+          await assert.rejects(
+            asAgent("alpha", () => patchHandoff(repo, { lane: "x", actor: "alpha", "no-dispatch": true, ...label, ...change })),
+            (error) => error instanceof BtrainError && /Cannot set status to `resolved`/.test(error.message),
+            `update ${JSON.stringify({ ...label, ...change })} on a resolved lane`,
+          )
+        }
       }
       const lane = await laneX(repo)
       assert.equal(lane.status, "resolved")

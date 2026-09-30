@@ -5994,7 +5994,8 @@ async function patchHandoff(repoRoot, options) {
       // keeps the lane's status, `resolved` included. Entering `resolved`
       // belongs to `handoff resolve`, and files or roles on a resolved lane
       // wait for a fresh claim (rows 16, 17, and 20 have no resolved source).
-      const metadataOnly = options.status === undefined && transitionEvent === "handoff update --metadata"
+      // Read the flags, not transitionEvent, which a caller can supply.
+      const metadataOnly = ["status", "files", "owner", "reviewer"].every((flag) => options[flag] === undefined)
       if (nextStatus === "resolved" && !metadataOnly) {
         throw new BtrainError({
           message: `Cannot set status to \`resolved\` via \`handoff update\`.`,

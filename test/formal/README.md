@@ -130,20 +130,27 @@ Harness-found implementation defect, repaired 2026-09-30:
     `--owner`, or `--reviewer`) on a `resolved` lane. It took the lane's own
     `resolved` status as the next status and hit the guard for `--status
     resolved`, whose fix text (resolve again) is the repeat resolve that
-    spec 002 rejects (L14). Spec 015 row 19 and spec 002 update authority
-    allow the update in any status. Implementation mode found it with
-    `BTRAIN_FORMAL_SEED=-1468514561` (resolve an idle lane, then update its
-    metadata), and contract mode with `-154424753` (claim, owner abandon
-    resolve by row 6, owner metadata update). The harness had scored a
-    roleless reassign as accepted without consulting the model, so row 19
-    was never checked: not in `resolved`, not its lane-agent actor (L12), and
-    not the FR-7 canonical actor that the update records. Repaired:
-    `patchHandoff` exempts the metadata-only case; `--status resolved`, and
-    files or roles on a resolved lane, stay rejected (rows 16, 17, and 20
-    have no resolved source). The model's `metadata` op transcribes row 19,
-    and a reassign draw with neither role runs as `metadata`.
-    `test/handoff-update-resolved.test.mjs`, the row 19 witnesses here, and
-    the `test/transitions.test.mjs` cross-check fixtures guard it.
+    spec 002 rejects (L14). Spec 015 row 19 allows the update in any status,
+    and spec 002 update authority names only its actor. Implementation mode
+    found it with `BTRAIN_FORMAL_SEED=-1468514561` (resolve an idle lane,
+    then update its metadata), and contract mode with `-154424753` (claim,
+    owner abandon resolve by row 6, owner metadata update). The harness had
+    scored a roleless reassign as accepted without consulting the model, so
+    row 19 was never checked: not in `resolved`, not its lane-agent actor
+    (L12), and not the FR-7 canonical actor that the update records.
+    Repaired: `patchHandoff` exempts the metadata-only case, read from the
+    four flags because a caller can supply `transitionEvent`; `--status
+    resolved`, and files or roles on a resolved lane, stay rejected (rows
+    16, 17, and 20 have no resolved source). The model's `metadata` op
+    transcribes row 19, and a reassign draw with neither role runs as
+    `metadata`. `test/handoff-update-resolved.test.mjs`, the row 19
+    witnesses here, and the `test/transitions.test.mjs` cross-check fixtures
+    guard it. Two differences remain: a metadata update of a resolved lane
+    whose registry still holds stale entries releases them, as idle lanes
+    already did, although row 19 says locks unchanged (harness runs never
+    leave stale entries on an inactive lane); and `LaneLock.tla` has no
+    metadata action, so the `lastActor` effect is mirror-only and belongs in
+    the `specs/tla/README.md` known-differences list.
 
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a

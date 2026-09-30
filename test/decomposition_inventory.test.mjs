@@ -99,7 +99,7 @@ describe("decomposition inventory, function spans", () => {
     // the "starts with }" bug). That is the property worth pinning.
     const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
     const { spans, fileLines } = readFunctionSpans(core)
-    assert.equal(spans.find((f) => f.name === "patchHandoff").lines, 584)
+    assert.equal(spans.find((f) => f.name === "patchHandoff").lines, 585)
     assert.equal(spans.find((f) => f.name === "runLoop").lines, 422)
     assert.ok(spans.length >= 352, `expected at least the 352 functions the plan measured, got ${spans.length}`)
     const inFunctions = spans.reduce((a, f) => a + f.lines, 0)
