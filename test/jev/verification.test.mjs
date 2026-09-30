@@ -10,13 +10,18 @@ import { mandatoryVerificationChecks, planVerification as planVerificationWithPi
 
 const sourceRefs = ["https://example.test/changes/42"]
 const sourceId = "b".repeat(64)
-const sourceContent = "frozen change evidence"
-const sources = [{ id: sourceId, sourceRef: sourceRefs[0], sourceHash: createHash("sha256").update(sourceContent).digest("hex") }]
-const sourceProof = { sources, sourceSnapshotHash: sourceSnapshotHashFor(sources) }
-const planVerification = ({ change, ...options }) => planVerificationWithPins({
-  codeRevision: "a".repeat(40), modelPin: "local-fixture", sourceProof, ...options,
-  change: { sourceId, sourceContent, ...change },
-})
+const frozenChange = (change) => {
+  const sourceContent = JSON.stringify({ changedPaths: change.changedPaths, contractTags: change.contractTags ?? [] })
+  const sources = [{ id: sourceId, sourceRef: sourceRefs[0], sourceHash: createHash("sha256").update(sourceContent).digest("hex") }]
+  return { sourceContent, sourceProof: { sources, sourceSnapshotHash: sourceSnapshotHashFor(sources) } }
+}
+const planVerification = ({ change, ...options }) => {
+  const { sourceContent, sourceProof } = frozenChange(change)
+  return planVerificationWithPins({
+    codeRevision: "a".repeat(40), modelPin: "local-fixture", sourceProof, ...options,
+    change: { ...change, sourceId, sourceContent },
+  })
+}
 const answer = (choice) => ({
   ok: true, model: "local-fixture",
   answers: { signal: { choice, probabilities: Object.fromEntries(
@@ -26,15 +31,17 @@ const answer = (choice) => ({
 
 describe("offline verification planner", () => {
   it("requires caller supplied identity pins for offline plans and records them in traces", async () => {
-    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId, sourceContent }
-    await assert.rejects(() => planVerificationWithPins({ change, provider: fakeProvider(answer("none")), mode: "offline", sourceProof }), /revision pin/)
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId }
+    const { sourceContent, sourceProof } = frozenChange(change)
+    await assert.rejects(() => planVerificationWithPins({ change: { ...change, sourceContent }, provider: fakeProvider(answer("none")), mode: "offline", sourceProof }), /revision pin/)
     const plan = await planVerification({ change, provider: fakeProvider(answer("none")), mode: "offline" })
     assert.equal(plan.traces[0].codeRevision, "a".repeat(40))
     assert.match(plan.traces[0].modelPin, /^id-sha256:[a-f0-9]{64}$/)
   })
 
   it("requires frozen source proof and produces persistable offline traces", async () => {
-    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId, sourceContent }
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId }
+    const { sourceProof } = frozenChange(change)
     const provider = fakeProvider(answer("none"))
     await assert.rejects(() => planVerificationWithPins({ change, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40) }), /frozen source proof/i)
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-verification-trace-"))
@@ -46,6 +53,44 @@ describe("offline verification planner", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }
+  })
+
+  it("rejects planner metadata that differs from its frozen change record", async () => {
+    const frozen = { changedPaths: ["src/safe.mjs"], contractTags: [], sourceRefs, sourceId }
+    const { sourceContent, sourceProof } = frozenChange(frozen)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    await assert.rejects(() => planVerificationWithPins({
+      change: { ...frozen, changedPaths: ["src/auth/payment.mjs"], sourceContent },
+      sourceProof, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    }), /frozen change record/i)
+    await assert.rejects(() => planVerificationWithPins({
+      change: { ...frozen, contractTags: ["security"], sourceContent },
+      sourceProof, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    }), /frozen change record/i)
+    const secured = { ...frozen, contractTags: ["security"] }
+    const securedEvidence = frozenChange(secured)
+    await assert.rejects(() => planVerificationWithPins({
+      change: { ...secured, contractTags: { toJSON: () => ["security"] }, sourceContent: securedEvidence.sourceContent },
+      sourceProof: securedEvidence.sourceProof, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    }), /frozen change record/i)
+    assert.equal(calls, 0)
+  })
+
+  it("keeps later provider inputs bound when the caller mutates its change object", async () => {
+    const change = { changedPaths: ["src/safe.mjs"], contractTags: [], sourceRefs }
+    const observed = []
+    const provider = { localOnly: true, decide: async ({ state }) => {
+      observed.push({ changedPaths: [...state.changedPaths], contractTags: [...state.contractTags] })
+      change.changedPaths[0] = "src/auth/payment.mjs"
+      change.contractTags.push("security")
+      return answer(observed.length === 1 ? "integration" : "none")
+    } }
+    await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(observed, [
+      { changedPaths: ["src/safe.mjs"], contractTags: [] },
+      { changedPaths: ["src/safe.mjs"], contractTags: [] },
+    ])
   })
 
 
