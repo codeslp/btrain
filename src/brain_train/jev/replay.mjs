@@ -104,6 +104,8 @@ export async function replayManifest({ manifest, family, candidates, provider })
   if (manifest.labels.length !== family.choices.length || new Set(manifest.labels).size !== family.choices.length
     || manifest.labels.some((label) => !family.choices.includes(label))) throw new Error("Manifest label catalog does not match family choices")
   if (manifest.cases.some((item) => !["train", "calibration", "test"].includes(item?.split))) throw new Error("Invalid manifest case split")
+  if (manifest.cases.some((item) => !family.choices.includes(item.label))) throw new Error("Invalid manifest case label")
+  if (manifest.cases.some((item) => !family.choices.includes(item.baseline))) throw new Error("Invalid manifest case baseline")
   if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash, manifest.pins)) throw new Error("Manifest dataset hash does not match frozen cases and pins")
   const sources = new Map(manifest.sources.map((source) => [source.id, source]))
   for (const item of manifest.cases) {

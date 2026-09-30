@@ -126,6 +126,27 @@ describe("offline context selection", () => {
     }
   })
 
+  it("persists frozen pinned and required skipped traces without provider calls", async () => {
+    const items = [item("pinned", "artifact", { pinned: true }), item("instruction", "instruction")]
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-context-skips-"))
+    try {
+      const plan = await offline({ kind: "dispatch", items, provider })
+      for (const [index, source] of [...items].sort((a, b) => a.id.localeCompare(b.id)).entries()) {
+        const sources = [{ id: source.id, sourceRef: source.sourceRef, sourceHash: createHash("sha256").update(source.content).digest("hex") }]
+        const proof = { sources, sourceSnapshotHash: sourceSnapshotHashFor(sources) }
+        const record = await appendDecisionTrace(root, plan.traces[index], dispatchContextFamily, proof)
+        assert.equal(record.outcome, "skipped")
+        assert.equal(record.attemptedCall, false)
+        assert.equal(record.sourceSnapshotHash, proof.sourceSnapshotHash)
+        assert.equal(JSON.stringify(record).includes(source.content), false)
+      }
+      assert.equal(calls, 0)
+      assert.deepEqual(plan.selections.map(({ selection }) => selection), ["full", "full"])
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
   it("keeps full content when off, private provider is remote, or a source reference is absent", async () => {
     let calls = 0
     const provider = { decide: async () => { calls += 1; return answer("omit") } }
