@@ -30,6 +30,17 @@ const REVIEW_CONTEXT = {
   "review-ask": "check src/a/feature.mjs",
 }
 
+// The section each reviewer-context flag fills, as the completeness check
+// names it.
+const REVIEW_CONTEXT_LABELS = {
+  preflight: "Pre-flight review",
+  changed: "Files changed",
+  verification: "Verification run",
+  gap: "Remaining gaps",
+  why: "Why this was done",
+  "review-ask": "Specific review asks",
+}
+
 function projectToml({ lanes, cgraph }) {
   return [
     "[project]",
@@ -204,10 +215,13 @@ describe("metadata-only update on a needs-review lane (spec 015 row 19)", () => 
     await withWorktreeLaneInReview(async ({ repo, lane }) => {
       // The whole field list is matched: a trailing "reviewable diff in
       // locked files" would mean the diff check ran as well.
-      await assert.rejects(
-        asAgent("alpha", () => patchHandoff(repo, { ...lane, actor: "alpha", verification: "pending", "no-dispatch": true })),
-        /Missing or placeholder fields: Verification run\./,
-      )
+      for (const [flag, label] of Object.entries(REVIEW_CONTEXT_LABELS)) {
+        await assert.rejects(
+          asAgent("alpha", () => patchHandoff(repo, { ...lane, actor: "alpha", [flag]: "pending", "no-dispatch": true })),
+          new RegExp(`Missing or placeholder fields: ${label}\\.`),
+          `--${flag} re-checks the context`,
+        )
+      }
       await assert.rejects(
         asAgent("alpha", () => patchHandoff(repo, { ...lane, actor: "alpha", base: "", "no-dispatch": true })),
         /Missing or placeholder fields: Base\./,
@@ -229,14 +243,17 @@ describe("metadata-only update on a needs-review lane (spec 015 row 19)", () => 
     })
   })
 
-  it("keeps the full needs-review gate for an explicit --status needs-review", async () => {
+  it("keeps the full needs-review gate for --status, --files, --owner, and --reviewer", async () => {
     await withWorktreeLaneInReview(async ({ repo, lane }) => {
-      await assert.rejects(
-        asAgent("alpha", () =>
-          patchHandoff(repo, { ...lane, actor: "alpha", status: "needs-review", "no-dispatch": true }),
-        ),
-        /Missing or placeholder fields: reviewable diff in locked files\./,
-      )
+      // Rows 17 and 20 do not name the gate either; they keep it until a
+      // designation says otherwise. The values repeat the lane's own.
+      for (const flags of [{ status: "needs-review" }, { files: "src/a/" }, { owner: "alpha" }, { reviewer: "beta" }]) {
+        await assert.rejects(
+          asAgent("alpha", () => patchHandoff(repo, { ...lane, actor: "alpha", ...flags, "no-dispatch": true })),
+          /Missing or placeholder fields: reviewable diff in locked files\./,
+          `${Object.keys(flags)[0]} keeps the diff check`,
+        )
+      }
     })
   })
 })
@@ -251,6 +268,11 @@ describe("cgraph on a needs-review lane (spec 015 row 19)", () => {
         patchHandoff(repo, { ...lane, actor: "alpha", pr: "84", "no-dispatch": true }),
       )
       assert.equal(linked.status, "needs-review")
+      // A reviewer-context or base edit re-checks completeness only.
+      for (const edit of [{ verification: "node --test passed again" }, { base: "main (lane-x-work rebased)" }]) {
+        const edited = await asAgent("alpha", () => patchHandoff(repo, { ...lane, actor: "alpha", ...edit, "no-dispatch": true }))
+        assert.equal(edited.status, "needs-review")
+      }
       assert.deepEqual(await fakeCgraph.gateCalls(), ["review-packet", "audit"], "a metadata update runs neither again")
 
       const events = await readEvents(repo, true)
