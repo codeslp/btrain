@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { createDecisionFamily, createDecisionRun, decideCandidate } from "./decision.mjs"
 
 export const VERIFICATION_CATALOG = Object.freeze([
@@ -43,6 +44,26 @@ function verificationEligible(paths, selectedChecks) {
   return paths.length <= maxPaths && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check))
 }
 
+function verifyFrozenChange(change, sourceProof) {
+  const sameStrings = (left, right) => Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value, index) => typeof value === "string" && value === right[index])
+  const content = change.sourceContent ?? change.sourceContents?.[change.sourceId]
+  const source = sourceProof?.sources?.find((entry) => entry.id === change.sourceId)
+  if (typeof content !== "string" || !source
+    || createHash("sha256").update(content).digest("hex") !== source.sourceHash
+    || (change.sourceContents && change.sourceContents[change.sourceId] !== content)) {
+    throw new Error("Planner metadata must match its frozen change record")
+  }
+  let record
+  try { record = JSON.parse(content) } catch { throw new Error("Planner metadata must match its frozen change record") }
+  if (!record || Array.isArray(record) || typeof record !== "object"
+    || !sameStrings(record.changedPaths, change.changedPaths)
+    || !sameStrings(record.contractTags, change.contractTags ?? [])) {
+    throw new Error("Planner metadata must match its frozen change record")
+  }
+  return { paths: [...record.changedPaths], contractTags: [...record.contractTags] }
+}
+
 export const verificationFamily = createDecisionFamily({
   id: "verification-planner",
   questionVersion: "1",
@@ -52,6 +73,7 @@ export const verificationFamily = createDecisionFamily({
     contractTags: [...contractTags],
     mandatoryRules: [changePaths, tagsFor, mandatoryVerificationChecks].map((rule) => rule.toString()).join("\n"),
     eligibilityRule: verificationEligible.toString(),
+    frozenRecordRule: verifyFrozenChange.toString(),
   },
   questionId: "signal",
   choices: [...VERIFICATION_CATALOG, "none"],
@@ -70,9 +92,12 @@ export const verificationFamily = createDecisionFamily({
 })
 
 export async function planVerification({ change, provider, mode = "off", modelPin = null, codeRevision = null, sourceProof = null }) {
-  const paths = changePaths(change)
+  changePaths(change)
   if (mode === "offline" && !sourceProof) throw new Error("Frozen source proof is required for offline verification")
-  const mandatory = mandatoryVerificationChecks(change)
+  const frozen = mode === "offline" ? verifyFrozenChange(change, sourceProof) : null
+  const paths = frozen?.paths ?? [...change.changedPaths]
+  const contractTags = tagsFor({ contractTags: frozen?.contractTags ?? change.contractTags })
+  const mandatory = mandatoryVerificationChecks({ changedPaths: paths, contractTags })
   const suggested = []
   const traces = []
   const run = createDecisionRun(verificationFamily)
@@ -89,7 +114,7 @@ export async function planVerification({ change, provider, mode = "off", modelPi
       privacyClass: "private",
       callIndex,
       changedPaths: paths,
-      contractTags: tagsFor(change),
+      contractTags,
       selectedChecks,
     }
     const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode, modelPin, codeRevision, sourceProof, run })
