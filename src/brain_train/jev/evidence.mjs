@@ -1,7 +1,6 @@
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { setTimeout as delay } from "node:timers/promises"
 
 const SHA = /^[a-f0-9]{40}$/i
 const hash = (value) => createHash("sha256").update(value).digest("hex")
@@ -22,6 +21,7 @@ function safeSourceRef(value) {
 }
 const evidenceDir = (root) => path.join(root, ".btrain", "jev", "evidence")
 const snapshotsPath = (root) => path.join(evidenceDir(root), "source-snapshots.jsonl")
+const snapshotFilesDir = (root) => path.join(evidenceDir(root), "source-snapshots")
 const outcomesPath = (root) => path.join(evidenceDir(root), "source-outcomes.jsonl")
 
 function reviewedCommitFor(comment) {
@@ -47,22 +47,22 @@ async function appendJsonl(file, rows) {
   await fs.appendFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8")
 }
 
-async function withSnapshotLock(root, action) {
-  await fs.mkdir(evidenceDir(root), { recursive: true })
-  const lockPath = `${snapshotsPath(root)}.lock`
-  const deadline = Date.now() + 10_000
-  let handle
-  while (!handle) {
-    try { handle = await fs.open(lockPath, "wx") } catch (error) {
-      if (error.code !== "EEXIST") throw error
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for Jev source snapshot lock")
-      await delay(20)
-    }
+async function readSourceSnapshots(root) {
+  const legacy = await readJsonl(snapshotsPath(root))
+  let names
+  try { names = await fs.readdir(snapshotFilesDir(root)) } catch (error) {
+    if (error.code !== "ENOENT") throw error
+    names = []
   }
-  try { return await action() } finally {
-    await handle.close()
-    await fs.unlink(lockPath).catch(() => {})
+  const snapshots = [...legacy]
+  const seen = new Set(legacy.map((row) => row.id))
+  for (const name of names.filter((name) => /^[a-f0-9]{64}\.json$/.test(name)).sort()) {
+    const snapshot = JSON.parse(await fs.readFile(path.join(snapshotFilesDir(root), name), "utf8"))
+    if (snapshot.id !== name.slice(0, -5)) throw new Error("Source snapshot ID does not match its file")
+    if (!seen.has(snapshot.id)) snapshots.push(snapshot)
+    seen.add(snapshot.id)
   }
+  return snapshots
 }
 
 export function createSourceSnapshot({ repository, prNumber, laneId, comment, capturedAt, captureHead = null, captureHeadObservedAt = null, deterministicDisposition = "not-evaluated" }) {
@@ -98,30 +98,38 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
 }
 
 export async function appendSourceSnapshots(root, snapshots) {
-  return withSnapshotLock(root, async () => {
-    const existing = new Set((await readJsonl(snapshotsPath(root))).map((row) => row.id))
-    const fresh = []
-    for (const snapshot of snapshots) {
-      if (existing.has(snapshot.id)) continue
-      existing.add(snapshot.id)
-      fresh.push(snapshot)
+  const existing = new Set((await readSourceSnapshots(root)).map((row) => row.id))
+  await fs.mkdir(snapshotFilesDir(root), { recursive: true })
+  let fresh = 0
+  for (const snapshot of snapshots) {
+    if (!/^[a-f0-9]{64}$/.test(snapshot?.id || "")) throw new Error("Source snapshot ID is required")
+    if (existing.has(snapshot.id)) continue
+    existing.add(snapshot.id)
+    const temporary = path.join(snapshotFilesDir(root), `.${randomUUID()}.tmp`)
+    const target = path.join(snapshotFilesDir(root), `${snapshot.id}.json`)
+    try {
+      await fs.writeFile(temporary, `${JSON.stringify(snapshot)}\n`, { flag: "wx" })
+      try { await fs.link(temporary, target); fresh += 1 } catch (error) {
+        if (error.code !== "EEXIST") throw error
+      }
+    } finally {
+      await fs.unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error })
     }
-    await appendJsonl(snapshotsPath(root), fresh)
-    return fresh.length
-  })
+  }
+  return fresh
 }
 
 export async function appendSourceOutcome(root, { sourceId, outcome, observedAt, evidenceRef }) {
   if (!/^[a-f0-9]{64}$/.test(sourceId || "")) throw new Error("Source ID is required")
   if (!outcome || !evidenceRef || !Number.isFinite(Date.parse(observedAt))) throw new Error("Outcome, observation time, and evidence reference are required")
   const safeEvidenceRef = safeSourceRef(evidenceRef)
-  const known = (await readJsonl(snapshotsPath(root))).some((row) => row.id === sourceId)
+  const known = (await readSourceSnapshots(root)).some((row) => row.id === sourceId)
   if (!known) throw new Error("Outcome source is unknown")
   await appendJsonl(outcomesPath(root), [{ schemaVersion: 1, sourceId, outcome, observedAt, evidenceRef: safeEvidenceRef }])
 }
 
 export async function readEvidence(root) {
-  const snapshots = await readJsonl(snapshotsPath(root))
+  const snapshots = await readSourceSnapshots(root)
   const laterOutcomes = await readJsonl(outcomesPath(root))
   const pending = snapshots.map((row) => ({ schemaVersion: 1, sourceId: row.id, outcome: "pending", observedAt: row.capturedAt, evidenceRef: row.sourceRef }))
   return { snapshots, outcomes: [...pending, ...laterOutcomes] }

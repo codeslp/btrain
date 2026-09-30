@@ -76,6 +76,38 @@ describe("Jev source evidence", () => {
     }
   })
 
+  it("continues capture after an orphaned snapshot lock", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-orphan-"))
+    try {
+      const directory = path.join(root, ".btrain", "jev", "evidence")
+      await fs.mkdir(directory, { recursive: true })
+      await fs.writeFile(path.join(directory, "source-snapshots.jsonl.lock"), "orphaned by crashed process")
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      assert.equal(await appendSourceSnapshots(root, [row]), 1)
+      assert.deepEqual((await readEvidence(root)).snapshots.map((source) => source.id), [row.id])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("reads legacy snapshots and ignores a crashed unpublished write", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-legacy-"))
+    try {
+      const directory = path.join(root, ".btrain", "jev", "evidence")
+      const snapshotDirectory = path.join(directory, "source-snapshots")
+      await fs.mkdir(snapshotDirectory, { recursive: true })
+      const old = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      const next = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "a", comment, capturedAt: "2026-09-01T10:06:00Z" })
+      await fs.writeFile(path.join(directory, "source-snapshots.jsonl"), `${JSON.stringify(old)}\n`)
+      await fs.writeFile(path.join(snapshotDirectory, ".unfinished.tmp"), "incomplete")
+      assert.equal(await appendSourceSnapshots(root, [old, next]), 1)
+      assert.deepEqual(new Set((await readEvidence(root)).snapshots.map((source) => source.id)), new Set([old.id, next.id]))
+      await appendSourceOutcome(root, { sourceId: next.id, outcome: "repaired", observedAt: "2026-09-02T10:00:00Z", evidenceRef: "https://example.test/repair" })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
 
   it("removes credentials from outcome evidence references and rejects non-HTTP URLs", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-outcome-ref-"))
