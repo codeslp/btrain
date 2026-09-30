@@ -177,7 +177,11 @@ that only carry another lane's reviewed work.
 - Metadata-only updates (spec 015 row 19) are generated as `metadata` (a
   reassign draw with neither role). A non-lane agent's update maps to the
   candidate label `metadata-actor-unchecked` (L12), which persists during the
-  spec 015 FR-5 advisory window like the other legacy labels.
+  spec 015 FR-5 advisory window like the other legacy labels. On a
+  `needs-review` lane the implementation reruns the needs-review gate
+  (reviewer context and reviewable diff), which row 19 does not name; the
+  throwaway repos have no git history, so the diff half always passes and
+  the harness cannot see a rejection.
 - Doctor resync (spec 015 row 17, Q2) runs as a deterministic witness in
   both modes: the harness drops a lane's registry entry (`dropRegistry`) and
   runs the real `doctor --repair` (`doctorRepair`); the mirror restores
