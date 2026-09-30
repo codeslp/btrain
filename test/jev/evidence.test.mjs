@@ -75,6 +75,20 @@ describe("Jev source evidence", () => {
     }
   })
 
+  it("captures edited comment versions separately while deduplicating repeated observations", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-edits-"))
+    const snapshot = (current, capturedAt) => createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: current, capturedAt })
+    try {
+      const first = snapshot(comment, "2026-09-01T10:05:00Z")
+      const next = snapshot({ ...comment, body: "Fix a different test", updatedAt: "2026-09-01T11:00:00Z" }, "2026-09-01T11:05:00Z")
+      assert.notEqual(first.id, next.id)
+      assert.equal(next.id, snapshot({ ...comment, body: "Fix a different test", updatedAt: "2026-09-01T11:00:00Z" }, "2026-09-02T11:05:00Z").id)
+      assert.equal(await appendSourceSnapshots(root, [first, next]), 2)
+      assert.equal(await appendSourceSnapshots(root, [first, next]), 0)
+      assert.equal((await readEvidence(root)).snapshots.length, 2)
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
   it("continues capture after an orphaned snapshot lock", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-orphan-"))
     try {

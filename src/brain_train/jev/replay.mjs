@@ -1,5 +1,5 @@
 import { createDecisionRun, decideCandidate, validProbabilityVector } from "./decision.mjs"
-import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
+import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision, validateCaseGroups } from "./manifest.mjs"
 import { createHash } from "node:crypto"
 
 const ratio = (numerator, denominator) => denominator ? numerator / denominator : null
@@ -86,6 +86,7 @@ export function summarizeReplay(rows, labels) {
 
 export async function replayManifest({ manifest, family, candidates, provider }) {
   if (!manifest?.datasetHash || !Array.isArray(manifest.cases) || !Array.isArray(manifest.labels)) throw new Error("Frozen manifest is required")
+  manifest = structuredClone(manifest)
   if (manifest.sourceSnapshotHash !== sourceSnapshotHashFor(manifest.sources)) throw new Error("Manifest source snapshot hash does not match provenance")
   if (manifest.pins?.policyHash !== family.policyHash) throw new Error("Manifest policy hash does not match family")
   if (manifest.pins?.family !== family.id || manifest.pins?.questionVersion !== family.questionVersion) throw new Error("Manifest family version does not match")
@@ -107,17 +108,20 @@ export async function replayManifest({ manifest, family, candidates, provider })
   if (manifest.cases.some((item) => !family.choices.includes(item.label))) throw new Error("Invalid manifest case label")
   if (manifest.cases.some((item) => !family.choices.includes(item.baseline))) throw new Error("Invalid manifest case baseline")
   if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash, manifest.pins)) throw new Error("Manifest dataset hash does not match frozen cases and pins")
-  const sources = new Map(manifest.sources.map((source) => [source.id, source]))
+  const sources = validateCaseGroups(manifest.cases, manifest.sources)
+  const replayCandidates = new Map()
   for (const item of manifest.cases) {
     const source = sources.get(item.sourceId)
     if (!source || (item.sourceHash && item.sourceHash !== source.sourceHash)) throw new Error(`Case source provenance mismatch: ${item.sourceId}`)
+    const candidate = candidates[item.sourceId]
+    if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
+    replayCandidates.set(item.sourceId, verifiedCandidate(item, source, candidate))
   }
   const rows = []
   for (const item of manifest.cases) {
-    const candidate = candidates[item.sourceId]
-    if (!candidate) throw new Error(`Missing replay candidate: ${item.sourceId}`)
+    const candidate = replayCandidates.get(item.sourceId)
     const source = sources.get(item.sourceId)
-    const trace = await decideCandidate({ family, candidate: verifiedCandidate(item, source, candidate), provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision, sourceProof: { sources: [source], sourceSnapshotHash: sourceSnapshotHashFor([source]) }, run: createDecisionRun(family) })
+    const trace = await decideCandidate({ family, candidate, provider, mode: "offline", modelPin: manifest.pins.model, codeRevision: manifest.pins.codeRevision, sourceProof: { sources: [source], sourceSnapshotHash: sourceSnapshotHashFor([source]) }, run: createDecisionRun(family) })
     rows.push({ sourceId: item.sourceId, split: item.split, label: item.label, baseline: trace.baseline, eligible: item.eligible, privacyClass: item.privacyClass, trace })
   }
   const splits = {}
