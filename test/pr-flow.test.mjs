@@ -367,6 +367,13 @@ describe("PR review flow classification", () => {
       eligible: true, privacyClass: "private", callIndex: 0, reviewedCommit: input.pr.headRefOid,
       headEvidence: "event-head",
     })
+    const equivalent = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [{ ...snapshot, eventHead: snapshot.eventHead.toUpperCase() }] })
+    assert.deepEqual(equivalent.excluded, [])
+    assert.equal(equivalent.candidates.length, 1)
+    const oldVersion = { ...snapshot, id: "c".repeat(64), sourceHash: createHash("sha256").update("previous comment body").digest("hex") }
+    const edited = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [oldVersion, snapshot] })
+    assert.deepEqual(edited.excluded, [{ sourceId: oldVersion.id, reason: "not-current-semantic-candidate" }])
+    assert.deepEqual(edited.candidates, result.candidates)
   })
 
   it("retains frozen semantic candidates after the PR merges, closes, or returns to draft", () => {
