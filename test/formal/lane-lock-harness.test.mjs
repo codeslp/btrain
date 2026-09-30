@@ -1007,21 +1007,30 @@ test(
 // and the implementation accepts it with a `transition-advisory: L14` record
 // during the spec 015 FR-5 window. Contract mode tallies the candidate; while
 // the model still accepted a lane agent's repeat resolve, both sides agreed
-// and the step passed silently. When L14 enforcement lands, the tally empties
-// and this witness must change.
-test(
-  "L14: a repeat resolve tallies the resolve-repeat candidate (contract mode)",
-  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
-  async () => {
-    const { candidateTally } = await executeSequence("contract", [
-      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
-      // Row 6 (AbandonResolve): the owner resolves the unlinked lane.
-      { t: "resolve", lane: "x", actorSel: "owner", final: false },
-      { t: "resolve", lane: "x", actorSel: "owner", final: false },
-    ])
-    assert.deepEqual([...candidateTally], [["resolve-repeat", 1]])
-  },
-)
+// and the step passed silently. The third-agent case pins the guard's order:
+// the implementation records L14 for any actor (L11 covers only in-progress
+// and changes-requested), so the resolved check comes before the lane-actor
+// check. When L14 enforcement lands, the tally empties and this witness must
+// change.
+for (const { who, actorSel, final } of [
+  { who: "the owner", actorSel: "owner", final: false },
+  { who: "the reviewer with --final", actorSel: "reviewer", final: true },
+  { who: "a third agent", actorSel: "third", final: false },
+]) {
+  test(
+    `L14: a repeat resolve by ${who} tallies the resolve-repeat candidate (contract mode)`,
+    { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+    async () => {
+      const { candidateTally } = await executeSequence("contract", [
+        { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+        // Row 6 (AbandonResolve): the owner resolves the unlinked lane.
+        { t: "resolve", lane: "x", actorSel: "owner", final: false },
+        { t: "resolve", lane: "x", actorSel, final },
+      ])
+      assert.deepEqual([...candidateTally], [["resolve-repeat", 1]])
+    },
+  )
+}
 
 // Implementation-mirror witness for the same window: the mirror and the
 // runtime both still accept the repeat resolve, and the lane stays resolved
