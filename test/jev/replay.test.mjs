@@ -16,6 +16,30 @@ const rows = [
 ]
 
 describe("Jev replay metrics", () => {
+  it("rejects duplicate sources and PR or template split leakage before any provider call", async () => {
+    const labels = [...family.choices]
+    const pins = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash,
+      model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
+    const source = (id, prNumber, templateGroup) => ({ id, repository: "o/r", prNumber, templateGroup, sourceRef: `https://example.test/${id}`, sourceHash })
+    const entry = (s, split) => ({ sourceId: s.id, repository: s.repository, prNumber: s.prNumber, templateGroup: s.templateGroup,
+      split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 })
+    const a = source("a", 1, "t1")
+    for (const [sources, cases] of [
+      [[a], [entry(a, "test"), entry(a, "test")]],
+      [[a, source("b", 1, "t2")], [entry(a, "train"), entry(source("b", 1, "t2"), "test")]],
+      [[a, source("b", 2, "t1")], [entry(a, "train"), entry(source("b", 2, "t1"), "test")]],
+    ]) {
+      const sourceSnapshotHash = sourceSnapshotHashFor(sources)
+      const manifest = { sources, cases, labels, pins, sourceSnapshotHash, datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins) }
+      const candidates = Object.fromEntries(sources.map((s) => [s.id, { sourceContent, sourceHash, sourceRefs: [s.sourceRef],
+        baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]))
+      let calls = 0
+      const provider = { localOnly: true, decide: async () => { calls += 1; return { ok: true, model: "pinned",
+        answers: { signal: { choice: "feedback", probabilities: { feedback: 1, clear: 0, uncertain: 0 } } } } } }
+      await assert.rejects(() => replayManifest({ manifest, family, candidates, provider }), /Duplicate case source|group crosses splits/)
+      assert.equal(calls, 0)
+    }
+  })
   it("keeps skips, valid abstentions, and failures in distinct denominators", () => {
     const result = summarizeReplay(rows, ["clear", "feedback", "uncertain"])
     assert.equal(result.counts.cases, 4)
@@ -63,9 +87,9 @@ describe("Jev replay metrics", () => {
   })
 
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
-    const cases = [{ sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
+    const cases = [{ sourceId: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]
-    const sources = [{ id: "a", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
+    const sources = [{ id: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
     const pins = { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
     const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins), sourceSnapshotHash, sources, labels, pins, cases }
@@ -153,10 +177,10 @@ describe("Jev replay metrics", () => {
 
   it("reports synthetic controls separately from real replay metrics", async () => {
     const labels = ["clear", "feedback", "uncertain"]
-    const sources = ["real", "synthetic"].map((id) => ({ id, sourceRef: `https://example.test/${id}`, sourceHash }))
+    const sources = ["real", "synthetic"].map((id, index) => ({ id, repository: "o/r", prNumber: index + 1, templateGroup: id, sourceRef: `https://example.test/${id}`, sourceHash }))
     const cases = [
-      { sourceId: "real", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0 },
-      { sourceId: "synthetic", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 },
+      { sourceId: "real", repository: "o/r", prNumber: 1, templateGroup: "real", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0 },
+      { sourceId: "synthetic", repository: "o/r", prNumber: 2, templateGroup: "synthetic", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 },
     ]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
     const pins = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
@@ -169,6 +193,32 @@ describe("Jev replay metrics", () => {
       ok: true, model: "pinned", answers: { signal: { choice: state.id === "real" ? "clear" : "feedback", probabilities: state.id === "real"
         ? { clear: 1, feedback: 0, uncertain: 0 } : { clear: 0, feedback: 1, uncertain: 0 } } },
     }) }
+    let prematureCalls = 0
+    await assert.rejects(() => replayManifest({ manifest, family,
+      candidates: { ...candidates, synthetic: { ...candidates.synthetic, sourceContent: "tampered later case" } },
+      provider: { localOnly: true, decide: async () => { prematureCalls += 1; return {} } },
+    }), /candidate source provenance/)
+    assert.equal(prematureCalls, 0)
+    const mutableManifest = structuredClone(manifest)
+    const mutableCandidates = structuredClone(candidates)
+    let mutationCalls = 0
+    const isolated = await replayManifest({ manifest: mutableManifest, family, candidates: mutableCandidates,
+      provider: { localOnly: true, decide: async (input) => {
+        mutationCalls += 1
+        if (mutationCalls === 1) {
+          mutableManifest.cases[1].label = "clear"
+          mutableManifest.sources[1].sourceRef = "https://example.test/changed"
+          mutableCandidates.synthetic.baseline = "clear"
+          mutableCandidates.synthetic.sourceContent = "changed after preflight"
+        }
+        return provider.decide(input)
+      } },
+    })
+    assert.equal(mutationCalls, 2)
+    assert.equal(isolated.rows[1].label, "feedback")
+    assert.equal(isolated.rows[1].baseline, "uncertain")
+    assert.equal(isolated.rows[1].trace.sourceSnapshotHash, sourceSnapshotHashFor([sources[1]]))
+    assert.equal(isolated.syntheticControls.test.model.correct, 1)
     const result = await replayManifest({ manifest, family, candidates, provider })
     assert.equal(result.splits.test.counts.cases, 1)
     assert.equal(result.splits.test.model.correct, 0)
