@@ -221,7 +221,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   if (!encoded || Buffer.byteLength(encoded) > family.maxInputBytes) return skip("input-budget")
   if (typeof provider?.decide === "function" && !consumeCallBudget(family, run)) return skip("call-budget")
   const inputHash = hash(boundedState)
-  const attempted = { ...base, inputHash, provider: opaqueId(provider?.id || "injected"), modelPin: opaqueId(modelPin), attemptedCall: true }
+  const attempted = { ...base, inputHash, provider: opaqueId(provider?.id || "injected"), modelPin: opaqueId(modelPin), attemptedCall: typeof provider?.decide === "function" }
   let startedAt
   const elapsed = () => startedAt === undefined ? null : nonnegative(performance.now() - startedAt)
   const fail = (reason, providerResponse) => ({ ...attempted,

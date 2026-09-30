@@ -113,6 +113,10 @@ describe("Jev replay metrics", () => {
       family: changedFamily, candidates, provider,
     }), /evaluation threshold pin/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, labels: ["feedback"], datasetHash: datasetHashFor(cases, ["feedback"], sourceSnapshotHash, pins) }, family, candidates, provider }), /label catalog/)
+    const invalidCases = [{ ...cases[0], split: "holdout" }]
+    const beforeInvalidSplit = providerCalls
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, cases: invalidCases, datasetHash: datasetHashFor(invalidCases, labels, sourceSnapshotHash, pins) }, family, candidates, provider }), /split/)
+    assert.equal(providerCalls, beforeInvalidSplit)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, baseline: "changed" } }, family, candidates, provider }), /evaluation baseline pin/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /evaluation threshold pin/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, codeRevision: "rev" } }, family, candidates, provider }), /code revision/)
