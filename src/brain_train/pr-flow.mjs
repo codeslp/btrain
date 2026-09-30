@@ -481,7 +481,10 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
   const candidates = []
   const excluded = []
   for (const candidate of selected) {
-    const matches = sourceSnapshots.filter((source) => source.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
+    const versions = sourceSnapshots.filter((source) => source.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
+    const bodyHash = crypto.createHash("sha256").update(candidate.body).digest("hex")
+    const exactVersions = versions.filter((source) => source.sourceHash === bodyHash)
+    const matches = exactVersions.length ? exactVersions : versions
     if (matches.length > 1) {
       excluded.push(...[...new Set(matches.map((source) => source.id))].map((sourceId) => ({ sourceId, reason: "ambiguous-source-snapshot" })))
       continue
@@ -493,7 +496,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     if (!source) reason = "missing-source-snapshot"
     else if (!repository || source.repository !== repository || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
     else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
-    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
+    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead.toLowerCase() !== headSha.toLowerCase()) reason = "stale-event-head"
     else if (source.reviewedCommit && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "stale-reviewed-commit"
     else if ((!source.eventHead || source.eventHead === "unknown") && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "unknown-event-head"
     else if (!candidateSourceRef || candidateSourceRef !== source.sourceRef) reason = "source-ref-mismatch"
@@ -513,7 +516,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
       privacyClass: "private",
       callIndex: 0,
       reviewedCommit: headSha,
-      headEvidence: source.eventHead === headSha ? "event-head" : source.reviewedCommit.length === 40 ? "reviewed-commit" : "reviewed-commit-prefix",
+      headEvidence: source.eventHead?.toLowerCase() === headSha.toLowerCase() ? "event-head" : source.reviewedCommit.length === 40 ? "reviewed-commit" : "reviewed-commit-prefix",
     })
   }
   const accounted = new Set([...candidates, ...excluded].map((entry) => entry.sourceId))
@@ -521,7 +524,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     if (!source || source.repository !== repository || source.prNumber !== pr.number || !source.id || accounted.has(source.id)) continue
     let reason = "not-current-semantic-candidate"
     if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
-    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead !== headSha) reason = "stale-event-head"
+    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead.toLowerCase() !== headSha.toLowerCase()) reason = "stale-event-head"
     else if (source.reviewedCommit && !commitMatches(source.reviewedCommit, headSha)) reason = "stale-reviewed-commit"
     else if ((!source.eventHead || source.eventHead === "unknown") && !source.reviewedCommit) reason = "unknown-event-head"
     excluded.push({ sourceId: source.id, reason })

@@ -158,9 +158,10 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     modelPin: opaqueId(trace.modelPin),
     model: opaqueId(trace.model),
     failureClass: ["provider", "response-shape"].includes(trace.failureClass) ? trace.failureClass : null,
-    prediction: family.choices.includes(trace.prediction) ? trace.prediction : null,
-    suggestedAction: family.allowedActions.includes(trace.suggestedAction) ? trace.suggestedAction : null,
-    probabilities: Object.fromEntries(Object.entries(trace.probabilities || {}).filter(([key, value]) => family.choices.includes(key) && Number.isFinite(value) && value >= 0 && value <= 1)),
+    prediction: ["decision", "abstain"].includes(trace.outcome) && family.choices.includes(trace.prediction) ? trace.prediction : null,
+    suggestedAction: trace.outcome === "decision" && family.allowedActions.includes(trace.suggestedAction) ? trace.suggestedAction : null,
+    probabilities: ["decision", "abstain"].includes(trace.outcome)
+      ? Object.fromEntries(Object.entries(trace.probabilities || {}).filter(([key, value]) => family.choices.includes(key) && Number.isFinite(value) && value >= 0 && value <= 1)) : {},
     latencyMs: nonnegative(trace.latencyMs),
     inputTokens: nonnegative(trace.inputTokens),
     cost: nonnegative(trace.cost),
