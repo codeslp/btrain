@@ -43,6 +43,63 @@ Spec 021 before broad advisory or assist behavior.
 These experiments compare btrain's current deterministic heuristics with a local,
 Jev-compatible System One model. They do not change workflow state.
 
+## Offline routing and memory prototypes (T014)
+
+`rankEligibleRoutes` and `inspectMemoryClaim` accept a serialized JSON source record,
+its frozen single-source proof, and an injected local provider. They default to `off`;
+`offline` requires a model pin, code revision, and matching content hash. The adapters
+derive their entire input from that frozen record and copy the proof before any call.
+Provider input contains only validated fields; source references must be bounded URL
+strings. Nested extra metadata is excluded so provider mutation cannot change later
+comparisons or warning citations under the same frozen proof.
+Hosted private calls remain denied. Neither adapter is connected to live workflow commands.
+
+Routing records contain `{kind, objective, requiredCapabilities, candidates}`. Kinds are
+`task`, `lane`, `reviewer`, `runner`, and `skill`. Each candidate has an ID, actor ID,
+description, capability list, and explicit boolean `authorized`, `available`, and
+`lockCompatible` observations from the deterministic catalog. Missing observations exclude
+the candidate. Reviewer records require `ownerId`; that actor is excluded. Optional
+`separateFrom` actor IDs enforce additional role separation. Only eligible candidates reach
+the provider. Their original catalog order is the baseline. High-confidence scores may
+rank at most 16 candidates; ties preserve baseline order. An incomplete ranking, provider
+failure, or oversized eligible catalog preserves the complete baseline. Returned IDs are
+proposals over a historical eligibility snapshot. Any future live caller must recompute
+authorization, availability, locks, role separation, and capabilities before dispatch.
+
+Memory records contain `{asOfSequence, claim, events}`. A claim has an ID, key, positive
+version, text, source reference, `observedSequence`, and `leaseUntilSequence`. Events have
+IDs, keys, positive versions, sequences, text, source references, and an explicit `authorized`
+boolean. Only authorized events with the same key, a higher version, and a sequence after
+the claim observation and at or before `asOfSequence` are compared. At most 16 comparisons
+are attempted. A high-confidence supersession answer returns a `possibly-stale` warning
+citing the supplied claim and event versions and references. It never edits memory or event
+history. The comparator marks an expired sequence lease as stale. This prototype assumes
+positive integer claim versions; nonmonotonic or content-addressed version schemes need a
+separate deterministic ordering adapter.
+
+`experiments/jev-btrain/routing-memory.mjs` accounts for paired routing outcomes and memory
+supersession labels. Routing kinds and real, synthetic, and unknown origins are reported
+separately. It measures ineligible proposals, routing success change, and precision/recall
+against the age baseline. It always reports `gateReady: false`: paired measurements alone
+do not prove independent labels, frozen splits, or promotion readiness. G8 still requires
+100 real routing decisions plus 100 real memory claims with at least 30 superseded, the
+gateway failure/coverage floors, and privacy/shadow/human promotion gates.
+Routing measurements retain the first eligible catalog destination as the deterministic
+baseline; an absent baseline is valid only when the eligible catalog is empty. Real-case
+source hashes must be strings, so coercible metadata cannot enter the real-case counts.
+
+Run the synthetic authority and paired accounting controls:
+
+```sh
+rtk env -- node --test test/jev/routing-memory.test.mjs experiments/jev-btrain/routing-memory.test.mjs
+```
+
+Every returned gateway trace keeps `actionTaken: none`. Offline traces compose with
+`appendDecisionTrace(root, trace, family, sourceProof)` for redacted local evidence;
+default-off traces omit frozen provenance and are not persisted by that writer.
+
+## Original PR and handoff experiment
+
 The frozen datasets cover:
 
 - PR review signals: clear, actionable feedback, reviewer unavailable, and no verdict.
