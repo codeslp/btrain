@@ -43,7 +43,12 @@ with a deterministic baseline and reports skips, valid abstentions, provider fai
 class metrics, coverage, latency, and observed cost separately. The focused executable
 examples are `test/jev/*.test.mjs`.
 Persisted failure and skipped traces have no prediction, probabilities, or suggested
-action; abstentions have no suggested action.
+action; abstentions have no suggested action. Every non-decision record has `actionTaken: none`.
+Successful records require a typed SHA256 input hash, and decision choices must be nonempty
+strings before constructing a family. Imported corpus source URLs with credentials, query
+parameters or fragments fail validation; prospective capture strips those fields first.
+Regression tests cover the persisted record and freeze boundaries, since gateway-generated
+happy paths alone do not exercise malformed imported records.
 
 This foundation does not enable live Jev use. Family-specific benchmarks, privacy and
 retention decisions, shadow evidence, and human promotion records are still required by
