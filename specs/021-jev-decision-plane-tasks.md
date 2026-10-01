@@ -41,6 +41,8 @@ The numbered workstreams in the [implementation plan](021-jev-decision-plane-imp
 
 - [ ] T015 [US5] Add supervisor signals only after durable cursor, acknowledgement, retry, and restart recovery exist in the owning supervisor implementation.
 - [ ] T016 [US5] Add authorized local history prefilter and read-only typed rerank in `src/brain_train/jev/` and `test/jev/`.
+  - [x] Offline principal/source ACL and lexical prefilter, typed relevance rerank, redacted traces and paired query accounting in `history.mjs`, its tests, and `experiments/jev-btrain/history-search.mjs`.
+  - [ ] Freeze 50 independently judged real queries with source-access roles and evaluate G10; a live reader must enforce authoritative access before exposing any search results.
 - [ ] T017 [US4] Compare pinned Jev and eligible alternative backends on the same frozen family suites in `experiments/jev-btrain/`.
 - [ ] T018 [US4] Record privacy approval, preregistered shadow run, live benefit and harm, human sign-off, and rollback for each promoted family in a versioned promotion record.
 
