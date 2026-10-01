@@ -206,9 +206,11 @@ that only carry another lane's reviewed work.
   the entry's actor; when that actor is not the FR-7 owner (a third agent
   declared the repair, say), contract mode fails with a false
   `validation_mismatch` (repair owner diverged). Spec 015 row 13 (designated)
-  gives the CLI source as "Active minus `repair-needed`", which leaves the
-  write to the advisory L4 repair-entry case. But `transitions.mjs` row 13
-  matches the write and records no advisory. The contract-model fix waits on
-  reconciling the two.
-- Traces are harness-internal JSON; export to TLC trace-validation format is
-  future work once `specs/tla/` exists.
+  excludes `repair-needed` as the CLI source, and spec 015 keeps identity
+  updates (same status) accepted. `classifyTransitionEvent` treats a
+  `--status` equal to the current status as a metadata update, so the
+  runtime records row 19 (L12 for an agent outside the lane). The
+  contract-model fix may cover every same-status `--status` update and is
+  for a later lane.
+- Traces are harness-internal JSON. Exporting them for TLC trace validation
+  against `specs/tla/LaneLock.tla` is future work (`specs/tla/README.md`).
