@@ -486,7 +486,14 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
   const candidates = []
   const excluded = []
   for (const candidate of selected) {
-    const versions = sourceSnapshots.filter((source) => source.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
+    const eventVersions = sourceSnapshots.filter((source) => source?.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
+    const matchesIdentity = (source) => identity && source.repository === identity.repository && source.prNumber === pr.number
+      && new URL(normalizedSourceRef(source.sourceRef) || "https://invalid.local").host.toLowerCase() === identity.host
+      && typeof source.id === "string" && /^[a-f0-9]{64}$/.test(source.id)
+    const versions = eventVersions.filter(matchesIdentity)
+    excluded.push(...[...new Set(eventVersions.filter((source) => !matchesIdentity(source)).map((source) => source.id || candidate.sourceId))]
+      .map((sourceId) => ({ sourceId, reason: "source-identity-mismatch" })))
+    if (eventVersions.length && !versions.length) continue
     const bodyHash = crypto.createHash("sha256").update(candidate.body).digest("hex")
     const exactVersions = versions.filter((source) => source.sourceHash === bodyHash)
     const matches = exactVersions.length ? exactVersions : versions
@@ -499,7 +506,6 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     const candidateSourceRef = normalizedSourceRef(candidate.url)
     let reason = null
     if (!source) reason = "missing-source-snapshot"
-    else if (!identity || source.repository !== identity.repository || new URL(normalizedSourceRef(source.sourceRef) || "https://invalid.local").host.toLowerCase() !== identity.host || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
     else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
     else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead.toLowerCase() !== headSha.toLowerCase()) reason = "stale-event-head"
     else if (source.reviewedCommit && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "stale-reviewed-commit"

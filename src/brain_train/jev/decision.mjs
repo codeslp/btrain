@@ -107,7 +107,7 @@ function resourceBudget(value, fallback, min, max) {
 
 export function createDecisionFamily(config) {
   const { id, questionVersion, choices, privacyClass, allowedActions, threshold, inputBuilder, actionPolicy, fallback } = config
-  if (!id || !questionVersion || !Array.isArray(choices) || choices.length < 2 || new Set(choices).size !== choices.length) throw new Error("A versioned closed choice family is required")
+  if (!id || !questionVersion || !Array.isArray(choices) || choices.length < 2 || Array.from(choices).some((choice) => typeof choice !== "string" || !choice.trim()) || new Set(choices).size !== choices.length) throw new Error("A versioned closed choice family is required")
   if (!["public", "synthetic", "private"].includes(privacyClass)) throw new Error("A privacy class is required")
   if (!Array.isArray(allowedActions) || typeof inputBuilder !== "function" || typeof actionPolicy !== "function" || typeof fallback !== "function") throw new Error("Family input, action, and fallback policies are required")
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new Error("Invalid decision threshold")
@@ -132,7 +132,7 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     throw new Error("Decision model must match the model pin")
   }
   if (["decision", "abstain"].includes(trace.outcome)
-    && (trace.attemptedCall !== true || !family.choices.includes(trace.prediction)
+    && (trace.attemptedCall !== true || typeof trace.inputHash !== "string" || !/^[a-f0-9]{64}$/.test(trace.inputHash) || !family.choices.includes(trace.prediction)
       || !validProbabilityVector(trace.probabilities, family.choices)
       || (trace.outcome === "decision" && (!family.allowedActions.includes(trace.suggestedAction)
         || trace.probabilities[trace.prediction] < family.threshold)))) {
@@ -156,11 +156,11 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     sourceBindings: binding.sourceBindings,
     sourceRefs: traceRefs,
     baseline: family.choices.includes(trace.baseline) ? trace.baseline : null,
-    actionTaken: trace.actionTaken === "none" || family.allowedActions.includes(trace.actionTaken) ? trace.actionTaken : "none",
+    actionTaken: trace.outcome === "decision" && family.allowedActions.includes(trace.actionTaken) ? trace.actionTaken : "none",
     outcome: trace.outcome,
     reason: traceReasons.has(trace.reason) ? trace.reason : "unclassified",
     attemptedCall: trace.attemptedCall === true,
-    inputHash: /^[a-f0-9]{64}$/.test(trace.inputHash || "") ? trace.inputHash : null,
+    inputHash: typeof trace.inputHash === "string" && /^[a-f0-9]{64}$/.test(trace.inputHash) ? trace.inputHash : null,
     provider: opaqueId(trace.provider),
     modelPin: opaqueId(trace.modelPin),
     model: opaqueId(trace.model),
