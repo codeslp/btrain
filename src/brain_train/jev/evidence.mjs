@@ -71,17 +71,18 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
   if (!comment?.surface || comment.id === undefined || !comment.author || !comment.at || !comment.url) throw new Error("Comment identity and source URL are required")
   if (!Number.isFinite(Date.parse(comment.at)) || !Number.isFinite(Date.parse(capturedAt))) throw new Error("Event and capture timestamps must be valid")
   if (captureHead !== null && !SHA.test(captureHead)) throw new Error("Capture head must be a commit SHA")
-  const sourceKey = `${repository}/pull/${prNumber}/${comment.surface}/${comment.id}`
+  const sourceRef = safeSourceRef(comment.url)
+  const sourceKey = `${new URL(sourceRef).host}/${repository}/pull/${prNumber}/${comment.surface}/${comment.id}`
   const sourceHash = hash(String(comment.body || ""))
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: hash(JSON.stringify([sourceKey, comment.updatedAt || comment.at, sourceHash])),
     repository,
     prNumber: Number(prNumber),
     laneId: String(laneId),
     surface: comment.surface,
     eventId: String(comment.id),
-    sourceRef: safeSourceRef(comment.url),
+    sourceRef,
     author: comment.author,
     eventAt: comment.at,
     updatedAt: comment.updatedAt || null,
@@ -101,9 +102,9 @@ export function createSourceSnapshot({ repository, prNumber, laneId, comment, ca
 export async function appendSourceSnapshots(root, snapshots) {
   const captured = await readSourceSnapshots(root)
   const existing = new Set(captured.map((row) => row.id))
-  const versionKey = (row) => JSON.stringify([row.repository, row.prNumber, row.surface, row.eventId,
+  const versionKey = (row) => JSON.stringify([new URL(row.sourceRef).host, row.repository, row.prNumber, row.surface, row.eventId,
     row.updatedAt || row.eventAt, row.sourceHash])
-  const legacyVersions = new Set(captured.filter((row) => row.schemaVersion === 1).map(versionKey))
+  const legacyVersions = new Set(captured.filter((row) => [1, 2].includes(row.schemaVersion)).map(versionKey))
   await fs.mkdir(snapshotFilesDir(root), { recursive: true })
   let fresh = 0
   for (const snapshot of snapshots) {
