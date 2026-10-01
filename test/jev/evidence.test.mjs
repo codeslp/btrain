@@ -77,6 +77,24 @@ describe("Jev source evidence", () => {
     }
   })
 
+  it("keeps hosts distinct while deduplicating unchanged schema 1 and 2 recaptures", async () => {
+    for (const schemaVersion of [1, 2]) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-host-identity-"))
+      try {
+        const snapshot = (url) => createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a",
+          comment: { ...comment, url }, capturedAt: "2026-09-01T10:05:00Z" })
+        const foreign = snapshot("https://ghe.internal/42")
+        const valid = snapshot("https://github.com/42")
+        assert.notEqual(foreign.id, valid.id)
+        const legacy = { ...foreign, schemaVersion, id: "a".repeat(64) }
+        await appendSourceSnapshots(root, [legacy])
+        assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 1)
+        assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 0)
+        assert.deepEqual(new Set((await readEvidence(root)).snapshots.map((row) => row.id)), new Set([legacy.id, valid.id]))
+      } finally { await fs.rm(root, { recursive: true, force: true }) }
+    }
+  })
+
   it("captures edited comment versions separately while deduplicating repeated observations", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-edits-"))
     const snapshot = (current, capturedAt) => createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: current, capturedAt })

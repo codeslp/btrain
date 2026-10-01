@@ -43,7 +43,12 @@ with a deterministic baseline and reports skips, valid abstentions, provider fai
 class metrics, coverage, latency, and observed cost separately. The focused executable
 examples are `test/jev/*.test.mjs`.
 Persisted failure and skipped traces have no prediction, probabilities, or suggested
-action; abstentions have no suggested action.
+action; abstentions have no suggested action. Every non-decision record has `actionTaken: none`.
+Successful records require a typed SHA256 input hash, and decision choices must be nonempty
+strings before constructing a family. Imported corpus source URLs with credentials, query
+parameters or fragments fail validation; prospective capture strips those fields first.
+Regression tests cover the persisted record and freeze boundaries, since gateway-generated
+happy paths alone do not exercise malformed imported records.
 
 This foundation does not enable live Jev use. Family-specific benchmarks, privacy and
 retention decisions, shadow evidence, and human promotion records are still required by
@@ -257,3 +262,5 @@ Shared gateway repair safeguards: require every captured source to have its own 
 
 G6 paired gateway outcomes require `failureClass` (`provider` or `response-shape`) on failures and no class on nonfailures. Reports preserve both category counts, alongside attempts and failures without a call; imported measurements cannot silently collapse malformed answers into provider outages.
 Frozen PR evaluation also validates event identity, author/surface, timestamps and their ordering, explicit event-head knowledge, nullable formal state and deterministic disposition. A hash only establishes content identity; it cannot supply missing provenance. Imported records must meet the same contract as prospective captures. Invalid transport response shapes use the response-shape failure category.
+
+Snapshot schema 3 includes the source host in version identity. Schema 1/2 recaptures deduplicate only within the same host; a foreign-host observation must never suppress valid evidence. Composition tests capture, persist and replay actual snapshots rather than assigning artificial IDs.
