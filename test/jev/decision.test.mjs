@@ -25,13 +25,18 @@ const sourceProof = (refs, content = candidate.sourceContent) => {
 }
 
 describe("offline decision gateway", () => {
+  it("requires nonempty string choices before constructing a closed family", () => {
+    for (const choices of [[1, 2], ["clear", null], ["clear", ""], ["clear", "  "], ["clear", ["feedback"]], Array(2)]) {
+      assert.throws(() => createDecisionFamily({ ...family, choices }), /closed choice family/)
+    }
+  })
   it("rejects successful traces with no call, invalid predictions or incomplete probabilities", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-success-invariants-"))
     try {
       const proof = sourceProof(candidate.sourceRefs)
       const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: proof })
       for (const outcome of ["decision", "abstain"]) {
-        for (const changed of [{ attemptedCall: false }, { prediction: "invented" }, { probabilities: { feedback: 1 } }]) {
+        for (const changed of [{ attemptedCall: false }, { inputHash: null }, { inputHash: "bad" }, { inputHash: ["a".repeat(64)] }, { prediction: "invented" }, { probabilities: { feedback: 1 } }]) {
           await assert.rejects(() => appendDecisionTrace(root, { ...trace, outcome, ...changed }, family, proof), /successful trace/i)
         }
       }
@@ -59,11 +64,14 @@ describe("offline decision gateway", () => {
     try {
       const proof = sourceProof(candidate.sourceRefs)
       const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: proof })
-      for (const outcome of ["failure", "skipped"]) {
-        const record = await appendDecisionTrace(root, { ...trace, outcome, reason: outcome === "failure" ? "timeout" : "ineligible" }, family, proof)
-        assert.equal(record.prediction, null)
+      for (const outcome of ["failure", "skipped", "abstain"]) {
+        const record = await appendDecisionTrace(root, { ...trace, outcome, actionTaken: "flag-feedback", reason: outcome === "failure" ? "timeout" : "ineligible" }, family, proof)
+        assert.equal(record.actionTaken, "none")
         assert.equal(record.suggestedAction, null)
-        assert.deepEqual(record.probabilities, {})
+        if (outcome !== "abstain") {
+          assert.equal(record.prediction, null)
+          assert.deepEqual(record.probabilities, {})
+        }
       }
     } finally { await fs.rm(root, { recursive: true, force: true }) }
   })

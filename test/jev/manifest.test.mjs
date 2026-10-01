@@ -106,7 +106,7 @@ describe("frozen Jev label manifest", () => {
       assert.throws(() => freezeLabeledManifest({ sources: [source], cases: [entry("s1", 1, "a")], pins, labels }), /source provenance/i, field)
       assert.equal(annotationCandidates([source]).eligible.length, 0, field)
     }
-    for (const changes of [{ sourceHash: "bad" }, { sourceRef: "file:///private" }, { sourceRef: ["https://example.test/s1"] }, { eventAt: "bad" },
+    for (const changes of [{ sourceHash: "bad" }, { sourceRef: "file:///private" }, { sourceRef: "https://example.test/s1?token=secret" }, { sourceRef: "https://example.test/s1#secret" }, { sourceRef: ["https://example.test/s1"] }, { eventAt: "bad" },
       { capturedAt: "2026-09-01T09:00:00Z" }, { updatedAt: "2026-09-01T11:00:00Z" },
       { eventHead: "bad" }, { captureHead: "bad" }, { captureHead: "a".repeat(40) },
       { captureHead: "a".repeat(40), captureHeadObservedAt: "2026-09-01T09:00:00Z" },
