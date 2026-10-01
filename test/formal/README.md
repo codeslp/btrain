@@ -15,6 +15,9 @@ contract, using fast-check model-based command sequences per spec 014 FR-6.
   (spec 006 FR-29 `btrain repair dispose`), `releaseLocks`, and
   `applyPrStatusToHandoff` against throwaway repos and compares every step
   with the model.
+- `lane-lock-model-fr18.test.mjs` — checks the model's spec 006 FR-18 repair
+  memory in both modes. It runs in the default `npm test`; the harness's FR-18
+  repair-memory witnesses run the same cases against the real entry points.
 
 ## Run
 
@@ -43,6 +46,7 @@ agent or provider credentials.
 | implementation mode | Real behavior vs the implementation mirror | Must pass; a failure means a new, unknown divergence |
 | closed-chain check | Deterministic close-without-merge chain | Must pass with zero tallies: the chain conforms end to end |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
+| FR-18 repair-memory witnesses | Repair entries, clears, a reclaim, and a doctor entry, each closed by a dispose | Must pass: model and implementation agree on every escalation (four cases in both modes, two in implementation mode only) |
 | repaired-drift witnesses | Close-without-merge, `--final` rejection, unaudited-release rejection | Must pass: normal regression tests since the drift-repair lane |
 
 A contract-mode failure is a fresh `validation_mismatch` verdict in spec 014
@@ -129,6 +133,18 @@ terminal PR outcomes from any status, so implementation mode reported a
 `validation_mismatch` that was a stale double, not a regression. Fixed on
 2026-09-01; implementation mode is a regression signal again.
 
+Mirror maintenance, 2026-10-01: the implementation mirror's `update` set the
+status and returned before the FR-18 bookkeeping. After a same-reason repair
+re-entry it still expected no escalation, so it rejected the disposition
+(`dispose-requires-escalation`) that `disposeRepair` accepts. Random seeds
+rarely draw that sequence; a review of the model found it. The mirror now
+records each `repair-needed` entry the way `resolveRepairAssignment` counts
+it, in `update` and in `doctorRepair`. An entry comes from another status. It
+escalates when an earlier entry since the last claim had the same reason, and
+a write while the lane is already `repair-needed` keeps the recorded
+escalation. The FR-18 repair-memory witnesses and
+`lane-lock-model-fr18.test.mjs` guard it.
+
 Verified working (positive witnesses): spec 006 FR-18 same-reason repair
 re-entry escalates to a human (`repairEscalation: "human"`, attempts
 counted).
@@ -143,7 +159,8 @@ that only carry another lane's reviewed work.
   fresh claim resets the FR-18 repair count and `RepairClear` does not. The
   implementation counts only entries after the most recent claim
   (`countRepairEntries` via `eventsSinceLastClaim`) and the mirror resets
-  `repairReasonsSeen` on claim. `test/core.test.mjs` carries the
+  `repairReasonsSeen` on claim. The FR-18 repair-memory witnesses compare
+  the reset through a closing dispose; `test/core.test.mjs` carries the
   production-level reclaim regression (the harness does not compare
   attempt-counting internals).
 - The override exit from `repair-needed` (spec 006 FR-29, `repair-resolve`
@@ -176,5 +193,19 @@ that only carry another lane's reviewed work.
   and the FR-7 comparison checks the assigned repair owner (most recent
   canonical actor before the repair). The implementation's attempt-counting
   internals are not designated and not compared.
+- A CLI `--status repair-needed` write on a lane that is already
+  `repair-needed` is not an FR-18 entry: spec 006 FR-29 lists the entry
+  sources without `repair-needed`, `LaneLock.tla`'s `RepairEnter` excludes
+  it, and the implementation keeps the recorded escalation and repair owner.
+  The implementation mirror treats the write as no entry, but contract-mode
+  `update` still treats it as a re-entry. With a repeated reason the
+  escalation check tallies `repair-escalation-missing`, a label the ledger
+  above does not list. With a new reason the model moves the repair owner to
+  the entry's actor; when that actor is not the FR-7 owner (a third agent
+  declared the repair, say), contract mode fails with a false
+  `validation_mismatch` (repair owner diverged). Whether the CLI may make the
+  write at all is undesignated: spec 015 row 13's prose excludes
+  `repair-needed` as the CLI source, while `transitions.mjs` row 13 accepts
+  it. The contract-model fix waits on that designation.
 - Traces are harness-internal JSON; export to TLC trace-validation format is
   future work once `specs/tla/` exists.
