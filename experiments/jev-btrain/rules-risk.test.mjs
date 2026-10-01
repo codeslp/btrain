@@ -15,7 +15,7 @@ function queue(id, extra = {}) {
 }
 
 test("G6-R and G6-T report independent baselines precision recall and gateway outcomes", () => {
-  const result = evaluateRulePairs("diff", [pair("tp"), pair("fn", { semanticWarned: false, outcome: "failure" }),
+  const result = evaluateRulePairs("diff", [pair("tp"), pair("fn", { semanticWarned: false, outcome: "failure", failureClass: "provider" }),
     pair("fp", { violation: false, baselineWarned: true }),
     pair("tn", { violation: false, semanticWarned: false, outcome: "abstain" })])
   assert.equal(result.synthetic.semantic.precision, 0.5)
@@ -32,7 +32,7 @@ test("G6-R and G6-T report independent baselines precision recall and gateway ou
 test("synthetic citations and failures cannot be hidden inside real rule-case metrics", () => {
   const result = evaluateRulePairs("diff", [pair("real", { origin: "real", sourceRef: "https://example.test/1", sourceSnapshotHash: "a".repeat(64) }),
     pair("control", { inventedCitations: 2 }), pair("skipped", { eligible: false, semanticWarned: false, attemptedCall: false, outcome: "skipped" }),
-    pair("no-provider", { semanticWarned: false, attemptedCall: false, outcome: "failure" })])
+    pair("no-provider", { semanticWarned: false, attemptedCall: false, outcome: "failure", failureClass: "provider" })])
   assert.equal(result.real.cases, 1)
   assert.equal(result.real.inventedCitations, 0)
   assert.equal(result.synthetic.inventedCitations, 2)
@@ -69,7 +69,7 @@ test("evaluation rejects removed reviews invented findings duplicate IDs coercib
   const malformedReal = { origin: "real", sourceRef: "https://example.test/1", sourceSnapshotHash: ["a".repeat(64)] }
   assert.throws(() => evaluateReviewQueues([queue("a", malformedReal)]))
   assert.throws(() => evaluateRulePairs("diff", [pair("a", malformedReal)]))
-  for (const value of [pair("a", { semanticWarned: true, outcome: "failure" }),
+  for (const value of [pair("a", { semanticWarned: true, outcome: "failure", failureClass: "provider" }),
     pair("a", { outcome: "skipped", attemptedCall: true, semanticWarned: false }),
     pair("a", { eligible: false }), pair("a", { inventedCitations: -1 }), pair("a", { outcome: "decision", attemptedCall: false })]) {
     assert.throws(() => evaluateRulePairs("diff", [value]))
@@ -95,16 +95,16 @@ test("G6-V reports gateway failures abstentions and eligible decision coverage p
   const gatewayAttempts = [
     { reviewId: "a", eligible: true, attemptedCall: true, outcome: "decision" },
     { reviewId: "b", eligible: true, attemptedCall: true, outcome: "abstain" },
-    { reviewId: "c", eligible: true, attemptedCall: true, outcome: "failure" },
+    { reviewId: "c", eligible: true, attemptedCall: true, outcome: "failure", failureClass: "provider" },
     { reviewId: "d", eligible: false, attemptedCall: false, outcome: "skipped" },
   ]
   const result = evaluateReviewQueues([queue("mixed", { gatewayAttempts, prioritizedIds: ["a", "b", "c", "d"] })])
   assert.deepEqual(result.synthetic.gateway, { eligible: 3, attemptedCalls: 3, decisions: 1, abstentions: 1,
-    skipped: 1, attemptedFailures: 1, failuresWithoutCall: 0, attemptedFailureRate: 1 / 3,
+    skipped: 1, attemptedFailures: 1, providerFailures: 1, responseShapeFailures: 0, failuresWithoutCall: 0, attemptedFailureRate: 1 / 3,
     validPredictionCoverage: 2 / 3, actionableDecisionCoverage: 1 / 3 })
   assert.equal(result.real.gateway.attemptedFailureRate, null)
   const failuresWithoutCalls = evaluateReviewQueues([queue("no-provider", {
-    gatewayAttempts: gatewayAttempts.map((entry) => ({ ...entry, eligible: true, attemptedCall: false, outcome: "failure" })),
+    gatewayAttempts: gatewayAttempts.map((entry) => ({ ...entry, eligible: true, attemptedCall: false, outcome: "failure", failureClass: "provider" })),
     prioritizedIds: ["a", "b", "c", "d"],
   })]).synthetic.gateway
   assert.equal(failuresWithoutCalls.attemptedCalls, 0)
@@ -124,17 +124,41 @@ test("G6-V rejects missing removed duplicate sparse and inconsistent gateway mea
   assert.throws(() => evaluateReviewQueues([queue("bad", { gatewayAttempts: sparse })]))
   const disguisedSparse = Array(4)
   disguisedSparse[Symbol.iterator] = function* () {
-    for (const reviewId of ["a", "b", "c", "d"]) yield { reviewId, eligible: true, attemptedCall: true, outcome: "failure" }
+    for (const reviewId of ["a", "b", "c", "d"]) yield { reviewId, eligible: true, attemptedCall: true, outcome: "failure", failureClass: "provider" }
   }
   assert.throws(() => evaluateReviewQueues([queue("iterator", { gatewayAttempts: disguisedSparse })]))
 })
 
 test("incomplete review scoring cannot claim ranking benefit contrary to the adapter fallback", () => {
   const value = queue("fallback")
-  value.gatewayAttempts[1] = { reviewId: "b", eligible: true, attemptedCall: true, outcome: "failure" }
+  value.gatewayAttempts[1] = { reviewId: "b", eligible: true, attemptedCall: true, outcome: "failure", failureClass: "provider" }
   assert.throws(() => evaluateReviewQueues([value]), /baseline order/)
   value.prioritizedIds = [...value.baselineIds]
   const result = evaluateReviewQueues([value])
   assert.equal(result.synthetic.severeRecallInTopThirtyPercent, result.synthetic.baselineSevereRecallInTopThirtyPercent)
   assert.equal(result.synthetic.gateway.attemptedFailureRate, 0.25)
+})
+
+test("G6 reports retain provider and response-shape failure categories", () => {
+  for (const kind of ["diff", "turn"]) {
+    const result = evaluateRulePairs(kind, [pair("provider", { kind, semanticWarned: false, outcome: "failure", failureClass: "provider" }),
+      pair("shape", { kind, semanticWarned: false, outcome: "failure", failureClass: "response-shape" })])
+    assert.equal(result.synthetic.gateway.providerFailures, 1)
+    assert.equal(result.synthetic.gateway.responseShapeFailures, 1)
+    for (const failureClass of [undefined, "other"]) assert.throws(() => evaluateRulePairs(kind, [pair("bad", { kind, semanticWarned: false, outcome: "failure", failureClass })]))
+  }
+  const value = queue("classes", { prioritizedIds: ["a", "b", "c", "d"] })
+  value.gatewayAttempts[0] = { ...value.gatewayAttempts[0], outcome: "failure", failureClass: "provider" }
+  value.gatewayAttempts[1] = { ...value.gatewayAttempts[1], outcome: "failure", failureClass: "response-shape" }
+  const metrics = evaluateReviewQueues([value]).synthetic.gateway
+  assert.equal(metrics.providerFailures, 1)
+  assert.equal(metrics.responseShapeFailures, 1)
+})
+
+test("response-shape failures require an attempted call in every G6 family", () => {
+  for (const kind of ["diff", "turn"]) assert.throws(() => evaluateRulePairs(kind, [pair("bad", { kind,
+    semanticWarned: false, outcome: "failure", failureClass: "response-shape", attemptedCall: false })]))
+  const value = queue("bad", { prioritizedIds: ["a", "b", "c", "d"] })
+  value.gatewayAttempts[0] = { ...value.gatewayAttempts[0], outcome: "failure", failureClass: "response-shape", attemptedCall: false }
+  assert.throws(() => evaluateReviewQueues([value]))
 })

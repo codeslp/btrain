@@ -234,7 +234,7 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
   const elapsed = () => startedAt === undefined ? null : nonnegative(performance.now() - startedAt)
   const fail = (reason, providerResponse) => ({ ...attempted,
     ...(providerResponse ? { model: opaqueId(providerResponse.model), inputTokens: nonnegative(providerResponse.usage?.input_tokens), cost: nonnegative(providerResponse.usage?.cost) } : {}),
-    outcome: "failure", reason, failureClass: reason === "invalid-answer" ? "response-shape" : "provider", latencyMs: elapsed(), actionTaken: "none" })
+    outcome: "failure", reason, failureClass: ["invalid-answer", "invalid-response"].includes(reason) ? "response-shape" : "provider", latencyMs: elapsed(), actionTaken: "none" })
   if (typeof provider?.decide !== "function") return fail("provider-unavailable")
   let response
   let timer

@@ -49,7 +49,7 @@ test("risk gateway traces compose with per-review G6-V accounting", async () => 
     baselineIds: result.baselineIds, prioritizedIds: result.prioritizedIds,
     defectIds: [], severeIds: [], baselineFoundIds: [], prioritizedFoundIds: [], baselineMinutes: 10, prioritizedMinutes: 10,
     gatewayAttempts: result.traces.map((trace, index) => ({ reviewId: record.reviews[index].id,
-      eligible: record.reviews[index].authorized, attemptedCall: trace.attemptedCall, outcome: trace.outcome })),
+      eligible: record.reviews[index].authorized, attemptedCall: trace.attemptedCall, outcome: trace.outcome, failureClass: trace.failureClass })),
   }])
   assert.equal(report.synthetic.gateway.eligible, 2)
   assert.equal(report.synthetic.gateway.attemptedCalls, 2)
