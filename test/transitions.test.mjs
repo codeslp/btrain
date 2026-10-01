@@ -159,6 +159,13 @@ describe("lane transition contract", () => {
         input: { to: "resolved", prFlowEnabled: true, humanDisposition: disposed },
         runModel: (model) => model.resolve({ lane: "a", actor: "codex", final: false }),
       })),
+      ...["codex", "claude"].map((actor) => ({
+        name: `lane agent ${actor} cannot resolve a resolved lane again (L14 is not designated)`,
+        state: { status: "resolved", actor },
+        event: "handoff resolve",
+        input: { to: "resolved", prFlowEnabled: true },
+        runModel: (model) => model.resolve({ lane: "a", actor, final: false }),
+      })),
       ...[false, true].map((prLinked) => ({
         name: `system clears bots with prLinked=${prLinked}`,
         state: { status: "pr-review", actor: "system", prLinked },

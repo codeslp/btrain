@@ -378,6 +378,9 @@ function applyModel(model, cmd, actor) {
 // diverged).
 const CANDIDATE_REASON_LABELS = new Map([
   ["resolve-from-idle", "resolve-from-idle"],
+  // spec 002 resolve authority: a repeat resolve, by any actor, is accepted
+  // with an L14 record during the FR-5 window.
+  ["resolve-from-resolved", "resolve-repeat"],
   ["resolve-requires-lane-actor", "resolve-actor-unchecked"],
   ["ready-for-pr-entry-requires-reviewer", "resolve-actor-unchecked"],
   ["resolve-from-pr-flow-status", "resolve-from-pr-flow"],
@@ -1160,6 +1163,56 @@ test(
     assert.equal(approval.ok, true)
     assert.equal(model.lane("x").status, "resolved")
     assert.deepEqual(model.registryPaths("x"), [])
+  },
+)
+
+// Advisory-window witness for L14 (spec 002 resolve authority, designated
+// 2026-09-09): resolving a `resolved` lane again is rejected by the contract,
+// and the implementation accepts it with a `transition-advisory: L14` record
+// during the spec 015 FR-5 window. Contract mode tallies the candidate; while
+// the model still accepted a lane agent's repeat resolve, both sides agreed
+// and the step passed silently. The third-agent case pins the guard's order:
+// the implementation records L14 for any actor (L11 covers only in-progress
+// and changes-requested), so the resolved check comes before the lane-actor
+// check. When L14 enforcement lands, the tally empties and this witness must
+// change.
+for (const { who, actorSel, final } of [
+  { who: "the owner", actorSel: "owner", final: false },
+  { who: "the reviewer with --final", actorSel: "reviewer", final: true },
+  { who: "a third agent", actorSel: "third", final: false },
+]) {
+  test(
+    `L14: a repeat resolve by ${who} tallies the resolve-repeat candidate (contract mode)`,
+    { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+    async () => {
+      const { candidateTally } = await executeSequence("contract", [
+        { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+        // Row 6 (AbandonResolve): the owner resolves the unlinked lane.
+        { t: "resolve", lane: "x", actorSel: "owner", final: false },
+        { t: "resolve", lane: "x", actorSel, final },
+      ])
+      assert.deepEqual([...candidateTally], [["resolve-repeat", 1]])
+    },
+  )
+}
+
+// Implementation-mirror witness for the same window: the mirror and the
+// runtime both still accept the repeat resolve, and the lane stays resolved
+// with no locks.
+test(
+  "implementation mirror: a repeat resolve follows L14 advisory",
+  { skip: ENABLED ? false : "set BTRAIN_FORMAL=1 to run the formal harness" },
+  async () => {
+    const { trace } = await executeSequence("implementation", [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+    ])
+    const again = trace.at(-1)
+    assert.equal(again.modelOk, true, "the implementation mirror accepts L14 during advisory")
+    assert.equal(again.realOk, true, "the runtime accepts L14 during advisory")
+    assert.equal(again.realState.x.status, "resolved")
+    assert.deepEqual(again.realState.x.registry, [])
   },
 )
 
