@@ -433,16 +433,20 @@ function semanticCandidatesForBot({ bot, headSha, rawComments, baselineState }) 
 
 function sourceRepository(pr) {
   for (const value of [pr?.html_url, pr?.url]) {
+    if (typeof value !== "string") continue
     try {
-      const parts = new URL(value).pathname.split("/").filter(Boolean)
-      if (parts.length === 4 && parts[2] === "pull" && parts[3] === String(pr?.number)) return `${parts[0]}/${parts[1]}`
-      if (parts.length === 5 && parts[0] === "repos" && parts[3] === "pulls" && parts[4] === String(pr?.number)) return `${parts[1]}/${parts[2]}`
+      const url = new URL(value)
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) continue
+      const parts = url.pathname.split("/").filter(Boolean)
+      if (parts.length === 4 && parts[2] === "pull" && parts[3] === String(pr?.number)) return { repository: `${parts[0]}/${parts[1]}`, host: url.host.toLowerCase() }
+      if (parts.length === 5 && parts[0] === "repos" && parts[3] === "pulls" && parts[4] === String(pr?.number)) return { repository: `${parts[1]}/${parts[2]}`, host: url.host.toLowerCase() === "api.github.com" ? "github.com" : url.host.toLowerCase() }
     } catch { /* Try the other GitHub URL shape. */ }
   }
   return null
 }
 
 function normalizedSourceRef(value) {
+  if (typeof value !== "string") return null
   try {
     const url = new URL(value)
     if (!["https:", "http:"].includes(url.protocol)) return null
@@ -472,7 +476,8 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
   const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
   const headSha = baseline.pr.headSha
   if (!/^[a-f0-9]{40}$/i.test(headSha || "")) throw new Error("A full PR head SHA is required for offline replay")
-  const repository = sourceRepository(pr)
+  const identity = sourceRepository(pr)
+  const repository = identity?.repository
   const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
   const selected = bots.flatMap((bot) => semanticCandidatesForBot({
     bot, headSha, rawComments,
@@ -494,7 +499,7 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
     const candidateSourceRef = normalizedSourceRef(candidate.url)
     let reason = null
     if (!source) reason = "missing-source-snapshot"
-    else if (!repository || source.repository !== repository || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
+    else if (!identity || source.repository !== identity.repository || new URL(normalizedSourceRef(source.sourceRef) || "https://invalid.local").host.toLowerCase() !== identity.host || source.prNumber !== pr.number || !/^[a-f0-9]{64}$/.test(source.id || "")) reason = "source-identity-mismatch"
     else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
     else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead.toLowerCase() !== headSha.toLowerCase()) reason = "stale-event-head"
     else if (source.reviewedCommit && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "stale-reviewed-commit"
