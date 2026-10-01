@@ -3,6 +3,7 @@
 **Status:** Draft
 **Version:** 0.1.0
 **Date:** 2026-09-24
+**Runtime activation update:** 2026-10-01 (explicit user instruction)
 **Owner:** btrain
 
 ## Decision
@@ -11,8 +12,10 @@ Add a versioned, optional semantic decision plane to btrain. It may classify, ra
 bounded evidence for a human or for a deterministic policy. It does not become the workflow
 authority. Each use case advances from data collection to offline evaluation, shadow observation,
 and only then to a separately approved, reversible assist action. A use case can stop at any phase.
-G4 and G6 may run a limited opt-in advisory label-gathering pilot before their quality benchmark
-passes, subject to the privacy and safety prerequisites in FR-10.
+The existing PR review-signal interpreter runs in feedback-only `assist` by default when Jev
+credentials are configured, under the explicit 2026-10-01 user activation instruction below.
+Other families retain their own integration and evaluation requirements. G4 and G6-R may run a
+limited advisory label-gathering pilot subject to FR-10.
 
 This spec covers the btrain opportunities identified in
 [`research/jev-typesafe-repo-assessment.md`](../research/jev-typesafe-repo-assessment.md).
@@ -37,6 +40,27 @@ deferred. No new model-accuracy claim follows from the 658-row upper bound.
 off, shadow, and feedback-only assist modes. This spec extends and evaluates those seams; it does
 not prescribe a second PR classifier or immediate activation.
 
+## User-directed runtime activation — 2026-10-01
+
+The operator explicitly requested: “it should be turned on by default and running in btrain”.
+This supersedes the previous off-by-default requirement for the existing live PR interpreter.
+Normal `btrain pr status` and `btrain pr poll` use `assist` without a mode flag when credentials
+are configured. Only unresolved current-head reviewer text reaches hosted Jev. Validated,
+high-confidence feedback may add a feedback signal; a model clear never supplies approval.
+Provider failure, malformed answers and missing credentials preserve the deterministic result.
+`BTRAIN_JEV_MODE=off` disables requests; `shadow` runs classification without applying feedback.
+
+The installed user's credential is kept in a private, owner-readable `jev.json` under
+`BRAIN_TRAIN_HOME` (default user `~/.btrain`), or an explicit `BTRAIN_JEV_CREDENTIALS_FILE`.
+Environment API keys take precedence. Loading rejects symlinks, nonregular files, oversized or
+malformed JSON, and nonprivate permissions or foreign ownership on POSIX. Credentials and
+unrelated repository contents never enter the decision state, traces, or command output.
+
+This is a recorded operator activation, not evidence that the real-data or shadow quality gates
+passed. Those evaluations remain open tasks. New offline family adapters still need their owning
+live workflow hooks; changing the PR runtime default does not fabricate those integrations.
+The existing deterministic approval, review, head, identity and merge gates remain authoritative.
+
 ## User scenarios
 
 1. **Researcher builds a defensible corpus.** A researcher can identify the exact PR event,
@@ -59,7 +83,7 @@ not prescribe a second PR classifier or immediate activation.
 
 | Family | Potential value | Current evidence | Earliest permitted use |
 | --- | --- | --- | --- |
-| PR review-signal interpretation | Catch actionable feedback missed by regex | Small positive pilot; corpus gate failed | Offline after provenance repair, then shadow |
+| PR review-signal interpretation | Catch actionable feedback missed by regex | Small positive pilot; larger corpus pending | Default feedback-only assist with configured credentials |
 | Handoff evidence lint | Expose vague, contradictory, or unsupported packets | Small positive pilot with one important miss | Advisory to owner and reviewer |
 | Verification and risk planning | Add missing negative, integration, security, or formal checks | Hypothesis | Advisory suggestions |
 | Repository-rule and end-of-turn checks | Flag semantic rule violations in focused diffs and bounded turn evidence | Hypothesis | Advisory findings with rule citation |
@@ -173,17 +197,19 @@ authorized records locally before any semantic ranking and remain read-only.
 
 ### FR-10 — Per-family promotion and rollback
 
-Each family starts off. G4 handoff lint and G6-R repository-rule checks may enter a bounded
+The existing PR interpreter defaults to feedback-only assist under the recorded user activation
+above. Other families start offline until their workflow hooks are implemented. G4 handoff lint and G6-R repository-rule checks may enter a bounded
 opt-in advisory pilot before the quality benchmark passes, solely to collect labels and
 reviewer-time evidence.
 That exception requires source-specific privacy clearance, hard-boundary tests, trace access and
 retention policy, an explicit operator opt-in and cohort, and human review of every warning. It
 cannot block a handoff, alter lane state, or authorize an assist action. End-of-turn checks and
-review-risk triage remain offline until their separate G6-T and G6-V gates pass. All other live
+review-risk triage remain offline until their separate G6-T and G6-V gates pass. Outside the recorded PR activation, live
 promotion requires a frozen benchmark and family-specific gates in the implementation plan.
 After that gate, each family completes a preregistered shadow window and eligible-case count,
 compares live outcomes with its baseline, and meets its harmful-error, failure, and benefit
-criteria before broad advisory or assist. The PR family requires a two-week shadow; other
+criteria before benchmark-backed broad advisory or assist. The recorded PR activation is an
+operator exception to this promotion gate. Benchmark-backed PR promotion requires a two-week shadow; other
 families require at least seven consecutive days and 30 eligible live cases, with higher
 family-specific minima set before observation. A human records the approved threshold and
 allowed assist action, plus the completed shadow-run reference for assist. The operator can
@@ -203,14 +229,15 @@ inferred from another task or provider.
 - **PR offline gate:** at least 95% overall accuracy and feedback recall, zero false `clear` on
   feedback/unavailable/uncertain controls, 100% agreement with deterministic stale-head and
   identity exclusion, under 1% provider/response-shape failure, and stable results on a pinned
-  model. Only then may a two-week live shadow begin.
+  model. This remains the target for benchmark-backed promotion; the recorded user-directed
+  feedback-only PR activation proceeds while this evaluation remains pending.
 - **New families:** before assist, each family has a preregistered dataset, baseline, negative
   controls, minimum class support, harmful-error definition, threshold, and measured improvement
   on an untouched test split. For G4–G10, any live promotion outside the FR-10 pilot also needs
   under 1% provider/response-shape failure per attempted call and at least 80% actionable
   `decision` coverage among deterministically eligible test cases. Only G4/G6-R may run the earlier
   opt-in, nonblocking advisory pilot defined in FR-10.
-- **Shadow-to-assist gate:** the same policy, code revision, model, and repository used for assist
+- **Benchmark-backed shadow-to-assist gate:** the same policy, code revision, model, and repository used for assist
   must have a completed shadow record meeting its preregistered live window, eligible-case count,
   baseline benefit threshold, harmful-error budget, and provider-failure ceiling. A change to any pinned
   decision component requires a new evaluated run and shadow record before promotion.
@@ -236,8 +263,9 @@ inferred from another task or provider.
 - The current System One client and PR semantic seam are starting points, not proof of readiness.
 - A contemporaneous head may be unavailable for historical comments; such cases are excluded
   from exact-head evaluation rather than relabeled by guesswork.
-- A family with insufficient labeled data remains off or in offline research. Only the bounded,
-  opt-in G4/G6-R advisory pilots in FR-10 may gather live labels before their quality gates pass.
+- The recorded user activation enables the existing feedback-only PR seam while its larger
+  benchmark remains pending. Other under-labeled families remain offline except the bounded
+  G4/G6-R advisory pilots in FR-10.
 
 ## Open decisions before implementation
 
@@ -247,5 +275,5 @@ inferred from another task or provider.
 3. Choose a retention period and access policy for source text and trace records before live
    shadow collection.
 
-These decisions do not block this plan or local, non-provider evidence capture. They block the
-dependent hosted or live phases.
+The user-directed PR activation is recorded above. These decisions remain prerequisites for
+other dependent hosted or live phases; they do not retroactively certify the PR benchmark.

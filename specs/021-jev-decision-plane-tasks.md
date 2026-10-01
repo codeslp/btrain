@@ -35,7 +35,7 @@ The numbered workstreams in the [implementation plan](021-jev-decision-plane-imp
   - [x] Offline routing and memory prototypes, frozen-record binding, synthetic authority controls, and separate paired accounting in `routing.mjs`, `memory.mjs`, and `experiments/jev-btrain/routing-memory.mjs`.
   - [ ] Freeze 100 independently labeled routing decisions and 100 versioned memory claims (at least 30 superseded), and evaluate G8 before any live use.
 
-**Independent check:** Suggestions only add permitted actions. Every family passes its own frozen gate before broad advisory or assist.
+**Independent check:** Suggestions only add permitted actions. Every family passes its own frozen gate before benchmark-backed broad advisory or assist; T019 records the user-authorized live PR exception.
 
 ## Phase 4: Optional expansions and promotion (WS9–11)
 
@@ -51,3 +51,19 @@ The numbered workstreams in the [implementation plan](021-jev-decision-plane-imp
 ## Dependencies
 
 T001–T006 precede T007–T010. T011–T014 depend on T004–T005 and each family’s data gate. T015 depends on the durable supervisor. T018 depends on the relevant family’s frozen benchmark and completed shadow run. Synthetic controls never count toward real-case quotas.
+
+## Operator-directed runtime activation (2026-10-01)
+
+- [x] T019 Enable the existing live PR interpreter in default feedback-only assist, load private
+  per-user credentials with environment precedence, verify the actual CLI/provider path and
+  deterministic fallback, record the user directive, and install the locally reviewed runtime.
+
+This task supersedes the prior off-by-default PR requirement. It does not mark real-data,
+shadow, or other family integration tasks complete.
+
+Activation verification: two independent local reviewers passed; the serial suite passed
+1,008 tests with 15 skips and no failures. The installed `btrain` resolves to the runtime
+worktree and ordinary `btrain pr status` reports `assist` enabled without mode/key
+environment variables. A real hosted synthetic PR classification used `jev-1.13.0`,
+returned feedback, and applied the permitted feedback signal in 294 ms. This smoke is
+connectivity/composition evidence, not a completed quality benchmark or shadow window.

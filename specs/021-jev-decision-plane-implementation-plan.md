@@ -1,6 +1,6 @@
 # 021 — Jev Decision Plane Implementation Plan
 
-**Status:** Proposed, no runtime work authorized by this document
+**Status:** Implementing; default live PR activation explicitly authorized by user 2026-10-01
 **Spec:** [021 — Jev Decision Plane](021-jev-decision-plane.md)
 **Date:** 2026-09-24
 
@@ -21,15 +21,22 @@ that established format and records the design, data model, contracts, and quali
 | Surface | Existing state | Planned change |
 | --- | --- | --- |
 | `src/brain_train/handoff/pr-comments.mjs` | Captures deduplicated JSONL comment records, not event-time PR heads | Add prospective event snapshots and provenance without rewriting old rows |
-| `src/brain_train/pr-flow.mjs` | Deterministic PR classifier plus off/shadow/feedback-only semantic seam | Preserve rules; add replayable traces and evaluate before activation |
+| `src/brain_train/pr-flow.mjs` | Deterministic PR classifier plus off/shadow/feedback-only semantic seam | Preserve rules; default existing feedback-only assist on with configured credentials |
 | `src/brain_train/system-one.mjs` | Bounded hosted System One client with timeout and response checks | Wrap with versioned family policy and fake/local backend contract when needed |
 | Handoff pre-flight in `core.mjs` | Checks required fields and placeholders | Add separate advisory semantic evidence lint after hard checks |
 | Harness traces and events | Records workflow evidence | Link decision traces by source and version; do not create a second lane-state store |
 | Spec 020 context budget | Measures and limits context | Supply a deterministic baseline for a later curation experiment |
 
-The current `BTRAIN_JEV_MODE` defaults to `off`; that remains the default. Existing `assist` may
-add high-confidence feedback but cannot manufacture clear approval. No phase enables it just by
-landing code.
+The existing live PR seam defaults `BTRAIN_JEV_MODE` to `assist`, per the 2026-10-01 operator
+instruction. It adds high-confidence feedback and cannot manufacture clear approval. Explicit
+`off` disables requests; `shadow` remains observational. Missing credentials or provider failures
+preserve deterministic behavior. The async runtime loader reads environment API keys first, then
+a bounded private per-user `jev.json`; the CLI never discovers credentials in a repository.
+
+This activation is recorded in the spec and does not assert that the larger benchmark or shadow
+window passed. Those evaluations remain pending. Installing the reviewed runtime into btrain
+makes the existing PR integration run on normal commands; offline family adapters are still
+separate owning-workflow integrations.
 
 ## Architecture and invariants
 
@@ -269,7 +276,7 @@ to shorten the evaluation.
   train, calibration, and test splits. Publish excluded-row counts and reasons.
 - Make privacy, authorization, and source-repository boundaries explicit before any live hosted
   request. Never log credentials or copy ai_sales comment bodies into btrain.
-- Keep the optional decision plane off by default and test a one-command family disable path.
+- Default the configured live PR interpreter to feedback-only assist under the recorded user activation; test its one-command disable path. Other family adapters remain offline until their live hooks and gates are complete.
 
 ## Risks and tradeoffs
 
