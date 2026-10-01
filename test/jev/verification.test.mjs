@@ -1,0 +1,266 @@
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { appendDecisionTrace, createDecisionFamily, fakeProvider } from "../../src/brain_train/jev/decision.mjs"
+import { sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
+import { mandatoryVerificationChecks, planVerification as planVerificationWithPins, verificationFamily } from "../../src/brain_train/jev/verification.mjs"
+
+const sourceRefs = ["https://example.test/changes/42"]
+const sourceId = "b".repeat(64)
+const frozenChange = (change) => {
+  const sourceContent = JSON.stringify({ changedPaths: change.changedPaths, contractTags: change.contractTags ?? [] })
+  const sources = [{ id: sourceId, sourceRef: sourceRefs[0], sourceHash: createHash("sha256").update(sourceContent).digest("hex") }]
+  return { sourceContent, sourceProof: { sources, sourceSnapshotHash: sourceSnapshotHashFor(sources) } }
+}
+const planVerification = ({ change, ...options }) => {
+  const { sourceContent, sourceProof } = frozenChange(change)
+  return planVerificationWithPins({
+    codeRevision: "a".repeat(40), modelPin: "local-fixture", sourceProof, ...options,
+    change: { ...change, sourceId, sourceContent },
+  })
+}
+const answer = (choice) => ({
+  ok: true, model: "local-fixture",
+  answers: { signal: { choice, probabilities: Object.fromEntries(
+    ["unit", "integration", "negative-path", "migration-safety", "security-boundary", "formal-witness", "none"].map((id) => [id, id === choice ? 1 : 0]),
+  ) } },
+})
+
+describe("offline verification planner", () => {
+  it("requires caller supplied identity pins for offline plans and records them in traces", async () => {
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId }
+    const { sourceContent, sourceProof } = frozenChange(change)
+    await assert.rejects(() => planVerificationWithPins({ change: { ...change, sourceContent }, provider: fakeProvider(answer("none")), mode: "offline", sourceProof }), /revision pin/)
+    const plan = await planVerification({ change, provider: fakeProvider(answer("none")), mode: "offline" })
+    assert.equal(plan.traces[0].codeRevision, "a".repeat(40))
+    assert.match(plan.traces[0].modelPin, /^id-sha256:[a-f0-9]{64}$/)
+  })
+
+  it("accepts map-only content for a single frozen source through the shared gateway", async () => {
+    const change = { changedPaths: ["src/safe.mjs"], contractTags: [], sourceRefs, sourceId }
+    const { sourceContent, sourceProof } = frozenChange(change)
+    const plan = await planVerificationWithPins({
+      change: { ...change, sourceContents: { [sourceId]: sourceContent } }, sourceProof,
+      provider: fakeProvider(answer("none")), mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    })
+    assert.equal(plan.traces[0].outcome, "abstain")
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-map-content-"))
+    try { await appendDecisionTrace(root, plan.traces[0], verificationFamily, sourceProof) }
+    finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
+  it("requires frozen source proof and produces persistable offline traces", async () => {
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId }
+    const { sourceProof } = frozenChange(change)
+    const provider = fakeProvider(answer("none"))
+    await assert.rejects(() => planVerificationWithPins({ change, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40) }), /frozen source proof/i)
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-verification-trace-"))
+    try {
+      const plan = await planVerification({ change, provider, mode: "offline" })
+      assert.equal(plan.traces[0].sourceSnapshotHash, sourceProof.sourceSnapshotHash)
+      const record = await appendDecisionTrace(root, plan.traces[0], verificationFamily, sourceProof)
+      assert.equal(record.sourceBindings[0].sourceId, sourceId)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects planner metadata that differs from its frozen change record", async () => {
+    const frozen = { changedPaths: ["src/safe.mjs"], contractTags: [], sourceRefs, sourceId }
+    const { sourceContent, sourceProof } = frozenChange(frozen)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    await assert.rejects(() => planVerificationWithPins({
+      change: { ...frozen, changedPaths: ["src/auth/payment.mjs"], sourceContent },
+      sourceProof, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    }), /frozen change record/i)
+    await assert.rejects(() => planVerificationWithPins({
+      change: { ...frozen, contractTags: ["security"], sourceContent },
+      sourceProof, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    }), /frozen change record/i)
+    const secured = { ...frozen, contractTags: ["security"] }
+    const securedEvidence = frozenChange(secured)
+    await assert.rejects(() => planVerificationWithPins({
+      change: { ...secured, contractTags: { toJSON: () => ["security"] }, sourceContent: securedEvidence.sourceContent },
+      sourceProof: securedEvidence.sourceProof, provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    }), /frozen change record/i)
+    assert.equal(calls, 0)
+  })
+
+  it("keeps later provider inputs bound when the caller mutates its change object", async () => {
+    const change = { changedPaths: ["src/safe.mjs"], contractTags: [], sourceRefs }
+    const observed = []
+    const provider = { localOnly: true, decide: async ({ state }) => {
+      observed.push({ changedPaths: [...state.changedPaths], contractTags: [...state.contractTags] })
+      change.changedPaths[0] = "src/auth/payment.mjs"
+      change.contractTags.push("security")
+      return answer(observed.length === 1 ? "integration" : "none")
+    } }
+    await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(observed, [
+      { changedPaths: ["src/safe.mjs"], contractTags: [] },
+      { changedPaths: ["src/safe.mjs"], contractTags: [] },
+    ])
+  })
+
+
+  it("pins deterministic planner settings into the family policy", () => {
+    assert.equal(verificationFamily.policyConfig.maxPaths, 256)
+    assert.deepEqual(verificationFamily.policyConfig.contractTags, ["cross-component", "negative-path", "migration", "security", "formal-impact"])
+    assert.ok(verificationFamily.policyConfig.mandatoryRules.includes("mandatoryVerificationChecks"))
+    const changed = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, maxPaths: 257 } })
+    assert.notEqual(changed.policyHash, verificationFamily.policyHash)
+    assert.ok(verificationFamily.policyConfig.eligibilityRule.includes("VERIFICATION_CATALOG.some"))
+    const changedEligibility = createDecisionFamily({ ...verificationFamily, policyConfig: { ...verificationFamily.policyConfig, eligibilityRule: "different predicate" } })
+    assert.notEqual(changedEligibility.policyHash, verificationFamily.policyHash)
+  })
+
+  it("retains mandatory migration, security, formal, and cross-component checks", () => {
+    const checks = mandatoryVerificationChecks({
+      changedPaths: ["src/brain_train/auth.mjs", "migrations/pg/042.sql", "formal/handoff.tla"],
+      contractTags: ["cross-component", "negative-path"],
+    })
+    assert.deepEqual(checks, ["unit", "integration", "negative-path", "migration-safety", "security-boundary", "formal-witness"])
+  })
+
+  it("requires security checks for changes inside auth directories", () => {
+    assert.deepEqual(mandatoryVerificationChecks({ changedPaths: ["src/api/auth/routes.mjs"] }), ["unit", "security-boundary"])
+  })
+
+  it("skips the provider when mandatory checks exhaust the catalog", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("unit") } }
+    const change = {
+      changedPaths: ["src/brain_train/auth.mjs", "migrations/pg/042.sql", "formal/handoff.tla"],
+      contractTags: ["cross-component", "negative-path"], sourceRefs,
+    }
+    const plan = await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(plan.checks, mandatoryVerificationChecks(change))
+    assert.deepEqual(plan.suggested, [])
+    assert.deepEqual(plan.traces.map((trace) => [trace.outcome, trace.reason]), [["skipped", "ineligible"]])
+    assert.equal(calls, 0)
+  })
+
+  it("rejects an empty change rather than requesting a model suggestion", async () => {
+    await assert.rejects(() => planVerification({ change: { changedPaths: [], sourceRefs }, provider: fakeProvider(answer("unit")), mode: "offline" }), /Changed paths are required/)
+  })
+
+  it("keeps mandatory checks when off, unavailable, or given out-of-catalog output", async () => {
+    const change = { changedPaths: ["migrations/pg/042.sql"], sourceRefs }
+    const off = await planVerification({ change, provider: fakeProvider(answer("integration")) })
+    const unavailable = await planVerification({ change, provider: fakeProvider({ ok: false, reason: "timeout" }), mode: "offline" })
+    const invalid = await planVerification({ change, provider: fakeProvider(answer("delete-required")), mode: "offline" })
+    for (const plan of [off, unavailable, invalid]) {
+      assert.deepEqual(plan.mandatory, ["migration-safety"])
+      assert.deepEqual(plan.checks, ["migration-safety"])
+      assert.deepEqual(plan.suggested, [])
+    }
+    assert.deepEqual([off.traces[0].outcome, unavailable.traces[0].outcome, invalid.traces[0].reason], ["skipped", "failure", "invalid-answer"])
+  })
+
+  it("accepts only additive catalog suggestions and stops on none", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => answer(["integration", "negative-path", "none"][calls++]) }
+    const plan = await planVerification({ change: { changedPaths: ["src/brain_train/jev/replay.mjs"], sourceRefs }, provider, mode: "offline" })
+    assert.deepEqual(plan.mandatory, ["unit"])
+    assert.deepEqual(plan.suggested, ["integration", "negative-path"])
+    assert.deepEqual(plan.checks, ["unit", "integration", "negative-path"])
+    assert.deepEqual(plan.traces.map((trace) => trace.outcome), ["decision", "decision", "abstain"])
+    assert.equal(calls, 3)
+    assert.equal(JSON.stringify(plan).includes("src/brain_train/jev/replay.mjs"), false)
+  })
+
+  it("stops repeated suggestions and never suppresses a mandatory check", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("unit") } }
+    const plan = await planVerification({ change: { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }, provider, mode: "offline" })
+    assert.deepEqual(plan.checks, ["unit"])
+    assert.deepEqual(plan.suggested, [])
+    assert.equal(calls, 1)
+    assert.equal(plan.traces[0].outcome, "abstain")
+    assert.equal(plan.traces[0].reason, "no-permitted-action")
+    assert.equal(plan.traces[0].suggestedAction, undefined)
+  })
+
+  it("does not record a repeated optional check as an actionable decision", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => answer(["integration", "integration"][calls++]) }
+    const plan = await planVerification({ change: { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }, provider, mode: "offline" })
+    assert.deepEqual(plan.suggested, ["integration"])
+    assert.deepEqual(plan.traces.map((trace) => trace.outcome), ["decision", "abstain"])
+    assert.equal(plan.traces[1].reason, "no-permitted-action")
+    assert.equal(plan.traces[1].suggestedAction, undefined)
+    assert.deepEqual(plan.traces.map((trace) => trace.policyHash), [verificationFamily.policyHash, verificationFamily.policyHash])
+  })
+
+  it("keeps selected checks pinned when a provider mutates its input", async () => {
+    const provider = { localOnly: true, decide: async ({ state }) => {
+      state.selectedChecks.splice(0)
+      return answer("unit")
+    } }
+    const plan = await planVerification({ change: { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }, provider, mode: "offline" })
+    assert.deepEqual(plan.checks, ["unit"])
+    assert.deepEqual([plan.traces[0].outcome, plan.traces[0].reason], ["abstain", "no-permitted-action"])
+  })
+
+  it("keeps changed paths immutable across provider calls", async () => {
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }
+    let calls = 0
+    const provider = { localOnly: true, decide: async ({ state }) => {
+      calls += 1
+      if (calls === 1) state.changedPaths.push(...Array(256).fill("src/injected.mjs"))
+      return answer(calls === 1 ? "integration" : "negative-path")
+    } }
+    const plan = await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(change.changedPaths, ["src/brain_train/core.mjs"])
+    assert.deepEqual(plan.suggested, ["integration", "negative-path"])
+    assert.deepEqual(plan.traces.map((trace) => trace.outcome), ["decision", "decision", "abstain"])
+  })
+
+  it("keeps private change metadata local and bounds provider calls", async () => {
+    let calls = 0
+    const provider = { decide: async () => { calls += 1; return answer("integration") } }
+    const plan = await planVerification({ change: { changedPaths: ["src/private-customer.mjs"], sourceRefs }, provider, mode: "offline" })
+    assert.deepEqual(plan.mandatory, ["unit"])
+    assert.equal(plan.traces[0].reason, "privacy-denied")
+    assert.equal(calls, 0)
+  })
+
+  it("caps model calls and skips an oversized path list without losing mandatory checks", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer(["integration", "negative-path", "formal-witness"][calls - 1]) } }
+    const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs }
+    const bounded = await planVerification({ change, provider, mode: "offline" })
+    assert.equal(calls, 3)
+    assert.deepEqual(bounded.suggested, ["integration", "negative-path", "formal-witness"])
+    const oversized = await planVerification({ change: { ...change, changedPaths: Array(257).fill("src/brain_train/core.mjs") }, provider, mode: "offline" })
+    assert.equal(calls, 3)
+    assert.deepEqual(oversized.mandatory, ["unit"])
+    assert.equal(oversized.traces[0].outcome, "skipped")
+  })
+
+  it("starts a fresh call budget for each independent change", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    for (const id of ["first", "second"]) {
+      const plan = await planVerification({ change: { changedPaths: [`src/${id}.mjs`], sourceRefs }, provider, mode: "offline" })
+      assert.equal(plan.traces[0].outcome, "abstain")
+    }
+    assert.equal(calls, 2)
+  })
+
+  it("classifies UTF-8 serialized input above the gateway budget as ineligible", async () => {
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("none") } }
+    const change = { changedPaths: Array.from({ length: 256 }, (_, index) => `src/${index}/${"é".repeat(40)}.mjs`), sourceRefs }
+    const plan = await planVerification({ change, provider, mode: "offline" })
+    assert.deepEqual(plan.mandatory, ["unit"])
+    assert.deepEqual(plan.suggested, [])
+    assert.equal(calls, 0)
+    assert.equal(plan.traces[0].outcome, "skipped")
+    assert.equal(plan.traces[0].reason, "ineligible")
+  })
+})
