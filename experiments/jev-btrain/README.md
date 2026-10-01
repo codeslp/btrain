@@ -150,7 +150,11 @@ all traces retain `actionTaken: none`.
 `experiments/jev-btrain/rules-risk.mjs` reports G6-R and G6-T separately and keeps real,
 synthetic, and unknown origins separate. Rule reports compare baseline and semantic warning
 precision/recall, audit invented citations, and distinguish skipped candidates, attempted
-failures, failures without calls, valid abstentions, and actionable coverage. G6-V reports
+failures, failures without calls, valid abstentions, and actionable coverage. All three families
+retain optional per-attempt `latencyMs` and `cost`: latency reports observed-call count and
+nearest-rank p50/p95; cost reports observed-call count and the sum of measured costs.
+Missing costs report `total: null`, and measured zero is retained. Invalid negative or
+nonfinite measurements and measurements without attempted calls are rejected. G6-V reports
 severe findings in the top 30% of the queue (rounded up to whole entries), defect recall,
 and total reviewer time relative to baseline. Every review candidate must have one
 `gatewayAttempts` entry with its `reviewId`, boolean `eligible` and `attemptedCall`, and

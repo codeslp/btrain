@@ -100,6 +100,7 @@ test("G6-V reports gateway failures abstentions and eligible decision coverage p
   ]
   const result = evaluateReviewQueues([queue("mixed", { gatewayAttempts, prioritizedIds: ["a", "b", "c", "d"] })])
   assert.deepEqual(result.synthetic.gateway, { eligible: 3, attemptedCalls: 3, decisions: 1, abstentions: 1,
+    latencyMs: { observedCalls: 0, p50: null, p95: null }, cost: { observedCalls: 0, total: null },
     skipped: 1, attemptedFailures: 1, providerFailures: 1, responseShapeFailures: 0, failuresWithoutCall: 0, attemptedFailureRate: 1 / 3,
     validPredictionCoverage: 2 / 3, actionableDecisionCoverage: 1 / 3 })
   assert.equal(result.real.gateway.attemptedFailureRate, null)
@@ -160,5 +161,28 @@ test("response-shape failures require an attempted call in every G6 family", () 
     semanticWarned: false, outcome: "failure", failureClass: "response-shape", attemptedCall: false })]))
   const value = queue("bad", { prioritizedIds: ["a", "b", "c", "d"] })
   value.gatewayAttempts[0] = { ...value.gatewayAttempts[0], outcome: "failure", failureClass: "response-shape", attemptedCall: false }
+  assert.throws(() => evaluateReviewQueues([value]))
+})
+
+
+test("all G6 families report observed call latency and cost without inventing missing measurements", () => {
+  for (const kind of ["diff", "turn"]) {
+    const rows = [pair("quick", { kind, latencyMs: 2, cost: 0 }), pair("slow", { kind, latencyMs: 100, cost: 0.03 }),
+      pair("unknown", { kind }), pair("failed", { kind, latencyMs: 20, cost: null, semanticWarned: false, outcome: "failure", failureClass: "provider" })]
+    const gateway = evaluateRulePairs(kind, rows).synthetic.gateway
+    assert.deepEqual(gateway.latencyMs, { observedCalls: 3, p50: 20, p95: 100 })
+    assert.deepEqual(gateway.cost, { observedCalls: 2, total: 0.03 })
+    assert.deepEqual(evaluateRulePairs(kind, [pair("missing", { kind })]).synthetic.gateway.cost, { observedCalls: 0, total: null })
+    for (const field of ["latencyMs", "cost"]) {
+      for (const invalid of [-1, Infinity, "2", [2]]) assert.throws(() => evaluateRulePairs(kind, [pair("bad", { kind, [field]: invalid })]))
+      assert.throws(() => evaluateRulePairs(kind, [pair("no-call", { kind, [field]: 2, attemptedCall: false, semanticWarned: false, outcome: "skipped" })]))
+    }
+  }
+  const value = queue("measured")
+  value.gatewayAttempts = value.gatewayAttempts.map((entry, index) => ({ ...entry, latencyMs: index + 1, cost: index === 0 ? 0.02 : null }))
+  const gateway = evaluateReviewQueues([value]).synthetic.gateway
+  assert.deepEqual(gateway.latencyMs, { observedCalls: 4, p50: 2, p95: 4 })
+  assert.deepEqual(gateway.cost, { observedCalls: 1, total: 0.02 })
+  value.gatewayAttempts[0].cost = -1
   assert.throws(() => evaluateReviewQueues([value]))
 })
