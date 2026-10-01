@@ -1,6 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 
 // Review skills that btrain bundles for reviewers. `btrain init` and
@@ -10,12 +11,20 @@ import path from "node:path"
 const REVIEW_SKILLS = ["red-team", "mutation-round"]
 const SURFACES = [".claude/skills", ".agents/skills"]
 
+// Every file under `dir`, as a sorted path relative to it. The walk is explicit
+// because readdir's `recursive` option needs Node 18.17 and Dirent.parentPath
+// needs Node 18.20, and the README advertises Node.js 18+.
 async function listFiles(dir) {
-  const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true })
-  return entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.relative(dir, path.join(entry.parentPath, entry.name)))
-    .sort()
+  const files = []
+  async function walk(current, relative) {
+    for (const entry of await fs.readdir(current, { withFileTypes: true })) {
+      const entryRelative = path.join(relative, entry.name)
+      if (entry.isDirectory()) await walk(path.join(current, entry.name), entryRelative)
+      else if (entry.isFile()) files.push(entryRelative)
+    }
+  }
+  await walk(dir, "")
+  return files.sort()
 }
 
 // Enough of YAML frontmatter for `key: value` lines, plus indented
@@ -122,5 +131,54 @@ describe("bundled review skills", () => {
         }
       })
     }
+  })
+})
+
+// The README advertises Node.js 18+, but CI installs the newest 18.x, so an API
+// that arrived in a later 18.x release passes there and breaks an early one.
+// These hold listFiles to what Node 18.0 gives readdir.
+describe("listFiles", () => {
+  const expected = ["SKILL.md", path.join("references", "a.md"), path.join("references", "deep", "b.md"), "z.txt"]
+
+  async function withTree(run) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-skills-"))
+    try {
+      for (const file of ["z.txt", "SKILL.md", "references/a.md", "references/deep/b.md"]) {
+        await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true })
+        await fs.writeFile(path.join(root, file), file)
+      }
+      await fs.mkdir(path.join(root, "empty"))
+      return await run(root)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }
+
+  // readdir as Node 18.0-18.19 has it: no `recursive` option (Node 18.17) and
+  // Dirents with a name and their type, no parentPath (Node 18.20). It promises
+  // no order, so the entries come back reversed.
+  async function withNode18Readdir(run) {
+    const readdir = fs.readdir
+    fs.readdir = async (dir, options) => {
+      assert.ok(!options?.recursive, "readdir({ recursive }) needs Node 18.17")
+      return (await readdir(dir, { withFileTypes: true })).reverse().map((entry) => ({
+        name: entry.name,
+        isFile: () => entry.isFile(),
+        isDirectory: () => entry.isDirectory(),
+      }))
+    }
+    try {
+      return await run()
+    } finally {
+      fs.readdir = readdir
+    }
+  }
+
+  it("lists every file under a directory, relative to it and sorted", async () => {
+    await withTree(async (root) => assert.deepEqual(await listFiles(root), expected))
+  })
+
+  it("lists the same files with only what Node 18.0 gives readdir", async () => {
+    await withTree(async (root) => assert.deepEqual(await withNode18Readdir(() => listFiles(root)), expected))
   })
 })
