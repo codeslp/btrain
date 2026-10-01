@@ -207,9 +207,19 @@ function commandArb() {
     // exit legal. A human is outside the agent pool, so no actor selector.
     { arbitrary: fc.record({ t: fc.constant("dispose"), lane }), weight: 2 },
     // spec 005 FR-5 reassignment (spec 015 row 20, Q8): owner and/or reviewer
-    // changes by owner, reviewer, or a third agent.
-    { arbitrary: fc.record({ t: fc.constant("reassign"), lane, actorSel, owner: fc.option(fc.constantFrom(...AGENTS), { nil: undefined }), reviewer: fc.option(fc.constantFrom(...AGENTS), { nil: undefined }) }), weight: 2 },
+    // changes by owner, reviewer, or a third agent. A draw with neither role
+    // is a metadata-only update instead.
+    { arbitrary: fc.record({ t: fc.constant("reassign"), lane, actorSel, owner: fc.option(fc.constantFrom(...AGENTS), { nil: undefined }), reviewer: fc.option(fc.constantFrom(...AGENTS), { nil: undefined }) }).map(asMetadataWhenRoleless), weight: 2 },
   )
+}
+
+// spec 015 row 19: an update with neither role (and no status or files) is a
+// metadata-only update, so it runs and is modeled as `metadata`. Relabeling
+// with `map` keeps the random draws, so recorded seeds replay the same
+// sequences, and shrinking toward no roles lands here too.
+function asMetadataWhenRoleless(cmd) {
+  if (cmd.owner !== undefined || cmd.reviewer !== undefined) return cmd
+  return { t: "metadata", lane: cmd.lane, actorSel: cmd.actorSel }
 }
 
 async function dropLaneRegistry(repo, lane) {
@@ -301,8 +311,6 @@ async function runReal(repo, cmd, actor) {
         reason: "formal probe disposition",
       })
     case "reassign":
-      // A reassign with neither role supplied is a metadata update; the
-      // generator can produce it, so send a harmless --next instead.
       return asAgent(actor, () =>
         patchHandoff(repo, {
           lane: cmd.lane,
@@ -310,8 +318,11 @@ async function runReal(repo, cmd, actor) {
           "no-dispatch": true,
           ...(cmd.owner !== undefined ? { owner: cmd.owner } : {}),
           ...(cmd.reviewer !== undefined ? { reviewer: cmd.reviewer } : {}),
-          ...(cmd.owner === undefined && cmd.reviewer === undefined ? { next: "formal probe metadata" } : {}),
         }),
+      )
+    case "metadata":
+      return asAgent(actor, () =>
+        patchHandoff(repo, { lane: cmd.lane, actor, next: "formal probe metadata", "no-dispatch": true }),
       )
     case "dropRegistry":
       return dropLaneRegistry(repo, cmd.lane)
@@ -347,8 +358,9 @@ function applyModel(model, cmd, actor) {
     case "dispose":
       return model.dispose(cmd)
     case "reassign":
-      if (cmd.owner === undefined && cmd.reviewer === undefined) return { ok: true }
       return model.reassign({ lane: cmd.lane, actor, owner: cmd.owner, reviewer: cmd.reviewer })
+    case "metadata":
+      return model.metadata({ lane: cmd.lane, actor })
     case "dropRegistry":
       return model.dropRegistry(cmd)
     case "doctorRepair":
@@ -389,6 +401,9 @@ const CANDIDATE_REASON_LABELS = new Map([
   ["reassign-requires-lane-agent", "reassign-authorization"],
   ["reassign-roles-not-distinct", "reassign-authorization"],
   ["reassign-reviewer-is-author", "reassign-authorization"],
+  // spec 015 row 19 actor: a non-lane agent's metadata update is accepted with
+  // an L12 record during the FR-5 window.
+  ["metadata-update-requires-lane-agent", "metadata-actor-unchecked"],
   ["repair-resolve-before-escalation", "repair-resolve-before-escalation"],
   ["repair-clear-requires-repair-owner", "update-actor-unchecked"],
 ])
@@ -870,6 +885,52 @@ for (const mode of ["contract", "implementation"]) {
     assert.equal(last.realRepair.y.owner, "beta")
   })
 }
+
+// Regression witness for ledger finding 12 (spec 015 row 19): a lane agent's
+// metadata-only update applies in any status, `resolved` included. The
+// implementation used to refuse it on a resolved lane, which broke this legal
+// contract chain and, in implementation mode, seed -1468514561.
+for (const mode of ["contract", "implementation"]) {
+  test(`row 19: metadata-only updates apply on a resolved lane (${mode} mode)`, { skip: !ENABLED }, async () => {
+    const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      // Row 6 (AbandonResolve): the owner resolves the unlinked lane.
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+      { t: "metadata", lane: "x", actorSel: "owner" },
+      { t: "metadata", lane: "x", actorSel: "reviewer" },
+    ])
+    assert.equal(designatedTally.size, 0, "no designated drift on the row 19 chain")
+    assert.equal(candidateTally.size, 0, `no candidate finding on the row 19 chain: ${[...candidateTally.keys()].join(", ")}`)
+    const last = trace.at(-1)
+    assert.equal(last.realOk, true, "the reviewer's metadata update on the resolved lane is accepted")
+    assert.equal(last.realState.x.status, "resolved")
+    assert.deepEqual(last.realState.x.registry, [])
+  })
+}
+
+// spec 006 FR-7 with row 19: the metadata update is a recorded workflow event,
+// so its actor is the most recent canonical actor before the repair.
+test("row 19: a metadata update's actor becomes the FR-7 repair owner (contract mode)", { skip: !ENABLED }, async () => {
+  const { candidateTally, trace } = await executeSequence("contract", [
+    { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+    { t: "metadata", lane: "x", actorSel: "reviewer" },
+    { t: "update", lane: "x", actorSel: "owner", status: "repair-needed", reason: "invalid-handoff" },
+  ])
+  assert.equal(candidateTally.size, 0, `no candidate finding: ${[...candidateTally.keys()].join(", ")}`)
+  assert.equal(trace.at(-1).realRepair.x.owner, "beta")
+})
+
+// Advisory-window witness for the row 19 actor (L12): the implementation
+// accepts a third agent's metadata update with a record, and contract mode
+// tallies it as a candidate instead of failing as an unknown divergence.
+// When L12 enforcement lands, the tally empties and this witness must change.
+test("row 19 actor: a third agent's metadata update tallies the L12 candidate (contract mode)", { skip: !ENABLED }, async () => {
+  const { candidateTally } = await executeSequence("contract", [
+    { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+    { t: "metadata", lane: "x", actorSel: "third" },
+  ])
+  assert.deepEqual([...candidateTally], [["metadata-actor-unchecked", 1]])
+})
 
 // Positive FR-18 witness: the implementation escalates a same-reason repair
 // re-entry to a human (spec 006 FR-18, spec 014 designation). Guards

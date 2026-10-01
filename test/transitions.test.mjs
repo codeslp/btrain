@@ -138,6 +138,20 @@ describe("lane transition contract", () => {
         input: { to: "repair-needed", reasonCode: "invalid-handoff" },
         runModel: (model) => model.update({ lane: "a", actor: "claude", status: "repair-needed", reason: "invalid-handoff" }),
       },
+      ...["in-progress", "resolved"].flatMap((status) => ["codex", "claude"].map((actor) => ({
+        name: `lane agent ${actor} updates metadata from ${status} (row 19)`,
+        state: { status, actor },
+        event: "handoff update --metadata",
+        input: { to: status },
+        runModel: (model) => model.metadata({ lane: "a", actor }),
+      }))),
+      {
+        name: "a third agent cannot update metadata (L12 is not designated)",
+        state: { status: "resolved", actor: "gemini" },
+        event: "handoff update --metadata",
+        input: { to: "resolved" },
+        runModel: (model) => model.metadata({ lane: "a", actor: "gemini" }),
+      },
       ...[false, true].map((disposed) => ({
         name: `lane agent resolves repair-needed with disposition=${disposed} (row 15 / L7)`,
         state: { status: "repair-needed", actor: "codex", disposed },

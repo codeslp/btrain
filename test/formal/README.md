@@ -124,6 +124,34 @@ resync by a non-owner (`resync-requires-owner`).
     recorded human decision"), so the tally persists by design. The model's
     `dispose` op and the harness's `dispose` command exercise the legal path.
 
+Harness-found implementation defect, repaired 2026-09-30:
+
+12. `patchHandoff` refused a metadata-only update (no `--status`, `--files`,
+    `--owner`, or `--reviewer`) on a `resolved` lane. It took the lane's own
+    `resolved` status as the next status and hit the guard for `--status
+    resolved`, whose fix text (resolve again) is the repeat resolve that
+    spec 002 rejects (L14). Spec 015 row 19 allows the update in any status,
+    and spec 002 update authority names only its actor. Implementation mode
+    found it with `BTRAIN_FORMAL_SEED=-1468514561` (resolve an idle lane,
+    then update its metadata), and contract mode with `-154424753` (claim,
+    owner abandon resolve by row 6, owner metadata update). The harness had
+    scored a roleless reassign as accepted without consulting the model, so
+    row 19 was never checked: not in `resolved`, not its lane-agent actor
+    (L12), and not the FR-7 canonical actor that the update records.
+    Repaired: `patchHandoff` exempts the metadata-only case, read from the
+    four flags because a caller can supply `transitionEvent`; `--status
+    resolved`, and files or roles on a resolved lane, stay rejected (rows
+    16, 17, and 20 have no resolved source). The model's `metadata` op
+    transcribes row 19, and a reassign draw with neither role runs as
+    `metadata`. `test/handoff-update-resolved.test.mjs`, the row 19
+    witnesses here, and the `test/transitions.test.mjs` cross-check fixtures
+    guard it. Two differences remain: a metadata update of a resolved lane
+    whose registry still holds stale entries releases them, as idle lanes
+    already did, although row 19 says locks unchanged (harness runs never
+    leave stale entries on an inactive lane); and `LaneLock.tla` has no
+    metadata action, so the `lastActor` effect is mirror-only and belongs in
+    the `specs/tla/README.md` known-differences list.
+
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a
 `validation_mismatch` that was a stale double, not a regression. Fixed on
@@ -153,14 +181,23 @@ that only carry another lane's reviewed work.
   `reassign` with the author history); every contract rejection maps to the
   candidate label `reassign-authorization`, which persists during the spec
   015 FR-5 advisory window like the other legacy labels.
+- Metadata-only updates (spec 015 row 19) are generated as `metadata` (a
+  reassign draw with neither role). A non-lane agent's update maps to the
+  candidate label `metadata-actor-unchecked` (L12), which persists during the
+  spec 015 FR-5 advisory window like the other legacy labels. On a
+  `needs-review` lane the implementation reruns the needs-review gate
+  (reviewer context and reviewable diff), which row 19 does not name; the
+  throwaway repos have no git history, so the diff half always passes and
+  the harness cannot see a rejection.
 - Doctor resync (spec 015 row 17, Q2) runs as a deterministic witness in
   both modes: the harness drops a lane's registry entry (`dropRegistry`) and
   runs the real `doctor --repair` (`doctorRepair`); the mirror restores
   coverage in the three permitted statuses and enters repair-needed
-  elsewhere. Status updates on an uncovered lane are not generated: the
-  implementation re-acquires coverage on any active-status update while the
-  model keeps the lane uncovered until claim or rescope, an undesignated
-  difference for a later lane.
+  elsewhere. Status and metadata updates on an uncovered lane are not
+  generated: the implementation rejects them as a lock-state mismatch until
+  a resync restores coverage (only request-changes and peer resolve
+  re-acquire), while the contract rows name no coverage guard for them, an
+  undesignated difference for a later lane.
 - PR-flow `changes-requested` provenance: the implementation reads the
   workflow event that entered `changes-requested` (`details.transitionEvent
   === "pr-poll"`); the mirror tracks the same fact as `prFeedbackEntered`,

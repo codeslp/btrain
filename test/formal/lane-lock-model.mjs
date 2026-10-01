@@ -245,6 +245,36 @@ export class LaneLockModel {
     return this.#accept()
   }
 
+  // spec 015 row 19 (spec 002 update authority, designated 2026-09-09): an
+  // update with none of --status, --files, --owner, or --reviewer changes only
+  // metadata, in any status, `resolved` included. Contract: a lane agent acts;
+  // any other actor is L12, accepted with a `transition-advisory` record during
+  // the spec 015 FR-5 window. Status, locks, reason, repair records, and PR
+  // provenance are unchanged, but the update is a recorded workflow event, so
+  // its actor becomes the spec 006 FR-7 canonical actor. Implementation
+  // mirror: patchHandoff keeps the current status and reruns its lock guards,
+  // so an active lane must still be covered and hold its locked files
+  // (re-acquired), and an inactive lane drops both lock records.
+  metadata({ lane, actor }) {
+    const s = this.lane(lane)
+    if (this.mode === "implementation") {
+      if (!s.fileExists) return this.#reject("no-handoff-file")
+      if (ACTIVE_STATUSES.has(s.status)) {
+        if (this.#coverageMismatch(lane)) return this.#reject("lock-state-mismatch")
+        if (s.lockedFiles.length === 0) return this.#reject("active-status-needs-locks")
+        if (this.#conflicts(lane, s.lockedFiles)) return this.#reject("lock-conflict")
+        this.#setRegistry(lane, s.lockedFiles)
+      } else {
+        s.lockedFiles = []
+        this.#releaseRegistry(lane)
+      }
+    } else if (actor !== s.owner && actor !== s.reviewer) {
+      return this.#reject("metadata-update-requires-lane-agent")
+    }
+    s.lastActor = actor
+    return this.#accept()
+  }
+
   // Registry loss outside btrain (or an audited force-release): the handoff
   // keeps its paths, the registry entry disappears, coverage is suspended.
   dropRegistry({ lane }) {
