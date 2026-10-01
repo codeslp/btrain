@@ -919,8 +919,10 @@ test(
 // this memory in `update` and rejected the disposition after a same-reason
 // re-entry (dispose-requires-escalation).
 const fr18Claim = { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] }
-const fr18Repair = (reason) => ({ t: "update", lane: "x", actorSel: "owner", status: "repair-needed", reason })
 const fr18Clear = { t: "update", lane: "x", actorSel: "owner", status: "in-progress" }
+function fr18Repair(reason) {
+  return { t: "update", lane: "x", actorSel: "owner", status: "repair-needed", reason }
+}
 // The doctor enters repair-needed (lock-mismatch) for a needs-review lane
 // whose registry entry is gone.
 const fr18DoctorEntry = [
@@ -985,9 +987,10 @@ for (const { name, modes, disposes, steps } of [
       assert.equal(designatedTally.size, 0, "no designated drift on the FR-18 chain")
       assert.equal(candidateTally.size, 0, `no candidate finding on the FR-18 chain: ${[...candidateTally.keys()].join(", ")}`)
       const dispose = trace.at(-1)
-      assert.equal(dispose.modelOk, disposes, `model dispose: ${dispose.modelReason || "accepted"}`)
+      assert.equal(dispose.realState.x.status, "repair-needed", "the chain ends in repair-needed")
+      assert.equal(dispose.realRepair.x.escalation, disposes ? "human" : "", "runtime FR-18 escalation")
+      assert.equal(dispose.modelReason, disposes ? "" : "dispose-requires-escalation", "model dispose verdict")
       assert.equal(dispose.realOk, disposes, `runtime dispose: ${dispose.realError || "accepted"}`)
-      assert.equal(dispose.realRepair.x.escalation, disposes ? "human" : "")
     })
   }
 }

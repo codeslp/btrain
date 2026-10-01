@@ -15,17 +15,37 @@ import assert from "node:assert/strict"
 
 import { LaneLockModel } from "./lane-lock-model.mjs"
 
-const claim = (m) => m.claim({ lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] })
-const repair = (reason) => (m) => m.update({ lane: "x", actor: "alpha", status: "repair-needed", reason })
-const clear = (m) => m.update({ lane: "x", actor: "alpha", status: "in-progress" })
-const resolve = (m) => m.resolve({ lane: "x", actor: "alpha", final: false })
+function claim(model) {
+  return model.claim({ lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] })
+}
+
+function repair(reason) {
+  return (model) => model.update({ lane: "x", actor: "alpha", status: "repair-needed", reason })
+}
+
+function clear(model) {
+  return model.update({ lane: "x", actor: "alpha", status: "in-progress" })
+}
+
+function resolve(model) {
+  return model.resolve({ lane: "x", actor: "alpha", final: false })
+}
+
+function needsReview(model) {
+  return model.update({ lane: "x", actor: "alpha", status: "needs-review" })
+}
+
+function dropRegistry(model) {
+  return model.dropRegistry({ lane: "x" })
+}
+
+function doctorRepair(model) {
+  return model.doctorRepair()
+}
+
 // The doctor enters repair-needed (reason lock-mismatch) for a needs-review
 // lane whose registry entry is gone.
-const doctorEntry = [
-  (m) => m.update({ lane: "x", actor: "alpha", status: "needs-review" }),
-  (m) => m.dropRegistry({ lane: "x" }),
-  (m) => m.doctorRepair(),
-]
+const doctorEntry = [needsReview, dropRegistry, doctorRepair]
 
 const BOTH = ["contract", "implementation"]
 const CASES = [
