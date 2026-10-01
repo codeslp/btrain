@@ -25,6 +25,35 @@ const sourceProof = (refs, content = candidate.sourceContent) => {
 }
 
 describe("offline decision gateway", () => {
+  it("rejects successful traces with no call, invalid predictions or incomplete probabilities", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-success-invariants-"))
+    try {
+      const proof = sourceProof(candidate.sourceRefs)
+      const trace = await decideCandidate({ family, candidate, provider: fakeProvider(answer()), mode: "offline", sourceProof: proof })
+      for (const outcome of ["decision", "abstain"]) {
+        for (const changed of [{ attemptedCall: false }, { prediction: "invented" }, { probabilities: { feedback: 1 } }]) {
+          await assert.rejects(() => appendDecisionTrace(root, { ...trace, outcome, ...changed }, family, proof), /successful trace/i)
+        }
+      }
+      for (const changed of [{ suggestedAction: "invented" }, { probabilities: { clear: 0.2, feedback: 0.7, unavailable: 0.05, uncertain: 0.05 } }]) {
+        await assert.rejects(() => appendDecisionTrace(root, { ...trace, ...changed }, family, proof), /successful trace/i)
+      }
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
+  it("rejects a provider response after synchronous work exceeds the timeout", async () => {
+    const short = createDecisionFamily({ ...family, timeoutMs: 5 })
+    let signal
+    const trace = await decideCandidate({ family: short, candidate, mode: "offline", provider: { localOnly: true, decide: (input) => {
+      signal = input.signal
+      const started = performance.now()
+      while (performance.now() - started < 15) { /* Simulate blocking provider preprocessing. */ }
+      return Promise.resolve(answer())
+    } } })
+    assert.deepEqual([trace.outcome, trace.reason], ["failure", "timeout"])
+    assert.equal(signal.aborted, true)
+  })
+
   it("does not persist decision fields on failed or skipped traces", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-trace-outcomes-"))
     try {

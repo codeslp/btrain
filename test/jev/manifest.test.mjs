@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { annotationCandidates, freezeLabeledManifest, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
-const snapshot = (id, prNumber, eventHead = "a".repeat(40)) => ({ id, repository: "o/r", prNumber, eventHead, sourceHash: "b".repeat(64), sourceRef: `https://example.test/${id}`, surface: "review", author: "bot" })
+const snapshot = (id, prNumber, eventHead = "a".repeat(40), templateGroup = "a") => ({ id, templateGroup, repository: "o/r", prNumber, eventHead, sourceHash: "b".repeat(64), sourceRef: `https://example.test/${id}`, surface: "review", author: "bot" })
 const entry = (id, prNumber, templateGroup, split = "test") => ({
   sourceId: id, repository: "o/r", prNumber, templateGroup, split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0,
   annotations: [{ by: "one", label: "feedback" }, { by: "two", label: "feedback" }],
@@ -32,7 +32,7 @@ describe("frozen Jev label manifest", () => {
   })
 
   it("freezes reproducibly with source and label hashes", () => {
-    const sources = [snapshot("s1", 1), snapshot("s2", 2)]
+    const sources = [snapshot("s1", 1, undefined, "template-a"), snapshot("s2", 2, undefined, "template-b")]
     const cases = [entry("s1", 1, "template-a", "train"), entry("s2", 2, "template-b", "test")]
     const first = freezeLabeledManifest({ sources, cases, pins, labels: ["clear", "feedback", "unavailable", "uncertain"], requireEventHead: true })
     const second = freezeLabeledManifest({ sources: [...sources].reverse(), cases: [...cases].reverse(), pins, labels: ["clear", "feedback", "unavailable", "uncertain"], requireEventHead: true })
@@ -77,13 +77,13 @@ describe("frozen Jev label manifest", () => {
   })
 
   it("rejects a PR or normalized template across splits", () => {
-    const sources = [snapshot("s1", 1), snapshot("s2", 1), snapshot("s3", 2)]
+    const sources = [snapshot("s1", 1), snapshot("s2", 1, undefined, "b"), snapshot("s3", 2)]
     assert.throws(() => freezeLabeledManifest({ sources, cases: [entry("s1", 1, "a", "train"), entry("s2", 1, "b", "test")], pins, labels }), /PR group crosses splits/)
     assert.throws(() => freezeLabeledManifest({ sources, cases: [entry("s1", 1, "a", "train"), entry("s3", 2, "a", "test")], pins, labels }), /Template group crosses splits/)
   })
 
   it("keeps the same template in one split across repositories", () => {
-    const sources = [snapshot("s1", 1), { ...snapshot("s2", 1), repository: "other/repo" }]
+    const sources = [snapshot("s1", 1, undefined, "shared"), { ...snapshot("s2", 1, undefined, "shared"), repository: "other/repo" }]
     const second = { ...entry("s2", 1, "shared", "test"), repository: "other/repo" }
     assert.throws(() => freezeLabeledManifest({ sources, cases: [entry("s1", 1, "shared", "train"), second], pins, labels }), /Template group crosses splits/)
   })
@@ -96,6 +96,13 @@ describe("frozen Jev label manifest", () => {
     bad.annotations[1].by = "two"
     bad.adjudication = null
     assert.throws(() => freezeLabeledManifest({ sources, cases: [bad], pins, labels }), /adjudication/)
+  })
+
+  it("requires a captured template group instead of trusting case-assigned groups", () => {
+    for (const templateGroup of [undefined, null, ""]) {
+      const source = { ...snapshot("s1", 1), templateGroup }
+      assert.throws(() => freezeLabeledManifest({ sources: [source], cases: [entry("s1", 1, "a")], pins, labels }), /captured template group/i)
+    }
   })
 
   it("rejects a case whose template group differs from captured evidence", () => {
