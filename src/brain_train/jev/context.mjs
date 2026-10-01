@@ -18,7 +18,11 @@ export function contextSourceHash(item) {
 
 export function contextManifestHash(sources, objective = "") {
   if (!Array.isArray(sources)) throw new Error("Frozen context sources are required")
-  return digest({ objective, sources: [...sources].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) })
+  const canonicalSources = sources.map((source) => ({
+    id: source.id, sourceRef: source.sourceRef, sourceSnapshotHash: source.sourceSnapshotHash,
+    kind: source.kind, evidenceClass: source.evidenceClass, pinned: source.pinned,
+  })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  return digest({ objective, sources: canonicalSources })
 }
 
 function frozenSourceMap(sources, expectedHash, objective) {

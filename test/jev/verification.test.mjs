@@ -39,6 +39,19 @@ describe("offline verification planner", () => {
     assert.match(plan.traces[0].modelPin, /^id-sha256:[a-f0-9]{64}$/)
   })
 
+  it("accepts map-only content for a single frozen source through the shared gateway", async () => {
+    const change = { changedPaths: ["src/safe.mjs"], contractTags: [], sourceRefs, sourceId }
+    const { sourceContent, sourceProof } = frozenChange(change)
+    const plan = await planVerificationWithPins({
+      change: { ...change, sourceContents: { [sourceId]: sourceContent } }, sourceProof,
+      provider: fakeProvider(answer("none")), mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40),
+    })
+    assert.equal(plan.traces[0].outcome, "abstain")
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-map-content-"))
+    try { await appendDecisionTrace(root, plan.traces[0], verificationFamily, sourceProof) }
+    finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
   it("requires frozen source proof and produces persistable offline traces", async () => {
     const change = { changedPaths: ["src/brain_train/core.mjs"], sourceRefs, sourceId }
     const { sourceProof } = frozenChange(change)

@@ -295,3 +295,5 @@ lexical/structured baseline, p95 at most 2 seconds, zero unauthorized results,
 and the universal failure/coverage gates. This prototype always reports
 `gateReady: false`; synthetic controls, supplied measurements, and policy tests
 do not establish model quality or authorize live read-only search.
+
+Shared gateway repair safeguards: require every captured source to have its own nonempty template group before assigning any evaluation split; reject successful serialized traces without a real attempted call and valid catalog probabilities; measure wall time after provider completion so synchronous work cannot evade the timeout. Timer cancellation alone cannot bound synchronous provider work. Tests must exercise these invariants through freeze/replay and persisted trace paths.

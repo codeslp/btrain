@@ -67,17 +67,18 @@ export async function inspectMemoryClaim({ source, sourceProof, provider, mode =
   validateMemory(record)
   const { claim } = record
   const ageBaseline = record.asOfSequence > claim.leaseUntilSequence ? "stale" : "current"
-  const eligible = record.events.filter((event) => eligibleEvent(event, record))
   const run = createDecisionRun(memoryFamily)
   const warnings = []
   const traces = []
-  for (const [callIndex, event] of (eligible.length ? eligible : [null]).entries()) {
+  let calls = 0
+  for (const event of record.events.length ? record.events : [null]) {
     const trace = await decideCandidate({
       family: memoryFamily, run, provider, mode, modelPin, codeRevision, sourceProof: proof,
-      candidate: { ...candidateSource, eligible: event !== null, privacyClass: "private", callIndex,
+      candidate: { ...candidateSource, eligible: event !== null && eligibleEvent(event, record), privacyClass: "private", callIndex: calls,
         baseline: ageBaseline === "stale" ? "superseded" : "supported", claim, event },
     })
     traces.push(trace)
+    if (trace.attemptedCall) calls += 1
     if (trace.outcome === "decision" && trace.suggestedAction === "memory:warn") {
       warnings.push({ kind: "possibly-stale", claimId: claim.id, claimVersion: claim.version,
         eventId: event.id, eventVersion: event.version, sourceRefs: [claim.sourceRef, event.sourceRef] })
