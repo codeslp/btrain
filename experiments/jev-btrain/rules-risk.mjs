@@ -38,6 +38,8 @@ function gatewayMetrics(pairs) {
   return { eligible, attemptedCalls: attempted.length, decisions, abstentions,
     skipped: pairs.filter((pair) => pair.outcome === "skipped").length,
     attemptedFailures: failures,
+    providerFailures: pairs.filter((pair) => pair.outcome === "failure" && pair.failureClass === "provider").length,
+    responseShapeFailures: pairs.filter((pair) => pair.outcome === "failure" && pair.failureClass === "response-shape").length,
     failuresWithoutCall: pairs.filter((pair) => pair.outcome === "failure" && !pair.attemptedCall).length,
     attemptedFailureRate: rate(failures, attempted.length),
     validPredictionCoverage: rate(decisions + abstentions, attempted.length),
@@ -47,6 +49,8 @@ function gatewayMetrics(pairs) {
 function validGatewayOutcome(entry) {
   return typeof entry?.eligible === "boolean" && typeof entry.attemptedCall === "boolean"
     && ["decision", "abstain", "failure", "skipped"].includes(entry.outcome)
+    && (entry.outcome === "failure" ? ["provider", "response-shape"].includes(entry.failureClass) : entry.failureClass == null)
+    && (entry.failureClass !== "response-shape" || entry.attemptedCall)
     && (entry.eligible || entry.outcome === "skipped")
     && (entry.outcome !== "skipped" || !entry.attemptedCall)
     && (!["decision", "abstain"].includes(entry.outcome) || entry.attemptedCall)
