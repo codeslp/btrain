@@ -262,15 +262,16 @@ describe("btrain CLI rejects internal-only transition gate inputs", () => {
       env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(root, "home"), BTRAIN_AGENT: "alpha", BTRAIN_DASHBOARD_DISABLED: "1" },
     }).then(({ stderr }) => ({ code: 0, stderr }), (error) => ({ code: error.code, stderr: error.stderr || "" }))
     try {
-      // No btrain repo is reachable from here, so a check that ran after repo
-      // resolution would fail with this error instead.
-      const clean = await run("handoff", "update", "--lane", "x", "--next", "n")
+      // No btrain repo is reachable from here (checked read-only), so a check
+      // that ran after repo resolution would fail with this error instead.
+      const clean = await run("handoff", "--lane", "x")
       assert.notEqual(clean.code, 0)
       assert.match(clean.stderr, /Could not find a bootstrapped repo/)
 
       const forged = await run("handoff", "update", "--lane", "x", "--next", "n", "--transitionEvent", "pr-poll")
       assert.notEqual(forged.code, 0)
       assert.match(forged.stderr, /`--transitionEvent` is internal to btrain/)
+      assert.deepEqual(await fs.readdir(root), ["work"], "a command created files, including under BRAIN_TRAIN_HOME")
       assert.deepEqual(await fs.readdir(cwd), [], "a rejected command created files")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
@@ -384,7 +385,9 @@ async function listSourceFiles(dir) {
 }
 
 const HANDOFF_FUNCTION_NAMES = "claimHandoff|patchHandoff|requestChangesHandoff|resolveHandoff"
-const REGEX_KEYWORDS = ["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"]
+// `of` is left out: it is also a legal variable name, and a regex right after
+// `for (x of` does not occur here.
+const REGEX_KEYWORDS = ["return", "typeof", "case", "do", "else", "in", "new", "delete", "void", "throw", "yield", "await"]
 
 // Every mention of the four handoff functions in one module, read from the
 // code that maskNonCode leaves, so a comment or string neither hides a call
@@ -449,8 +452,8 @@ function maskNonCode(source) {
   }
   // A `/` starts a regex literal unless the code before it ends a value.
   // Comments are skipped on the way back; a string, template or regex, a
-  // postfix `++` or `--`, and a property named like a keyword (`a.in`) end
-  // a value.
+  // postfix `++` or `--`, and a property or private field named like a
+  // keyword (`a.in`, `this.#in`) end a value.
   const startsRegex = (slash) => {
     let index = slash - 1
     while (index >= 0 && (kind[index] === 2 || (kind[index] === 0 && /\s/.test(source[index])))) index -= 1
@@ -461,7 +464,7 @@ function maskNonCode(source) {
     if ("(,=:[!&|?{};+-*%<>~^".includes(char)) return true
     let wordStart = index
     while (wordStart > 0 && /[\w$]/.test(source[wordStart - 1])) wordStart -= 1
-    if (source[wordStart - 1] === ".") return false
+    if (source[wordStart - 1] === "." || source[wordStart - 1] === "#") return false
     return REGEX_KEYWORDS.includes(source.slice(wordStart, index + 1))
   }
   // Inside a template expression, stops at the `}` that closes it.
