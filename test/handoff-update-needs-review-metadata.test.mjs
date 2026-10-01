@@ -300,6 +300,10 @@ describe("single-handoff mode (spec 015 row 19)", () => {
       )
       assert.equal(linked.status, "needs-review")
       assert.equal(String(linked.prNumber), "84")
+      for (const edit of [{ verification: "node --test passed again" }, { base: "main (lane-x-work rebased)" }]) {
+        const edited = await asAgent("alpha", () => patchHandoff(repo, { ...lane, actor: "alpha", ...edit, "no-dispatch": true }))
+        assert.equal(edited.status, "needs-review")
+      }
       assert.deepEqual(await fakeCgraph.gateCalls(), ["review-packet", "audit"])
       assert.equal((await lastUpdateEvent(repo, false)).details.cgraph, undefined)
 
