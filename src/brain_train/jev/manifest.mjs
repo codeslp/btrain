@@ -29,7 +29,8 @@ export function validateCaseGroups(cases, sources) {
     if (typeof item.repository !== "string" || !item.repository || !Number.isSafeInteger(item.prNumber) || item.prNumber < 1
       || source.repository !== item.repository || source.prNumber !== item.prNumber) throw new Error("Case source identity mismatch")
     if (typeof item.templateGroup !== "string" || !item.templateGroup) throw new Error("Template group is required")
-    if (source.templateGroup && source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
+    if (typeof source.templateGroup !== "string" || !source.templateGroup) throw new Error("A captured template group is required")
+    if (source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
     if (!splits.has(item.split)) throw new Error("Invalid split")
     if (typeof item.eligible !== "boolean" || !["public", "synthetic", "private"].includes(item.privacyClass)
       || !Number.isSafeInteger(item.callIndex) || item.callIndex < 0) throw new Error("Case evaluation inputs are required")
