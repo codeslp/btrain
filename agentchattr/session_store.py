@@ -1,12 +1,66 @@
 """Session store — persists active session runs to JSON."""
 
+import hashlib
 import json
+import os
+import shutil
 import time
 import threading
 import logging
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    """Replace ``path`` with ``data`` as JSON through a temp file and os.replace.
+
+    A failed or interrupted write leaves the old file whole, never truncated.
+    A read-only target is refused rather than silently replaced, since
+    os.replace needs only a writable directory.
+    """
+    if path.exists() and not os.access(path, os.W_OK):
+        raise PermissionError(f"{path} is read-only")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+# Longest phase prompt or per-role prompt a template may carry.
+MAX_PROMPT_CHARS = 200
+
+# Template keys that never shape a run: shown only on proposal cards, or set by the loader.
+_FINGERPRINT_IGNORED_KEYS = ("description", "is_custom")
+
+
+def template_fingerprint(tmpl: dict) -> str:
+    """A digest of everything in ``tmpl`` that shapes a run.
+
+    Each run saves it, so a restart can tell whether the run's template id
+    still names the template it started on. The id alone can't: a custom
+    template that shared a built-in id is renamed at load, and a custom
+    template can be edited in place.
+    """
+    shaped = {k: v for k, v in tmpl.items() if k not in _FINGERPRINT_IGNORED_KEYS}
+    # ASCII escapes, so a lone surrogate from a hand-edited file can't fail the encode.
+    canonical = json.dumps(shaped, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class CustomTemplatesUnreadable(RuntimeError):
+    """custom_templates.json can't safely be rewritten: it couldn't be read, so
+    writing it would lose what it holds, or it still has ids renamed only in memory."""
 
 
 class SessionStore:
@@ -18,6 +72,9 @@ class SessionStore:
         self._lock = threading.Lock()
         self._callbacks: list = []
         self._templates: dict[str, dict] = {}
+        self._custom_templates_unreadable = False
+        # Why a rename at load couldn't be saved, or None. See _load_custom_templates.
+        self._custom_templates_rename_error: str | None = None
         self._load()
 
         # Warn about legacy file
@@ -33,13 +90,12 @@ class SessionStore:
         if custom_path.exists():
             try:
                 custom = json.loads(custom_path.read_text("utf-8"))
-                for tmpl in (custom if isinstance(custom, list) else []):
-                    tid = tmpl.get("id", "")
-                    if tid:
-                        tmpl["is_custom"] = True
-                        self._templates[tid] = tmpl
-                        log.info("Loaded custom template: %s", tid)
-            except (json.JSONDecodeError, KeyError) as exc:
+                if not isinstance(custom, list):
+                    self._custom_templates_unreadable = True
+                    log.warning("Failed to load custom templates: %s is not a list", custom_path.name)
+                self._load_custom_templates(custom if isinstance(custom, list) else [], custom_path)
+            except (json.JSONDecodeError, KeyError, UnicodeDecodeError, OSError) as exc:
+                self._custom_templates_unreadable = True
                 log.warning("Failed to load custom templates: %s", exc)
 
     # --- Persistence ---
@@ -79,24 +135,136 @@ class SessionStore:
             except (json.JSONDecodeError, KeyError) as exc:
                 log.warning("Failed to load template %s: %s", f.name, exc)
 
+    def _load_custom_templates(self, custom: list, custom_path: Path):
+        """Register saved custom templates after the built-in ones.
+
+        One that reuses a built-in id (saved before drafts were kept off
+        built-in ids, or edited by hand) is renamed to ``<id>-custom`` and the
+        file rewritten, so it stays listed, runnable and deletable without
+        replacing the built-in. Unfinished runs on that id are marked first
+        (see ``_mark_runs_on_renamed_ids``). Entries without a string id are
+        skipped.
+        """
+        saved_ids = {t.get("id") for t in custom if isinstance(t, dict) and isinstance(t.get("id"), str)}
+        taken = set(self._templates) | saved_ids
+        renamed: dict[str, str] = {}
+        for tmpl in custom:
+            tid = tmpl.get("id") if isinstance(tmpl, dict) else None
+            if not isinstance(tid, str) or not tid:
+                log.warning("Skipping custom template without a string id: %r", tmpl)
+                continue
+            if self.is_builtin_template(tid):
+                new_id, n = f"{tid}-custom", 2
+                while new_id in taken:
+                    new_id, n = f"{tid}-custom-{n}", n + 1
+                log.warning("Custom template %s shares a built-in id; renamed it to %s", tid, new_id)
+                renamed[tid] = new_id
+                tmpl["id"] = tid = new_id
+                taken.add(new_id)
+            tmpl["is_custom"] = True
+            self._templates[tid] = tmpl
+            log.info("Loaded custom template: %s", tid)
+        if renamed:
+            try:
+                self._mark_runs_on_renamed_ids(renamed)
+                _write_json_atomic(custom_path, custom)
+            except (OSError, ValueError) as exc:
+                # Starting matters more than persisting: the rename holds in
+                # memory and is tried again at the next load. Until then the
+                # file still has the old ids, so a delete would miss the entry
+                # and a save would write both ids; _read_custom_file refuses both.
+                # ValueError: a hand-edited lone surrogate can't be encoded.
+                self._custom_templates_rename_error = str(exc) or type(exc).__name__
+                log.warning("Could not save the rename of custom templates that shared a built-in id (%s); "
+                            "it holds until restart, and template changes are refused until then", exc)
+
     def get_templates(self) -> list[dict]:
         return list(self._templates.values())
 
     def get_template(self, template_id: str) -> dict | None:
         return self._templates.get(template_id)
 
+    def custom_templates_unreadable(self) -> bool:
+        """True when custom_templates.json exists but couldn't be read as a list of templates."""
+        return self._custom_templates_unreadable
+
+    def _mark_runs_on_renamed_ids(self, renamed: dict[str, str]):
+        """Record the rename on each unfinished run that has no template fingerprint.
+
+        Such a run may have started on the built-in or on the copy, and only
+        this load knows the copy existed: once the rewritten custom file is on
+        disk, a later start sees no rename. So the runs are saved first, and a
+        start that exits before resuming leaves the mark for the next one.
+        """
+        with self._lock:
+            marked = False
+            for s in self._sessions:
+                new_id = renamed.get(s.get("template_id"))
+                if (new_id and not s.get("template_fingerprint")
+                        and s.get("state") in ("active", "waiting", "paused")):
+                    s["template_copy_renamed_to"] = new_id
+                    marked = True
+            if marked:
+                # Atomic: a crash mid-write must not cost every saved run.
+                _write_json_atomic(self._path, self._sessions)
+
+    def is_builtin_template(self, template_id: str) -> bool:
+        """True for a template shipped in session_templates/.
+
+        Drafts and custom templates may not take its id: replacing it would
+        drop its rules, such as code-review's distinct_roles.
+        """
+        tmpl = self._templates.get(template_id)
+        return tmpl is not None and not tmpl.get("is_custom")
+
+    def usable_template_id(self, template_id, fallback: str) -> str:
+        """``template_id`` if a draft may keep it, else ``fallback``.
+
+        A draft may not take a built-in template's id, and ids are dict keys,
+        so one that is not a non-empty string is replaced too.
+        """
+        if isinstance(template_id, str) and template_id.strip() and not self.is_builtin_template(template_id):
+            return template_id
+        return fallback
+
+    def _read_custom_file(self, custom_path: Path) -> list:
+        """The saved custom templates, for a save or delete to rewrite.
+
+        Raises CustomTemplatesUnreadable rather than start from an empty list
+        when the file can't be read: the rewrite would replace every template
+        in it. Also for the rest of a start whose load failed, even once the
+        file is repaired: its templates were never loaded, so a save could
+        replace one the user never saw. And for the rest of a start whose
+        rename of ids shared with built-ins couldn't be saved: the file still
+        has the old ids, so a delete would miss its entry and a save would
+        write both ids.
+        """
+        if self._custom_templates_unreadable:
+            raise CustomTemplatesUnreadable(
+                f"{custom_path.name} couldn't be read when agentchattr started; "
+                "fix it and restart before changing templates")
+        if self._custom_templates_rename_error:
+            raise CustomTemplatesUnreadable(
+                f"The template renames at startup couldn't be saved ({self._custom_templates_rename_error}), "
+                f"so {custom_path.name} still has the old ids; fix that and restart before changing templates")
+        if not custom_path.exists():
+            return []
+        try:
+            custom = json.loads(custom_path.read_text("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise CustomTemplatesUnreadable(
+                f"{custom_path.name} can't be read ({exc}); fix it before changing templates") from exc
+        if not isinstance(custom, list):
+            raise CustomTemplatesUnreadable(f"{custom_path.name} is not a list; fix it before changing templates")
+        return custom
+
     def save_custom_template(self, tmpl: dict) -> dict:
         custom_path = self._path.parent / "custom_templates.json"
-        custom = []
-        if custom_path.exists():
-            try:
-                custom = json.loads(custom_path.read_text("utf-8"))
-            except (json.JSONDecodeError, KeyError):
-                custom = []
+        custom = self._read_custom_file(custom_path)
 
         saved = dict(tmpl)
         saved["is_custom"] = True
-        custom = [t for t in custom if t.get("id") != saved.get("id")]
+        custom = [t for t in custom if not (isinstance(t, dict) and t.get("id") == saved.get("id"))]
         custom.append(saved)
         custom_path.write_text(json.dumps(custom, indent=2, ensure_ascii=False) + "\n", "utf-8")
         self._templates[saved["id"]] = saved
@@ -108,14 +276,9 @@ class SessionStore:
             return False
 
         custom_path = self._path.parent / "custom_templates.json"
-        custom = []
-        if custom_path.exists():
-            try:
-                custom = json.loads(custom_path.read_text("utf-8"))
-            except (json.JSONDecodeError, KeyError):
-                custom = []
+        custom = self._read_custom_file(custom_path)
 
-        new_custom = [t for t in custom if t.get("id") != template_id]
+        new_custom = [t for t in custom if not (isinstance(t, dict) and t.get("id") == template_id)]
         if len(new_custom) != len(custom):
             custom_path.write_text(json.dumps(new_custom, indent=2, ensure_ascii=False) + "\n", "utf-8")
 
@@ -155,6 +318,7 @@ class SessionStore:
                 "id": self._next_id,
                 "template_id": template_id,
                 "template_name": tmpl.get("name", template_id),
+                "template_fingerprint": template_fingerprint(tmpl),
                 "channel": channel,
                 "cast": cast,
                 "state": "active",
@@ -316,6 +480,9 @@ def validate_session_template(tmpl: dict) -> list[str]:
     if not tmpl.get("name") or not isinstance(tmpl.get("name"), str):
         errors.append("Missing or invalid 'name' (string required)")
 
+    if "id" in tmpl and (not isinstance(tmpl["id"], str) or not tmpl["id"].strip()):
+        errors.append("'id' must be a non-empty string")
+
     roles = tmpl.get("roles", [])
     if not isinstance(roles, list) or len(roles) == 0:
         errors.append("'roles' must be a non-empty array")
@@ -346,8 +513,9 @@ def validate_session_template(tmpl: dict) -> list[str]:
             if p not in roles_set:
                 errors.append(f"Phase {i + 1}: participant '{p}' not in roles list")
         prompt = phase.get("prompt", "")
-        if isinstance(prompt, str) and len(prompt) > 200:
-            errors.append(f"Phase {i + 1}: prompt too long ({len(prompt)} chars, max 200)")
+        if isinstance(prompt, str) and len(prompt) > MAX_PROMPT_CHARS:
+            errors.append(f"Phase {i + 1}: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_CHARS})")
+        errors.extend(_role_prompt_errors(i, phase, participants))
         if phase.get("is_output"):
             output_count += 1
 
@@ -356,4 +524,174 @@ def validate_session_template(tmpl: dict) -> list[str]:
     elif output_count > 1:
         errors.append(f"Multiple phases marked as output ({output_count}, expected 1)")
 
+    errors.extend(_distinct_roles_errors(tmpl.get("distinct_roles"), roles_set))
+    return errors
+
+
+def _distinct_roles_errors(groups, roles_set: set) -> list[str]:
+    """Errors for the optional ``distinct_roles`` list of role groups."""
+    if groups is None:
+        return []
+    if not isinstance(groups, list):
+        return ["'distinct_roles' must be an array of role groups"]
+    errors = []
+    for j, group in enumerate(groups):
+        names = [r for r in group if isinstance(r, str)] if isinstance(group, list) else []
+        if len(set(names)) < 2:
+            errors.append(f"distinct_roles group {j + 1}: must list at least two different roles")
+            continue
+        for role in group:
+            if not isinstance(role, str) or role not in roles_set:
+                errors.append(f"distinct_roles group {j + 1}: '{role}' not in roles list")
+    return errors
+
+
+def _role_prompt_errors(index: int, phase: dict, participants) -> list[str]:
+    """Errors for a phase's optional ``role_prompts`` map of role -> prompt.
+
+    A role prompt replaces the phase prompt for that one participant, so it
+    must name a participant of the same phase and obey the same length cap.
+    """
+    role_prompts = phase.get("role_prompts")
+    if role_prompts is None:
+        return []
+    label = f"Phase {index + 1}"
+    if not isinstance(role_prompts, dict):
+        return [f"{label}: 'role_prompts' must be an object mapping role to prompt"]
+
+    members = {p for p in participants if isinstance(p, str)} if isinstance(participants, list) else set()
+    errors = []
+    for role, text in role_prompts.items():
+        if role not in members:
+            errors.append(f"{label}: role prompt for '{role}', which is not a participant in this phase")
+        if not isinstance(text, str) or not text.strip():
+            errors.append(f"{label}: role prompt for '{role}' must be a non-empty string")
+        elif len(text) > MAX_PROMPT_CHARS:
+            errors.append(
+                f"{label}: role prompt for '{role}' too long ({len(text)} chars, max {MAX_PROMPT_CHARS})"
+            )
+    return errors
+
+
+# --- Casting ---
+#
+# A template's ``distinct_roles`` lists groups of roles that must go to
+# different agents, e.g. ``[["builder", "red_team"]]`` so that nobody
+# red-teams their own build. static/sessions.js mirrors auto_cast and the
+# conflict check (``_autoCast`` / ``_castConflicts``) for the launcher.
+
+
+class CastError(ValueError):
+    """The template's roles cannot be given to the agents that are online."""
+
+
+# Roles that never share an agent in a template that has both, whatever its
+# distinct_roles says: nobody red-teams their own build.
+BUILDER_AND_RED_TEAM = ("builder", "red_team")
+
+
+def _distinct_groups(tmpl: dict) -> list[list[str]]:
+    """The groups casting enforces: ``distinct_roles`` plus builder/red_team.
+
+    A template with both a builder and a red_team role keeps them apart even
+    when its distinct_roles leaves them out, as a draft copy of code-review
+    might. Malformed entries are skipped here; validate_session_template
+    reports them for drafts, and casting also runs on templates that were
+    never validated.
+    """
+    if not isinstance(tmpl, dict):
+        return []
+    groups = tmpl.get("distinct_roles")
+    result = [
+        list(dict.fromkeys(role for role in group if isinstance(role, str)))
+        for group in (groups if isinstance(groups, list) else [])
+        if isinstance(group, list)
+    ]
+    roles = tmpl.get("roles")
+    if (
+        isinstance(roles, list)
+        and all(role in roles for role in BUILDER_AND_RED_TEAM)
+        and not any(set(BUILDER_AND_RED_TEAM) <= set(group) for group in result)
+    ):
+        result.append(list(BUILDER_AND_RED_TEAM))
+    return result
+
+
+def auto_cast(tmpl: dict, online_agents: list[str]) -> dict:
+    """Give each of the template's roles to an online agent.
+
+    Round-robin in role order, reusing agents when roles outnumber them,
+    except that two roles in one ``distinct_roles`` group never share an
+    agent: a candidate that would repeat one is passed over for the next
+    agent in the rotation. Raises CastError when a role cannot be cast.
+
+    The pass is greedy and never revisits a choice, so with several
+    overlapping groups it can fail where a hand cast would work. For one
+    pair such as builder/red_team it fails only when one agent is online.
+    """
+    roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
+    if not isinstance(roles, list) or not roles:
+        raise CastError("template has no roles to cast")
+    agents = list(dict.fromkeys(online_agents))
+    if not agents:
+        raise CastError("not enough agents online to fill all roles")
+
+    groups = _distinct_groups(tmpl)
+    cast: dict[str, str] = {}
+    turn = 0
+    for role in roles:
+        rival_roles = {other for group in groups if role in group for other in group if other != role}
+        rivals = [other for other in dict.fromkeys(roles) if other in rival_roles and other in cast]
+        taken = {cast[other] for other in rivals}
+        pick = next(
+            (i % len(agents) for i in range(turn, turn + len(agents)) if agents[i % len(agents)] not in taken),
+            None,
+        )
+        if pick is None:
+            online = f"{len(agents)} agent is" if len(agents) == 1 else f"{len(agents)} agents are"
+            raise CastError(
+                f"Cannot auto-cast '{role}': it needs a different agent than "
+                f"{' and '.join(repr(r) for r in rivals)}, but only {online} online ({', '.join(agents)}). "
+                "Auto-cast fills roles in order and does not try every combination, "
+                "so choose the cast by hand or bring another agent online."
+            )
+        cast[role] = agents[pick]
+        turn = (pick + 1) % len(agents)
+    return cast
+
+
+def validate_cast(tmpl: dict, cast) -> list[str]:
+    """Check a role -> agent cast against the template. Returns errors (empty = valid).
+
+    Every key must be one of the template's roles: a stray key is inert until
+    the template under a running session changes, and then it is a live role
+    held by whoever the key named. Roles in one ``distinct_roles`` group may
+    not share an agent (or a human). Roles left uncast are not checked here.
+    """
+    if not isinstance(cast, dict):
+        return ["'cast' must be an object mapping role to agent"]
+    errors = [
+        f"Cast for '{role}' must be an agent name"
+        for role, agent in cast.items()
+        if agent and not isinstance(agent, str)
+    ]
+    if errors:
+        return errors
+
+    roles = tmpl.get("roles") if isinstance(tmpl, dict) else None
+    roles = roles if isinstance(roles, list) else []
+    errors = [f"Cast names '{role}', which is not a role in this template." for role in cast if role not in roles]
+    for group in _distinct_groups(tmpl):
+        first_role_by_agent: dict[str, str] = {}
+        for role in group:
+            agent = cast.get(role)
+            if not agent:
+                continue
+            if agent in first_role_by_agent:
+                errors.append(
+                    f"Cast conflict: '{first_role_by_agent[agent]}' and '{role}' "
+                    f"must be different agents, but both are '{agent}'."
+                )
+            else:
+                first_role_by_agent[agent] = role
     return errors

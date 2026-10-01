@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+from session_store import template_fingerprint, validate_cast
+
 log = logging.getLogger(__name__)
 
 # Dissent mandate injected for review/critique roles
@@ -26,6 +28,9 @@ class SessionEngine:
         self._trigger = agent_trigger
         self._registry = registry
         self._lock = threading.Lock()
+        # Runs whose template was missing at startup while the custom templates
+        # couldn't be read. They take no turns until a later start checks them.
+        self._held: set[int] = set()
 
         # Hook into message stream
         self._messages.on_message(self._on_message)
@@ -103,22 +108,88 @@ class SessionEngine:
         active = []
         for session in self._store.list_all():
             if session.get("state") in ("active", "waiting", "paused"):
-                active.append(self._enrich(session))
+                active.append(self._enrich(dict(session)))
         return active
 
     def resume_active_sessions(self):
         """On server restart, resume any sessions that were in progress.
+
+        A session whose cast breaks its template's rules (saved before the
+        builder/red_team check existed, say) is ended with the reason rather
+        than resumed, whatever its state: a waiting one would reach the
+        broken turn as soon as its agent answers. So is one whose template
+        is gone (a draft, which lives only in memory) or changed since it
+        started, including a built-in changed by an upgrade: resuming it
+        could run a role, phase or prompt it didn't start with. A run whose
+        template is missing while custom_templates.json can't be read is held
+        instead: it takes no turns, and a later start checks it again.
 
         Only re-trigger 'active' sessions. 'waiting' sessions already had
         their trigger sent before the restart — re-triggering would
         double-queue the same participant.
         """
         for session in self._store.list_all():
+            if session.get("state") not in ("active", "waiting", "paused"):
+                continue
+            tmpl = self._store.get_template(session.get("template_id", ""))
+            if tmpl:
+                reason = self._resume_blocker(session, tmpl)
+            elif self._store.custom_templates_unreadable():
+                # Its template may be in the file that didn't load, and ending
+                # the run can't be undone once the file is repaired. It is held
+                # instead: a template registered under the same id during this
+                # start must not pick it up.
+                log.warning("Session %d held: template '%s' is missing and the custom templates "
+                            "failed to load", session["id"], session.get("template_id"))
+                self._held.add(session["id"])
+                self._messages.add(
+                    sender="system",
+                    text=(f"Session on hold: {session.get('template_name', '?')}. Its template is missing and "
+                          "custom_templates.json couldn't be read. Fix the file and restart to continue it, "
+                          "or end it."),
+                    msg_type="system",
+                    channel=session.get("channel", "general"),
+                    metadata={"session_id": session["id"], "held": True},
+                )
+                continue
+            else:
+                reason = "template not found"
+            if reason:
+                log.warning("Session %d not resumed: %s", session["id"], reason)
+                self._store.interrupt(session["id"], reason)
+                continue
             if session.get("state") == "active":
                 log.info("Resuming session %d (%s) from phase %d, turn %d",
                          session["id"], session.get("template_name", "?"),
                          session["current_phase"], session["current_turn"])
                 self._trigger_current(session)
+
+    def _resume_blocker(self, session: dict, tmpl: dict) -> str:
+        """Why a saved session must not resume on ``tmpl``, or "" if it may.
+
+        The id can resolve to a different template than the one the session
+        started on. A custom template that shared a built-in id is renamed at
+        load, so the id then names the built-in; and a custom template can be
+        edited in place. A run saved with its template's fingerprint settles
+        this exactly. An older run has only the display name, which the renamed
+        copy may share, so an older run on an id a custom template shared is
+        not resumed at all; the store marks such runs when it renames.
+        """
+        template_id = session.get("template_id")
+        saved_name = session.get("template_name")
+        current_name = tmpl.get("name", template_id)
+        if saved_name and saved_name != current_name:
+            return (f"Template '{template_id}' changed since the session started "
+                    f"(was '{saved_name}', now '{current_name}').")
+        saved_fingerprint = session.get("template_fingerprint")
+        if saved_fingerprint:
+            if saved_fingerprint != template_fingerprint(tmpl):
+                return f"Template '{template_id}' changed since the session started."
+        elif session.get("template_copy_renamed_to"):
+            return (f"A custom template shared the id '{template_id}' and is now "
+                    f"'{session['template_copy_renamed_to']}'; "
+                    "the session may have started on either, so it was not resumed.")
+        return " ".join(validate_cast(tmpl, session.get("cast", {})))
 
     def _is_agent(self, name: str) -> bool:
         """Check if name belongs to a registered agent (not a human)."""
@@ -222,8 +293,19 @@ class SessionEngine:
 
     def _trigger_current(self, session: dict):
         """Trigger the agent whose turn it is."""
+        if session.get("id") in self._held:
+            return
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
+            return
+
+        # A draft run under the same id replaces the template under sessions
+        # already using it, so hold the cast to the template as it is now,
+        # not as it was when the session started.
+        cast_errors = validate_cast(tmpl, session.get("cast", {}))
+        if cast_errors:
+            log.warning("Session %d stopped before its next turn: %s", session["id"], " ".join(cast_errors))
+            self._store.interrupt(session["id"], " ".join(cast_errors))
             return
 
         phases = tmpl.get("phases", [])
@@ -285,7 +367,15 @@ class SessionEngine:
             lines.append(f"GOAL: {session['goal']}")
         lines.append(f"PHASE: {phase['name']} ({phase_idx + 1}/{total_phases})")
         lines.append(f"YOUR ROLE: {role}")
-        lines.append(f"INSTRUCTION: {phase.get('prompt', '')}")
+        # A phase may give one participant its own instruction (e.g. red_team
+        # in a review phase); every other participant gets the phase prompt.
+        instruction = phase.get("prompt", "")
+        role_prompts = phase.get("role_prompts")
+        if isinstance(role_prompts, dict):
+            role_prompt = role_prompts.get(role)
+            if isinstance(role_prompt, str) and role_prompt.strip():
+                instruction = role_prompt
+        lines.append(f"INSTRUCTION: {instruction}")
 
         # Dissent mandate for review/critique roles
         if role.lower() in _DISSENT_ROLES:
@@ -303,6 +393,8 @@ class SessionEngine:
 
     def _get_expected_agent(self, session: dict) -> str | None:
         """Get the agent name expected to respond next."""
+        if session.get("id") in self._held:
+            return None
         tmpl = self._store.get_template(session["template_id"])
         if not tmpl:
             return None
@@ -326,6 +418,10 @@ class SessionEngine:
 
     def _enrich(self, session: dict) -> dict:
         """Add computed fields to a session dict for the frontend."""
+        if session.get("id") in self._held:
+            # Whatever the id names now is not the template the run started on.
+            session["held"] = True
+            return session
         tmpl = self._store.get_template(session["template_id"])
         if tmpl:
             phases = tmpl.get("phases", [])
