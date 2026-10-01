@@ -151,7 +151,7 @@ test("authorized shortlist, gateway traces and paired recall compose through the
     sourceAccessRoles: data.principal.roles, authorizedIds: data.records.map((entry) => entry.id), relevantIds: ["match-5"],
     baselineIds: result.baselineIds, rankedIds: result.rankedIds, elapsedMs: performance.now() - start,
     gatewayAttempts: result.traces.map((trace, index) => ({ id: result.baselineIds[index],
-      eligible: result.eligibleIds.includes(result.baselineIds[index]), attemptedCall: trace.attemptedCall, outcome: trace.outcome })) }])
+      eligible: result.eligibleIds.includes(result.baselineIds[index]), attemptedCall: trace.attemptedCall, outcome: trace.outcome, failureClass: trace.failureClass })) }])
   assert.equal(report.synthetic.baselineRecallAt5, 0)
   assert.equal(report.synthetic.semanticRecallAt5, 1)
   assert.equal(report.synthetic.gateway.attempted, 6)

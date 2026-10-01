@@ -32,7 +32,9 @@ function metrics(pairs) {
     recallDifferencePercentagePoints: pairs.length ? 100 * (semanticRecall - baselineRecall) / pairs.length : null,
     unauthorizedResults: pairs.reduce((sum, pair) => sum + pair.rankedIds.filter((id) => !pair.authorizedIds.includes(id)).length, 0),
     latencyMs: { observedQueries: pairs.length, p95: latencies.length ? latencies[Math.ceil(latencies.length * 0.95) - 1] : null },
-    gateway: { eligible, attempted, failures, attemptedFailures, failuresWithoutCall: failures - attemptedFailures,
+    gateway: { eligible, attempted, failures, attemptedFailures,
+      providerFailures: attempts.filter((attempt) => attempt.outcome === "failure" && attempt.failureClass === "provider").length,
+      responseShapeFailures: attempts.filter((attempt) => attempt.outcome === "failure" && attempt.failureClass === "response-shape").length, failuresWithoutCall: failures - attemptedFailures,
       skipped: attempts.filter((attempt) => attempt.outcome === "skipped").length,
       abstentions, actionable,
       failureRate: rate(attemptedFailures, attempted), validPredictionCoverage: rate(actionable + abstentions, attempted),
@@ -62,6 +64,8 @@ function validatePair(pair) {
     if (!attempt || !pair.baselineIds.includes(attempt.id) || seen.has(attempt.id)
       || typeof attempt.eligible !== "boolean" || typeof attempt.attemptedCall !== "boolean"
       || !outcomes.includes(attempt.outcome)
+      || (attempt.outcome === "failure" ? !["provider", "response-shape"].includes(attempt.failureClass) : attempt.failureClass != null)
+      || (attempt.failureClass === "response-shape" && !attempt.attemptedCall)
       || (!attempt.eligible && (attempt.attemptedCall || attempt.outcome !== "skipped"))
       || (attempt.outcome === "skipped" && attempt.attemptedCall)
       || (["decision", "abstain"].includes(attempt.outcome) && !attempt.attemptedCall)) {

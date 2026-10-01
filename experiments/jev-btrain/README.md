@@ -297,3 +297,5 @@ and the universal failure/coverage gates. This prototype always reports
 do not establish model quality or authorize live read-only search.
 
 Shared gateway repair safeguards: require every captured source to have its own nonempty template group before assigning any evaluation split; reject successful serialized traces without a real attempted call and valid catalog probabilities; measure wall time after provider completion so synchronous work cannot evade the timeout. Timer cancellation alone cannot bound synchronous provider work. Tests must exercise these invariants through freeze/replay and persisted trace paths.
+
+History paired accounting requires the shared trace failure class (`provider` or `response-shape`) on failed gateway rows and reports both categories separately. Publishing this stacked prototype uses an explicit preceding Jev branch as the PR base and `--no-dispatch` for handoff updates, so an automatically dispatched runner cannot choose a different publication target.

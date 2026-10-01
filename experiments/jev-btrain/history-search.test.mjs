@@ -29,7 +29,7 @@ test("history reports paired recall at five, latency and gateway floors by origi
 test("history counts attempted failures and skips without crediting partial rankings", () => {
   const input = pair()
   input.rankedIds = [...input.baselineIds]
-  input.gatewayAttempts[0] = { id: "a", eligible: true, attemptedCall: true, outcome: "failure" }
+  input.gatewayAttempts[0] = { id: "a", eligible: true, attemptedCall: true, outcome: "failure", failureClass: "provider" }
   input.gatewayAttempts[1] = { id: "b", eligible: true, attemptedCall: false, outcome: "skipped" }
   const result = evaluateHistoryPairs([input]).synthetic
   assert.equal(result.gateway.eligible, 6)
@@ -54,6 +54,7 @@ test("history rejects unauthorized IDs, invented reranks, incomplete gateway evi
   for (const changed of changes) assert.throws(() => evaluateHistoryPairs([pair(changed)]))
   const partial = pair()
   partial.gatewayAttempts[0].outcome = "failure"
+  partial.gatewayAttempts[0].failureClass = "provider"
   assert.throws(() => evaluateHistoryPairs([partial]), /baseline/)
   assert.throws(() => evaluateHistoryPairs([pair({ origin: "real" })]), /proof/)
   assert.throws(() => evaluateHistoryPairs([pair(), pair()]), /unique/)
@@ -74,11 +75,30 @@ test("history failure rate uses attempted calls and reports failures without cal
   const input = pair()
   input.rankedIds = [...input.baselineIds]
   input.gatewayAttempts = input.gatewayAttempts.map((attempt, index) => ({ ...attempt,
-    outcome: index < 2 ? "failure" : "skipped", attemptedCall: index === 0 }))
+    outcome: index < 2 ? "failure" : "skipped", attemptedCall: index === 0, failureClass: index < 2 ? "provider" : null }))
   const gateway = evaluateHistoryPairs([input]).synthetic.gateway
   assert.equal(gateway.attempted, 1)
   assert.equal(gateway.failureRate, 1)
   assert.equal(gateway.attemptedFailures, 1)
   assert.equal(gateway.failuresWithoutCall, 1)
   assert.equal(gateway.validPredictionCoverage, 0)
+})
+
+test("history preserves provider and malformed-response failure categories", () => {
+  const input = pair({ rankedIds: pair().baselineIds })
+  input.gatewayAttempts[0] = { ...input.gatewayAttempts[0], outcome: "failure", failureClass: "provider" }
+  input.gatewayAttempts[1] = { ...input.gatewayAttempts[1], outcome: "failure", failureClass: "response-shape" }
+  const gateway = evaluateHistoryPairs([input]).synthetic.gateway
+  assert.equal(gateway.providerFailures, 1)
+  assert.equal(gateway.responseShapeFailures, 1)
+  for (const failureClass of [undefined, "other"]) {
+    input.gatewayAttempts[0].failureClass = failureClass
+    assert.throws(() => evaluateHistoryPairs([input]))
+  }
+})
+
+test("history cannot count a response-shape failure without an attempted call", () => {
+  const input = pair({ rankedIds: pair().baselineIds })
+  input.gatewayAttempts[0] = { ...input.gatewayAttempts[0], outcome: "failure", failureClass: "response-shape", attemptedCall: false }
+  assert.throws(() => evaluateHistoryPairs([input]))
 })
