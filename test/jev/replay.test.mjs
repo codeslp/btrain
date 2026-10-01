@@ -25,6 +25,7 @@ describe("Jev replay metrics", () => {
       split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 })
     const a = source("a", 1, "t1")
     for (const [sources, cases] of [
+      [[{ ...a, templateGroup: undefined }], [entry(a, "test")]],
       [[a], [entry(a, "test"), entry(a, "test")]],
       [[a, source("b", 1, "t2")], [entry(a, "train"), entry(source("b", 1, "t2"), "test")]],
       [[a, source("b", 2, "t1")], [entry(a, "train"), entry(source("b", 2, "t1"), "test")]],
@@ -36,7 +37,7 @@ describe("Jev replay metrics", () => {
       let calls = 0
       const provider = { localOnly: true, decide: async () => { calls += 1; return { ok: true, model: "pinned",
         answers: { signal: { choice: "feedback", probabilities: { feedback: 1, clear: 0, uncertain: 0 } } } } } }
-      await assert.rejects(() => replayManifest({ manifest, family, candidates, provider }), /Duplicate case source|group crosses splits/)
+      await assert.rejects(() => replayManifest({ manifest, family, candidates, provider }), /Duplicate case source|group crosses splits|captured template group/)
       assert.equal(calls, 0)
     }
   })

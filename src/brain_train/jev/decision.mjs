@@ -131,6 +131,13 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
   if (["decision", "abstain"].includes(trace.outcome) && opaqueId(trace.model) !== opaqueId(trace.modelPin)) {
     throw new Error("Decision model must match the model pin")
   }
+  if (["decision", "abstain"].includes(trace.outcome)
+    && (trace.attemptedCall !== true || !family.choices.includes(trace.prediction)
+      || !validProbabilityVector(trace.probabilities, family.choices)
+      || (trace.outcome === "decision" && (!family.allowedActions.includes(trace.suggestedAction)
+        || trace.probabilities[trace.prediction] < family.threshold)))) {
+    throw new Error("A successful trace requires a call, valid prediction, complete probabilities and permitted confident action")
+  }
   const traceRefs = opaqueRefs(trace.sourceRefs)
   const binding = sourceBindingFor(sourceProof, traceRefs)
   if (trace.sourceSnapshotHash !== binding.sourceSnapshotHash
@@ -241,7 +248,10 @@ export async function decideCandidate({ family, candidate, provider, mode = "off
     ])
   } catch (error) { return fail(timedOut || error?.message === "timeout" ? "timeout" : "provider-error") }
   finally { clearTimeout(timer) }
-  if (timedOut) return fail("timeout")
+  if (timedOut || elapsed() >= family.timeoutMs) {
+    controller.abort()
+    return fail("timeout", response)
+  }
   if (!response?.ok) return fail(failureReasons.has(response?.reason) ? response.reason : "provider-error", response)
   if (modelPin && response.model !== modelPin) return fail("model-mismatch", response)
   const answer = validAnswer(response, family)
