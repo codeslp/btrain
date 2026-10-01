@@ -8,7 +8,9 @@
 // escalates to a human when an earlier entry of the same task had the same
 // reason. A write while the lane is already `repair-needed` keeps the
 // recorded escalation. `btrain repair dispose` accepts only an escalated
-// repair, so the model's dispose answer shows the escalation it expects.
+// repair, so the model's dispose answer shows the escalation it expects. An
+// entry also starts a new repair, so an earlier repair's disposition no longer
+// counts (hasRepairDisposition).
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
@@ -41,6 +43,14 @@ function dropRegistry(model) {
 
 function doctorRepair(model) {
   return model.doctorRepair()
+}
+
+function dispose(model) {
+  return model.dispose({ lane: "x" })
+}
+
+function prWaiting(model) {
+  return model.prOutcome({ lane: "x", outcome: "waiting", pr: "101" })
 }
 
 // The doctor enters repair-needed (reason lock-mismatch) for a needs-review
@@ -87,6 +97,13 @@ const CASES = [
     modes: ["implementation"],
     disposes: false,
     steps: [repair("invalid-handoff"), clear, repair("invalid-handoff"), ...doctorEntry],
+  },
+  // Contract mode has no PR outcome from repair-needed (L5).
+  {
+    name: "a new repair voids an earlier disposition",
+    modes: ["implementation"],
+    disposes: true,
+    steps: [repair("invalid-handoff"), clear, repair("invalid-handoff"), dispose, prWaiting, repair("invalid-handoff")],
   },
 ]
 

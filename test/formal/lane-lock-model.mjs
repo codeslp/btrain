@@ -169,10 +169,13 @@ export class LaneLockModel {
   // the task's reason memory, as resolveRepairAssignment counts entries since
   // the last claim (countRepairEntries). The entry escalates to a human when
   // an earlier entry of the task had the same reason; the first entry for a
-  // reason starts its count. Contract-mode `update` keeps its own
-  // bookkeeping, which also counts a repair-needed write on a lane that is
-  // already repair-needed (README Known gaps).
+  // reason starts its count. The entry also starts a new repair, so an
+  // earlier repair's FR-29 disposition no longer counts (hasRepairDisposition
+  // reads only dispositions recorded after the latest entry). Contract-mode
+  // `update` keeps its own bookkeeping, which also counts a repair-needed
+  // write on a lane that is already repair-needed (README Known gaps).
   #recordRepairEntry(s, reason) {
+    s.disposition = false
     s.escalationExpected = s.repairReasonsSeen.includes(reason)
     if (!s.escalationExpected) s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
   }

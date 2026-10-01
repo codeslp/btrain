@@ -976,6 +976,21 @@ for (const { name, modes, disposes, steps } of [
     disposes: false,
     steps: [fr18Repair("invalid-handoff"), fr18Clear, fr18Repair("invalid-handoff"), ...fr18DoctorEntry],
   },
+  // Contract mode has no PR outcome from repair-needed (L5). The new entry
+  // voids the first repair's disposition (hasRepairDisposition).
+  {
+    name: "a new repair voids an earlier disposition",
+    modes: ["implementation"],
+    disposes: true,
+    steps: [
+      fr18Repair("invalid-handoff"),
+      fr18Clear,
+      fr18Repair("invalid-handoff"),
+      { t: "dispose", lane: "x" },
+      { t: "prOutcome", lane: "x", outcome: "waiting" },
+      fr18Repair("invalid-handoff"),
+    ],
+  },
 ]) {
   for (const mode of modes) {
     test(`FR-18 repair memory: ${name} (${mode} mode)`, { skip: !ENABLED }, async () => {

@@ -46,7 +46,7 @@ agent or provider credentials.
 | implementation mode | Real behavior vs the implementation mirror | Must pass; a failure means a new, unknown divergence |
 | closed-chain check | Deterministic close-without-merge chain | Must pass with zero tallies: the chain conforms end to end |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
-| FR-18 repair-memory witnesses | Repair entries, clears, a reclaim, and a doctor entry, each closed by a dispose | Must pass: model and implementation agree on every escalation (four cases in both modes, two in implementation mode only) |
+| FR-18 repair-memory witnesses | Repair entries, clears, a reclaim, and a doctor entry, each closed by a dispose | Must pass: model and implementation agree on every escalation (four cases in both modes, three in implementation mode only) |
 | repaired-drift witnesses | Close-without-merge, `--final` rejection, unaudited-release rejection | Must pass: normal regression tests since the drift-repair lane |
 
 A contract-mode failure is a fresh `validation_mismatch` verdict in spec 014
@@ -142,8 +142,10 @@ records each `repair-needed` entry the way `resolveRepairAssignment` counts
 it, in `update` and in `doctorRepair`. An entry comes from another status. It
 escalates when an earlier entry since the last claim had the same reason, and
 a write while the lane is already `repair-needed` keeps the recorded
-escalation. The FR-18 repair-memory witnesses and
-`lane-lock-model-fr18.test.mjs` guard it.
+escalation. An entry also voids an earlier repair's disposition, because
+`hasRepairDisposition` reads only dispositions recorded after the latest
+entry. The FR-18 repair-memory witnesses and `lane-lock-model-fr18.test.mjs`
+guard it.
 
 Verified working (positive witnesses): spec 006 FR-18 same-reason repair
 re-entry escalates to a human (`repairEscalation: "human"`, attempts
@@ -203,9 +205,10 @@ that only carry another lane's reviewed work.
   above does not list. With a new reason the model moves the repair owner to
   the entry's actor; when that actor is not the FR-7 owner (a third agent
   declared the repair, say), contract mode fails with a false
-  `validation_mismatch` (repair owner diverged). Whether the CLI may make the
-  write at all is undesignated: spec 015 row 13's prose excludes
-  `repair-needed` as the CLI source, while `transitions.mjs` row 13 accepts
-  it. The contract-model fix waits on that designation.
+  `validation_mismatch` (repair owner diverged). Spec 015 row 13 (designated)
+  gives the CLI source as "Active minus `repair-needed`", which leaves the
+  write to the advisory L4 repair-entry case. But `transitions.mjs` row 13
+  matches the write and records no advisory. The contract-model fix waits on
+  reconciling the two.
 - Traces are harness-internal JSON; export to TLC trace-validation format is
   future work once `specs/tla/` exists.
