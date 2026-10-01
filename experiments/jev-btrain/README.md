@@ -50,9 +50,10 @@ parameters or fragments fail validation; prospective capture strips those fields
 Regression tests cover the persisted record and freeze boundaries, since gateway-generated
 happy paths alone do not exercise malformed imported records.
 
-This foundation does not enable live Jev use. Family-specific benchmarks, privacy and
-retention decisions, shadow evidence, and human promotion records are still required by
-Spec 021 before broad advisory or assist behavior.
+The shared experimental family gateway stays offline. Separately, the existing live PR
+interpreter now defaults to feedback-only assist under the explicit 2026-10-01 user instruction.
+This does not claim that the larger benchmark or shadow gates passed. Other family adapters
+need their own live hooks and evaluations.
 
 These experiments compare btrain's current deterministic heuristics with a local,
 Jev-compatible System One model. They do not change workflow state.
@@ -312,3 +313,22 @@ G6 paired gateway outcomes require `failureClass` (`provider` or `response-shape
 Frozen PR evaluation also validates event identity, author/surface, timestamps and their ordering, explicit event-head knowledge, nullable formal state and deterministic disposition. A hash only establishes content identity; it cannot supply missing provenance. Imported records must meet the same contract as prospective captures. Invalid transport response shapes use the response-shape failure category.
 
 Snapshot schema 3 includes the source host in version identity. Schema 1/2 recaptures deduplicate only within the same host; a foreign-host observation must never suppress valid evidence. Composition tests capture, persist and replay actual snapshots rather than assigning artificial IDs.
+
+## Default live Jev in btrain
+
+Normal `btrain pr status` and `btrain pr poll` use the existing current-head review-text
+interpreter in feedback-only `assist` when credentials are available. Jev may identify additional
+feedback; it cannot approve, merge or waive a mandatory check. Provider and malformed-answer
+failures preserve deterministic results. Set `BTRAIN_JEV_MODE=off` to disable calls, or `shadow`
+to retain observational classification without applying feedback.
+
+Credential precedence is `BTRAIN_JEV_API_KEY`, `JEV_API_KEY`, `TYPESAFE_API_KEY`, then a private
+user JSON credential containing `apiKey`. Its location is `BTRAIN_JEV_CREDENTIALS_FILE` when
+explicitly set, otherwise `jev.json` in `BRAIN_TRAIN_HOME` (default `~/.btrain`). On POSIX the
+file must belong to the current user and have no group/other permissions (normally mode0600).
+The loader rejects symlinks, nonregular files, oversized/malformed data, and insecure permissions;
+it never searches a repository for secrets. No key value is printed or written to decision traces.
+
+This default records the operator's activation instruction. Larger real-data evaluations and
+live hooks for the newer offline families remain separate work; test counts are not model
+accuracy claims. Runtime composition is covered by `test/jev-runtime.test.mjs`.

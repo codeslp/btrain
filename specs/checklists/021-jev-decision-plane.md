@@ -33,14 +33,14 @@ quality checks, not claims that the runtime work is complete.
 - [x] WS7–10 start offline; their own frozen gate precedes any live shadow, suggestion, nudge,
   or read-only search. Split checks cover train/calibration, train/test, and calibration/test.
 - [x] Source capture retains the deterministic disposition even without a model candidate and
-  links a pending or eventual outcome; under-labeled families stay offline except G4/G6-R pilots.
+  links a pending or eventual outcome; under-labeled families stay offline except the recorded user-directed PR activation and G4/G6-R pilots.
 - [x] The PR gate requires per-class support inside the untouched test split as well as training
   and calibration; grouped splits cannot borrow support from another partition.
 - [x] Evaluation runs, traces, and promotion records pin the family policy and code revision;
   G4–G10 require low provider failure and minimum actionable decision coverage before promotion.
 - [x] G6-R repository-rule findings are the only WS6 pre-gate advisory pilot; end-of-turn and
   review-risk stay offline until separate frozen subgates pass.
-- [x] Assist promotion requires a completed same-policy/model/repository shadow record meeting
+- [x] Benchmark-backed assist promotion requires a completed same-policy/model/repository shadow record meeting
   preregistered duration, case count, live benefit, failure, and harmful-error criteria.
 
 ## Requirement-to-plan coverage
@@ -83,8 +83,17 @@ opportunities too broadly. It prevents a source idea from disappearing behind a 
 - [ ] Trace retention and access policy is decided before live collection.
 - [ ] WS1 yields event-time PR heads and an explicit unknown path for backfills.
 - [ ] Two independent labelers and adjudication produce the frozen PR corpus.
-- [ ] The 200-case PR gate and family-specific offline gates pass before live shadow or assist.
+- [ ] The 200-case PR gate and family-specific quality gates pass for benchmark-backed promotion; the user-directed PR activation remains explicitly distinguished.
 - [ ] Each assist action receives a human-signed promotion record and a tested rollback.
 
 These unchecked items are intentional implementation gates. They do not block review of the
 specification or planning documents.
+
+## Default live PR activation requirements (2026-10-01)
+
+- [x] The explicit user instruction superseding the off-by-default PR policy is recorded.
+- [x] Configured PR commands run feedback-only assist without an environment mode flag.
+- [x] Explicit off, observational shadow, missing credentials and provider failure preserve their contracts.
+- [x] A model clear cannot supply PR approval, bypass reviewer checks, or merge.
+- [x] Credentials load from a bounded private user file or environment, not repository discovery.
+- [x] The reviewed installed runtime completes an actual hosted-provider smoke (`jev-1.13.0`, synthetic feedback, 294 ms).

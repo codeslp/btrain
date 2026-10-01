@@ -6,16 +6,26 @@ import {
 } from "../src/brain_train/system-one.mjs"
 
 describe("System One runtime configuration", () => {
-  it("is disabled by default and requires an explicit mode", () => {
+  it("defaults to feedback assist and reports missing credentials explicitly", () => {
     assert.deepEqual(readSystemOneRuntimeConfig({}), {
-      mode: "off",
+      mode: "assist",
       enabled: false,
       apiKey: "",
       endpoint: "https://api.typesafe.ai/v1/systemone",
       model: "jev-latest",
       timeoutMs: 2000,
-      reason: "mode-off",
+      reason: "missing-api-key",
     })
+  })
+
+  it("runs assist with a configured key without an explicit mode and honors off", () => {
+    const active = readSystemOneRuntimeConfig({ JEV_API_KEY: "test-key" })
+    assert.equal(active.mode, "assist")
+    assert.equal(active.enabled, true)
+    assert.equal(active.reason, "enabled")
+    const off = readSystemOneRuntimeConfig({ JEV_API_KEY: "test-key", BTRAIN_JEV_MODE: "off" })
+    assert.equal(off.enabled, false)
+    assert.equal(off.reason, "mode-off")
   })
 
   it("keeps shadow and assist disabled when the key is missing", () => {

@@ -27,7 +27,7 @@ import {
 } from "./handoff/pr-comments.mjs"
 import {
   createSystemOneClient,
-  readSystemOneRuntimeConfig,
+  loadSystemOneRuntimeConfig,
 } from "./system-one.mjs"
 
 const execFileAsync = promisify(execFile)
@@ -877,7 +877,7 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
     cwd: repoRoot,
   })
   const input = { pr, rawComments, prFlowConfig }
-  const semanticConfig = readSystemOneRuntimeConfig(process.env)
+  const semanticConfig = await loadSystemOneRuntimeConfig(process.env)
   if (semanticConfig.mode === "off" && semanticConfig.reason === "mode-off") {
     return classifyPrReviewState(input)
   }
