@@ -17,7 +17,9 @@ import {
   getPrCommentsLogPath,
   getPrCommentsCursorsPath,
   getCursorKey,
+  persistCapturedComments,
 } from "../src/brain_train/handoff/pr-comments.mjs"
+import { readEvidence } from "../src/brain_train/jev/evidence.mjs"
 
 describe("parseConcatenatedJsonArrays", () => {
   it("returns [] on empty input", () => {
@@ -44,6 +46,59 @@ describe("parseConcatenatedJsonArrays", () => {
   })
 })
 
+describe("comment capture and Jev evidence composition", () => {
+  it("keeps submitted comments when GitHub also returns a pending review", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-pending-"))
+    try {
+      const at = "2026-09-01T10:00:00Z"
+      const comments = shapeComments({
+        issueComments: [{ id: 9, user: { login: "bot" }, body: "Review done", html_url: "https://example.test/9", created_at: at }],
+        reviewComments: [{ id: 11, user: { login: "reviewer" }, body: "draft inline", html_url: "https://example.test/11", created_at: at, pull_request_review_id: 10 }],
+        reviews: [{ id: 10, user: { login: "reviewer" }, body: "draft", state: "PENDING", html_url: "https://example.test/10", submitted_at: null }],
+      })
+      await persistCapturedComments(root, { identity: { owner: "o", repo: "r" }, laneId: "a", prNumber: "7", comments, captureHead: { head: "a".repeat(40), observedAt: at }, capturedAt: at })
+      assert.deepEqual((await readEvidence(root)).snapshots.map((row) => row.eventId), ["9"])
+      assert.deepEqual((await readComments(root, "a", "7")).map((row) => row.id), [9])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("writes provenance and the original comment once across repeated pulls", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-evidence-"))
+    try {
+      const comment = { surface: "review", id: 8, author: "bot", body: "Fix test", url: "https://example.test/8", at: "2026-09-01T10:00:00Z", state: "CHANGES_REQUESTED", reviewedCommit: "a".repeat(40) }
+      const args = { identity: { owner: "o", repo: "r" }, laneId: "a", prNumber: "7", comments: [comment], captureHead: { head: "b".repeat(40), observedAt: "2026-09-01T10:05:00Z" }, capturedAt: "2026-09-01T10:05:01Z" }
+      assert.equal((await persistCapturedComments(root, args)).length, 1)
+      assert.equal((await persistCapturedComments(root, args)).length, 0)
+      const evidence = await readEvidence(root)
+      assert.equal(evidence.snapshots.length, 1)
+      assert.equal(evidence.snapshots[0].eventHead, "unknown")
+      assert.equal(evidence.snapshots[0].captureHead, "b".repeat(40))
+      assert.equal(evidence.snapshots[0].reviewedCommit, "a".repeat(40))
+      assert.equal((await readComments(root, "a", "7"))[0].body, "Fix test")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("pins an unedited issue comment's full reviewed commit through the capture pipeline", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-evidence-"))
+    try {
+      const at = "2026-09-01T10:00:00Z"
+      const raw = { issueComments: [{ id: 9, user: { login: "bot" }, body: `**Reviewed commit:** \`${"c".repeat(40)}\``, html_url: "https://example.test/9", created_at: at, updated_at: at }] }
+      const comments = shapeComments(raw)
+      await persistCapturedComments(root, { identity: { owner: "o", repo: "r" }, laneId: "a", prNumber: "7", comments, captureHead: { head: "d".repeat(40), observedAt: "2026-09-01T10:05:00Z" }, capturedAt: "2026-09-01T10:05:01Z" })
+      const { snapshots } = await readEvidence(root)
+      assert.equal(snapshots[0].reviewedCommit, "c".repeat(40))
+      assert.equal(snapshots[0].updatedAt, at)
+      assert.equal(snapshots[0].eventHead, "unknown")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("shapeComments", () => {
   it("shapes issue, inline, and review surfaces uniformly", () => {
     const raw = {
@@ -60,10 +115,11 @@ describe("shapeComments", () => {
           path: "src/foo.ts",
           line: 42,
           pull_request_review_id: 99,
+          commit_id: "a".repeat(40),
         },
       ],
       reviews: [
-        { id: 100, user: { login: "carol" }, body: "blocking", state: "CHANGES_REQUESTED", html_url: "u3", submitted_at: "2026-05-03T00:00:00Z" },
+        { id: 100, user: { login: "carol" }, body: "blocking", state: "CHANGES_REQUESTED", html_url: "u3", submitted_at: "2026-05-03T00:00:00Z", commit_id: "b".repeat(40) },
       ],
     }
     const out = shapeComments(raw)
@@ -79,6 +135,8 @@ describe("shapeComments", () => {
     assert.equal(out[1].file, "src/foo.ts")
     assert.equal(out[1].line, 42)
     assert.equal(out[2].state, "CHANGES_REQUESTED")
+    assert.equal(out[1].reviewedCommit, "a".repeat(40))
+    assert.equal(out[2].reviewedCommit, "b".repeat(40))
   })
 
   it("sorts by timestamp ascending, then by id", () => {

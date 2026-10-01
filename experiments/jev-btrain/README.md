@@ -1,5 +1,59 @@
 # btrain typed-decision experiments
 
+## Spec 021 offline foundation
+
+`btrain handoff pull-pr` now stores append-only source snapshots under
+`.btrain/jev/evidence/`. Each snapshot has the source repository, PR, comment URL and ID,
+author, event and capture times, reviewed commit when GitHub supplies one, a body hash,
+and the PR head observed during the pull. The event-time head stays `unknown`: polling
+cannot prove what the head was when an earlier comment was written. Later outcomes are
+appended separately through `appendSourceOutcome`; `readEvidence` includes an initial
+`pending` outcome for every snapshot. These local records contain no comment body.
+Version 2 snapshot IDs bind the comment identity, edit timestamp (or creation time), and
+body hash. Repeated observations deduplicate; edits append a new immutable version.
+Legacy snapshots remain readable.
+
+Use `annotationCandidates` from `src/brain_train/jev/manifest.mjs` to export source
+references for independent labeling. Set `requireEventHead: true` for an exact-head PR
+evaluation; current polling snapshots are excluded until a true event-time source exists.
+`freezeLabeledManifest` requires two distinct annotators, adjudication, pinned model and
+policy metadata, and one split per PR and normalized template group. It returns canonical
+source metadata, a source hash, and a dataset hash. Replay checks both hashes, so a changed
+source URL, reviewed commit, event head, or label fails before a provider call. Keep raw text
+and candidate fixtures inside their source repository.
+Freezing and replay share corpus grouping validation: duplicate case sources and PR or
+template groups crossing splits are rejected even when a caller recomputes the dataset
+hash. Replay validates every candidate before making calls and copies the frozen manifest
+before awaiting a provider.
+
+`decideCandidate` from `src/brain_train/jev/decision.mjs` defaults to `off`. In `offline`
+mode an injected local fake provider can replay private fixtures without a hosted call.
+Create a `createDecisionRun(family)` token for each independent case and pass it as `run`;
+reuse that token across retries so the gateway enforces the family's call budget.
+Providers receive an abort signal when a call times out. Failed responses retain sanitized
+billed usage when the provider returns it.
+It returns `skipped`, `decision`, `abstain`, or `failure` traces and only *suggests* an
+allowed action. `appendDecisionTrace` requires the matching family and a source manifest proof,
+then writes an allowlisted
+local trace without the input text. Trace source references and provider/model IDs are opaque
+hashes; source URLs and pinned model names remain inspectable in the local evidence and frozen
+manifest. `replayManifest` requires candidate source content, hash, and URL to match the frozen
+source before any provider call. It compares the pinned manifest
+with a deterministic baseline and reports skips, valid abstentions, provider failures,
+class metrics, coverage, latency, and observed cost separately. The focused executable
+examples are `test/jev/*.test.mjs`.
+Persisted failure and skipped traces have no prediction, probabilities, or suggested
+action; abstentions have no suggested action. Every non-decision record has `actionTaken: none`.
+Successful records require a typed SHA256 input hash, and decision choices must be nonempty
+strings before constructing a family. Imported corpus source URLs with credentials, query
+parameters or fragments fail validation; prospective capture strips those fields first.
+Regression tests cover the persisted record and freeze boundaries, since gateway-generated
+happy paths alone do not exercise malformed imported records.
+
+This foundation does not enable live Jev use. Family-specific benchmarks, privacy and
+retention decisions, shadow evidence, and human promotion records are still required by
+Spec 021 before broad advisory or assist behavior.
+
 These experiments compare btrain's current deterministic heuristics with a local,
 Jev-compatible System One model. They do not change workflow state.
 
@@ -77,3 +131,9 @@ Each request has a 10-second deadline, including response parsing. Set
 error with no prediction, excludes the case from classification metrics, records reduced
 coverage and a failure count, and then continues to the next case.
 Run the offline timeout regressions with `node --test experiments/jev-btrain/run.test.mjs`.
+
+Shared gateway repair safeguards: require every captured source to have its own nonempty template group before assigning any evaluation split; reject successful serialized traces without a real attempted call and valid catalog probabilities; measure wall time after provider completion so synchronous work cannot evade the timeout. Timer cancellation alone cannot bound synchronous provider work. Tests must exercise these invariants through freeze/replay and persisted trace paths.
+
+Frozen PR evaluation also validates event identity, author/surface, timestamps and their ordering, explicit event-head knowledge, nullable formal state and deterministic disposition. A hash only establishes content identity; it cannot supply missing provenance. Imported records must meet the same contract as prospective captures. Invalid transport response shapes use the response-shape failure category.
+
+Snapshot schema 3 includes the source host in version identity. Schema 1/2 recaptures deduplicate only within the same host; a foreign-host observation must never suppress valid evidence. Composition tests capture, persist and replay actual snapshots rather than assigning artificial IDs.
