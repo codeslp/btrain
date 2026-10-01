@@ -7,6 +7,7 @@ import { datasetHashFor, sourceSnapshotHashFor } from "../../src/brain_train/jev
 
 const family = createDecisionFamily({ id: "sample", questionVersion: "1", policyVersion: "1", policyConfig: { evaluation: { baselineId: "fixture", thresholds: { feedback: 0.8 } } }, choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
 const sourceContent = "frozen review text"
+const provenance = { eventId: "fixture-event", surface: "review", author: "bot", eventAt: "2026-09-01T10:00:00Z", capturedAt: "2026-09-01T10:05:00Z", eventHead: "unknown", formalState: null, deterministicDisposition: "not-evaluated" }
 const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
 const rows = [
   { sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, trace: { outcome: "decision", prediction: "feedback", attemptedCall: true, latencyMs: 10, cost: 0.01 } },
@@ -20,12 +21,13 @@ describe("Jev replay metrics", () => {
     const labels = [...family.choices]
     const pins = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash,
       model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
-    const source = (id, prNumber, templateGroup) => ({ id, repository: "o/r", prNumber, templateGroup, sourceRef: `https://example.test/${id}`, sourceHash })
+    const source = (id, prNumber, templateGroup) => ({ ...provenance, id, repository: "o/r", prNumber, templateGroup, sourceRef: `https://example.test/${id}`, sourceHash })
     const entry = (s, split) => ({ sourceId: s.id, repository: s.repository, prNumber: s.prNumber, templateGroup: s.templateGroup,
       split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 })
     const a = source("a", 1, "t1")
     for (const [sources, cases] of [
       [[{ ...a, templateGroup: undefined }], [entry(a, "test")]],
+      [[{ ...a, eventAt: undefined }], [entry(a, "test")]],
       [[a], [entry(a, "test"), entry(a, "test")]],
       [[a, source("b", 1, "t2")], [entry(a, "train"), entry(source("b", 1, "t2"), "test")]],
       [[a, source("b", 2, "t1")], [entry(a, "train"), entry(source("b", 2, "t1"), "test")]],
@@ -37,7 +39,7 @@ describe("Jev replay metrics", () => {
       let calls = 0
       const provider = { localOnly: true, decide: async () => { calls += 1; return { ok: true, model: "pinned",
         answers: { signal: { choice: "feedback", probabilities: { feedback: 1, clear: 0, uncertain: 0 } } } } } }
-      await assert.rejects(() => replayManifest({ manifest, family, candidates, provider }), /Duplicate case source|group crosses splits|captured template group/)
+      await assert.rejects(() => replayManifest({ manifest, family, candidates, provider }), /Duplicate case source|group crosses splits|captured template group|source provenance/)
       assert.equal(calls, 0)
     }
   })
@@ -90,7 +92,7 @@ describe("Jev replay metrics", () => {
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
     const cases = [{ sourceId: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
     const labels = ["clear", "feedback", "uncertain"]
-    const sources = [{ id: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
+    const sources = [{ ...provenance, id: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
     const pins = { family: "sample", questionVersion: "1", policyHash: family.policyHash, model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
     const manifest = { datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins), sourceSnapshotHash, sources, labels, pins, cases }
@@ -178,7 +180,7 @@ describe("Jev replay metrics", () => {
 
   it("reports synthetic controls separately from real replay metrics", async () => {
     const labels = ["clear", "feedback", "uncertain"]
-    const sources = ["real", "synthetic"].map((id, index) => ({ id, repository: "o/r", prNumber: index + 1, templateGroup: id, sourceRef: `https://example.test/${id}`, sourceHash }))
+    const sources = ["real", "synthetic"].map((id, index) => ({ ...provenance, id, repository: "o/r", prNumber: index + 1, templateGroup: id, sourceRef: `https://example.test/${id}`, sourceHash }))
     const cases = [
       { sourceId: "real", repository: "o/r", prNumber: 1, templateGroup: "real", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0 },
       { sourceId: "synthetic", repository: "o/r", prNumber: 2, templateGroup: "synthetic", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 },
