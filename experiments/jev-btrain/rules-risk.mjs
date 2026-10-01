@@ -29,13 +29,21 @@ function confusion(pairs, field) {
     precision: rate(truePositive, truePositive + falsePositive), recall: rate(truePositive, truePositive + falseNegative) }
 }
 
+function percentile(values, fraction) {
+  return values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * fraction) - 1] : null
+}
+
 function gatewayMetrics(pairs) {
   const attempted = pairs.filter((pair) => pair.attemptedCall)
+  const latencies = attempted.map((entry) => entry.latencyMs).filter(Number.isFinite)
+  const costs = attempted.map((entry) => entry.cost).filter(Number.isFinite)
   const failures = attempted.filter((pair) => pair.outcome === "failure").length
   const eligible = pairs.filter((pair) => pair.eligible).length
   const decisions = pairs.filter((pair) => pair.outcome === "decision").length
   const abstentions = pairs.filter((pair) => pair.outcome === "abstain").length
   return { eligible, attemptedCalls: attempted.length, decisions, abstentions,
+    latencyMs: { observedCalls: latencies.length, p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95) },
+    cost: { observedCalls: costs.length, total: costs.length ? costs.reduce((total, value) => total + value, 0) : null },
     skipped: pairs.filter((pair) => pair.outcome === "skipped").length,
     attemptedFailures: failures,
     providerFailures: pairs.filter((pair) => pair.outcome === "failure" && pair.failureClass === "provider").length,
@@ -51,6 +59,8 @@ function validGatewayOutcome(entry) {
     && ["decision", "abstain", "failure", "skipped"].includes(entry.outcome)
     && (entry.outcome === "failure" ? ["provider", "response-shape"].includes(entry.failureClass) : entry.failureClass == null)
     && (entry.failureClass !== "response-shape" || entry.attemptedCall)
+    && ["latencyMs", "cost"].every((field) => entry[field] == null
+      || (entry.attemptedCall && Number.isFinite(entry[field]) && entry[field] >= 0))
     && (entry.eligible || entry.outcome === "skipped")
     && (entry.outcome !== "skipped" || !entry.attemptedCall)
     && (!["decision", "abstain"].includes(entry.outcome) || entry.attemptedCall)

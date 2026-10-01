@@ -19,7 +19,7 @@ function completeSourceProvenance(source) {
   const timestamp = (value) => text(value) && Number.isFinite(Date.parse(value))
   let ref
   try { ref = new URL(source?.sourceRef) } catch { return false }
-  if (!source || !text(source.sourceRef) || !["https:", "http:"].includes(ref.protocol) || ref.username || ref.password
+  if (!source || !text(source.sourceRef) || !["https:", "http:"].includes(ref.protocol) || ref.username || ref.password || ref.search || ref.hash
     || !text(source.id) || !text(source.repository) || !/^[^/\s]+\/[^/\s]+$/.test(source.repository)
     || !Number.isSafeInteger(source.prNumber) || source.prNumber < 1
     || !text(source.eventId) || !["issue", "review", "inline"].includes(source.surface) || !text(source.author)

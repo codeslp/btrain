@@ -8,6 +8,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { createHash } from "node:crypto"
+import { createSourceSnapshot, appendSourceSnapshots, readEvidence } from "../src/brain_train/jev/evidence.mjs"
 import {
   applyPrStatusToHandoff,
   buildPrSemanticReplayCandidates,
@@ -27,7 +28,6 @@ import {
   patchHandoff,
 } from "../src/brain_train/core.mjs"
 import { createSystemOneClient } from "../src/brain_train/system-one.mjs"
-import { createSourceSnapshot } from "../src/brain_train/jev/evidence.mjs"
 import { freezeLabeledManifest, sourceSnapshotHashFor } from "../src/brain_train/jev/manifest.mjs"
 import { replayManifest } from "../src/brain_train/jev/replay.mjs"
 import { createDecisionFamily } from "../src/brain_train/jev/decision.mjs"
@@ -374,6 +374,48 @@ describe("PR review flow classification", () => {
     const edited = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [oldVersion, snapshot] })
     assert.deepEqual(edited.excluded, [{ sourceId: oldVersion.id, reason: "not-current-semantic-candidate" }])
     assert.deepEqual(edited.candidates, result.candidates)
+  })
+
+  it("does not let foreign source identities make a valid snapshot ambiguous", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = input.pr.url
+    const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null }
+    for (const changes of [{ sourceRef: "https://ghe.internal/o/r/pull/12" }, { repository: "other/repo" }, { prNumber: 13 }]) {
+      const foreign = { ...snapshot, ...changes, id: "c".repeat(64) }
+      for (const sourceSnapshots of [[foreign, snapshot], [snapshot, foreign]]) {
+        const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots })
+        assert.equal(result.candidates.length, 1)
+        assert.equal(result.candidates[0].sourceId, snapshot.id)
+        assert.deepEqual(result.excluded, [{ sourceId: foreign.id, reason: "source-identity-mismatch" }])
+      }
+    }
+  })
+
+  it("captures persists and replays same-event snapshots on different hosts without losing valid evidence", async () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const raw = input.rawComments.issueComments[0]
+    raw.html_url = input.pr.url
+    const comment = { surface: "issue", id: raw.id, author: raw.user.login, body: raw.body,
+      at: raw.created_at, updatedAt: raw.created_at, url: raw.html_url }
+    const snapshot = (url) => createSourceSnapshot({ repository: "o/r", prNumber: 12, laneId: "a",
+      comment: { ...comment, url }, capturedAt: "2026-09-20T20:05:00Z" })
+    const foreign = snapshot("https://ghe.internal/o/r/pull/12")
+    const valid = snapshot(comment.url)
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-pr-host-composition-"))
+    try {
+      assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 2)
+      assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 0)
+      const sourceSnapshots = (await readEvidence(root)).snapshots
+      assert.equal(sourceSnapshots.length, 2)
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [valid.id])
+      assert.deepEqual(result.excluded, [{ sourceId: foreign.id, reason: "source-identity-mismatch" }])
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
   })
 
   it("rejects frozen comments from another GitHub host with the same repository and PR", () => {
