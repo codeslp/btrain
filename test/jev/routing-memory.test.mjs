@@ -156,6 +156,16 @@ test("memory compares only authorized events for the same key that postdate the 
   } } })
   assert.deepEqual(seen, ["event-2"])
   assert.equal(result.warnings.length, 1)
+  assert.equal(result.traces.length, record.events.length)
+  assert.deepEqual(result.traces.map(({ outcome, attemptedCall }) => [outcome, attemptedCall]),
+    [...Array(5).fill(["skipped", false]), ["decision", true]])
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-memory-skips-"))
+  try {
+    for (const trace of result.traces) {
+      const entry = await appendDecisionTrace(root, trace, memoryFamily, frozen(record).sourceProof)
+      assert.equal(entry.sourceSnapshotHash, frozen(record).sourceProof.sourceSnapshotHash)
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 
 test("memory retains canonical history for supported uncertain malformed and failed responses", async () => {
@@ -261,4 +271,17 @@ test("routing and memory traces compose with the shared redacted evidence writer
     assert.equal(text.trim().split("\n").length, 3)
     for (const raw of ["Original review policy", "Replacement review policy", "Review candidate", "example.test"]) assert.ok(!text.includes(raw))
   } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test("excluded memory events do not consume the sixteen-call budget", async () => {
+  const base = memoryRecord().events[0]
+  const events = Array.from({ length: 16 }, (_, i) => ({ ...base, id: `excluded-${i}`, authorized: false }))
+    .concat(Array.from({ length: 16 }, (_, i) => ({ ...base, id: `allowed-${i}` })))
+  let calls = 0
+  const result = await inspectMemoryClaim({ ...frozen(memoryRecord(events)), provider: { localOnly: true, decide: async () => {
+    calls += 1; return response(memoryFamily, "superseded")
+  } } })
+  assert.equal(result.traces.length, 32)
+  assert.equal(calls, 16)
+  assert.equal(result.warnings.length, 16)
 })

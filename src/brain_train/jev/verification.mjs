@@ -63,7 +63,7 @@ function verifyFrozenChange(change, sourceProof) {
     || !sameStrings(record.contractTags, change.contractTags ?? [])) {
     throw new Error("Planner metadata must match its frozen change record")
   }
-  return { paths: [...record.changedPaths], contractTags: [...record.contractTags] }
+  return { paths: [...record.changedPaths], contractTags: [...record.contractTags], content }
 }
 
 export const verificationFamily = createDecisionFamily({
@@ -109,7 +109,7 @@ export async function planVerification({ change, provider, mode = "off", modelPi
       eligible: verificationEligible(paths, contractTags, selectedChecks),
       sourceId: change.sourceId,
       sourceIds: change.sourceIds,
-      sourceContent: change.sourceContent,
+      sourceContent: frozen?.content ?? change.sourceContent,
       sourceContents: change.sourceContents,
       sourceRefs: change.sourceRefs,
       baseline: "none",

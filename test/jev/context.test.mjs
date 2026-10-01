@@ -270,6 +270,17 @@ describe("offline context selection", () => {
     await assert.rejects(() => selectContext({ kind: "dispatch", items: [source], provider, mode: "offline" }), /pinned model/)
   })
 
+  it("preserves frozen selections across source field order and unrelated metadata", async () => {
+    const source = item("a", "artifact")
+    const manifest = frozen([source])
+    const reordered = manifest.map((entry) => ({ metadata: "ignored", ...Object.fromEntries(Object.entries(entry).reverse()) }))
+    const expectedManifestHash = contextManifestHash(manifest)
+    assert.equal(contextManifestHash(reordered), expectedManifestHash)
+    const plan = await offline({ kind: "dispatch", items: [source], frozenSources: reordered, expectedManifestHash,
+      provider: { localOnly: true, decide: async () => answer("omit") } })
+    assert.equal(plan.selections[0].selection, "omit")
+  })
+
   it("hashes the same frozen source set identically across Unicode ID orderings", () => {
     const composed = { id: "é", sourceRef: ref, sourceSnapshotHash: "a".repeat(64), kind: "artifact", evidenceClass: "low-risk-artifact", pinned: false }
     const decomposed = { ...composed, id: "e\u0301" }
