@@ -14,6 +14,31 @@ function canonicalSources(sources) {
   return records
 }
 
+function completeSourceProvenance(source) {
+  const text = (value) => typeof value === "string" && value.trim().length > 0
+  const timestamp = (value) => text(value) && Number.isFinite(Date.parse(value))
+  let ref
+  try { ref = new URL(source?.sourceRef) } catch { return false }
+  if (!source || !text(source.sourceRef) || !["https:", "http:"].includes(ref.protocol) || ref.username || ref.password
+    || !text(source.id) || !text(source.repository) || !/^[^/\s]+\/[^/\s]+$/.test(source.repository)
+    || !Number.isSafeInteger(source.prNumber) || source.prNumber < 1
+    || !text(source.eventId) || !["issue", "review", "inline"].includes(source.surface) || !text(source.author)
+    || typeof source.sourceHash !== "string" || !/^[a-f0-9]{64}$/.test(source.sourceHash)
+    || !text(source.templateGroup) || !timestamp(source.eventAt) || !timestamp(source.capturedAt)
+    || Date.parse(source.eventAt) > Date.parse(source.capturedAt)
+    || (source.updatedAt != null && (!timestamp(source.updatedAt) || Date.parse(source.updatedAt) < Date.parse(source.eventAt)
+      || Date.parse(source.updatedAt) > Date.parse(source.capturedAt)))
+    || (source.eventHead !== "unknown" && (typeof source.eventHead !== "string" || !eventHeadSha.test(source.eventHead)))
+    || !Object.hasOwn(source, "formalState") || (source.formalState !== null && !text(source.formalState))
+    || !text(source.deterministicDisposition)
+    || (source.reviewedCommit != null && (typeof source.reviewedCommit !== "string" || !/^[a-f0-9]{7,40}$/i.test(source.reviewedCommit)))
+    || (source.captureHead != null && (typeof source.captureHead !== "string" || !eventHeadSha.test(source.captureHead)
+      || !timestamp(source.captureHeadObservedAt) || Date.parse(source.captureHeadObservedAt) > Date.parse(source.capturedAt)
+      || Date.parse(source.captureHeadObservedAt) < Date.parse(source.updatedAt ?? source.eventAt)))
+    || (source.captureHead == null && source.captureHeadObservedAt != null)) return false
+  return true
+}
+
 export function validateCaseGroups(cases, sources) {
   if (!Array.isArray(cases) || !cases.length || !Array.isArray(sources)) throw new Error("Sources and nonempty cases are required")
   const sourceById = new Map(sources.map((source) => [source.id, source]))
@@ -31,6 +56,7 @@ export function validateCaseGroups(cases, sources) {
     if (typeof item.templateGroup !== "string" || !item.templateGroup) throw new Error("Template group is required")
     if (typeof source.templateGroup !== "string" || !source.templateGroup) throw new Error("A captured template group is required")
     if (source.templateGroup !== item.templateGroup) throw new Error("Case template group mismatch")
+    if (!completeSourceProvenance(source)) throw new Error("Incomplete or invalid source provenance")
     if (!splits.has(item.split)) throw new Error("Invalid split")
     if (typeof item.eligible !== "boolean" || !["public", "synthetic", "private"].includes(item.privacyClass)
       || !Number.isSafeInteger(item.callIndex) || item.callIndex < 0) throw new Error("Case evaluation inputs are required")
@@ -78,7 +104,7 @@ export function annotationCandidates(sources, { requireEventHead = false } = {})
       excluded.push({ sourceId: source.id, reason })
       continue
     }
-    if (!source.sourceRef || !source.sourceHash || !source.repository || !source.id) {
+    if (!completeSourceProvenance(source)) {
       excluded.push({ sourceId: source.id || null, reason: "incomplete-provenance" })
       continue
     }
