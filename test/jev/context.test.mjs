@@ -147,13 +147,16 @@ describe("offline context selection", () => {
     } finally { await fs.rm(root, { recursive: true, force: true }) }
   })
 
-  it("keeps full content when off, private provider is remote, or a source reference is absent", async () => {
+  it("keeps full content off or for remote providers and rejects missing offline source proof", async () => {
     let calls = 0
     const provider = { decide: async () => { calls += 1; return answer("omit") } }
-    for (const [mode, currentProvider, sourceRef] of [["off", provider, ref], ["offline", provider, ref], ["offline", { localOnly: true, decide: provider.decide }, null]]) {
-      const plan = await selectContext({ kind: "dispatch", items: [item("a", "artifact", { sourceRef })], provider: currentProvider, mode, modelPin: "local-fixture", codeRevision: "a".repeat(40) })
-      assert.equal(plan.selections[0].selection, "full")
-    }
+    const source = item("a", "artifact")
+    const off = await selectContext({ kind: "dispatch", items: [source], provider })
+    const denied = await offline({ kind: "dispatch", items: [source], provider })
+    assert.equal(off.selections[0].selection, "full")
+    assert.equal(denied.selections[0].selection, "full")
+    await assert.rejects(() => selectContext({ kind: "dispatch", items: [source], provider, mode: "offline", modelPin: "local-fixture", codeRevision: "a".repeat(40) }), /frozen context provenance/i)
+    await assert.rejects(() => offline({ kind: "dispatch", items: [item("a", "artifact", { sourceRef: null })], provider }), /frozen context provenance/i)
     assert.equal(calls, 0)
   })
 
@@ -252,18 +255,16 @@ describe("offline context selection", () => {
     const source = item("a", "artifact")
     const originalSources = frozen([source])
     const originalManifestHash = contextManifestHash(originalSources)
-    const changed = await offline({ kind: "dispatch", items: [{ ...source, content: "changed after snapshot", sourceSnapshotHash: contextSourceHash({ ...source, content: "changed after snapshot" }) }], frozenSources: originalSources, expectedManifestHash: originalManifestHash, provider })
-    assert.equal(changed.selections[0].selection, "full")
-    assert.equal(calls, 0)
-    const changedManifest = await offline({ kind: "dispatch", items: [source], frozenSources: [{ ...originalSources[0], sourceRef: "https://example.test/mutable" }], expectedManifestHash: originalManifestHash, provider })
-    assert.equal(changedManifest.selections[0].selection, "full")
-    assert.equal(calls, 0)
-    const changedTokens = await offline({ kind: "dispatch", items: [{ ...source, tokens: 101 }], frozenSources: originalSources, expectedManifestHash: originalManifestHash, provider })
-    assert.equal(changedTokens.selections[0].selection, "full")
-    assert.equal(calls, 0)
-    const changedObjective = await offline({ kind: "dispatch", items: [source], objective: "changed objective", frozenSources: originalSources, expectedManifestHash: originalManifestHash, provider })
-    assert.equal(changedObjective.selections[0].selection, "full")
-    assert.equal(calls, 0)
+    for (const options of [
+      { items: [{ ...source, content: "changed after snapshot" }] },
+      { frozenSources: [{ ...originalSources[0], sourceRef: "https://example.test/mutable" }] },
+      { items: [{ ...source, tokens: 101 }] },
+      { objective: "changed objective" },
+    ]) {
+      await assert.rejects(() => offline({ kind: "dispatch", items: [source], frozenSources: originalSources,
+        expectedManifestHash: originalManifestHash, provider, ...options }), /frozen context provenance/i)
+      assert.equal(calls, 0)
+    }
     const wrongModel = await offline({ kind: "dispatch", items: [source], provider: { localOnly: true, decide: async () => ({ ...answer("omit"), model: "other-model" }) } })
     assert.equal(wrongModel.selections[0].selection, "full")
     assert.equal(wrongModel.traces[0].reason, "model-mismatch")
@@ -279,6 +280,24 @@ describe("offline context selection", () => {
     const plan = await offline({ kind: "dispatch", items: [source], frozenSources: reordered, expectedManifestHash,
       provider: { localOnly: true, decide: async () => answer("omit") } })
     assert.equal(plan.selections[0].selection, "omit")
+  })
+
+  it("rejects mismatched frozen content before emitting traces or calling any provider", async () => {
+    const items = [item("a", "artifact"), item("b", "artifact")]
+    const frozenSources = frozen(items)
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return answer("omit") } }
+    await assert.rejects(() => offline({ kind: "dispatch", items: [items[0], { ...items[1], content: "changed" }], frozenSources, provider }), /frozen context provenance/i)
+    assert.equal(calls, 0)
+  })
+
+  it("rejects coercible source references before preflight can retain mutable aliases", async () => {
+    const items = [item("a", "artifact"), item("b", "artifact", { sourceRef: [ref] })]
+    let calls = 0
+    await assert.rejects(() => offline({ kind: "dispatch", items, provider: { localOnly: true, decide: async () => {
+      calls += 1; items[1].sourceRef[0] = "https://changed.test"; return answer("omit")
+    } } }), /frozen context provenance/i)
+    assert.equal(calls, 0)
   })
 
   it("hashes the same frozen source set identically across Unicode ID orderings", () => {

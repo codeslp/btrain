@@ -74,6 +74,7 @@ export const dispatchContextFamily = family("dispatch-context")
 export const transcriptContextFamily = family("transcript-context")
 
 export function validSourceRef(value) {
+  if (typeof value !== "string") return false
   try {
     const url = new URL(value)
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password
@@ -115,6 +116,12 @@ export async function selectContext({ kind, items, objective = "", provider, mod
   if ([...sourceMap.values()].some((source) => !itemIds.has(source.id))) {
     throw new Error("A frozen context item is missing from the packet")
   }
+  if (mode === "offline" && (sourceMap.size !== packetItems.length || !Array.isArray(frozenSources)
+    || !hashPattern.test(expectedManifestHash || "") || contextManifestHash(frozenSources, objective) !== expectedManifestHash
+    || packetItems.some((item) => {
+      const source = sourceMap.get(item.id)
+      return source?.sourceRef !== item.sourceRef || source?.sourceSnapshotHash !== contextSourceHash(item)
+    }))) throw new Error("Frozen context provenance must match every item before evaluation")
   const decisionFamily = kind === "dispatch" ? dispatchContextFamily : transcriptContextFamily
   const run = createDecisionRun(decisionFamily)
   const selections = []
