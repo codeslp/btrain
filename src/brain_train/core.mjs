@@ -47,6 +47,7 @@ import {
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
+import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -7686,37 +7687,6 @@ function tokenizeAgentIdentity(value) {
         .filter((token) => !["agent", "manual", "mode", "notify", "permission", "review"].includes(token)),
     ),
   )
-}
-
-function collectRuntimeAgentHints(env = process.env) {
-  const hints = new Set()
-
-  const addHintsFromText = (value) => {
-    const text = String(value || "").toLowerCase()
-    if (!text) {
-      return
-    }
-
-    if (text.includes("codex")) {
-      hints.add("codex")
-    }
-    if (text.includes("claude")) {
-      hints.add("claude")
-    }
-    if (text.includes("gemini")) {
-      hints.add("gemini")
-    }
-    if (text.includes("opus")) {
-      hints.add("opus")
-    }
-  }
-
-  for (const [key, value] of Object.entries(env || {})) {
-    addHintsFromText(key)
-    addHintsFromText(value)
-  }
-
-  return [...hints]
 }
 
 function detectCurrentAgent(config, env = process.env) {
