@@ -56,9 +56,10 @@ function emptyLane() {
     // Whether a handoff file exists for the lane. patchHandoff crashes on a
     // never-claimed lane, so the implementation mirror needs this.
     fileExists: false,
-    // FR-18 tracking: every workflow-integrity reason seen (the
-    // implementation counts history per reason) and whether the contract
-    // now expects human escalation (same-reason re-entry).
+    // FR-18 tracking: the reasons of the task's repair-needed entries since
+    // the last claim (the implementation counts entries per reason) and
+    // whether the current repair expects human escalation (a same-reason
+    // re-entry).
     repairReasonsSeen: [],
     escalationExpected: false,
     // Canonical reason code carried by the lane (spec 005/006 taxonomies).
@@ -162,6 +163,21 @@ export class LaneLockModel {
     }
     s.prFeedbackEntered = false
     s.lastActor = actor
+  }
+
+  // spec 006 FR-18 (spec 015 Q4, Option A): one repair-needed entry against
+  // the task's reason memory, as resolveRepairAssignment counts entries since
+  // the last claim (countRepairEntries). The entry escalates to a human when
+  // an earlier entry of the task had the same reason; the first entry for a
+  // reason starts its count. The entry also starts a new repair, so an
+  // earlier repair's FR-29 disposition no longer counts (hasRepairDisposition
+  // reads only dispositions recorded after the latest entry). Contract-mode
+  // `update` keeps its own bookkeeping, which also counts a repair-needed
+  // write on a lane that is already repair-needed (README Known gaps).
+  #recordRepairEntry(s, reason) {
+    s.disposition = false
+    s.escalationExpected = s.repairReasonsSeen.includes(reason)
+    if (!s.escalationExpected) s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
   }
 
   // Mirrors inferPeerReviewer after spec 015 FR-9 (spec 016 WS3): a current
@@ -303,8 +319,7 @@ export class LaneLockModel {
       }
       if (ACTIVE_STATUSES.has(s.status)) {
         const reason = "lock-mismatch"
-        if (s.repairReasonsSeen.includes(reason)) s.escalationExpected = true
-        else s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
+        this.#recordRepairEntry(s, reason)
         s.status = "repair-needed"
         s.reasonCode = reason
         s.repairOwner = s.lastActor || s.owner
@@ -348,9 +363,14 @@ export class LaneLockModel {
       if (s.lockedFiles.length === 0) return this.#reject("active-status-needs-locks")
       if (this.#conflicts(lane, s.lockedFiles)) return this.#reject("lock-conflict")
       this.#setRegistry(lane, s.lockedFiles)
+      // spec 006 FR-18 as patchHandoff applies it: only an entry from another
+      // status consults the reason memory; a write while the lane is already
+      // repair-needed keeps the recorded escalation.
+      const repairEntry = status === "repair-needed" && s.status !== "repair-needed"
       s.status = status
       if (status === "needs-review") this.#reassignReviewer(s, actor)
       this.#applyUpdateEffects(s, status, actor, reason)
+      if (repairEntry) this.#recordRepairEntry(s, s.reasonCode)
       if (pr) s.prNumber = String(pr)
       return this.#accept()
     }

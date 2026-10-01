@@ -968,6 +968,109 @@ test(
   },
 )
 
+// spec 006 FR-18 repair memory against the real entry points
+// (lane-lock-model-fr18.test.mjs runs the same cases on the model alone in
+// the default suite). The implementation counts repair-needed entries since
+// the most recent claim (countRepairEntries; spec 015 Q4 Option A): an entry
+// comes from another status, it escalates when an earlier entry of the same
+// task had the same reason, and a write while the lane is already
+// repair-needed keeps the recorded escalation. disposeRepair accepts only an
+// escalated repair, so the closing dispose shows whether model and runtime
+// agree on the escalation. Until 2026-10-01 the implementation mirror skipped
+// this memory in `update` and rejected the disposition after a same-reason
+// re-entry (dispose-requires-escalation).
+const fr18Claim = { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] }
+const fr18Clear = { t: "update", lane: "x", actorSel: "owner", status: "in-progress" }
+function fr18Repair(reason) {
+  return { t: "update", lane: "x", actorSel: "owner", status: "repair-needed", reason }
+}
+// The doctor enters repair-needed (lock-mismatch) for a needs-review lane
+// whose registry entry is gone.
+const fr18DoctorEntry = [
+  { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
+  { t: "dropRegistry", lane: "x" },
+  { t: "doctorRepair", lane: "x" },
+]
+for (const { name, modes, disposes, steps } of [
+  {
+    name: "a same-reason re-entry admits the disposition",
+    modes: ["contract", "implementation"],
+    disposes: true,
+    steps: [fr18Repair("invalid-handoff"), fr18Clear, fr18Repair("invalid-handoff")],
+  },
+  {
+    name: "a different reason starts its own count",
+    modes: ["contract", "implementation"],
+    disposes: false,
+    steps: [fr18Repair("invalid-handoff"), fr18Clear, fr18Repair("lock-mismatch")],
+  },
+  {
+    name: "a fresh claim resets the count",
+    modes: ["contract", "implementation"],
+    disposes: false,
+    steps: [
+      fr18Repair("invalid-handoff"),
+      fr18Clear,
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+      fr18Claim,
+      fr18Repair("invalid-handoff"),
+    ],
+  },
+  {
+    name: "a doctor entry counts an earlier update entry",
+    modes: ["contract", "implementation"],
+    disposes: true,
+    steps: [fr18Repair("lock-mismatch"), fr18Clear, ...fr18DoctorEntry],
+  },
+  // Contract mode still counts this write as a re-entry; spec 006 FR-29 does
+  // not (README Known gaps).
+  {
+    name: "a write while repair-needed is not an entry",
+    modes: ["implementation"],
+    disposes: false,
+    steps: [fr18Repair("invalid-handoff"), fr18Repair("invalid-handoff")],
+  },
+  // Contract mode has no update from repair-needed to needs-review (L3).
+  {
+    name: "a doctor entry recomputes the escalation",
+    modes: ["implementation"],
+    disposes: false,
+    steps: [fr18Repair("invalid-handoff"), fr18Clear, fr18Repair("invalid-handoff"), ...fr18DoctorEntry],
+  },
+  // Contract mode has no PR outcome from repair-needed (L5). The new entry
+  // voids the first repair's disposition (hasRepairDisposition).
+  {
+    name: "a new repair voids an earlier disposition",
+    modes: ["implementation"],
+    disposes: true,
+    steps: [
+      fr18Repair("invalid-handoff"),
+      fr18Clear,
+      fr18Repair("invalid-handoff"),
+      { t: "dispose", lane: "x" },
+      { t: "prOutcome", lane: "x", outcome: "waiting" },
+      fr18Repair("invalid-handoff"),
+    ],
+  },
+]) {
+  for (const mode of modes) {
+    test(`FR-18 repair memory: ${name} (${mode} mode)`, { skip: !ENABLED }, async () => {
+      const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+        fr18Claim,
+        ...steps,
+        { t: "dispose", lane: "x" },
+      ])
+      assert.equal(designatedTally.size, 0, "no designated drift on the FR-18 chain")
+      assert.equal(candidateTally.size, 0, `no candidate finding on the FR-18 chain: ${[...candidateTally.keys()].join(", ")}`)
+      const dispose = trace.at(-1)
+      assert.equal(dispose.realState.x.status, "repair-needed", "the chain ends in repair-needed")
+      assert.equal(dispose.realRepair.x.escalation, disposes ? "human" : "", "runtime FR-18 escalation")
+      assert.equal(dispose.modelReason, disposes ? "" : "dispose-requires-escalation", "model dispose verdict")
+      assert.equal(dispose.realOk, disposes, `runtime dispose: ${dispose.realError || "accepted"}`)
+    })
+  }
+}
+
 // Regression witness for the repaired --final bypass: a direct --final from
 // needs-review is rejected and the lane stays in review with its locks; the
 // reviewer's plain resolve then enters ready-for-pr. The todo marker came
