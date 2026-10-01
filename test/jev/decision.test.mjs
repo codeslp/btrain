@@ -385,3 +385,8 @@ describe("offline decision gateway", () => {
     }
   })
 })
+
+it("classifies provider invalid-response as a response-shape failure", async () => {
+  const trace = await decideCandidate({ family, candidate, provider: fakeProvider({ ok: false, reason: "invalid-response" }), mode: "offline" })
+  assert.equal(trace.failureClass, "response-shape")
+})
