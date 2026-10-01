@@ -22,6 +22,10 @@ import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 const exec = promisify(execFile)
 const CLI = path.resolve("src/brain_train/cli.mjs")
 const INTERNAL_OPTIONS_MODULE = "../src/brain_train/internal_options.mjs"
+// The handoff flags that btrain's own callers (pr-flow) pass to the handoff
+// functions. Any other key they pass must be registered as internal-only, so
+// a flag documented only for another command cannot slip through as a "flag".
+const HANDOFF_FLAGS_PASSED_INTERNALLY = ["lane", "actor", "status", "pr", "next", "summary", "final", "base", "reason-code", "reason-tag"]
 
 const PROJECT_TOML = `[project]
 name = "cli-internal-options"
@@ -212,7 +216,7 @@ describe("btrain CLI rejects internal-only transition gate inputs", () => {
     })
   })
 
-  it("rejects them on every handoff subcommand, in any spelling, before reading lane state", async () => {
+  it("rejects them on every handoff subcommand, in any spelling", async () => {
     await withLaneRepo(async ({ repo, btrain }) => {
       await laneAt(btrain, "in-progress")
       const subcommands = [
@@ -242,10 +246,28 @@ describe("btrain CLI rejects internal-only transition gate inputs", () => {
         ["--via-pr-outcome"],
         ["--TRANSITIONCOMPATIBILITY"],
         ["--on-event", "x"],
+        ["--transitionEvent=watchdog-lock-release"],
       ]) {
         await assertRejected(repo, btrain("alpha", "handoff", "update", "--lane", "x", "--next", "n", ...option), option[0])
       }
     })
+  })
+
+  it("rejects them before resolving the repo or reading any state", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-cli-internal-norepo-"))
+    const missing = path.join(root, "missing-repo")
+    try {
+      const result = await exec(
+        "node",
+        [CLI, "handoff", "update", "--lane", "x", "--next", "n", "--transitionEvent", "pr-poll", "--repo", missing],
+        { env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(root, "home"), BTRAIN_AGENT: "alpha", BTRAIN_DASHBOARD_DISABLED: "1" } },
+      ).then(() => ({ code: 0, stderr: "" }), (error) => ({ code: error.code, stderr: error.stderr || "" }))
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /`--transitionEvent` is internal to btrain/)
+      assert.deepEqual(await fs.readdir(root), [], "a rejected command created files")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
   it("keeps btrain's own pr-poll classification: a real PR outcome still takes row 10", async () => {
@@ -290,42 +312,46 @@ describe("internal-only option registry", () => {
       TRANSITION_COMPATIBILITY: true,
       viaproutcome: true,
       onEvent: "x",
+      "transitionEvent=pr-poll": true,
     })
     assert.deepEqual(found.map(({ flag, key }) => [flag, key]), [
       ["transition-event", "transitionEvent"],
       ["TRANSITION_COMPATIBILITY", "transitionCompatibility"],
       ["viaproutcome", "viaPrOutcome"],
       ["onEvent", "onEvent"],
+      ["transitionEvent=pr-poll", "transitionEvent"],
     ])
-    assert.deepEqual(findInternalOnlyOptions({ _: [], lane: "x", final: true, pr: "12" }), [])
+    assert.deepEqual(findInternalOnlyOptions({ _: [], lane: "x", final: true, pr: "12", "repo=x": true }), [])
   })
 
-  it("covers every option that btrain's own callers pass to the handoff functions without a CLI flag", async () => {
+  it("covers every option that btrain's own callers pass to the handoff functions", async () => {
     const { INTERNAL_ONLY_OPTIONS } = await import(INTERNAL_OPTIONS_MODULE)
-    const documented = new Set(
-      [...(await exec("node", [CLI, "help"])).stdout.matchAll(/--([a-z][a-z0-9-]*)/g)].map((match) => match[1]),
-    )
-    const sources = await listSourceFiles(path.resolve("src/brain_train"))
-    const unregistered = []
+    const help = (await exec("node", [CLI, "help"])).stdout
+    for (const flag of HANDOFF_FLAGS_PASSED_INTERNALLY) {
+      assert.ok(help.includes(`--${flag}`), `--${flag} is listed as a handoff flag, but btrain help does not document it`)
+    }
+    const problems = []
     const passed = new Set()
-    for (const file of sources) {
+    for (const file of await listSourceFiles(path.resolve("src/brain_train"))) {
       // The CLI's own calls spread parseOptions output; parseOptions guards those.
       if (file.endsWith(`${path.sep}cli.mjs`)) continue
       const source = await fs.readFile(file, "utf8")
-      for (const call of findHandoffCalls(source)) {
-        const where = `${path.relative(process.cwd(), file)}:${call.line} ${call.name}`
-        if (!call.keys) {
-          unregistered.push(`${where}: options are not an inline object literal`)
-          continue
-        }
-        for (const key of call.keys) {
+      for (const mention of findHandoffMentions(source)) {
+        const where = `${path.relative(process.cwd(), file)}:${mention.line} ${mention.name}`
+        if (mention.problem) problems.push(`${where}: ${mention.problem}`)
+        for (const key of mention.keys || []) {
           passed.add(key)
-          if (documented.has(key) || Object.hasOwn(INTERNAL_ONLY_OPTIONS, key)) continue
-          unregistered.push(`${where}: ${key}`)
+          if (!HANDOFF_FLAGS_PASSED_INTERNALLY.includes(key) && !Object.hasOwn(INTERNAL_ONLY_OPTIONS, key)) {
+            problems.push(`${where}: ${key}`)
+          }
         }
       }
     }
-    assert.deepEqual(unregistered, [], "register these in src/brain_train/internal_options.mjs, or document them as CLI flags")
+    assert.deepEqual(
+      problems,
+      [],
+      "call the handoff functions directly with an inline options literal, and register each new key in src/brain_train/internal_options.mjs (or, for a documented handoff flag, in HANDOFF_FLAGS_PASSED_INTERNALLY)",
+    )
     for (const key of ["transitionEvent", "transitionCompatibility", "viaPrOutcome"]) {
       assert.ok(passed.has(key), `expected an internal caller to pass ${key}; the scan found ${[...passed].join(", ")}`)
     }
@@ -350,58 +376,104 @@ async function listSourceFiles(dir) {
   return files
 }
 
-// Calls to the four handoff functions and the top-level keys of their options
-// literal (`keys` is null when the options are not an inline literal).
-function findHandoffCalls(source) {
-  const calls = []
-  const pattern = /\b(claimHandoff|patchHandoff|requestChangesHandoff|resolveHandoff)\(/g
-  for (const match of source.matchAll(pattern)) {
-    if (/function\s+$/.test(source.slice(0, match.index))) continue
-    const line = source.slice(0, match.index).split("\n").length
-    const afterRepo = source.slice(match.index + match[0].length).match(/^\s*[\w.]+\s*,\s*/)
-    const open = afterRepo ? match.index + match[0].length + afterRepo[0].length : -1
-    calls.push({ name: match[1], line, keys: open >= 0 && source[open] === "{" ? topLevelKeys(source, open) : null })
+// Every mention of the four handoff functions in one module. A mention must be
+// a whole-line comment, a declaration, an import or export specifier without
+// `as`, or a direct call whose options are an inline literal. Anything else
+// (an alias, `?.(`, `.call`, a reference passed around) is reported, so the
+// guard fails closed instead of losing track of a call.
+function findHandoffMentions(source) {
+  const specifierLists = [...source.matchAll(/\bimport\s*\{[^}]*\}\s*from\b|\bexport\s*\{[^}]*\}/g)]
+    .map((match) => [match.index, match.index + match[0].length])
+  const mentions = []
+  for (const match of source.matchAll(/\b(claimHandoff|patchHandoff|requestChangesHandoff|resolveHandoff)\b/g)) {
+    const start = match.index
+    const end = start + match[0].length
+    const linePrefix = source.slice(source.lastIndexOf("\n", start) + 1, start)
+    if (/^\s*(\/\/|\/\*|\*)/.test(linePrefix) || /\bfunction\s*$/.test(linePrefix)) continue
+    const mention = { name: match[1], line: source.slice(0, start).split("\n").length }
+    const rest = source.slice(end, end + 200)
+    if (specifierLists.some(([listStart, listEnd]) => start > listStart && end < listEnd)) {
+      if (!/^\s+as\b/.test(rest)) continue
+      mention.problem = "imported or exported under another name"
+    } else if (!/^\s*\(/.test(rest)) {
+      mention.problem = "not a direct call"
+    } else {
+      const args = rest.match(/^\s*\(\s*[\w$.]+\s*,\s*/)
+      const open = args ? end + args[0].length : -1
+      mention.keys = open >= 0 && source[open] === "{" ? objectLiteralKeys(source, open) : null
+      if (!mention.keys) mention.problem = "options are not an inline object literal"
+    }
+    mentions.push(mention)
   }
-  return calls
+  return mentions
 }
 
-// A small scanner for one object literal: it skips strings, template
-// expressions, comments, and nested brackets, and reports spreads and
-// computed keys as `...` and `[computed]` so the registry check fails closed.
-function topLevelKeys(source, open) {
+// The top-level keys of the object literal opening at `open`, or null when it
+// does not close right before `,` or `)`. Spreads, computed keys and anything
+// else that is not a plain key are reported, never dropped.
+function objectLiteralKeys(source, open) {
   const keys = []
   let atKey = true
   for (let index = open + 1; index < source.length; index += 1) {
     const char = source[index]
-    if (char === "}") return keys
+    if (char === "}") return /^\s*[,)]/.test(source.slice(index + 1, index + 100)) ? keys : null
     if (/\s/.test(char)) continue
-    if (source.startsWith("//", index)) { index = source.indexOf("\n", index); continue }
-    if (source.startsWith("/*", index)) { index = source.indexOf("*/", index) + 1; continue }
+    if (source.startsWith("//", index) || source.startsWith("/*", index)) { index = tokenEnd(source, index); continue }
     if (char === ",") { atKey = true; continue }
-    if (char === '"' || char === "'" || char === "`") {
-      const end = skipString(source, index)
-      if (atKey) keys.push(source.slice(index + 1, end))
-      atKey = false
-      index = end
-      continue
-    }
-    if ("([{".includes(char)) {
-      if (atKey && char === "[") keys.push("[computed]")
-      atKey = false
-      index = skipBalanced(source, index)
-      continue
-    }
-    if (atKey && source.startsWith("...", index)) { keys.push("..."); atKey = false; index += 2; continue }
-    if (atKey && /[A-Za-z_$]/.test(char)) {
-      const name = source.slice(index).match(/^[A-Za-z_$][\w$]*/)[0]
-      keys.push(name)
-      atKey = false
-      index += name.length - 1
-      continue
-    }
+    if (!atKey) { index = tokenEnd(source, index); continue }
     atKey = false
+    if (char === '"' || char === "'") {
+      const end = skipString(source, index)
+      keys.push(source.slice(index + 1, end))
+      index = end
+    } else if (source.startsWith("...", index)) {
+      keys.push("...")
+      index += 2
+    } else if (/[A-Za-z_$]/.test(char)) {
+      const name = source.slice(index, index + 100).match(/^[A-Za-z_$][\w$]*/)[0]
+      keys.push(name)
+      index += name.length - 1
+    } else {
+      keys.push(char === "[" ? "[computed]" : `[unparsed ${char}]`)
+      index = tokenEnd(source, index)
+    }
   }
   throw new Error("unterminated object literal")
+}
+
+// The index of the last character of the token at `start`: a comment, a string
+// or template literal, a regex literal, or a bracketed group. Any other
+// character is a token by itself.
+function tokenEnd(source, start) {
+  const char = source[start]
+  if (source.startsWith("//", start)) {
+    const end = source.indexOf("\n", start)
+    return end === -1 ? source.length - 1 : end
+  }
+  if (source.startsWith("/*", start)) {
+    const end = source.indexOf("*/", start + 2)
+    if (end === -1) throw new Error("unterminated comment")
+    return end + 1
+  }
+  if (char === '"' || char === "'" || char === "`") return skipString(source, start)
+  if (char === "/" && startsRegex(source, start)) return skipRegex(source, start)
+  if ("([{".includes(char)) return skipBalanced(source, start)
+  return start
+}
+
+function skipBalanced(source, open) {
+  let depth = 0
+  for (let index = open; index < source.length; index += 1) {
+    const char = source[index]
+    if ("([{".includes(char)) depth += 1
+    else if (")]}".includes(char)) {
+      depth -= 1
+      if (depth === 0) return index
+    } else {
+      index = tokenEnd(source, index)
+    }
+  }
+  throw new Error("unbalanced brackets")
 }
 
 function skipString(source, start) {
@@ -410,21 +482,37 @@ function skipString(source, start) {
     const char = source[index]
     if (char === "\\") { index += 1; continue }
     if (char === quote) return index
+    if (quote !== "`" && char === "\n") break
     if (quote === "`" && source.startsWith("${", index)) index = skipBalanced(source, index + 1)
   }
   throw new Error("unterminated string")
 }
 
-function skipBalanced(source, open) {
-  let depth = 0
-  for (let index = open; index < source.length; index += 1) {
+// A `/` starts a regex literal after an operator, an opening bracket, a comma,
+// or one of these keywords; after a value it is division.
+function startsRegex(source, slash) {
+  let index = slash - 1
+  while (index >= 0 && /\s/.test(source[index])) index -= 1
+  if (index < 0 || "(,=:[!&|?{};+-*%<>~^".includes(source[index])) return true
+  const word = source.slice(Math.max(0, index - 9), index + 1).match(/[A-Za-z]+$/)
+  return !!word && ["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"].includes(word[0])
+}
+
+function skipRegex(source, start) {
+  let inClass = false
+  for (let index = start + 1; index < source.length; index += 1) {
     const char = source[index]
-    if (char === '"' || char === "'" || char === "`") { index = skipString(source, index); continue }
-    if ("([{".includes(char)) depth += 1
-    else if (")]}".includes(char)) {
-      depth -= 1
-      if (depth === 0) return index
+    if (char === "\\") { index += 1; continue }
+    if (char === "\n") break
+    if (inClass) {
+      if (char === "]") inClass = false
+      continue
+    }
+    if (char === "[") { inClass = true; continue }
+    if (char === "/") {
+      while (/[A-Za-z]/.test(source[index + 1] || "")) index += 1
+      return index
     }
   }
-  throw new Error("unbalanced brackets")
+  throw new Error("unterminated regex literal")
 }

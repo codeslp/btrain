@@ -16,8 +16,9 @@ export const INTERNAL_ONLY_OPTIONS = Object.freeze({
   onEvent: "is the progress callback that btrain passes to the handoff functions.",
 })
 
+// parseOptions keeps `--key=value` as one key, so the name ends at `=`.
 function normalizeOptionName(name) {
-  return String(name).toLowerCase().replace(/[-_]/g, "")
+  return String(name).split("=")[0].toLowerCase().replace(/[-_]/g, "")
 }
 
 const INTERNAL_KEY_BY_NAME = new Map(
