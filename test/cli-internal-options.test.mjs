@@ -255,16 +255,23 @@ describe("btrain CLI rejects internal-only transition gate inputs", () => {
 
   it("rejects them before resolving the repo or reading any state", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-cli-internal-norepo-"))
-    const missing = path.join(root, "missing-repo")
+    const cwd = path.join(root, "work")
+    await fs.mkdir(cwd)
+    const run = (...args) => exec("node", [CLI, ...args], {
+      cwd,
+      env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(root, "home"), BTRAIN_AGENT: "alpha", BTRAIN_DASHBOARD_DISABLED: "1" },
+    }).then(({ stderr }) => ({ code: 0, stderr }), (error) => ({ code: error.code, stderr: error.stderr || "" }))
     try {
-      const result = await exec(
-        "node",
-        [CLI, "handoff", "update", "--lane", "x", "--next", "n", "--transitionEvent", "pr-poll", "--repo", missing],
-        { env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(root, "home"), BTRAIN_AGENT: "alpha", BTRAIN_DASHBOARD_DISABLED: "1" } },
-      ).then(() => ({ code: 0, stderr: "" }), (error) => ({ code: error.code, stderr: error.stderr || "" }))
-      assert.notEqual(result.code, 0)
-      assert.match(result.stderr, /`--transitionEvent` is internal to btrain/)
-      assert.deepEqual(await fs.readdir(root), [], "a rejected command created files")
+      // No btrain repo is reachable from here, so a check that ran after repo
+      // resolution would fail with this error instead.
+      const clean = await run("handoff", "update", "--lane", "x", "--next", "n")
+      assert.notEqual(clean.code, 0)
+      assert.match(clean.stderr, /Could not find a bootstrapped repo/)
+
+      const forged = await run("handoff", "update", "--lane", "x", "--next", "n", "--transitionEvent", "pr-poll")
+      assert.notEqual(forged.code, 0)
+      assert.match(forged.stderr, /`--transitionEvent` is internal to btrain/)
+      assert.deepEqual(await fs.readdir(cwd), [], "a rejected command created files")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }
@@ -328,7 +335,7 @@ describe("internal-only option registry", () => {
     const { INTERNAL_ONLY_OPTIONS } = await import(INTERNAL_OPTIONS_MODULE)
     const help = (await exec("node", [CLI, "help"])).stdout
     for (const flag of HANDOFF_FLAGS_PASSED_INTERNALLY) {
-      assert.ok(help.includes(`--${flag}`), `--${flag} is listed as a handoff flag, but btrain help does not document it`)
+      assert.match(help, new RegExp(`--${flag}(?![\\w-])`), `--${flag} is listed as a handoff flag, but btrain help does not document it`)
     }
     const problems = []
     const passed = new Set()
@@ -376,22 +383,41 @@ async function listSourceFiles(dir) {
   return files
 }
 
-// Every mention of the four handoff functions in one module. A mention must be
-// a whole-line comment, a declaration, an import or export specifier without
-// `as`, or a direct call whose options are an inline literal. Anything else
-// (an alias, `?.(`, `.call`, a reference passed around) is reported, so the
-// guard fails closed instead of losing track of a call.
+const HANDOFF_FUNCTION_NAMES = "claimHandoff|patchHandoff|requestChangesHandoff|resolveHandoff"
+const REGEX_KEYWORDS = ["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"]
+
+// Every mention of the four handoff functions in one module, read from the
+// code that maskNonCode leaves, so a comment or string neither hides a call
+// nor counts as one. A mention must be a declaration, an import or export
+// specifier without `as`, or a direct call whose options are an inline
+// literal. Anything else (an alias, `?.(`, `.call`, a reference passed
+// around) is reported, as is a string-named specifier or a namespace or
+// dynamic import of core.mjs, whose computed access the scan cannot follow.
 function findHandoffMentions(source) {
-  const specifierLists = [...source.matchAll(/\bimport\s*\{[^}]*\}\s*from\b|\bexport\s*\{[^}]*\}/g)]
-    .map((match) => [match.index, match.index + match[0].length])
+  if (!new RegExp(`\\b(?:${HANDOFF_FUNCTION_NAMES})\\b`).test(source) && !source.includes("core.mjs")) return []
+  const masked = maskNonCode(source)
+  const { code } = masked
+  const lineOf = (index) => source.slice(0, index).split("\n").length
   const mentions = []
-  for (const match of source.matchAll(/\b(claimHandoff|patchHandoff|requestChangesHandoff|resolveHandoff)\b/g)) {
+  const coreImports = /\bimport\s*\*\s*as\s+[\w$]+\s+from\s*["'][^"']*core\.mjs["']|\bimport\s*\(\s*["'][^"']*core\.mjs["']/g
+  for (const match of source.matchAll(coreImports)) {
+    if (code.startsWith("import", match.index)) {
+      mentions.push({ name: "core.mjs", line: lineOf(match.index), problem: "namespace or dynamic import of core.mjs" })
+    }
+  }
+  const specifierLists = [...code.matchAll(/^[ \t]*(?:import\s*\{[^}]*\}\s*from\b|export\s*\{[^}]*\})/gm)]
+    .map((match) => [match.index, match.index + match[0].length])
+  for (const [listStart, listEnd] of specifierLists) {
+    if (new RegExp(`["'](?:${HANDOFF_FUNCTION_NAMES})["']`).test(source.slice(listStart, listEnd))) {
+      mentions.push({ name: "specifier", line: lineOf(listStart), problem: "string-named import or export specifier" })
+    }
+  }
+  for (const match of code.matchAll(new RegExp(`\\b(${HANDOFF_FUNCTION_NAMES})\\b`, "g"))) {
     const start = match.index
     const end = start + match[0].length
-    const linePrefix = source.slice(source.lastIndexOf("\n", start) + 1, start)
-    if (/^\s*(\/\/|\/\*|\*)/.test(linePrefix) || /\bfunction\s*$/.test(linePrefix)) continue
-    const mention = { name: match[1], line: source.slice(0, start).split("\n").length }
-    const rest = source.slice(end, end + 200)
+    if (/\bfunction\s*\*?\s*$/.test(code.slice(code.lastIndexOf("\n", start) + 1, start))) continue
+    const mention = { name: match[1], line: lineOf(start) }
+    const rest = code.slice(end, end + 200)
     if (specifierLists.some(([listStart, listEnd]) => start > listStart && end < listEnd)) {
       if (!/^\s+as\b/.test(rest)) continue
       mention.problem = "imported or exported under another name"
@@ -400,7 +426,7 @@ function findHandoffMentions(source) {
     } else {
       const args = rest.match(/^\s*\(\s*[\w$.]+\s*,\s*/)
       const open = args ? end + args[0].length : -1
-      mention.keys = open >= 0 && source[open] === "{" ? objectLiteralKeys(source, open) : null
+      mention.keys = open >= 0 && code[open] === "{" ? objectLiteralKeys(source, masked, open) : null
       if (!mention.keys) mention.problem = "options are not an inline object literal"
     }
     mentions.push(mention)
@@ -408,72 +434,134 @@ function findHandoffMentions(source) {
   return mentions
 }
 
-// The top-level keys of the object literal opening at `open`, or null when it
-// does not close right before `,` or `)`. Spreads, computed keys and anything
-// else that is not a plain key are reported, never dropped.
-function objectLiteralKeys(source, open) {
+// The source with comments, strings, template text and regex literals
+// blanked, plus each character's kind (0 code, 1 string, template text or
+// regex, 2 comment). Newlines and template expressions are kept, so offsets
+// and line numbers still match the source.
+function maskNonCode(source) {
+  const chars = source.split("")
+  const kind = new Uint8Array(source.length)
+  const blank = (from, to, as) => {
+    for (let index = from; index <= to; index += 1) {
+      kind[index] = as
+      if (chars[index] !== "\n") chars[index] = " "
+    }
+  }
+  // A `/` starts a regex literal unless the code before it ends a value.
+  // Comments are skipped on the way back; a string, template or regex, a
+  // postfix `++` or `--`, and a property named like a keyword (`a.in`) end
+  // a value.
+  const startsRegex = (slash) => {
+    let index = slash - 1
+    while (index >= 0 && (kind[index] === 2 || (kind[index] === 0 && /\s/.test(source[index])))) index -= 1
+    if (index < 0) return true
+    if (kind[index] === 1) return false
+    const char = source[index]
+    if ((char === "+" || char === "-") && source[index - 1] === char) return false
+    if ("(,=:[!&|?{};+-*%<>~^".includes(char)) return true
+    let wordStart = index
+    while (wordStart > 0 && /[\w$]/.test(source[wordStart - 1])) wordStart -= 1
+    if (source[wordStart - 1] === ".") return false
+    return REGEX_KEYWORDS.includes(source.slice(wordStart, index + 1))
+  }
+  // Inside a template expression, stops at the `}` that closes it.
+  const scanCode = (start, inTemplate) => {
+    let depth = 0
+    for (let index = start; index < source.length; index += 1) {
+      const char = source[index]
+      if (source.startsWith("//", index)) {
+        const newline = source.indexOf("\n", index)
+        const end = newline === -1 ? source.length - 1 : newline - 1
+        blank(index, end, 2)
+        index = end
+      } else if (source.startsWith("/*", index)) {
+        const close = source.indexOf("*/", index + 2)
+        if (close === -1) throw new Error("unterminated comment")
+        blank(index, close + 1, 2)
+        index = close + 1
+      } else if (char === '"' || char === "'") {
+        const end = skipString(source, index)
+        blank(index, end, 1)
+        index = end
+      } else if (char === "/" && startsRegex(index)) {
+        const end = skipRegex(source, index)
+        blank(index, end, 1)
+        index = end
+      } else if (char === "`") {
+        index = maskTemplate(index)
+      } else if (inTemplate && char === "{") {
+        depth += 1
+      } else if (inTemplate && char === "}") {
+        if (depth === 0) return index
+        depth -= 1
+      }
+    }
+    if (inTemplate) throw new Error("unterminated template expression")
+    return source.length
+  }
+  const maskTemplate = (start) => {
+    let textStart = start
+    for (let index = start + 1; index < source.length; index += 1) {
+      if (source[index] === "\\") { index += 1; continue }
+      if (source[index] === "`") {
+        blank(textStart, index, 1)
+        return index
+      }
+      if (source.startsWith("${", index)) {
+        blank(textStart, index - 1, 1)
+        // The `${` opens code, so a regex right after it still reads as one.
+        chars[index] = " "
+        chars[index + 1] = " "
+        index = scanCode(index + 2, true)
+        textStart = index
+      }
+    }
+    throw new Error("unterminated template literal")
+  }
+  scanCode(0, false)
+  return { code: chars.join(""), kind }
+}
+
+// The top-level keys of the object literal opening at `open`, read from the
+// masked code so that strings, comments and regex literals cannot fake a
+// bracket or a comma; quoted keys are read from the source. Returns null when
+// the literal does not close right before `,` or `)`. Spreads, computed keys
+// and anything else that is not a plain key are reported, never dropped.
+function objectLiteralKeys(source, { code, kind }, open) {
   const keys = []
   let atKey = true
-  for (let index = open + 1; index < source.length; index += 1) {
-    const char = source[index]
-    if (char === "}") return /^\s*[,)]/.test(source.slice(index + 1, index + 100)) ? keys : null
-    if (/\s/.test(char)) continue
-    if (source.startsWith("//", index) || source.startsWith("/*", index)) { index = tokenEnd(source, index); continue }
+  let depth = 0
+  for (let index = open + 1; index < code.length; index += 1) {
+    const char = code[index]
+    if (kind[index] === 2 || (kind[index] === 0 && /\s/.test(char))) continue
+    if (depth > 0) {
+      if ("([{".includes(char)) depth += 1
+      else if (")]}".includes(char)) depth -= 1
+      continue
+    }
+    if (char === "}") return /^\s*[,)]/.test(code.slice(index + 1, index + 100)) ? keys : null
     if (char === ",") { atKey = true; continue }
-    if (!atKey) { index = tokenEnd(source, index); continue }
+    if (!atKey) {
+      if ("([{".includes(char)) depth += 1
+      continue
+    }
     atKey = false
-    if (char === '"' || char === "'") {
-      const end = skipString(source, index)
-      keys.push(source.slice(index + 1, end))
-      index = end
-    } else if (source.startsWith("...", index)) {
+    if (kind[index] === 1) {
+      const quoted = source[index] === '"' || source[index] === "'"
+      keys.push(quoted ? source.slice(index + 1, skipString(source, index)) : `[unparsed ${source[index]}]`)
+    } else if (code.startsWith("...", index)) {
       keys.push("...")
       index += 2
     } else if (/[A-Za-z_$]/.test(char)) {
-      const name = source.slice(index, index + 100).match(/^[A-Za-z_$][\w$]*/)[0]
+      const name = code.slice(index, index + 100).match(/^[A-Za-z_$][\w$]*/)[0]
       keys.push(name)
       index += name.length - 1
     } else {
       keys.push(char === "[" ? "[computed]" : `[unparsed ${char}]`)
-      index = tokenEnd(source, index)
+      if ("([{".includes(char)) depth += 1
     }
   }
   throw new Error("unterminated object literal")
-}
-
-// The index of the last character of the token at `start`: a comment, a string
-// or template literal, a regex literal, or a bracketed group. Any other
-// character is a token by itself.
-function tokenEnd(source, start) {
-  const char = source[start]
-  if (source.startsWith("//", start)) {
-    const end = source.indexOf("\n", start)
-    return end === -1 ? source.length - 1 : end
-  }
-  if (source.startsWith("/*", start)) {
-    const end = source.indexOf("*/", start + 2)
-    if (end === -1) throw new Error("unterminated comment")
-    return end + 1
-  }
-  if (char === '"' || char === "'" || char === "`") return skipString(source, start)
-  if (char === "/" && startsRegex(source, start)) return skipRegex(source, start)
-  if ("([{".includes(char)) return skipBalanced(source, start)
-  return start
-}
-
-function skipBalanced(source, open) {
-  let depth = 0
-  for (let index = open; index < source.length; index += 1) {
-    const char = source[index]
-    if ("([{".includes(char)) depth += 1
-    else if (")]}".includes(char)) {
-      depth -= 1
-      if (depth === 0) return index
-    } else {
-      index = tokenEnd(source, index)
-    }
-  }
-  throw new Error("unbalanced brackets")
 }
 
 function skipString(source, start) {
@@ -482,20 +570,9 @@ function skipString(source, start) {
     const char = source[index]
     if (char === "\\") { index += 1; continue }
     if (char === quote) return index
-    if (quote !== "`" && char === "\n") break
-    if (quote === "`" && source.startsWith("${", index)) index = skipBalanced(source, index + 1)
+    if (char === "\n") break
   }
   throw new Error("unterminated string")
-}
-
-// A `/` starts a regex literal after an operator, an opening bracket, a comma,
-// or one of these keywords; after a value it is division.
-function startsRegex(source, slash) {
-  let index = slash - 1
-  while (index >= 0 && /\s/.test(source[index])) index -= 1
-  if (index < 0 || "(,=:[!&|?{};+-*%<>~^".includes(source[index])) return true
-  const word = source.slice(Math.max(0, index - 9), index + 1).match(/[A-Za-z]+$/)
-  return !!word && ["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"].includes(word[0])
 }
 
 function skipRegex(source, start) {
