@@ -128,3 +128,5 @@ coverage and a failure count, and then continues to the next case.
 Run the offline timeout regressions with `node --test experiments/jev-btrain/run.test.mjs`.
 
 Shared gateway repair safeguards: require every captured source to have its own nonempty template group before assigning any evaluation split; reject successful serialized traces without a real attempted call and valid catalog probabilities; measure wall time after provider completion so synchronous work cannot evade the timeout. Timer cancellation alone cannot bound synchronous provider work. Tests must exercise these invariants through freeze/replay and persisted trace paths.
+
+Frozen PR evaluation also validates event identity, author/surface, timestamps and their ordering, explicit event-head knowledge, nullable formal state and deterministic disposition. A hash only establishes content identity; it cannot supply missing provenance. Imported records must meet the same contract as prospective captures. Invalid transport response shapes use the response-shape failure category.
