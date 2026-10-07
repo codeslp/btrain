@@ -55,6 +55,8 @@ function abandonY(model) {
   return model.resolve({ lane: "y", actor: "gamma", final: false })
 }
 
+const idleY = { status: "idle", reasonCode: "", repairOwner: "", escalationExpected: false, registry: [] }
+
 const conflict = [dropRegistry("x"), claimY, doctorRepair]
 
 const CASES = [
@@ -110,12 +112,29 @@ const CASES = [
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // A covered lane needs nothing from the doctor, even in review.
+    name: "a covered review lane is left alone",
+    steps: [update("alpha", "needs-review"), doctorRepair],
+    x: { status: "needs-review", reasonCode: "", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: ["src/a/"] },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
+    // A successful resync clears the coverage loss, so a later doctor run
+    // leaves the lane alone once it is in review.
+    name: "a resynced lane that enters review is left alone",
+    steps: [dropRegistry("x"), doctorRepair, update("alpha", "needs-review"), doctorRepair],
+    x: { status: "needs-review", reasonCode: "", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: ["src/a/"] },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
     // Row 6 abandon of the uncovered lane: a resolved lane is not active, so
     // the doctor neither resyncs nor repairs it.
     name: "a resolved uncovered lane is left alone",
     steps: [dropRegistry("x"), (model) => model.resolve({ lane: "x", actor: "alpha", final: false }), doctorRepair],
     x: { status: "resolved", reasonCode: "", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: [] },
-    y: { status: "idle", reasonCode: "", repairOwner: "", escalationExpected: false, registry: [] },
+    y: idleY,
     disposeReason: "dispose-requires-repair-needed",
   },
   {

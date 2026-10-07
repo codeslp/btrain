@@ -990,6 +990,30 @@ for (const { name, modes = ["contract", "implementation"], steps, x, y = yHoldsP
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // A covered lane needs nothing from the doctor, even in review.
+    name: "a covered review lane is left alone",
+    steps: [{ t: "update", lane: "x", actorSel: "owner", status: "needs-review" }, { t: "doctorRepair", lane: "x" }],
+    x: { status: "needs-review", reasonCode: "", registry: ["src/a/"] },
+    y: { status: "idle", reasonCode: "", registry: [] },
+    xRepair: noRepair,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
+    // A successful resync clears the coverage loss, so the lane can enter
+    // review and a later doctor run leaves it alone.
+    name: "a resynced lane that enters review is left alone",
+    steps: [
+      { t: "dropRegistry", lane: "x" },
+      { t: "doctorRepair", lane: "x" },
+      { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
+      { t: "doctorRepair", lane: "x" },
+    ],
+    x: { status: "needs-review", reasonCode: "", registry: ["src/a/"] },
+    y: { status: "idle", reasonCode: "", registry: [] },
+    xRepair: noRepair,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
     // The owner abandons the uncovered lane (row 6). A resolved lane is not
     // active, so the doctor neither resyncs nor repairs it.
     name: "a resolved uncovered lane is left alone",
