@@ -1088,6 +1088,62 @@ test("doctor resync conflict: a failed resync of a repair-needed lane tallies re
   assert.deepEqual(repairOf(doctor.realRepair.x), { owner: "alpha", escalation: "" }, "the runtime keeps the unescalated repair")
 })
 
+// The real doctor reads coverage from the registry: step 2b resyncs a lane
+// whose registry entries differ from its handoff record, and the integrity
+// check repairs an active lane that holds no registry entries
+// (analyzeLaneIntegrity's lockCount check). A lane whose coverage came back
+// outside a resync is left alone in any status. Until 2026-10-07 the model
+// read coverage loss from its own flag, which a re-acquire or a contract-mode
+// rescope to a new set left set, so a later doctor run sent the covered
+// review or PR-flow lane to repair-needed. The re-acquire
+// cases run in implementation mode only: contract mode diverges earlier, at
+// the request-changes or peer resolve of the uncovered lane, which the
+// runtime re-acquires (L9) and the contract rows name no coverage guard for.
+const xInReview = { t: "update", lane: "x", actorSel: "owner", status: "needs-review" }
+for (const { name, modes = ["contract", "implementation"], steps, x } of [
+  {
+    name: "a ready-for-pr lane re-acquired by the peer resolve",
+    modes: ["implementation"],
+    steps: [xInReview, { t: "dropRegistry", lane: "x" }, { t: "resolve", lane: "x", actorSel: "reviewer", final: false }],
+    x: { status: "ready-for-pr", reasonCode: "", registry: ["src/a/"] },
+  },
+  {
+    name: "a review lane re-acquired by request-changes",
+    modes: ["implementation"],
+    steps: [xInReview, { t: "dropRegistry", lane: "x" }, { t: "requestChanges", lane: "x", actorSel: "reviewer" }, xInReview],
+    x: { status: "needs-review", reasonCode: "", registry: ["src/a/"] },
+  },
+  {
+    name: "a review lane rescoped to a new set",
+    steps: [{ t: "dropRegistry", lane: "x" }, { t: "rescope", lane: "x", actorSel: "owner", files: ["src/b/"] }, xInReview],
+    x: { status: "needs-review", reasonCode: "", registry: ["src/b/"] },
+  },
+  {
+    name: "a ready-for-pr lane rescoped to a new set",
+    steps: [
+      { t: "dropRegistry", lane: "x" },
+      { t: "rescope", lane: "x", actorSel: "owner", files: ["src/b/"] },
+      xInReview,
+      { t: "resolve", lane: "x", actorSel: "reviewer", final: false },
+    ],
+    x: { status: "ready-for-pr", reasonCode: "", registry: ["src/b/"] },
+  },
+]) {
+  for (const mode of modes) {
+    test(`doctor coverage from the registry: ${name} is left alone (${mode} mode)`, { skip: !ENABLED }, async () => {
+      const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+        { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+        ...steps,
+        { t: "doctorRepair", lane: "x" },
+      ])
+      assert.equal(designatedTally.size, 0, "no designated drift")
+      assert.equal(candidateTally.size, 0, `no candidate finding: ${[...candidateTally.keys()].join(", ")}`)
+      const real = trace.at(-1).realState.x
+      assert.deepEqual({ status: real.status, reasonCode: real.reasonCode, registry: real.registry }, x)
+    })
+  }
+}
+
 // Regression witness for ledger finding 12 (spec 015 row 19): a lane agent's
 // metadata-only update applies in any status, `resolved` included. The
 // implementation used to refuse it on a resolved lane, which broke this legal

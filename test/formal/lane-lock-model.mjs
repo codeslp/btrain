@@ -82,6 +82,8 @@ function emptyLane() {
     authors: [],
     // spec 002 Force-release override: TRUE while registry coverage for an
     // active lane is suspended (registry emptied outside a claim or rescope).
+    // Only the contract coverage invariant reads it; a re-acquire or a
+    // rescope to a new set leaves it set, so doctorRepair reads the registry.
     uncovered: false,
   }
 }
@@ -133,6 +135,7 @@ export class LaneLockModel {
   // In implementation mode the handoff locked-file record and the registry
   // can drift apart (unaudited release). patchHandoff rejects active-status
   // updates while they disagree; requestChanges and peer resolve re-acquire.
+  // doctorRepair reads the same disagreement in both modes.
   #coverageMismatch(laneId) {
     const s = this.lane(laneId)
     const expected = JSON.stringify([...s.lockedFiles].sort())
@@ -309,16 +312,27 @@ export class LaneLockModel {
   // coverage to the owner. A lane left without locks fails the
   // active-without-locks integrity check, and the doctor writes repair-needed
   // (spec 015 row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
-  // lock-mismatch).
+  // lock-mismatch). Like the real doctor (buildLaneLockState and
+  // analyzeLaneIntegrity's lockCount check), it reads coverage from the
+  // registry, not from the `uncovered` flag: a re-acquire or a rescope to a
+  // new set restores coverage without clearing the flag.
   doctorRepair() {
     for (const [lane, s] of this.lanes) {
-      if (!s.uncovered || !ACTIVE_STATUSES.has(s.status)) continue
+      if (!ACTIVE_STATUSES.has(s.status)) continue
       const resyncPermitted = ["in-progress", "changes-requested", "repair-needed"].includes(s.status)
-      if (resyncPermitted && !this.#conflicts(lane, s.lockedFiles)) {
+      if (
+        this.#coverageMismatch(lane)
+        && resyncPermitted
+        && s.lockedFiles.length > 0
+        && !this.#conflicts(lane, s.lockedFiles)
+      ) {
         this.#setRegistry(lane, s.lockedFiles)
         s.uncovered = false
         continue
       }
+      // The integrity check repairs only an active lane that holds no
+      // registry entry.
+      if (this.registryPaths(lane).length > 0) continue
       const reason = "lock-mismatch"
       if (s.status !== "repair-needed") {
         this.#recordRepairEntry(s, reason)
