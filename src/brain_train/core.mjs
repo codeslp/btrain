@@ -587,8 +587,9 @@ async function resolveGitHooksDir(repoRoot) {
 }
 
 // A repeated CLI flag (`--files a --files b`) arrives as an array, so each
-// value is split on commas and the results are flattened. parseOptions sets a
-// flag with no value to `true`, which must not become a path named "true".
+// value is split on commas and the results are flattened and deduplicated.
+// parseOptions sets a flag with no value to `true`, which must not become a
+// path named "true".
 function parseCsvList(value) {
   if (!value) {
     return []
@@ -602,10 +603,11 @@ function parseCsvList(value) {
     })
   }
 
-  return items
+  const list = items
     .flatMap((item) => item.split(","))
     .map((item) => item.trim())
     .filter(Boolean)
+  return [...new Set(list)]
 }
 
 function normalizePrNumber(value) {

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
 import { parseCsvList, readLockRegistry } from "../src/brain_train/core.mjs"
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 
 const execFileAsync = promisify(execFile)
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/brain_train/cli.mjs")
@@ -46,7 +47,7 @@ async function withRepo(fn) {
 function runCli(repo, home, args) {
   return execFileAsync(process.execPath, [CLI, ...args, "--repo", repo], {
     cwd: repo,
-    env: { ...process.env, BRAIN_TRAIN_HOME: home, BTRAIN_AGENT: "alpha" },
+    env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: home, BTRAIN_AGENT: "alpha" },
   })
 }
 
@@ -60,6 +61,7 @@ describe("repeated --files flags", () => {
     assert.deepEqual(parseCsvList("a, b"), ["a", "b"])
     assert.deepEqual(parseCsvList(["a", "b,c", " d "]), ["a", "b", "c", "d"])
     assert.deepEqual(parseCsvList(undefined), [])
+    assert.deepEqual(parseCsvList(["a", "a,b"]), ["a", "b"])
   })
 
   it("parseCsvList rejects a flag given without a value instead of locking a path named 'true'", () => {
@@ -87,6 +89,16 @@ describe("repeated --files flags", () => {
         "--files", "src/a.mjs", "--files", "src/b.mjs,src/c.mjs",
       ])
       assert.deepEqual(await lockedPaths(repo), ["src/a.mjs", "src/b.mjs", "src/c.mjs"])
+    })
+  })
+
+  it("claim locks a path repeated across --files only once", async () => {
+    await withRepo(async (repo, home) => {
+      await runCli(repo, home, [
+        "handoff", "claim", "--lane", "x", "--task", "duplicate files", "--owner", "alpha", "--reviewer", "beta",
+        "--files", "src/a.mjs", "--files", "src/a.mjs",
+      ])
+      assert.deepEqual(await lockedPaths(repo), ["src/a.mjs"])
     })
   })
 
