@@ -586,13 +586,15 @@ async function resolveGitHooksDir(repoRoot) {
   return path.join(commonDir, "hooks")
 }
 
+// A repeated CLI flag (`--files a --files b`) arrives as an array, so each
+// value is split on commas and the results are flattened.
 function parseCsvList(value) {
   if (!value) {
     return []
   }
 
-  return value
-    .split(",")
+  return normalizeOptionArray(value)
+    .flatMap((item) => String(item).split(","))
     .map((item) => item.trim())
     .filter(Boolean)
 }
