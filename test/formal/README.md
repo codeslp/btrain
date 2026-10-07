@@ -185,20 +185,23 @@ equal to the lane's current status as a transition. `classifyTransitionEvent`
 records the write as `handoff update --metadata` (spec 015 row 19, or L12 for
 an agent outside the lane). So a same-reason `repair-needed` re-write tallied
 `repair-escalation-missing`, a label this ledger never listed. A new-reason
-re-write after an entry by the reviewer or a third agent moved the repair
-owner to that agent and failed contract mode with a false
-`validation_mismatch` (repair owner diverged), and random seeds can draw that
-sequence. Same-status `needs-review`, `pr-review`,
-and `ready-to-merge` writes, and the reviewer's `in-progress` write, tallied
-`update-source-status` or `update-actor-unchecked`. Brian Faris designated the
-row 19 reading on 2026-10-06 over L4 (a literal reading of row 13's CLI
-source, which excludes `repair-needed`), in line with spec 015's note that
-identity updates (same status) stay accepted. Contract-mode `update` now
-routes the write through `metadata`. A lane agent's write keeps the status,
-the locks, and the repair records (owner, escalation, attempts), and records
-a supplied reason code and PR number, as `patchHandoff` does. Another agent's
-write maps to `metadata-actor-unchecked`. The implementation mirror already
-matched. The same-status witnesses, the FR-18 repair-memory witnesses,
+re-write moved the repair owner to the most recent actor before it, so when
+that actor was not the FR-7 repair owner (after an entry by the reviewer or a
+third agent, say), contract mode failed with a false `validation_mismatch`
+(repair owner diverged), and random seeds can draw that sequence. Same-status
+`needs-review`, `pr-review`, and `ready-to-merge` writes, and the reviewer's
+`in-progress` write, tallied `update-source-status` or
+`update-actor-unchecked`. Brian Faris designated the row 19 reading on
+2026-10-06 over L4 (a literal reading of row 13's CLI source, which excludes
+`repair-needed`), in line with spec 015's note that identity updates (same
+status) stay accepted. Contract-mode `update` now routes the write through
+`metadata`. A lane agent's write keeps the status, the locks, and the repair
+records (owner, escalation, attempts), and records a supplied reason code and
+PR number, as `patchHandoff` does. Another agent's write maps to
+`metadata-actor-unchecked`. The implementation mirror already agreed on every
+compared field. It still moves the repair owner on a re-write, which
+`patchHandoff` keeps, but implementation mode never reads or compares the
+repair owner. The same-status witnesses, the FR-18 repair-memory witnesses,
 `lane-lock-model-same-status.test.mjs`, and the `test/transitions.test.mjs`
 cross-check fixtures guard it.
 

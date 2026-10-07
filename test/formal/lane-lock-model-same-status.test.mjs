@@ -47,13 +47,13 @@ const PATHS = {
 
 // The write as the harness sends it: a reason code only for repair-needed,
 // a PR number only for pr-review.
-function sameStatusWrite(status, actor) {
+function sameStatusWrite(status, actor, { reason = "invalid-handoff", pr = "101" } = {}) {
   return {
     lane: "x",
     actor,
     status,
-    ...(status === "repair-needed" ? { reason: "invalid-handoff" } : {}),
-    ...(status === "pr-review" ? { pr: "101" } : {}),
+    ...(status === "repair-needed" ? { reason } : {}),
+    ...(status === "pr-review" ? { pr } : {}),
   }
 }
 
@@ -70,11 +70,13 @@ for (const [status, steps] of Object.entries(PATHS)) {
     })
   }
 
+  // A fresh reason code and PR number show that the refused write records
+  // neither.
   test(`row 19 actor: --status ${status} on a lane already in ${status} is L12 for a third agent (contract mode)`, () => {
     const model = claimedModel("contract")
     for (const step of steps) accepted(step(model))
     const before = structuredClone(model.lane("x"))
-    assert.deepEqual(model.update(sameStatusWrite(status, "gamma")), {
+    assert.deepEqual(model.update(sameStatusWrite(status, "gamma", { reason: "lock-mismatch", pr: "202" })), {
       ok: false,
       reason: "metadata-update-requires-lane-agent",
     })
@@ -100,6 +102,21 @@ test("row 19: a pr-review re-write records a supplied PR number (contract mode)"
   assert.equal(model.lane("x").prNumber, "202")
   assert.equal(model.lane("x").status, "pr-review")
 })
+
+// patchHandoff refuses --status resolved even on a resolved lane: only
+// `handoff resolve` enters resolved, although classifyTransitionEvent calls
+// the write a metadata update. The model's resolved check therefore runs
+// before the same-status routing.
+for (const actor of ["alpha", "beta"]) {
+  test(`--status resolved on a resolved lane stays refused (${actor}, contract mode)`, () => {
+    const model = claimedModel("contract")
+    accepted(model.resolve({ lane: "x", actor: "alpha", final: false }))
+    assert.deepEqual(model.update({ lane: "x", actor, status: "resolved" }), {
+      ok: false,
+      reason: "resolved-via-update-forbidden",
+    })
+  })
+}
 
 // spec 006 FR-7: the reviewer or a third agent declares the repair (row 13
 // allows any configured agent), so the owner, the most recent canonical actor
