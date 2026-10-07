@@ -184,14 +184,14 @@ Contract maintenance, 2026-10-06: contract-mode `update` treated a `--status`
 equal to the lane's current status as a transition. `classifyTransitionEvent`
 records the write as `handoff update --metadata` (spec 015 row 19, or L12 for
 an agent outside the lane). So a same-reason `repair-needed` re-write tallied
-`repair-escalation-missing`, a label this ledger never listed. A new-reason
-re-write moved the repair owner to the most recent actor before it, so when
-that actor was not the FR-7 repair owner (after an entry by the reviewer or a
-third agent, say), contract mode failed with a false `validation_mismatch`
-(repair owner diverged), and random seeds can draw that sequence. Same-status
-`needs-review`, `pr-review`, and `ready-to-merge` writes, and the reviewer's
-`in-progress` write, tallied `update-source-status` or
-`update-actor-unchecked`. Brian Faris designated the row 19 reading on
+`repair-escalation-missing`, a label this ledger did not list at the time. A
+new-reason re-write moved the repair owner to the most recent actor before it,
+so when that actor was not the FR-7 repair owner (after an entry by the
+reviewer or a third agent, say), contract mode failed with a false
+`validation_mismatch` (repair owner diverged), and random seeds can draw that
+sequence. Same-status `needs-review`, `pr-review`, and `ready-to-merge`
+writes, and the reviewer's `in-progress` write, tallied `update-source-status`
+or `update-actor-unchecked`. Brian Faris designated the row 19 reading on
 2026-10-06 over L4 (a literal reading of row 13's CLI source, which excludes
 `repair-needed`), in line with spec 015's note that identity updates (same
 status) stay accepted. Spec 002's Resolve, update, and claim authority records
