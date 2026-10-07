@@ -172,8 +172,8 @@ export class LaneLockModel {
   // reason starts its count. The entry also starts a new repair, so an
   // earlier repair's FR-29 disposition no longer counts (hasRepairDisposition
   // reads only dispositions recorded after the latest entry). Contract-mode
-  // `update` keeps its own bookkeeping, which also counts a repair-needed
-  // write on a lane that is already repair-needed (README Known gaps).
+  // `update` keeps its own bookkeeping, which sees only entries from another
+  // status because it routes a same-status write through row 19.
   #recordRepairEntry(s, reason) {
     s.disposition = false
     s.escalationExpected = s.repairReasonsSeen.includes(reason)
@@ -375,6 +375,24 @@ export class LaneLockModel {
       return this.#accept()
     }
 
+    // spec 015 row 19 (designated 2026-10-06): a --status equal to the lane's
+    // current status is an identity update, not a transition.
+    // classifyTransitionEvent records it as `handoff update --metadata`, and
+    // spec 015 keeps identity updates accepted, so `metadata` decides: a lane
+    // agent acts, and any other agent is L12. Status, locks, and the repair
+    // records stay as they are, so a repair-needed re-write is no FR-18 entry
+    // (spec 006 FR-29; row 13's CLI source excludes repair-needed). Like
+    // patchHandoff, the write still records a supplied reason code
+    // (resolveReasonMetadata) and PR number.
+    if (status === s.status) {
+      const result = this.metadata({ lane, actor })
+      if (result.ok) {
+        if (reason) s.reasonCode = reason
+        if (pr) s.prNumber = String(pr)
+      }
+      return result
+    }
+
     if (status === "needs-review") {
       // Writer hands off: from in-progress (spec 005 status model) or from
       // changes-requested (FR-7 clean re-handoff). Owner acts.
@@ -429,7 +447,7 @@ export class LaneLockModel {
 
     if (status === "in-progress") {
       // spec 006 FR-15: the responsible actor clears repair-needed.
-      if (!["repair-needed", "in-progress", "changes-requested"].includes(s.status)) {
+      if (!["repair-needed", "changes-requested"].includes(s.status)) {
         return this.#reject("in-progress-from-invalid-status")
       }
       if (s.status === "repair-needed") {
