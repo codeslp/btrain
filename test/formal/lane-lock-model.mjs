@@ -171,9 +171,9 @@ export class LaneLockModel {
   // an earlier entry of the task had the same reason; the first entry for a
   // reason starts its count. The entry also starts a new repair, so an
   // earlier repair's FR-29 disposition no longer counts (hasRepairDisposition
-  // reads only dispositions recorded after the latest entry). Contract-mode
-  // `update` keeps its own bookkeeping, which also counts a repair-needed
-  // write on a lane that is already repair-needed (README Known gaps).
+  // reads only dispositions recorded after the latest entry). `update` in
+  // both modes and `doctorRepair` record their entries here; a same-status
+  // write is no entry in either mode.
   #recordRepairEntry(s, reason) {
     s.disposition = false
     s.escalationExpected = s.repairReasonsSeen.includes(reason)
@@ -375,6 +375,26 @@ export class LaneLockModel {
       return this.#accept()
     }
 
+    // spec 015 row 19 also covers a --status equal to the lane's current
+    // status (spec 002 Resolve, update, and claim authority, designated
+    // 2026-10-06): an identity update, not a transition.
+    // classifyTransitionEvent records it as `handoff update --metadata`, and
+    // spec 015 keeps identity updates accepted, so `metadata` decides: a lane
+    // agent acts, and any other agent is L12. Status, locks, and the repair
+    // records stay as they are, so a repair-needed re-write is no FR-18 entry
+    // (spec 006 FR-29; row 13's CLI source excludes repair-needed). Like
+    // patchHandoff, the write still records a supplied PR number and reason
+    // code (resolveReasonMetadata, which refuses a reason code on a status
+    // that takes none; the harness sends one only with repair-needed).
+    if (status === s.status) {
+      const result = this.metadata({ lane, actor })
+      if (result.ok) {
+        if (reason) s.reasonCode = reason
+        if (pr) s.prNumber = String(pr)
+      }
+      return result
+    }
+
     if (status === "needs-review") {
       // Writer hands off: from in-progress (spec 005 status model) or from
       // changes-requested (FR-7 clean re-handoff). Owner acts.
@@ -417,19 +437,15 @@ export class LaneLockModel {
       // designation: re-entering for the same unresolved reason exhausts the
       // one-attempt budget, so the contract expects human escalation.
       if (!ACTIVE_STATUSES.has(s.status)) return this.#reject("repair-from-inactive")
-      if (reason && s.repairReasonsSeen.includes(reason)) {
-        s.escalationExpected = true
-      } else if (reason) {
-        s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
-      }
       s.status = "repair-needed"
       this.#applyUpdateEffects(s, status, actor, reason)
+      this.#recordRepairEntry(s, s.reasonCode)
       return this.#accept()
     }
 
     if (status === "in-progress") {
       // spec 006 FR-15: the responsible actor clears repair-needed.
-      if (!["repair-needed", "in-progress", "changes-requested"].includes(s.status)) {
+      if (!["repair-needed", "changes-requested"].includes(s.status)) {
         return this.#reject("in-progress-from-invalid-status")
       }
       if (s.status === "repair-needed") {

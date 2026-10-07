@@ -393,7 +393,9 @@ directing PR feedback back through local review. Prevents recurrence: yes, this
 finding is the list. Blast radius: `test/core.test.mjs:1495-1503` sets
 `ready-to-merge` directly; `test/core.test.mjs:4972` moves `repair-needed` to
 `needs-review`, which spec 014 line 111 forbids; identity updates (same status)
-must stay accepted.
+must stay accepted. Designated 2026-10-06 in spec 002 (Resolve, update, and
+claim authority): a `--status` equal to the current status is a row 19
+metadata update, as `classifyTransitionEvent` already records it, not L4.
 
 **#8 raw `ENOENT` on a missing lane file.** Code-wrong; pure error handling.
 Owner: none; spec 006 FR-2a covers the spirit. No prose change. Prevents

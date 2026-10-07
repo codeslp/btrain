@@ -83,11 +83,9 @@ const CASES = [
     disposes: true,
     steps: [repair("lock-mismatch"), clear, ...doctorEntry],
   },
-  // Contract mode still counts this write as a re-entry; spec 006 FR-29 does
-  // not (see the Known gaps in README.md).
   {
     name: "a write while repair-needed is not an entry",
-    modes: ["implementation"],
+    modes: BOTH,
     disposes: false,
     steps: [repair("invalid-handoff"), repair("invalid-handoff")],
   },

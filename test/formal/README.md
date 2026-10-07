@@ -15,6 +15,10 @@ contract, using fast-check model-based command sequences per spec 014 FR-6.
   (spec 006 FR-29 `btrain repair dispose`), `releaseLocks`, and
   `applyPrStatusToHandoff` against throwaway repos and compares every step
   with the model.
+- `lane-lock-model-same-status.test.mjs` — checks that contract mode reads a
+  `--status` equal to the lane's current status as a spec 015 row 19
+  identity update. It runs in the default `npm test`; the harness's
+  same-status witnesses run the same writes against the real entry points.
 - `lane-lock-model-fr18.test.mjs` — checks the model's spec 006 FR-18 repair
   memory in both modes. It runs in the default `npm test`; the harness's FR-18
   repair-memory witnesses run the same cases against the real entry points.
@@ -46,7 +50,8 @@ agent or provider credentials.
 | implementation mode | Real behavior vs the implementation mirror | Must pass; a failure means a new, unknown divergence |
 | closed-chain check | Deterministic close-without-merge chain | Must pass with zero tallies: the chain conforms end to end |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
-| FR-18 repair-memory witnesses | Repair entries, clears, a reclaim, and a doctor entry, each closed by a dispose | Must pass: model and implementation agree on every escalation (four cases in both modes, three in implementation mode only) |
+| FR-18 repair-memory witnesses | Repair entries, clears, a reclaim, and a doctor entry, each closed by a dispose | Must pass: model and implementation agree on every escalation (five cases in both modes, two in implementation mode only) |
+| same-status witnesses | `--status X` on a lane already in X, for each modeled status and actor, plus a new-reason `repair-needed` re-write | Must pass: a spec 015 row 19 identity update in both modes; contract mode tallies only a third agent's write (`metadata-actor-unchecked`) |
 | repaired-drift witnesses | Close-without-merge, `--final` rejection, unaudited-release rejection | Must pass: normal regression tests since the drift-repair lane |
 
 A contract-mode failure is a fresh `validation_mismatch` verdict in spec 014
@@ -175,6 +180,33 @@ escalation. An entry also voids an earlier repair's disposition, because
 entry. The FR-18 repair-memory witnesses and `lane-lock-model-fr18.test.mjs`
 guard it.
 
+Contract maintenance, 2026-10-06: contract-mode `update` treated a `--status`
+equal to the lane's current status as a transition. `classifyTransitionEvent`
+records the write as `handoff update --metadata` (spec 015 row 19, or L12 for
+an agent outside the lane). So a same-reason `repair-needed` re-write tallied
+`repair-escalation-missing`, a label this ledger did not list at the time. A
+new-reason re-write moved the repair owner to the most recent actor before it,
+so when that actor was not the FR-7 repair owner (after an entry by the
+reviewer or a third agent, say), contract mode failed with a false
+`validation_mismatch` (repair owner diverged), and random seeds can draw that
+sequence. Same-status `needs-review`, `pr-review`, and `ready-to-merge`
+writes, and the reviewer's `in-progress` write, tallied `update-source-status`
+or `update-actor-unchecked`. Brian Faris designated the row 19 reading on
+2026-10-06 over L4 (a literal reading of row 13's CLI source, which excludes
+`repair-needed`), in line with spec 015's note that identity updates (same
+status) stay accepted. Spec 002's Resolve, update, and claim authority records
+it. `LaneLock.tla` has no metadata or same-status action, so the write is a
+stutter step there and only its pin was refreshed. Contract-mode `update` now
+routes the write through `metadata`. A lane agent's write keeps the status,
+the locks, and the repair records (owner, escalation, attempts), and records a
+supplied reason code and PR number, as `patchHandoff` does. Another agent's
+write maps to `metadata-actor-unchecked`. The implementation mirror already
+agreed on every compared field. It still moves the repair owner on a re-write,
+which `patchHandoff` keeps, but implementation mode never reads or compares
+the repair owner. The same-status witnesses, the FR-18 repair-memory
+witnesses, `lane-lock-model-same-status.test.mjs`, and the
+`test/transitions.test.mjs` cross-check fixtures guard it.
+
 Verified working (positive witnesses): spec 006 FR-18 same-reason repair
 re-entry escalates to a human (`repairEscalation: "human"`, attempts
 counted).
@@ -241,22 +273,10 @@ that only carry another lane's reviewed work.
   and the FR-7 comparison checks the assigned repair owner (most recent
   canonical actor before the repair). The implementation's attempt-counting
   internals are not designated and not compared.
-- A CLI `--status repair-needed` write on a lane that is already
-  `repair-needed` is not an FR-18 entry: spec 006 FR-29 lists the entry
-  sources without `repair-needed`, `LaneLock.tla`'s `RepairEnter` excludes
-  it, and the implementation keeps the recorded escalation and repair owner.
-  The implementation mirror treats the write as no entry, but contract-mode
-  `update` still treats it as a re-entry. With a repeated reason the
-  escalation check tallies `repair-escalation-missing`, a label the ledger
-  above does not list. With a new reason the model moves the repair owner to
-  the entry's actor; when that actor is not the FR-7 owner (a third agent
-  declared the repair, say), contract mode fails with a false
-  `validation_mismatch` (repair owner diverged). Spec 015 row 13 (designated)
-  excludes `repair-needed` as the CLI source, and spec 015 keeps identity
-  updates (same status) accepted. `classifyTransitionEvent` treats a
-  `--status` equal to the current status as a metadata update, so the
-  runtime records row 19 (L12 for an agent outside the lane). The
-  contract-model fix may cover every same-status `--status` update and is
-  for a later lane.
+- Spec 002 (Resolve, update, and claim authority) records the same-status
+  reading, and spec 015's ledger note #7 points to it, but spec 015 row 19's
+  event cell still reads `handoff update` without `--status`, `--files`,
+  `--owner`, or `--reviewer`. Lane h edits that row, so the cell's wording
+  waits for it.
 - Traces are harness-internal JSON. Exporting them for TLC trace validation
   against `specs/tla/LaneLock.tla` is future work (`specs/tla/README.md`).
