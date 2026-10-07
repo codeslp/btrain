@@ -9,9 +9,11 @@
 // no locks. It writes watchdog-repair to repair-needed with reason
 // lock-mismatch (row 13). From in-progress or changes-requested that is an
 // FR-18 entry (resolveRepairAssignment). On a lane already repair-needed it is
-// a re-write: the repair owner, the escalation, and any disposition stay, and
-// only the reason code changes (spec 006 FR-29 lists no repair-needed entry
-// source).
+// a re-write, not an entry (spec 006 FR-29): the repair owner and any
+// disposition stay, and the reason code changes. The runtime also keeps the
+// escalation. The contract escalates, because a failed resync is guardian
+// intervention that still cannot restore a healthy state (FR-18; designated
+// 2026-10-07), so the two modes differ there.
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
@@ -89,10 +91,16 @@ const CASES = [
     disposeReason: "dispose-already-recorded",
   },
   {
-    name: "a re-write with the entry's own reason does not escalate",
+    // The re-write is no entry, so the runtime keeps the escalation unset.
+    // The contract escalates: the guardian could not restore the lane (FR-18).
+    name: "a failed resync of a repair-needed lane escalates in contract mode only",
     steps: [update("alpha", "repair-needed", "lock-mismatch"), ...conflict],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", repairOwner: "alpha", repairReasonsSeen: ["lock-mismatch"], escalationExpected: false, registry: [] },
     disposeReason: "dispose-requires-escalation",
+    contract: {
+      x: { status: "repair-needed", reasonCode: "lock-mismatch", repairOwner: "alpha", repairReasonsSeen: ["lock-mismatch"], escalationExpected: true, registry: [] },
+      disposeReason: "",
+    },
   },
   {
     name: "a later doctor run restores coverage after the conflict clears",
@@ -113,8 +121,9 @@ const CASES = [
 
 const yHoldsPath = { status: "in-progress", reasonCode: "", repairOwner: "", escalationExpected: false, registry: ["src/a/"] }
 
-for (const { name, steps, x, y = yHoldsPath, disposeReason } of CASES) {
+for (const { name, steps, contract, ...expected } of CASES) {
   for (const mode of ["contract", "implementation"]) {
+    const { x, y = yHoldsPath, disposeReason } = mode === "contract" && contract ? { ...expected, ...contract } : expected
     test(`doctor resync conflict: ${name} (${mode} mode)`, () => {
       const model = new LaneLockModel({ lanes: ["x", "y"], agents: ["alpha", "beta", "gamma"], mode })
       for (const [i, step] of [claimX, ...steps].entries()) {

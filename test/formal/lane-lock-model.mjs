@@ -320,14 +320,21 @@ export class LaneLockModel {
         continue
       }
       const reason = "lock-mismatch"
-      // A lane already repair-needed gets a re-write, not an entry (spec 006
-      // FR-29): it keeps its repair owner, FR-18 escalation, and disposition.
       if (s.status !== "repair-needed") {
         this.#recordRepairEntry(s, reason)
         s.status = "repair-needed"
         s.repairOwner = s.lastActor || s.owner
         s.prFeedbackEntered = false
+      } else if (this.mode === "contract") {
+        // A failed resync of a lane already repair-needed is guardian
+        // intervention that still cannot restore a healthy state, so spec
+        // 006 FR-18 escalates to a human (spec 015 row 13: the watchdog
+        // re-write computes the escalation; designated 2026-10-07). It is
+        // still no entry (FR-29), so the repair owner and disposition stay.
+        s.escalationExpected = true
       }
+      // Implementation mirror: the doctor's re-write keeps the recorded
+      // repair owner, escalation, and disposition (core.mjs repairMetadata).
       s.reasonCode = reason
     }
     return this.#accept()

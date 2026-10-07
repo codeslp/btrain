@@ -896,8 +896,10 @@ for (const mode of ["contract", "implementation"]) {
 // lane with no locks and writes watchdog-repair (row 13, reason
 // lock-mismatch). From in-progress or changes-requested that is an FR-18
 // entry. On a lane already repair-needed it is a re-write, which keeps the
-// repair owner, the escalation, and any disposition and changes only the
-// reason code (spec 006 FR-29 lists no repair-needed entry source). Until
+// repair owner and any disposition and changes the reason code (spec 006
+// FR-29 lists no repair-needed entry source); the runtime also keeps the
+// escalation, while the contract escalates (see the witness after the
+// table). Until
 // 2026-10-06 the model skipped the conflicting lane, so the real lane went to
 // repair-needed while the model's lane kept its status. Each case ends with a
 // dispose, whose verdict shows the escalation model and runtime agree on.
@@ -920,7 +922,7 @@ const noRepair = { owner: "", escalation: "" }
 function repairOf({ owner, escalation }) {
   return { owner, escalation }
 }
-for (const { name, steps, x, y = yHoldsPath, xRepair, yRepair = noRepair, disposeReason } of [
+for (const { name, modes = ["contract", "implementation"], steps, x, y = yHoldsPath, xRepair, yRepair = noRepair, disposeReason } of [
   {
     name: "an in-progress lane enters repair-needed",
     steps: doctorOnTakenPath,
@@ -963,8 +965,11 @@ for (const { name, steps, x, y = yHoldsPath, xRepair, yRepair = noRepair, dispos
     disposeReason: "dispose-already-recorded",
   },
   {
-    // A same-reason re-write is still no entry, so nothing escalates.
+    // A same-reason re-write is still no entry, so the runtime does not
+    // escalate. Contract mode expects the escalation (the witness after this
+    // table), so this case runs in implementation mode only.
     name: "a re-write with the entry's own reason does not escalate",
+    modes: ["implementation"],
     steps: [ownerRepair("lock-mismatch"), ...doctorOnTakenPath],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
     xRepair: { owner: "alpha", escalation: "" },
@@ -997,7 +1002,7 @@ for (const { name, steps, x, y = yHoldsPath, xRepair, yRepair = noRepair, dispos
     disposeReason: "dispose-requires-repair-needed",
   },
 ]) {
-  for (const mode of ["contract", "implementation"]) {
+  for (const mode of modes) {
     test(`doctor resync conflict: ${name} (${mode} mode)`, { skip: !ENABLED }, async () => {
       const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
         { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
@@ -1017,6 +1022,27 @@ for (const { name, steps, x, y = yHoldsPath, xRepair, yRepair = noRepair, dispos
     })
   }
 }
+
+// spec 006 FR-18 (designated 2026-10-07): a failed resync of a lane already
+// repair-needed is guardian intervention that still cannot restore a healthy
+// state, so the contract escalates to a human; spec 015 row 13 has the
+// watchdog re-write compute the escalation. The runtime keeps the recorded
+// escalation instead (core.mjs repairMetadata), so contract mode tallies the
+// candidate repair-escalation-missing. When the runtime escalates, the tally
+// empties and this witness must change.
+test("doctor resync conflict: a failed resync of a repair-needed lane tallies repair-escalation-missing (contract mode)", { skip: !ENABLED }, async () => {
+  const { designatedTally, candidateTally, trace } = await executeSequence("contract", [
+    { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+    ownerRepair("lock-mismatch"),
+    ...doctorOnTakenPath,
+  ])
+  assert.equal(designatedTally.size, 0, "no designated drift")
+  assert.deepEqual([...candidateTally], [["repair-escalation-missing", 1]])
+  const doctor = trace.at(-1)
+  assert.equal(doctor.realState.x.status, "repair-needed")
+  assert.equal(doctor.realState.x.reasonCode, "lock-mismatch")
+  assert.deepEqual(repairOf(doctor.realRepair.x), { owner: "alpha", escalation: "" }, "the runtime keeps the unescalated repair")
+})
 
 // Regression witness for ledger finding 12 (spec 015 row 19): a lane agent's
 // metadata-only update applies in any status, `resolved` included. The

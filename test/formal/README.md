@@ -236,15 +236,17 @@ that only carry another lane's reviewed work.
   conflict), the integrity check finds an active lane with no locks, and the
   doctor writes repair-needed with `lock-mismatch` (row 13). From
   in-progress or changes-requested that is an FR-18 entry; on a lane already
-  repair-needed it is a re-write that keeps the repair owner, escalation,
-  and disposition and changes only the reason code. Until 2026-10-06 the
+  repair-needed it is a re-write, not an entry, that keeps the repair owner
+  and disposition and changes the reason code. Until 2026-10-06 the
   model skipped the conflicting lane; the doctor resync conflict witnesses
-  and `lane-lock-model-doctor.test.mjs` guard the fall-through. Spec 006
-  FR-18 also escalates when guardian intervention still cannot restore a
-  healthy state, which a failed resync of a repair-needed lane arguably is;
-  the re-write keeps the recorded escalation, as the implementation does and
-  as `LaneLock.tla`'s `RepairEnter` (no repair-needed source) implies, so
-  whether FR-18 should escalate there is an open question. The model still
+  and `lane-lock-model-doctor.test.mjs` guard the fall-through. A failed
+  resync of a lane already repair-needed is guardian intervention that still
+  cannot restore a healthy state, so spec 006 FR-18 escalates it to a human
+  (designated 2026-10-07; row 13 has the watchdog re-write compute the
+  escalation). Contract mode expects that escalation. The implementation
+  keeps the recorded escalation on the re-write, so the mirror does too and
+  contract mode tallies `repair-escalation-missing`, which persists like the
+  other candidate labels until the runtime escalates. The model still
   reads coverage loss from its `uncovered` flag, while the real doctor reads
   the registry: a re-acquire (implementation-mode request-changes and peer
   resolve) or a contract-mode rescope to a new set restores coverage without
