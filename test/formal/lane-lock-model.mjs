@@ -376,16 +376,16 @@ export class LaneLockModel {
     }
 
     // spec 015 row 19 also covers a --status equal to the lane's current
-    // status (that reading designated 2026-10-06): an identity update, not a
-    // transition. classifyTransitionEvent records it as `handoff update
-    // --metadata`, and spec 015 keeps identity updates accepted, so `metadata`
-    // decides: a lane agent acts, and any other agent is L12. Status, locks,
-    // and the repair records stay as they are, so a repair-needed re-write is
-    // no FR-18 entry (spec 006 FR-29; row 13's CLI source excludes
-    // repair-needed). Like patchHandoff, the write still records a supplied PR
-    // number and reason code (resolveReasonMetadata, which refuses a reason
-    // code on a status that takes none; the harness sends one only with
-    // repair-needed).
+    // status (spec 002 Resolve, update, and claim authority, designated
+    // 2026-10-06): an identity update, not a transition.
+    // classifyTransitionEvent records it as `handoff update --metadata`, and
+    // spec 015 keeps identity updates accepted, so `metadata` decides: a lane
+    // agent acts, and any other agent is L12. Status, locks, and the repair
+    // records stay as they are, so a repair-needed re-write is no FR-18 entry
+    // (spec 006 FR-29; row 13's CLI source excludes repair-needed). Like
+    // patchHandoff, the write still records a supplied PR number and reason
+    // code (resolveReasonMetadata, which refuses a reason code on a status
+    // that takes none; the harness sends one only with repair-needed).
     if (status === s.status) {
       const result = this.metadata({ lane, actor })
       if (result.ok) {

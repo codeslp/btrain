@@ -194,16 +194,18 @@ third agent, say), contract mode failed with a false `validation_mismatch`
 `update-actor-unchecked`. Brian Faris designated the row 19 reading on
 2026-10-06 over L4 (a literal reading of row 13's CLI source, which excludes
 `repair-needed`), in line with spec 015's note that identity updates (same
-status) stay accepted. Contract-mode `update` now routes the write through
-`metadata`. A lane agent's write keeps the status, the locks, and the repair
-records (owner, escalation, attempts), and records a supplied reason code and
-PR number, as `patchHandoff` does. Another agent's write maps to
-`metadata-actor-unchecked`. The implementation mirror already agreed on every
-compared field. It still moves the repair owner on a re-write, which
-`patchHandoff` keeps, but implementation mode never reads or compares the
-repair owner. The same-status witnesses, the FR-18 repair-memory witnesses,
-`lane-lock-model-same-status.test.mjs`, and the `test/transitions.test.mjs`
-cross-check fixtures guard it.
+status) stay accepted. Spec 002's Resolve, update, and claim authority records
+it. `LaneLock.tla` has no metadata or same-status action, so the write is a
+stutter step there and only its pin was refreshed. Contract-mode `update` now
+routes the write through `metadata`. A lane agent's write keeps the status,
+the locks, and the repair records (owner, escalation, attempts), and records a
+supplied reason code and PR number, as `patchHandoff` does. Another agent's
+write maps to `metadata-actor-unchecked`. The implementation mirror already
+agreed on every compared field. It still moves the repair owner on a re-write,
+which `patchHandoff` keeps, but implementation mode never reads or compares
+the repair owner. The same-status witnesses, the FR-18 repair-memory
+witnesses, `lane-lock-model-same-status.test.mjs`, and the
+`test/transitions.test.mjs` cross-check fixtures guard it.
 
 Verified working (positive witnesses): spec 006 FR-18 same-reason repair
 re-entry escalates to a human (`repairEscalation: "human"`, attempts
@@ -271,11 +273,10 @@ that only carry another lane's reviewed work.
   and the FR-7 comparison checks the assigned repair owner (most recent
   canonical actor before the repair). The implementation's attempt-counting
   internals are not designated and not compared.
-- Spec 015 row 19's event cell still reads `handoff update` without
-  `--status`, `--files`, `--owner`, or `--reviewer`. It does not name a
-  `--status` equal to the lane's current status, which the runtime records
-  as row 19 and contract mode now models as row 19 (designated 2026-10-06;
-  see the 2026-10-06 contract maintenance note above). The spec edit belongs
-  to whichever lane next holds spec 015.
+- Spec 002 (Resolve, update, and claim authority) records the same-status
+  reading, and spec 015's ledger note #7 points to it, but spec 015 row 19's
+  event cell still reads `handoff update` without `--status`, `--files`,
+  `--owner`, or `--reviewer`. Lane h edits that row, so the cell's wording
+  waits for it.
 - Traces are harness-internal JSON. Exporting them for TLC trace validation
   against `specs/tla/LaneLock.tla` is future work (`specs/tla/README.md`).
