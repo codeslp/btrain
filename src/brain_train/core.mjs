@@ -587,14 +587,23 @@ async function resolveGitHooksDir(repoRoot) {
 }
 
 // A repeated CLI flag (`--files a --files b`) arrives as an array, so each
-// value is split on commas and the results are flattened.
+// value is split on commas and the results are flattened. parseOptions sets a
+// flag with no value to `true`, which must not become a path named "true".
 function parseCsvList(value) {
   if (!value) {
     return []
   }
 
-  return normalizeOptionArray(value)
-    .flatMap((item) => String(item).split(","))
+  const items = normalizeOptionArray(value)
+  if (items.some((item) => typeof item !== "string")) {
+    throw new BtrainError({
+      message: "--files needs a value.",
+      fix: 'Pass comma-separated paths (--files "a,b") or repeat the flag (--files a --files b).',
+    })
+  }
+
+  return items
+    .flatMap((item) => item.split(","))
     .map((item) => item.trim())
     .filter(Boolean)
 }

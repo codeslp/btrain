@@ -62,6 +62,24 @@ describe("repeated --files flags", () => {
     assert.deepEqual(parseCsvList(undefined), [])
   })
 
+  it("parseCsvList rejects a flag given without a value instead of locking a path named 'true'", () => {
+    assert.throws(() => parseCsvList(true), /--files needs a value/)
+    assert.throws(() => parseCsvList(["src/a.mjs", true]), /--files needs a value/)
+  })
+
+  it("claim with a bare --files fails with a clear error and locks nothing", async () => {
+    await withRepo(async (repo, home) => {
+      await assert.rejects(
+        runCli(repo, home, [
+          "handoff", "claim", "--lane", "x", "--task", "bare files", "--owner", "alpha", "--reviewer", "beta",
+          "--files",
+        ]),
+        (error) => /--files needs a value/.test(error.stderr),
+      )
+      assert.deepEqual(await lockedPaths(repo), [])
+    })
+  })
+
   it("claim locks every file from repeated and comma-separated --files", async () => {
     await withRepo(async (repo, home) => {
       await runCli(repo, home, [
