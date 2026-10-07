@@ -22,6 +22,11 @@ contract, using fast-check model-based command sequences per spec 014 FR-6.
 - `lane-lock-model-fr18.test.mjs` — checks the model's spec 006 FR-18 repair
   memory in both modes. It runs in the default `npm test`; the harness's FR-18
   repair-memory witnesses run the same cases against the real entry points.
+- `lane-lock-model-doctor.test.mjs` — checks how the model's `doctorRepair`
+  handles a resync that conflicts with another lane's lock (spec 015 rows 17
+  and 13) in both modes. It runs in the default `npm test`; the harness's
+  doctor resync conflict witnesses run the same cases against the real
+  `doctor --repair`.
 
 ## Run
 
@@ -249,15 +254,37 @@ that only carry another lane's reviewed work.
   (reviewer context and reviewable diff), which row 19 does not name; the
   throwaway repos have no git history, so the diff half always passes and
   the harness cannot see a rejection.
-- Doctor resync (spec 015 row 17, Q2) runs as a deterministic witness in
+- Doctor resync (spec 015 row 17, Q2) runs as deterministic witnesses in
   both modes: the harness drops a lane's registry entry (`dropRegistry`) and
-  runs the real `doctor --repair` (`doctorRepair`); the mirror restores
+  runs the real `doctor --repair` (`doctorRepair`); the model restores
   coverage in the three permitted statuses and enters repair-needed
   elsewhere. Status and metadata updates on an uncovered lane are not
   generated: the implementation rejects them as a lock-state mismatch until
   a resync restores coverage (only request-changes and peer resolve
   re-acquire), while the contract rows name no coverage guard for them, an
-  undesignated difference for a later lane.
+  undesignated difference for a later lane. Row 17's guard also requires
+  that no other lane holds a lock that overlaps the recorded set. When one
+  does, the real resync fails (the doctor catches the `acquireLocks`
+  conflict), the integrity check finds an active lane with no locks, and the
+  doctor writes repair-needed with `lock-mismatch` (row 13). From
+  in-progress or changes-requested that is an FR-18 entry; on a lane already
+  repair-needed it is a re-write, not an entry, that keeps the repair owner
+  and disposition and changes the reason code. Until 2026-10-06 the
+  model skipped the conflicting lane; the doctor resync conflict witnesses
+  and `lane-lock-model-doctor.test.mjs` guard the fall-through. A failed
+  resync of a lane already repair-needed is guardian intervention that still
+  cannot restore a healthy state, so spec 006 FR-18 escalates it to a human
+  (designated 2026-10-07; row 13 has the watchdog re-write compute the
+  escalation). Contract mode expects that escalation. The implementation
+  keeps the recorded escalation on the re-write, so the mirror does too and
+  contract mode tallies `repair-escalation-missing`, which persists like the
+  other candidate labels until the runtime escalates. The model still
+  reads coverage loss from its `uncovered` flag, while the real doctor reads
+  the registry: a re-acquire (implementation-mode request-changes and peer
+  resolve) or a contract-mode rescope to a new set restores coverage without
+  clearing the flag, so a later doctor run sends a covered review or PR-flow
+  lane to repair-needed that the real doctor leaves alone. That gap is also
+  left for a later lane.
 - PR-flow `changes-requested` provenance: the implementation reads the
   workflow event that entered `changes-requested` (`details.transitionEvent
   === "pr-poll"`); the mirror tracks the same fact as `prFeedbackEntered`,
