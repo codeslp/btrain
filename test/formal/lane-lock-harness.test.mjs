@@ -990,6 +990,16 @@ for (const { name, modes = ["contract", "implementation"], steps, x, y = yHoldsP
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // The owner abandons the uncovered lane (row 6). A resolved lane is not
+    // active, so the doctor neither resyncs nor repairs it.
+    name: "a resolved uncovered lane is left alone",
+    steps: [{ t: "dropRegistry", lane: "x" }, { t: "resolve", lane: "x", actorSel: "owner", final: false }, { t: "doctorRepair", lane: "x" }],
+    x: { status: "resolved", reasonCode: "", registry: [] },
+    y: { status: "idle", reasonCode: "", registry: [] },
+    xRepair: noRepair,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
     // Lanes resync in order against the live registry: x restores its path
     // first, so y's resync conflicts with it and y enters repair-needed.
     name: "the first resync in a doctor run takes the path",

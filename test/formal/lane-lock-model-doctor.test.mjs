@@ -110,6 +110,15 @@ const CASES = [
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // Row 6 abandon of the uncovered lane: a resolved lane is not active, so
+    // the doctor neither resyncs nor repairs it.
+    name: "a resolved uncovered lane is left alone",
+    steps: [dropRegistry("x"), (model) => model.resolve({ lane: "x", actor: "alpha", final: false }), doctorRepair],
+    x: { status: "resolved", reasonCode: "", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: [] },
+    y: { status: "idle", reasonCode: "", repairOwner: "", escalationExpected: false, registry: [] },
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
     // Lane y's FR-7 owner is its claimer, the most recent canonical actor.
     name: "the first resync in a doctor run takes the path",
     steps: [dropRegistry("x"), claimY, dropRegistry("y"), doctorRepair],
