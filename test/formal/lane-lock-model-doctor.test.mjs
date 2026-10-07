@@ -1,8 +1,8 @@
 // spec 015 row 17 in the lane/lock model: `btrain doctor --repair` restores
-// coverage only when no other lane holds the recorded set. These checks run in
-// the default suite; the formal harness's doctor resync conflict witnesses,
-// which are opt-in and advisory in CI, compare the same sequences with the
-// real doctor.
+// coverage only when no other lane holds a lock that overlaps the recorded
+// set. These checks run in the default suite; the formal harness's doctor
+// resync conflict witnesses, which are opt-in and advisory in CI, compare the
+// same sequences with the real doctor.
 //
 // On a conflict the real doctor (applyWatchdogRepairs in core.mjs) catches the
 // acquireLocks error, and its integrity check then finds an active lane with
@@ -98,19 +98,22 @@ const CASES = [
     name: "a later doctor run restores coverage after the conflict clears",
     steps: [...conflict, abandonY, doctorRepair],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", repairOwner: "alpha", repairReasonsSeen: ["lock-mismatch"], escalationExpected: false, registry: ["src/a/"] },
-    y: { status: "resolved", reasonCode: "", registry: [] },
+    y: { status: "resolved", reasonCode: "", repairOwner: "", escalationExpected: false, registry: [] },
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // Lane y's FR-7 owner is its claimer, the most recent canonical actor.
     name: "the first resync in a doctor run takes the path",
     steps: [dropRegistry("x"), claimY, dropRegistry("y"), doctorRepair],
     x: { status: "in-progress", reasonCode: "", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: ["src/a/"] },
-    y: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    y: { status: "repair-needed", reasonCode: "lock-mismatch", repairOwner: "gamma", escalationExpected: false, registry: [] },
     disposeReason: "dispose-requires-repair-needed",
   },
 ]
 
-for (const { name, steps, x, y, disposeReason } of CASES) {
+const yHoldsPath = { status: "in-progress", reasonCode: "", repairOwner: "", escalationExpected: false, registry: ["src/a/"] }
+
+for (const { name, steps, x, y = yHoldsPath, disposeReason } of CASES) {
   for (const mode of ["contract", "implementation"]) {
     test(`doctor resync conflict: ${name} (${mode} mode)`, () => {
       const model = new LaneLockModel({ lanes: ["x", "y"], agents: ["alpha", "beta", "gamma"], mode })
@@ -132,8 +135,14 @@ for (const { name, steps, x, y, disposeReason } of CASES) {
       )
       const laneY = model.lane("y")
       assert.deepEqual(
-        { status: laneY.status, reasonCode: laneY.reasonCode, registry: model.registryPaths("y") },
-        y || { status: "in-progress", reasonCode: "", registry: ["src/a/"] },
+        {
+          status: laneY.status,
+          reasonCode: laneY.reasonCode,
+          repairOwner: laneY.repairOwner,
+          escalationExpected: laneY.escalationExpected,
+          registry: model.registryPaths("y"),
+        },
+        y,
       )
       assert.deepEqual(model.dispose({ lane: "x" }), disposeReason ? { ok: false, reason: disposeReason } : { ok: true })
     })

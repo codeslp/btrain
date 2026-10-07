@@ -231,15 +231,20 @@ that only carry another lane's reviewed work.
   a resync restores coverage (only request-changes and peer resolve
   re-acquire), while the contract rows name no coverage guard for them, an
   undesignated difference for a later lane. Row 17's guard also requires
-  that no other lane holds part of the recorded set. When one does, the
-  real resync fails (the doctor catches the `acquireLocks` conflict), the
-  integrity check finds an active lane with no locks, and the doctor writes
-  repair-needed with `lock-mismatch` (row 13). From in-progress or
-  changes-requested that is an FR-18 entry; on a lane already repair-needed
-  it is a re-write that keeps the repair owner, escalation, and disposition
-  and changes only the reason code. Until 2026-10-06 the model skipped the
-  conflicting lane; the doctor resync conflict witnesses and
-  `lane-lock-model-doctor.test.mjs` guard the fall-through. The model still
+  that no other lane holds a lock that overlaps the recorded set. When one
+  does, the real resync fails (the doctor catches the `acquireLocks`
+  conflict), the integrity check finds an active lane with no locks, and the
+  doctor writes repair-needed with `lock-mismatch` (row 13). From
+  in-progress or changes-requested that is an FR-18 entry; on a lane already
+  repair-needed it is a re-write that keeps the repair owner, escalation,
+  and disposition and changes only the reason code. Until 2026-10-06 the
+  model skipped the conflicting lane; the doctor resync conflict witnesses
+  and `lane-lock-model-doctor.test.mjs` guard the fall-through. Spec 006
+  FR-18 also escalates when guardian intervention still cannot restore a
+  healthy state, which a failed resync of a repair-needed lane arguably is;
+  the re-write keeps the recorded escalation, as the implementation does and
+  as `LaneLock.tla`'s `RepairEnter` (no repair-needed source) implies, so
+  whether FR-18 should escalate there is an open question. The model still
   reads coverage loss from its `uncovered` flag, while the real doctor reads
   the registry: a re-acquire (implementation-mode request-changes and peer
   resolve) or a contract-mode rescope to a new set restores coverage without

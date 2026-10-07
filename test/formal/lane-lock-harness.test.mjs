@@ -890,8 +890,8 @@ for (const mode of ["contract", "implementation"]) {
 }
 
 // Row 17's guard requires no cross-lane conflict. When another lane has
-// claimed part of the recorded set since the registry entry was lost, the
-// real doctor's resync fails (acquireLocks throws the conflict, and
+// claimed a path that overlaps the recorded set since the registry entry was
+// lost, the real doctor's resync fails (acquireLocks throws the conflict, and
 // applyWatchdogRepairs catches it). Its integrity check then finds an active
 // lane with no locks and writes watchdog-repair (row 13, reason
 // lock-mismatch). From in-progress or changes-requested that is an FR-18
@@ -916,19 +916,23 @@ function ownerRepair(reason) {
   return { t: "update", lane: "x", actorSel: "owner", status: "repair-needed", reason }
 }
 const yHoldsPath = { status: "in-progress", reasonCode: "", registry: ["src/a/"] }
-for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
+const noRepair = { owner: "", escalation: "" }
+function repairOf({ owner, escalation }) {
+  return { owner, escalation }
+}
+for (const { name, steps, x, y = yHoldsPath, xRepair, yRepair = noRepair, disposeReason } of [
   {
     name: "an in-progress lane enters repair-needed",
     steps: doctorOnTakenPath,
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
-    repair: { owner: "alpha", escalation: "" },
+    xRepair: { owner: "alpha", escalation: "" },
     disposeReason: "dispose-requires-escalation",
   },
   {
     name: "a changes-requested lane enters repair-needed",
     steps: [...changesRequested, ...doctorOnTakenPath],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
-    repair: { owner: "beta", escalation: "" },
+    xRepair: { owner: "beta", escalation: "" },
     disposeReason: "dispose-requires-escalation",
   },
   {
@@ -939,7 +943,7 @@ for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
       ...doctorOnTakenPath,
     ],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
-    repair: { owner: "alpha", escalation: "human" },
+    xRepair: { owner: "alpha", escalation: "human" },
     disposeReason: "",
   },
   {
@@ -955,7 +959,7 @@ for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
       ...doctorOnTakenPath,
     ],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
-    repair: { owner: "beta", escalation: "human" },
+    xRepair: { owner: "beta", escalation: "human" },
     disposeReason: "dispose-already-recorded",
   },
   {
@@ -963,7 +967,7 @@ for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
     name: "a re-write with the entry's own reason does not escalate",
     steps: [ownerRepair("lock-mismatch"), ...doctorOnTakenPath],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
-    repair: { owner: "alpha", escalation: "" },
+    xRepair: { owner: "alpha", escalation: "" },
     disposeReason: "dispose-requires-escalation",
   },
   {
@@ -977,7 +981,7 @@ for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
     ],
     x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: ["src/a/"] },
     y: { status: "resolved", reasonCode: "", registry: [] },
-    repair: { owner: "alpha", escalation: "" },
+    xRepair: { owner: "alpha", escalation: "" },
     disposeReason: "dispose-requires-escalation",
   },
   {
@@ -987,7 +991,9 @@ for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
     steps: [...pathTakenByY, { t: "dropRegistry", lane: "y" }, { t: "doctorRepair", lane: "x" }],
     x: { status: "in-progress", reasonCode: "", registry: ["src/a/"] },
     y: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
-    repair: { owner: "", escalation: "" },
+    xRepair: noRepair,
+    // Lane y's FR-7 owner is its claimer, the most recent canonical actor.
+    yRepair: { owner: "gamma", escalation: "" },
     disposeReason: "dispose-requires-repair-needed",
   },
 ]) {
@@ -1004,8 +1010,8 @@ for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
       const real = dispose.realState
       assert.deepEqual({ status: real.x.status, reasonCode: real.x.reasonCode, registry: real.x.registry }, x)
       assert.deepEqual({ status: real.y.status, reasonCode: real.y.reasonCode, registry: real.y.registry }, y)
-      const { owner, escalation } = dispose.realRepair.x
-      assert.deepEqual({ owner, escalation }, repair, "repair owner (FR-7) and FR-18 escalation")
+      assert.deepEqual(repairOf(dispose.realRepair.x), xRepair, "x: repair owner (FR-7) and FR-18 escalation")
+      assert.deepEqual(repairOf(dispose.realRepair.y), yRepair, "y: repair owner (FR-7) and FR-18 escalation")
       assert.equal(dispose.modelReason, disposeReason, "model dispose verdict")
       assert.equal(dispose.realOk, !disposeReason, `runtime dispose: ${dispose.realError || "accepted"}`)
     })

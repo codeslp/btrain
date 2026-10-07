@@ -304,8 +304,8 @@ export class LaneLockModel {
   // (spec 015 row 17; Q2 Option B): `btrain doctor --repair` restores
   // coverage for the handoff's recorded set only while the lane is
   // in-progress, changes-requested, or repair-needed, and only when no other
-  // lane holds part of the set (row 17's guard; the doctor catches the
-  // acquireLocks conflict error). In needs-review and the PR flow it leaves
+  // lane holds a lock that overlaps the set (row 17's guard; the doctor catches
+  // the acquireLocks conflict error). In needs-review and the PR flow it leaves
   // coverage to the owner. A lane left without locks fails the
   // active-without-locks integrity check, and the doctor writes repair-needed
   // (spec 015 row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
