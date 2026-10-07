@@ -280,9 +280,10 @@ that only carry another lane's reviewed work.
   keeps the recorded escalation on the re-write, so the mirror does too and
   contract mode tallies `repair-escalation-missing`, which persists like the
   other candidate labels until the runtime escalates. Like the real doctor,
-  the model reads coverage from the registry: it resyncs an active lane
-  whose registry entries differ from its recorded set, and repairs one only
-  when it holds no registry entry. Until 2026-10-07 it read coverage loss
+  the model reads coverage from the registry: it resyncs a lane in one of
+  the three permitted statuses whose registry entries differ from a
+  non-empty recorded set that overlaps no other lane's lock, and otherwise
+  repairs an active lane only when it holds no registry entry. Until 2026-10-07 it read coverage loss
   from its `uncovered` flag, which a re-acquire (implementation-mode
   request-changes and peer resolve) or a contract-mode rescope to a new set
   leaves set, so a later doctor run sent a covered review or PR-flow lane to
