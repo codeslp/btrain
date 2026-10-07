@@ -303,28 +303,32 @@ export class LaneLockModel {
   // spec 006 FR-2 lock/status resync with the spec 014 rescope/resync split
   // (spec 015 row 17; Q2 Option B): `btrain doctor --repair` restores
   // coverage for the handoff's recorded set only while the lane is
-  // in-progress, changes-requested, or repair-needed. In needs-review and
-  // the PR flow it leaves coverage to the owner; the lane then fails the
-  // active-without-locks integrity check and enters repair-needed (spec 015
-  // row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
+  // in-progress, changes-requested, or repair-needed, and only when no other
+  // lane holds part of the set (row 17's guard; the doctor catches the
+  // acquireLocks conflict error). In needs-review and the PR flow it leaves
+  // coverage to the owner. A lane left without locks fails the
+  // active-without-locks integrity check, and the doctor writes repair-needed
+  // (spec 015 row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
   // lock-mismatch).
   doctorRepair() {
     for (const [lane, s] of this.lanes) {
-      if (!s.uncovered) continue
-      if (["in-progress", "changes-requested", "repair-needed"].includes(s.status)) {
-        if (this.#conflicts(lane, s.lockedFiles)) continue
+      if (!s.uncovered || !ACTIVE_STATUSES.has(s.status)) continue
+      const resyncPermitted = ["in-progress", "changes-requested", "repair-needed"].includes(s.status)
+      if (resyncPermitted && !this.#conflicts(lane, s.lockedFiles)) {
         this.#setRegistry(lane, s.lockedFiles)
         s.uncovered = false
         continue
       }
-      if (ACTIVE_STATUSES.has(s.status)) {
-        const reason = "lock-mismatch"
+      const reason = "lock-mismatch"
+      // A lane already repair-needed gets a re-write, not an entry (spec 006
+      // FR-29): it keeps its repair owner, FR-18 escalation, and disposition.
+      if (s.status !== "repair-needed") {
         this.#recordRepairEntry(s, reason)
         s.status = "repair-needed"
-        s.reasonCode = reason
         s.repairOwner = s.lastActor || s.owner
         s.prFeedbackEntered = false
       }
+      s.reasonCode = reason
     }
     return this.#accept()
   }

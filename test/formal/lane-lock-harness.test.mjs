@@ -889,6 +889,129 @@ for (const mode of ["contract", "implementation"]) {
   })
 }
 
+// Row 17's guard requires no cross-lane conflict. When another lane has
+// claimed part of the recorded set since the registry entry was lost, the
+// real doctor's resync fails (acquireLocks throws the conflict, and
+// applyWatchdogRepairs catches it). Its integrity check then finds an active
+// lane with no locks and writes watchdog-repair (row 13, reason
+// lock-mismatch). From in-progress or changes-requested that is an FR-18
+// entry. On a lane already repair-needed it is a re-write, which keeps the
+// repair owner, the escalation, and any disposition and changes only the
+// reason code (spec 006 FR-29 lists no repair-needed entry source). Until
+// 2026-10-06 the model skipped the conflicting lane, so the real lane went to
+// repair-needed while the model's lane kept its status. Each case ends with a
+// dispose, whose verdict shows the escalation model and runtime agree on.
+const pathTakenByY = [
+  { t: "dropRegistry", lane: "x" },
+  // Lane y claims x's path while x is uncovered.
+  { t: "claim", lane: "y", owner: "gamma", reviewer: "alpha", files: ["src/a/"] },
+]
+const doctorOnTakenPath = [...pathTakenByY, { t: "doctorRepair", lane: "x" }]
+// The reviewer's request-changes makes beta the most recent canonical actor.
+const changesRequested = [
+  { t: "update", lane: "x", actorSel: "owner", status: "needs-review" },
+  { t: "requestChanges", lane: "x", actorSel: "reviewer" },
+]
+function ownerRepair(reason) {
+  return { t: "update", lane: "x", actorSel: "owner", status: "repair-needed", reason }
+}
+const yHoldsPath = { status: "in-progress", reasonCode: "", registry: ["src/a/"] }
+for (const { name, steps, x, y = yHoldsPath, repair, disposeReason } of [
+  {
+    name: "an in-progress lane enters repair-needed",
+    steps: doctorOnTakenPath,
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    repair: { owner: "alpha", escalation: "" },
+    disposeReason: "dispose-requires-escalation",
+  },
+  {
+    name: "a changes-requested lane enters repair-needed",
+    steps: [...changesRequested, ...doctorOnTakenPath],
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    repair: { owner: "beta", escalation: "" },
+    disposeReason: "dispose-requires-escalation",
+  },
+  {
+    name: "the entry counts toward FR-18 like any other",
+    steps: [
+      ownerRepair("lock-mismatch"),
+      { t: "update", lane: "x", actorSel: "owner", status: "in-progress" },
+      ...doctorOnTakenPath,
+    ],
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    repair: { owner: "alpha", escalation: "human" },
+    disposeReason: "",
+  },
+  {
+    // The re-write keeps beta as the repair owner although alpha declared the
+    // repair, and keeps the disposition, so the closing dispose is refused.
+    name: "a repair-needed lane keeps its repair record",
+    steps: [
+      ...changesRequested,
+      ownerRepair("invalid-handoff"),
+      { t: "update", lane: "x", actorSel: "reviewer", status: "in-progress" },
+      ownerRepair("invalid-handoff"),
+      { t: "dispose", lane: "x" },
+      ...doctorOnTakenPath,
+    ],
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    repair: { owner: "beta", escalation: "human" },
+    disposeReason: "dispose-already-recorded",
+  },
+  {
+    // A same-reason re-write is still no entry, so nothing escalates.
+    name: "a re-write with the entry's own reason does not escalate",
+    steps: [ownerRepair("lock-mismatch"), ...doctorOnTakenPath],
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    repair: { owner: "alpha", escalation: "" },
+    disposeReason: "dispose-requires-escalation",
+  },
+  {
+    // Once y's owner abandons y (row 6), the next doctor run resyncs the
+    // repair-needed lane (row 17) and leaves its repair in place.
+    name: "a later doctor run restores coverage after the conflict clears",
+    steps: [
+      ...doctorOnTakenPath,
+      { t: "resolve", lane: "y", actorSel: "owner", final: false },
+      { t: "doctorRepair", lane: "x" },
+    ],
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", registry: ["src/a/"] },
+    y: { status: "resolved", reasonCode: "", registry: [] },
+    repair: { owner: "alpha", escalation: "" },
+    disposeReason: "dispose-requires-escalation",
+  },
+  {
+    // Lanes resync in order against the live registry: x restores its path
+    // first, so y's resync conflicts with it and y enters repair-needed.
+    name: "the first resync in a doctor run takes the path",
+    steps: [...pathTakenByY, { t: "dropRegistry", lane: "y" }, { t: "doctorRepair", lane: "x" }],
+    x: { status: "in-progress", reasonCode: "", registry: ["src/a/"] },
+    y: { status: "repair-needed", reasonCode: "lock-mismatch", registry: [] },
+    repair: { owner: "", escalation: "" },
+    disposeReason: "dispose-requires-repair-needed",
+  },
+]) {
+  for (const mode of ["contract", "implementation"]) {
+    test(`doctor resync conflict: ${name} (${mode} mode)`, { skip: !ENABLED }, async () => {
+      const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+        { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+        ...steps,
+        { t: "dispose", lane: "x" },
+      ])
+      assert.equal(designatedTally.size, 0, "no designated drift on the doctor conflict chain")
+      assert.equal(candidateTally.size, 0, `no candidate finding on the doctor conflict chain: ${[...candidateTally.keys()].join(", ")}`)
+      const dispose = trace.at(-1)
+      const real = dispose.realState
+      assert.deepEqual({ status: real.x.status, reasonCode: real.x.reasonCode, registry: real.x.registry }, x)
+      assert.deepEqual({ status: real.y.status, reasonCode: real.y.reasonCode, registry: real.y.registry }, y)
+      const { owner, escalation } = dispose.realRepair.x
+      assert.deepEqual({ owner, escalation }, repair, "repair owner (FR-7) and FR-18 escalation")
+      assert.equal(dispose.modelReason, disposeReason, "model dispose verdict")
+      assert.equal(dispose.realOk, !disposeReason, `runtime dispose: ${dispose.realError || "accepted"}`)
+    })
+  }
+}
+
 // Regression witness for ledger finding 12 (spec 015 row 19): a lane agent's
 // metadata-only update applies in any status, `resolved` included. The
 // implementation used to refuse it on a resolved lane, which broke this legal
