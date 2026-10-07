@@ -171,9 +171,9 @@ export class LaneLockModel {
   // an earlier entry of the task had the same reason; the first entry for a
   // reason starts its count. The entry also starts a new repair, so an
   // earlier repair's FR-29 disposition no longer counts (hasRepairDisposition
-  // reads only dispositions recorded after the latest entry). Contract-mode
-  // `update` keeps its own bookkeeping, which sees only entries from another
-  // status because it routes a same-status write through row 19.
+  // reads only dispositions recorded after the latest entry). `update` in
+  // both modes and `doctorRepair` record their entries here; a same-status
+  // write is no entry in either mode.
   #recordRepairEntry(s, reason) {
     s.disposition = false
     s.escalationExpected = s.repairReasonsSeen.includes(reason)
@@ -435,13 +435,9 @@ export class LaneLockModel {
       // designation: re-entering for the same unresolved reason exhausts the
       // one-attempt budget, so the contract expects human escalation.
       if (!ACTIVE_STATUSES.has(s.status)) return this.#reject("repair-from-inactive")
-      if (reason && s.repairReasonsSeen.includes(reason)) {
-        s.escalationExpected = true
-      } else if (reason) {
-        s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
-      }
       s.status = "repair-needed"
       this.#applyUpdateEffects(s, status, actor, reason)
+      this.#recordRepairEntry(s, s.reasonCode)
       return this.#accept()
     }
 

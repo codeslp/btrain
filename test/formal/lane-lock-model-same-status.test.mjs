@@ -91,6 +91,16 @@ for (const [status, steps] of Object.entries(PATHS)) {
   })
 }
 
+// patchHandoff records a --pr on any metadata update (L12 lists it), so a
+// pr-review re-write with another PR number relinks the lane.
+test("row 19: a pr-review re-write records a supplied PR number (contract mode)", () => {
+  const model = claimedModel("contract")
+  for (const step of PATHS["pr-review"]) accepted(step(model))
+  accepted(model.update({ lane: "x", actor: "alpha", status: "pr-review", pr: "202" }))
+  assert.equal(model.lane("x").prNumber, "202")
+  assert.equal(model.lane("x").status, "pr-review")
+})
+
 // spec 006 FR-7: the reviewer or a third agent declares the repair (row 13
 // allows any configured agent), so the owner, the most recent canonical actor
 // before the entry, owns it. The owner's re-write with a new reason is no
