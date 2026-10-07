@@ -112,6 +112,15 @@ const CASES = [
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // changes-requested is a permitted resync status (row 17, Q2 Option B):
+    // with no other lane on the path, the doctor restores coverage.
+    name: "a changes-requested lane is resynced",
+    steps: [update("alpha", "needs-review"), requestChanges, dropRegistry("x"), doctorRepair],
+    x: { status: "changes-requested", reasonCode: "spec-mismatch", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: ["src/a/"] },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
     // A covered lane needs nothing from the doctor, even in review.
     name: "a covered review lane is left alone",
     steps: [update("alpha", "needs-review"), doctorRepair],

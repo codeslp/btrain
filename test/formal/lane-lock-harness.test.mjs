@@ -990,6 +990,16 @@ for (const { name, modes = ["contract", "implementation"], steps, x, y = yHoldsP
     disposeReason: "dispose-requires-escalation",
   },
   {
+    // changes-requested is a permitted resync status (row 17, Q2 Option B):
+    // with no other lane on the path, the doctor restores coverage.
+    name: "a changes-requested lane is resynced",
+    steps: [...changesRequested, { t: "dropRegistry", lane: "x" }, { t: "doctorRepair", lane: "x" }],
+    x: { status: "changes-requested", reasonCode: "spec-mismatch", registry: ["src/a/"] },
+    y: { status: "idle", reasonCode: "", registry: [] },
+    xRepair: noRepair,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
     // A covered lane needs nothing from the doctor, even in review.
     name: "a covered review lane is left alone",
     steps: [{ t: "update", lane: "x", actorSel: "owner", status: "needs-review" }, { t: "doctorRepair", lane: "x" }],
