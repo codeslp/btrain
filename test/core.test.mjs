@@ -4928,6 +4928,256 @@ describe("managed pre-push hook", () => {
   })
 })
 
+describe("managed pre-push hook scoped to lane locks", () => {
+  // Spec 006 FR-2b: block pushes *containing* unresolved lane-owned work,
+  // not every push while some lane is active.
+  let tmpDir
+  let remoteDir
+  let pushEnv
+
+  async function commitChange(relPath, line, message) {
+    await fs.appendFile(path.join(tmpDir, relPath), `${line}\n`, "utf8")
+    await runGit(["add", relPath], tmpDir)
+    const result = await runGit(["commit", "-m", message], tmpDir, { BTRAIN_AGENT: "OwnerBot" })
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  }
+
+  async function push(args) {
+    const result = await runGit(["push", "origin", ...args], tmpDir, pushEnv)
+    return { ...result, output: `${result.stdout}\n${result.stderr}` }
+  }
+
+  before(async () => {
+    tmpDir = await makeTmpDir()
+    remoteDir = await makeTmpDir()
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const exec = promisify(execFile)
+    await exec("git", ["init", "-b", "main", tmpDir])
+    await exec("git", ["init", "--bare", remoteDir])
+    await configureGitIdentity(tmpDir)
+    const btrainBinDir = await setupBtrainShim(tmpDir)
+    pushEnv = { PATH: `${btrainBinDir}:${process.env.PATH || ""}` }
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+    await enableLanes(tmpDir)
+    await runBtrain(["init", tmpDir, "--hooks"], tmpDir)
+    await fs.mkdir(path.join(tmpDir, "src", "auth"), { recursive: true })
+    await fs.mkdir(path.join(tmpDir, "src", "scoring"), { recursive: true })
+    await fs.writeFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const guard = true\n", "utf8")
+    await fs.writeFile(path.join(tmpDir, "src", "scoring", "score.ts"), "export const score = 1\n", "utf8")
+    await fs.appendFile(path.join(tmpDir, ".gitignore"), "btrain-bin/\n", "utf8")
+    await runGit(["add", "."], tmpDir)
+    await runGit(["commit", "-m", "Initial commit"], tmpDir)
+    await runGit(["remote", "add", "origin", remoteDir], tmpDir)
+    const initialPush = await push(["main"])
+    assert.equal(initialPush.code, 0, initialPush.output)
+
+    const claim = await runBtrain(
+      [
+        "handoff", "claim", "--repo", tmpDir, "--lane", "a", "--task", "Auth work",
+        "--owner", "OwnerBot", "--reviewer", "ReviewBot", "--files", "src/auth/",
+      ],
+      tmpDir,
+    )
+    assert.equal(claim.code, 0, claim.stderr)
+  })
+
+  after(async () => {
+    await rmDir(tmpDir)
+    await rmDir(remoteDir)
+  })
+
+  it("allows a push whose new commits touch no locked file", async () => {
+    await commitChange("src/scoring/score.ts", "export const nextScore = 2", "Scoring change")
+    const result = await push(["main"])
+    assert.equal(result.code, 0, result.output)
+  })
+
+  it("allows a new branch whose commits beyond the remote touch no locked file", async () => {
+    await commitChange("src/scoring/score.ts", "export const branchScore = 3", "Scoring branch change")
+    const result = await push(["HEAD:refs/heads/scoring-feature"])
+    assert.equal(result.code, 0, result.output)
+  })
+
+  it("allows deleting a remote branch", async () => {
+    const result = await push([":refs/heads/scoring-feature"])
+    assert.equal(result.code, 0, result.output)
+  })
+
+  it("blocks a push whose new commits touch a locked file and names the lane and file", async () => {
+    await commitChange("src/auth/guard.ts", "export const stricterGuard = true", "Auth change")
+    try {
+      const result = await push(["HEAD:refs/heads/auth-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /blocked push/i)
+      assert.match(result.output, /HANDOFF_A\.md: in-progress/)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+      assert.doesNotMatch(result.output, /src\/scoring\/score\.ts/)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("blocks pushing locked-file commits into another branch even when a remote branch already has them", async () => {
+    // Commits already on origin/feat must still count when they are pushed
+    // into main: the target branch lacks them.
+    await runGit(["checkout", "-b", "feat"], tmpDir)
+    await commitChange("src/auth/guard.ts", "export const featGuard = true", "Auth change on feat")
+    const grant = await runBtrain(
+      [
+        "override", "grant", "--repo", tmpDir, "--action", "push", "--requested-by", "OwnerBot",
+        "--confirmed-by", "HumanOperator", "--reason", "Seed a remote branch that holds lane work.",
+      ],
+      tmpDir,
+    )
+    assert.equal(grant.code, 0, grant.stderr)
+    const seeded = await push(["feat"])
+    assert.equal(seeded.code, 0, seeded.output)
+    try {
+      const result = await push(["feat:main"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["checkout", "main"], tmpDir)
+    }
+  })
+
+  it("blocks a merge commit whose own changes touch a locked file", async () => {
+    await runGit(["checkout", "-b", "scoring-side"], tmpDir)
+    await commitChange("src/scoring/score.ts", "export const sideScore = 4", "Scoring side change")
+    await runGit(["checkout", "main"], tmpDir)
+    const merge = await runGit(["merge", "--no-ff", "--no-commit", "scoring-side"], tmpDir)
+    assert.equal(merge.code, 0, `${merge.stdout}\n${merge.stderr}`)
+    await fs.appendFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const mergeEdit = true\n", "utf8")
+    await runGit(["add", "src/auth/guard.ts"], tmpDir)
+    const commit = await runGit(["commit", "--no-verify", "-m", "Merge with an auth edit"], tmpDir)
+    assert.equal(commit.code, 0, `${commit.stdout}\n${commit.stderr}`)
+    try {
+      const result = await push(["HEAD:refs/heads/merge-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("matches locked paths with non-ASCII names", async () => {
+    await fs.writeFile(path.join(tmpDir, "src", "auth", "café.ts"), "export const cafe = true\n", "utf8")
+    await runGit(["add", "src/auth/café.ts"], tmpDir)
+    await runGit(["commit", "--no-verify", "-m", "Add café"], tmpDir)
+    try {
+      const result = await push(["HEAD:refs/heads/cafe-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/café\.ts/)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("blocks a push that renames a file out of a locked directory", async () => {
+    await runGit(["mv", "src/auth/guard.ts", "src/guard.ts"], tmpDir)
+    await runGit(["commit", "-m", "Move guard"], tmpDir, { BTRAIN_AGENT: "OwnerBot" })
+    try {
+      const result = await push(["HEAD:refs/heads/move-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("matches locked paths that git C-quotes even with core.quotePath=false", async () => {
+    const name = 'a"b\\c\td.ts'
+    await fs.writeFile(path.join(tmpDir, "src", "auth", name), "export const odd = true\n", "utf8")
+    await runGit(["add", "--", `src/auth/${name}`], tmpDir)
+    await runGit(["commit", "--no-verify", "-m", "Add oddly named auth file"], tmpDir)
+    try {
+      const result = await push(["HEAD:refs/heads/odd-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.ok(result.output.includes(`src/auth/${name}`), result.output)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("does not treat an unrelated remote's branches as the destination's history", async () => {
+    // origin/feat holds a locked-file commit (seeded above). Pushing feat to a
+    // different URL must still count it: that destination has never seen it.
+    const otherRemote = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      await promisify(execFile)("git", ["init", "--bare", otherRemote])
+      const result = await runGit(["push", otherRemote, "feat:refs/heads/copy"], tmpDir, pushEnv)
+      const output = `${result.stdout}\n${result.stderr}`
+      assert.notEqual(result.code, 0, output)
+      assert.match(output, /src\/auth\/guard\.ts/)
+    } finally {
+      await rmDir(otherRemote)
+    }
+  })
+
+  it("counts lane commits copied to a new branch even when a cached remote branch has them", async () => {
+    // origin/feat may be stale (deleted or force-updated on the server since
+    // the last fetch), so only the remote's base branch vouches for commits.
+    const result = await push(["feat:refs/heads/feat-copy"])
+    assert.notEqual(result.code, 0, result.output)
+    assert.match(result.output, /src\/auth\/guard\.ts/)
+  })
+
+  it("blocks when it cannot list the pushed commits while a lane is unresolved", async () => {
+    // A guard that fails open is no guard: if git log errors, nothing shows
+    // the push is clear of the lane's locks.
+    const { spawnSync } = await import("node:child_process")
+    const hook = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const result = spawnSync("sh", [hook, "origin", remoteDir], {
+      cwd: tmpDir,
+      input: `refs/heads/ghost ${"1".repeat(40)} refs/heads/ghost ${"0".repeat(40)}\n`,
+      encoding: "utf8",
+      env: { ...withoutLaneScope(), ...pushEnv },
+    })
+    const output = `${result.stdout}\n${result.stderr}`
+    assert.notEqual(result.status, 0, output)
+    assert.match(output, /blocked push/i)
+    assert.match(output, /could not list/i)
+    assert.match(output, /refs\/heads\/ghost/)
+  })
+
+  it("allows updating a pushed branch with main even when main gained a locked-file commit", async () => {
+    // Commits the remote base branch already has are not this push's lane work.
+    // origin/HEAD is unset after `git remote add`, so this also covers the
+    // fallback to origin/main. The final push goes by URL, which must map to
+    // origin to find that base branch.
+    await runGit(["checkout", "-b", "side-b", "main"], tmpDir)
+    await commitChange("src/scoring/score.ts", "export const sideB = 5", "Side branch scoring change")
+    const first = await push(["side-b"])
+    assert.equal(first.code, 0, first.output)
+
+    await runGit(["checkout", "main"], tmpDir)
+    await commitChange("src/auth/guard.ts", "export const landedGuard = true", "Auth change landed on main")
+    const grant = await runBtrain(
+      [
+        "override", "grant", "--repo", tmpDir, "--action", "push", "--requested-by", "OwnerBot",
+        "--confirmed-by", "HumanOperator", "--reason", "Land a locked-file commit on main for the fixture.",
+      ],
+      tmpDir,
+    )
+    assert.equal(grant.code, 0, grant.stderr)
+    const landed = await push(["main"])
+    assert.equal(landed.code, 0, landed.output)
+
+    await runGit(["checkout", "side-b"], tmpDir)
+    const merge = await runGit(["merge", "--no-edit", "main"], tmpDir, { BTRAIN_AGENT: "OwnerBot" })
+    assert.equal(merge.code, 0, `${merge.stdout}\n${merge.stderr}`)
+    try {
+      const result = await runGit(["push", remoteDir, "side-b"], tmpDir, pushEnv)
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+    } finally {
+      await runGit(["checkout", "main"], tmpDir)
+    }
+  })
+})
+
 describe("managed pre-commit hook", () => {
   let tmpDir
 
