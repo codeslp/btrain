@@ -431,6 +431,26 @@ describe("PR review flow classification", () => {
     assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "source-identity-mismatch" }])
   })
 
+  it("labels leftover snapshots from another GitHub host as an identity mismatch, not stale", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = input.pr.url
+    const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null }
+    const foreignHost = { ...snapshot, eventId: "999", sourceRef: "https://ghe.internal/o/r/pull/12" }
+    for (const leftover of [
+      { ...foreignHost, id: "c".repeat(64) },
+      { ...foreignHost, id: "d".repeat(64), eventHead: "f".repeat(40) },
+      { ...foreignHost, id: "e".repeat(64), eventHead: "unknown" },
+    ]) {
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, leftover] })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [snapshot.id])
+      assert.deepEqual(result.excluded, [{ sourceId: leftover.id, reason: "source-identity-mismatch" }])
+    }
+  })
+
   it("retains frozen semantic candidates after the PR merges, closes, or returns to draft", () => {
     const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
     input.pr.url = "https://github.com/o/r/pull/12"
