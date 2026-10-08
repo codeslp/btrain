@@ -69,6 +69,18 @@ export function validateCaseGroups(cases, sources) {
   return sourceById
 }
 
+// Replay re-runs this because datasetHash is an unkeyed digest anyone can recompute.
+export function validateCaseAnnotations(item, labels) {
+  const text = (value) => typeof value === "string" && value.trim().length > 0
+  if (!Array.isArray(item.annotations) || item.annotations.length < 2) throw new Error("Two independent annotators are required")
+  // Array.from turns holes in a sparse array into undefined, so they fail validation instead of
+  // being skipped by some() and then counted as an annotator by Set.
+  const annotations = Array.from(item.annotations)
+  if (annotations.some((a) => !text(a?.by) || !labels.includes(a.label))) throw new Error("Invalid annotation")
+  if (new Set(annotations.map((a) => a.by.trim())).size < 2) throw new Error("Two independent annotators are required")
+  if (!text(item.adjudication?.by) || item.adjudication.label !== item.label || !text(item.adjudication.reason)) throw new Error("Explicit adjudication is required")
+}
+
 export function sourceSnapshotHashFor(sources) {
   return hash(canonicalSources(sources))
 }
@@ -127,9 +139,7 @@ export function freezeLabeledManifest({ sources, cases, pins, labels, requireEve
     if (!source.sourceHash || !source.sourceRef || !source.repository) throw new Error("Incomplete source provenance")
     if (!labels.includes(item.label)) throw new Error("Out-of-catalog label")
     if (!labels.includes(item.baseline)) throw new Error("Baseline is outside the label catalog")
-    if (!Array.isArray(item.annotations) || item.annotations.length < 2 || new Set(item.annotations.map((a) => a.by)).size < 2) throw new Error("Two independent annotators are required")
-    if (item.annotations.some((a) => !a.by || !labels.includes(a.label))) throw new Error("Invalid annotation")
-    if (!item.adjudication?.by || item.adjudication.label !== item.label || !item.adjudication.reason) throw new Error("Explicit adjudication is required")
+    validateCaseAnnotations(item, labels)
     frozenCases.push({ sourceId: item.sourceId, repository: item.repository, prNumber: item.prNumber, templateGroup: item.templateGroup, split: item.split, label: item.label, baseline: item.baseline, eligible: item.eligible, privacyClass: item.privacyClass, callIndex: item.callIndex, annotations: item.annotations.map((a) => ({ by: a.by, label: a.label })), adjudication: { by: item.adjudication.by, label: item.adjudication.label, reason: item.adjudication.reason }, sourceHash: source.sourceHash })
   }
   frozenCases.sort((a, b) => a.sourceId.localeCompare(b.sourceId))

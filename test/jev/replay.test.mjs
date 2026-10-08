@@ -3,12 +3,13 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { summarizeReplay, replayManifest } from "../../src/brain_train/jev/replay.mjs"
 import { createDecisionFamily } from "../../src/brain_train/jev/decision.mjs"
-import { datasetHashFor, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
+import { datasetHashFor, freezeLabeledManifest, sourceSnapshotHashFor } from "../../src/brain_train/jev/manifest.mjs"
 
 const family = createDecisionFamily({ id: "sample", questionVersion: "1", policyVersion: "1", policyConfig: { evaluation: { baselineId: "fixture", thresholds: { feedback: 0.8 } } }, choices: ["clear", "feedback", "uncertain"], privacyClass: "synthetic", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (c) => ({ id: c.sourceId }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
 const sourceContent = "frozen review text"
 const provenance = { eventId: "fixture-event", surface: "review", author: "bot", eventAt: "2026-09-01T10:00:00Z", capturedAt: "2026-09-01T10:05:00Z", eventHead: "unknown", formalState: null, deterministicDisposition: "not-evaluated" }
 const sourceHash = createHash("sha256").update(sourceContent).digest("hex")
+const annotated = { annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "feedback" }], adjudication: { by: "lead", label: "feedback", reason: "agreed" } }
 const rows = [
   { sourceId: "a", split: "test", label: "feedback", baseline: "uncertain", eligible: true, trace: { outcome: "decision", prediction: "feedback", attemptedCall: true, latencyMs: 10, cost: 0.01 } },
   { sourceId: "b", split: "test", label: "feedback", baseline: "feedback", eligible: true, trace: { outcome: "failure", reason: "invalid-answer", failureClass: "response-shape", attemptedCall: true } },
@@ -23,7 +24,7 @@ describe("Jev replay metrics", () => {
       model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
     const source = (id, prNumber, templateGroup) => ({ ...provenance, id, repository: "o/r", prNumber, templateGroup, sourceRef: `https://example.test/${id}`, sourceHash })
     const entry = (s, split) => ({ sourceId: s.id, repository: s.repository, prNumber: s.prNumber, templateGroup: s.templateGroup,
-      split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 })
+      split, label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0, ...annotated })
     const a = source("a", 1, "t1")
     for (const [sources, cases] of [
       [[{ ...a, templateGroup: undefined }], [entry(a, "test")]],
@@ -43,6 +44,47 @@ describe("Jev replay metrics", () => {
       assert.equal(calls, 0)
     }
   })
+  it("rejects hand-built manifests that lack two independent annotators or an explicit adjudication", async () => {
+    const labels = [...family.choices]
+    const pins = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash,
+      model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
+    const sources = [{ ...provenance, id: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", sourceRef: "https://example.test/a", sourceHash }]
+    const base = { sourceId: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", split: "test", label: "feedback",
+      baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0, sourceHash }
+    const { adjudication } = annotated
+    const candidates = { a: { sourceContent, sourceHash, sourceRefs: ["https://example.test/a"], baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 } }
+    let calls = 0
+    const provider = { localOnly: true, decide: async () => { calls += 1; return { ok: true, model: "pinned",
+      answers: { signal: { choice: "feedback", probabilities: { feedback: 1, clear: 0, uncertain: 0 } } } } } }
+    const sourceSnapshotHash = sourceSnapshotHashFor(sources)
+    for (const [changed, expected] of [
+      [{}, /independent annotators/],
+      [{ annotations: [{ by: "r1", label: "feedback" }], adjudication }, /independent annotators/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r1", label: "feedback" }], adjudication }, /independent annotators/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "unknown" }], adjudication }, /Invalid annotation/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r1 ", label: "feedback" }], adjudication }, /independent annotators/],
+      [{ annotations: [{ by: {}, label: "feedback" }, { by: {}, label: "feedback" }], adjudication }, /Invalid annotation/],
+      [{ annotations: [null, { by: "r1", label: "feedback" }], adjudication }, /Invalid annotation/],
+      // A hole is skipped by some() but iterated by Set, so it must not count as an annotator.
+      // eslint-disable-next-line no-sparse-arrays
+      [{ annotations: [, { by: "r1", label: "feedback" }], adjudication }, /Invalid annotation/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }] }, /adjudication/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { ...adjudication, label: "clear" } }, /adjudication/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { by: "lead", label: "feedback" } }, /adjudication/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { ...adjudication, reason: "  " } }, /adjudication/],
+    ]) {
+      const cases = [{ ...base, ...changed }]
+      const manifest = { sources, cases, labels, pins, sourceSnapshotHash, datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins) }
+      await assert.rejects(() => replayManifest({ manifest, family, candidates, provider }), expected)
+      assert.equal(calls, 0)
+    }
+    const frozen = freezeLabeledManifest({ sources, labels, pins,
+      cases: [{ ...base, annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication }] })
+    const replayed = await replayManifest({ manifest: frozen, family, candidates, provider })
+    assert.equal(replayed.syntheticControls.test.model.correct, 1)
+    assert.equal(calls, 1)
+  })
+
   it("keeps skips, valid abstentions, and failures in distinct denominators", () => {
     const result = summarizeReplay(rows, ["clear", "feedback", "uncertain"])
     assert.equal(result.counts.cases, 4)
@@ -90,7 +132,7 @@ describe("Jev replay metrics", () => {
   })
 
   it("replays a pinned manifest through an injected provider reproducibly", async () => {
-    const cases = [{ sourceId: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 }]
+    const cases = [{ sourceId: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0, ...annotated }]
     const labels = ["clear", "feedback", "uncertain"]
     const sources = [{ ...provenance, id: "a", repository: "o/r", prNumber: 1, templateGroup: "t1", sourceRef: "https://example.test/a", reviewedCommit: "a".repeat(40), eventHead: "a".repeat(40), sourceHash }]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
@@ -157,7 +199,7 @@ describe("Jev replay metrics", () => {
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, thresholds: { feedback: 0.1 } } }, family, candidates, provider }), /evaluation threshold pin/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, codeRevision: "rev" } }, family, candidates, provider }), /code revision/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, pins: { ...manifest.pins, policyHash: "wrong" } }, family, candidates, provider }), /policy hash/)
-    await assert.rejects(() => replayManifest({ manifest: { ...manifest, cases: [{ ...cases[0], label: "clear" }] }, family, candidates, provider }), /dataset hash/)
+    await assert.rejects(() => replayManifest({ manifest: { ...manifest, cases: [{ ...cases[0], label: "clear", adjudication: { ...annotated.adjudication, label: "clear" } }] }, family, candidates, provider }), /dataset hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, sources: [{ ...sources[0], sourceRef: "https://example.test/tampered" }] }, family, candidates, provider }), /source snapshot hash/)
     await assert.rejects(() => replayManifest({ manifest: { ...manifest, sources: [{ ...sources[0], reviewedCommit: "c".repeat(40) }] }, family, candidates, provider }), /source snapshot hash/)
     for (const changed of [
@@ -182,8 +224,8 @@ describe("Jev replay metrics", () => {
     const labels = ["clear", "feedback", "uncertain"]
     const sources = ["real", "synthetic"].map((id, index) => ({ ...provenance, id, repository: "o/r", prNumber: index + 1, templateGroup: id, sourceRef: `https://example.test/${id}`, sourceHash }))
     const cases = [
-      { sourceId: "real", repository: "o/r", prNumber: 1, templateGroup: "real", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0 },
-      { sourceId: "synthetic", repository: "o/r", prNumber: 2, templateGroup: "synthetic", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0 },
+      { sourceId: "real", repository: "o/r", prNumber: 1, templateGroup: "real", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0, ...annotated },
+      { sourceId: "synthetic", repository: "o/r", prNumber: 2, templateGroup: "synthetic", split: "test", label: "feedback", baseline: "uncertain", eligible: true, privacyClass: "synthetic", callIndex: 0, ...annotated },
     ]
     const sourceSnapshotHash = sourceSnapshotHashFor(sources)
     const pins = { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, model: "pinned", codeRevision: "a".repeat(40), baseline: "fixture", thresholds: { feedback: 0.8 } }
