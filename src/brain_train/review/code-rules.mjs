@@ -14,12 +14,44 @@
 //   new-dependency      (warn)  — added line in package.json deps,
 //                                 requirements.txt, pyproject.toml, Cargo.toml
 //
+// Weakened-test rules. These also read removed lines and file headers, and
+// scan code with string, regex and comment contents masked out. Masking runs
+// over whole files when their contents are loaded (reviewCode loads them);
+// otherwise each hunk is masked on its own.
+//   deleted-test-file   (warn)  — test file deleted, or renamed to a
+//                                 non-test path
+//   removed-assertion   (warn)  — a hunk of a surviving test file removes
+//                                 more assertion lines than it adds, after
+//                                 lines that moved within the file cancel out
+//   skipped-test        (warn)  — new unconditional skip, todo or fixme
+//   focused-test        (hard)  — new focused test (only / fit / fdescribe);
+//                                 warn when the file was masked hunk by hunk.
+//                                 A marker that moved within the file, even
+//                                 to another hunk, is not new
+//   loosened-assertion  (warn)  — in one hunk, a strict check on a subject is
+//                                 replaced by a looser check on that subject
+//   lowered-threshold   (warn)  — otherwise identical lines where a run
+//                                 count, coverage floor or lower bound drops,
+//                                 or a runner retry count or upper bound rises
+//   test-ignore-added   (warn)  — new entry in an existing test ignore list,
+//                                 or a new runner filter flag (--deselect,
+//                                 --test-skip-pattern, --test-name-pattern,
+//                                 --test-only, jest --testPathIgnorePatterns /
+//                                 --testNamePattern, pytest --ignore /
+//                                 --ignore-glob / -k)
+//
+// Config, in `[review_code]` of .btrain/project.toml (single-line arrays):
+//   ignore_list_keys = ["NAME"]  more test-ignore-added list names
+//   run_count_keys = ["NAME"]    more lowered-threshold run-count names
+//
 // Per-line allow markers suppress violations for that rule on that line:
 //   // btrain-allow: hardcoded-secret
 //   # btrain-allow: cors-wildcard
 // Markers may appear at end of the violating line or on the line above.
+// A finding about removed lines sits on the new-file line where the removal
+// happened, so the marker goes there (or on the line above it).
 
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import { promisify } from "node:util"
 import path from "node:path"
@@ -95,49 +127,306 @@ const DEPENDENCY_FILES = [
   { name: "go.mod", everyAddedLine: false },
 ]
 
+// ---- weakened-test rules: file classes ----
+
+const TEST_CODE_EXTENSION = "(?:[cm]?[jt]sx?|py|go|rb|rs|java|kts?|scala|groovy|cs|swift|php|exs?|dart)"
+// Runner naming conventions: foo.test.mjs, foo.spec.ts, foo_test.go,
+// foo-test.js, test_foo.py, FooTest.java, __tests__/foo.js, Rust tests/*.rs.
+const TEST_BASENAME_PATTERNS = [
+  new RegExp(`[._-](?:test|spec)\\.${TEST_CODE_EXTENSION}$`, "i"),
+  new RegExp(`^test[_-].+\\.${TEST_CODE_EXTENSION}$`, "i"),
+  /(?:Tests?|Spec|IT)\.(?:java|kts?|scala|groovy|cs|swift|php)$/,
+]
+const TEST_PATH_PATTERNS = [
+  new RegExp(`(?:^|/)__tests__/.+\\.${TEST_CODE_EXTENSION}$`, "i"),
+  /(?:^|\/)tests\/[^/]+\.rs$/,
+]
+// Node's test runner and mocha collect every JS file under a test/
+// directory by default, so test/smoke.js counts whatever its name. Files
+// in helper, fixture, mock or data folders under it do not.
+const JS_TEST_DIR_FILE = /(?:^|\/)test\/(?:[^/]+\/)*[^/]+\.[cm]?[jt]sx?$/i
+const TEST_SUPPORT_DIR =
+  /(?:^|\/)test\/(?:[^/]+\/)*(?:helpers?|fixtures?|__fixtures__|support|utils?|mocks?|__mocks__|stubs?|data|testdata|snapshots|__snapshots__|assets|resources)\//i
+const DOC_FILE = /\.(?:md|mdx|markdown|rst|txt|adoc)$/i
+const PYTHON_FILE = /\.pyi?$/
+// Files whose comments start with `#`; every other file uses // and /* */.
+const HASH_COMMENT_FILE =
+  /(?:\.(?:py|pyi|rb|sh|bash|zsh|toml|ya?ml|ini|cfg|conf|mk|r|pl)|(?:^|\/)(?:Makefile|makefile|GNUmakefile|justfile|Justfile|Dockerfile|\.coveragerc))$/
+// Test-runner and coverage config. `exclude` counts only in the JS ones.
+const JS_TEST_CONFIG_BASENAME =
+  /^(?:(?:jest|vitest|vite|playwright|cypress|karma|wdio|ava|mocha)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|karma\.conf\.[cm]?js|\.(?:mocharc|nycrc|c8rc)(?:\.(?:json|ya?ml|[cm]?js))?|package\.json)$/
+const PYTHON_TEST_CONFIG_BASENAME = /^(?:\.coveragerc|\.?codecov\.ya?ml|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|conftest\.py)$/
+// Config shared with non-test tools (vite optimizeDeps, package.json
+// fields). There `exclude` counts only under one of these parent keys.
+const SHARED_CONFIG_BASENAME = /^(?:(?:vite|vitest)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|package\.json)$/
+const EXCLUDE_PARENT_KEYS = new Set(["test", "coverage", "nyc", "c8", "mocha", "ava"])
+// Files that carry test commands: package scripts, CI, shell, make, ini, toml.
+const COMMAND_FILE =
+  /(?:\.(?:ya?ml|toml|ini|cfg|sh|bash|zsh|mk)|(?:^|\/)(?:package\.json|Makefile|makefile|GNUmakefile|justfile|Justfile|Dockerfile))$/
+
+// ---- weakened-test rules: patterns ----
+
+// removed-assertion counts lines with assert…( / expect( / self.assert…(
+// (Rust assert_eq!( included) and Python's bare `assert` statement. A single
+// character class after `assert` keeps the match linear: nested groups there
+// backtrack exponentially on a long identifier such as assert_A_A_A.
+const ASSERTION_CALL = /(?<![\w$])(?:assert(?=[A-Z_.!(\s])[\w.]*!?\s*\(|expect(?:\.\w+)?\s*\()/
+const PYTHON_ASSERT_STATEMENT = /^\s*assert\b(?!\s*\.)/
+// A line that continues a call chain: `  .toBe(1)`, `  .resolves.toEqual(x)`.
+const CHAINED_CALL_LINE = /^\s*\.\s*[\w$]+(?:\s*\.\s*[\w$]+)*\s*\(/
+
+// Focus and skip calls: it.only(, describe.skip(, test.concurrent.only(,
+// test.describe.serial.only(, it.only.each(, and fit( / xit( / xdescribe(
+// with an optional .each. Without .each a call needs two arguments, and:
+// - for it / test / describe (and fdescribe, xdescribe, xtest), a title that
+//   is a whole string or template literal, so it.only("x", runCase) counts;
+// - for the look-alike names (context, suite, specify, fit, xit), a literal
+//   callback, so context.only("tenant") and a fit("linear", points) helper
+//   do not.
+// A Jest test.todo("title") placeholder and a Playwright
+// test.skip(condition, "reason") never count, and neither does
+// test.skip("webkit" === browserName, "flaky").
+const RUNNER_MARKER_CALL =
+  /(?<![\w$.])(it|test|describe|suite|context|specify)(?:\.(?:concurrent|serial|parallel|sequential|describe))*\.(only|skip|todo|fixme)(\.each)?\s*[(`]/g
+const PREFIXED_MARKER_CALL = /(?<![\w$.])(f(?:it|describe)|x(?:it|test|describe|context|specify))(\.each)?\s*[(`]/g
+const PREFIXED_MARKER_NAMES = ["fit", "fdescribe", "xit", "xtest", "xdescribe", "xcontext", "xspecify"]
+const TITLE_RECEIVERS = new Set(["it", "test", "describe", "fdescribe", "xdescribe", "xtest"])
+// A fit or xit that the file defines, or imports from a non-test module, is a helper.
+const TEST_FRAMEWORK_MODULES = new Set(["@jest/globals", "vitest", "bun:test", "jasmine", "jasmine-core", "mocha", "@playwright/test"])
+// Test calls whose top-level options object can set only, skip, todo or
+// retry: test("name", { only: true }, fn). Other receivers are not test calls
+// (pattern.test(x)), except node:test's `t`.
+const TEST_OPTIONS_CALL = /(?<![\w$.])(?:t\.)?(?:test|it|describe|suite)\s*\(/g
+// A literal callback, with an optional TypeScript return type:
+// async (): Promise<void> => {}.
+const CALLBACK_ARG = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*(?::[^=]*?)?=>|[\w$]+\s*=>)/
+// Arguments read per call: a test declaration takes at most a title, an
+// options object and a callback. Options objects are read in full.
+const MAX_CALL_ARGS = 3
+// Characters read from each argument, after its leading blanks.
+const ARG_HEAD_LENGTH = 300
+// Runner-level retry settings in a test file. Anything else there named
+// retries is usually the code under test.
+const RUNNER_RETRY_CALL = /\bthis\.retries\s*\(|\bjest\.retryTimes\s*\(|\btest(?:\.describe)?\.configure\s*\(/
+
+// loosened-assertion grades each assertion as strict (a specific value,
+// pattern or error) or loose (truthiness, a bound, a negation) and compares
+// removed and added checks on the same subject within one hunk.
+const ASSERTION_START =
+  /(?<![\w$])(?:self\.assert[A-Z]\w*\s*\(|assert(?:\.strict)?(?:\.\w+)?\s*\(|(?<!\.)expect\s*\(|pytest\.raises\s*\()/
+const STRICT_NODE_ASSERTS = new Set(["equal", "strictEqual", "deepEqual", "deepStrictEqual", "partialDeepStrictEqual", "match"])
+const LOOSE_NODE_ASSERTS = new Set(["notEqual", "notStrictEqual", "notDeepEqual", "notDeepStrictEqual"])
+const STRICT_EXPECT_MATCHERS = new Set([
+  "toBe", "toEqual", "toStrictEqual", "toHaveLength", "toMatch", "toMatchObject", "toMatchSnapshot",
+  "toMatchInlineSnapshot", "toHaveBeenCalledWith", "toHaveBeenCalledTimes", "toHaveBeenLastCalledWith",
+  "toHaveBeenNthCalledWith", "toHaveReturnedWith", "toBeNull", "toBeUndefined", "toBeNaN", "toBeCloseTo",
+])
+const LOOSE_EXPECT_MATCHERS = new Set([
+  "toBeTruthy", "toBeFalsy", "toBeDefined", "toBeGreaterThan", "toBeGreaterThanOrEqual", "toBeLessThan",
+  "toBeLessThanOrEqual", "toHaveBeenCalled", "toContain", "toContainEqual", "toBeInstanceOf",
+])
+const STRICT_UNITTEST_ASSERTS = new Set([
+  "assertEqual", "assertEquals", "assertDictEqual", "assertListEqual", "assertTupleEqual", "assertSetEqual",
+  "assertSequenceEqual", "assertMultiLineEqual", "assertCountEqual", "assertItemsEqual", "assertIs",
+  "assertIsNone", "assertRegex", "assertRegexpMatches", "assertRaisesRegex", "assertRaisesRegexp",
+  "assertWarnsRegex", "assertAlmostEqual",
+])
+const LOOSE_UNITTEST_ASSERTS = new Set([
+  "assertFalse", "assertIsNotNone", "assertIsNot", "assertNotEqual", "assertNotEquals", "assertGreater",
+  "assertGreaterEqual", "assertLess", "assertLessEqual", "assertRaises", "assertWarns", "assertIsInstance",
+])
+const COMPARISON_OPERATORS = ["===", "!==", "==", "!=", ">=", "<=", ">", "<"]
+const STRICT_COMPARISONS = new Set(["===", "==", "is"])
+const MAX_STATEMENT_LINES = 12
+
+// lowered-threshold: a number attached to one of these settings (the text
+// just before it matches `before`). `loosens` is the direction that weakens
+// the suite. Scopes: config = test config and command files, testConfig =
+// test config only, runner = test config, or a runner retry line in a test.
+// Run counts (DEFAULT_RUN_COUNT_KEYS plus run_count_keys) apply in any
+// non-doc file.
+const NUMBER_LITERAL = /(?<![\w$.])\d[\d_]*(?:\.\d+)?(?![\w$])/g
+const DEFAULT_RUN_COUNT_KEYS = ["numRuns", "max_examples"]
+const THRESHOLD_SETTINGS = [
+  { name: "coverage", loosens: "lowered", scope: "config", before: /[\w-]*coverage[\w-]*["']?(?:\s*[:=]\s*|\s+)["']?$/i },
+  { name: "fail_under", loosens: "lowered", scope: "config", before: /fail[_-]?under["']?(?:\s*[:=]\s*|\s+)["']?$/i },
+  { name: "coverage threshold", loosens: "lowered", scope: "testConfig", before: /\b(?:branches|functions|lines|statements)["']?\s*[:=]?\s*$/ },
+  { name: "retries", loosens: "raised", scope: "runner", before: /\bretr(?:ies|y)["']?\s*(?:[:=(]|\s)\s*$/ },
+  { name: "retryTimes", loosens: "raised", scope: "runner", before: /\bretryTimes\s*\(\s*$/ },
+]
+// Only this much text on each side of a number is examined, which bounds
+// the polynomial regexes above on very long lines.
+const THRESHOLD_WINDOW = 200
+const LOWER_BOUND_CALL = /\b(?:toBeGreaterThan(?:OrEqual)?|assertGreater(?:Equal)?)\(\s*(?:[^,()]*(?:\([^()]*\)[^,()]*)?,\s*)?$/
+const UPPER_BOUND_CALL = /\b(?:toBeLessThan(?:OrEqual)?|assertLess(?:Equal)?)\(\s*(?:[^,()]*(?:\([^()]*\)[^,()]*)?,\s*)?$/
+
+// test-ignore-added list names; `[review_code] ignore_list_keys` adds more.
+const DEFAULT_IGNORE_LIST_KEYS = ["testPathIgnorePatterns", "testIgnore", "exclude", "collect_ignore", "collect_ignore_glob"]
+const CONFIG_KEY_NAME = /^[A-Za-z_$][\w$-]*$/
+// Runner flags that drop or filter tests, with the value that follows. The
+// pytest-only flags share names with other tools (flake8 --ignore, curl -k),
+// so they count only after `pytest` on the line or inside a pytest addopts.
+const FLAG_VALUE = `(?:=|\\s+|["'\`]?\\s*,\\s*["'\`]?)?("[^"\\n]*"|'[^'\\n]*'|[^\\s"'\`,\\]]*)`
+const IGNORE_FLAG = new RegExp(
+  `(?:^|[\\s"'\`=,[(])(--deselect|--test-skip-pattern|--test-name-pattern|--testPathIgnorePatterns?|--testNamePattern|--test-only)(?![\\w-])${FLAG_VALUE}`,
+  "g",
+)
+const VALUELESS_FLAGS = new Set(["--test-only"])
+const PYTEST_IGNORE_FLAG = new RegExp(`(?:^|[\\s"'\`=,[(])(--ignore-glob|--ignore|-k)(?![\\w-])${FLAG_VALUE}`, "g")
+const PYTEST_COMMAND = /(?<![\w-])(?:py\.?test|addopts)(?![\w-])/
+// A config line that starts a new key or section ends an addopts value.
+const CONFIG_KEY_OR_SECTION = /^\s*(?:\[[^\]]*\]\s*$|["']?[\w.-]+["']?\s*[=:])/
+// Lines walked up from a flag to find its addopts key or pytest command.
+const MAX_OPTION_LINES = 20
+
 // ---- diff parsing ----
 
 // Parse a unified diff into per-file blocks of hunk lines with line numbers.
-// Returns: [{ file: "src/foo.ts", added: [{ line: 42, text: "..." }, ...], lines: [...] }]
+// Returns one entry per file:
+//   file     new path (the b/ side)
+//   added    [{ line, text }] with new-file line numbers
+//   lines    [{ line, text, kind }] added and context lines, new-file numbers
+//   oldFile  old path; differs from file only for a rename
+//   status   "modified" | "added" | "deleted" | "renamed"
+//   removed  [{ line, text }] with old-file line numbers
+//   hunks    [{ oldStart, newStart, added, removed, entries }]; entries keep
+//            diff order as { kind, text, oldLine, newLine }, and a removed
+//            entry's newLine is the new-file line at the removal point.
+// The original rules and the allow-marker lookup read only added and lines,
+// whose shape is unchanged.
 export function parseUnifiedDiff(diff) {
   const files = []
   let currentFile = null
+  let currentHunk = null
   let newLineNum = 0
+  let oldLineNum = 0
   let inHunk = false
+  // Lines the current hunk header still promises on each side. An empty
+  // line while both remain is a blank context line written without its
+  // leading space (diff.suppressBlankEmpty).
+  let oldLeft = 0
+  let newLeft = 0
 
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff --git ")) {
       // start a new file
-      const match = /\sb\/(.+)$/.exec(raw)
-      currentFile = { file: match ? match[1] : "", added: [], lines: [] }
+      const file = diffGitPath(raw)
+      currentFile = { file, added: [], lines: [], oldFile: file, status: "modified", removed: [], hunks: [] }
       files.push(currentFile)
+      currentHunk = null
       newLineNum = 0
+      oldLineNum = 0
+      oldLeft = 0
+      newLeft = 0
       inHunk = false
       continue
     }
     if (!currentFile) continue
     if (raw.startsWith("@@")) {
-      // @@ -a,b +c,d @@  →  pull c
+      // @@ -a,b +c,d @@  →  pull a and c
       const match = /\+(\d+)(?:,\d+)?/.exec(raw)
       if (match) newLineNum = Number.parseInt(match[1], 10)
+      const oldMatch = /^@@ -(\d+)/.exec(raw)
+      if (oldMatch) oldLineNum = Number.parseInt(oldMatch[1], 10)
+      const counts = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(raw)
+      oldLeft = counts ? Number.parseInt(counts[1] ?? "1", 10) : 0
+      newLeft = counts ? Number.parseInt(counts[2] ?? "1", 10) : 0
+      currentHunk = { oldStart: oldLineNum, newStart: newLineNum, added: [], removed: [], entries: [] }
+      currentFile.hunks.push(currentHunk)
       inHunk = true
       continue
     }
-    if (!inHunk) continue
+    if (!inHunk) {
+      readFileHeader(currentFile, raw)
+      continue
+    }
     if (raw.startsWith("\\ No newline at end of file")) continue
     if (raw.startsWith("+")) {
       const entry = { line: newLineNum, text: raw.slice(1), kind: "added" }
       currentFile.lines.push(entry)
       currentFile.added.push({ line: entry.line, text: entry.text })
+      currentHunk.added.push({ line: entry.line, text: entry.text })
+      currentHunk.entries.push({ kind: "added", text: entry.text, oldLine: null, newLine: entry.line })
       newLineNum++
+      newLeft--
     } else if (raw.startsWith("-")) {
       // removed; line numbers in the new file don't advance
-    } else if (raw.startsWith(" ")) {
+      const text = raw.slice(1)
+      currentFile.removed.push({ line: oldLineNum, text })
+      currentHunk.removed.push({ line: oldLineNum, text })
+      currentHunk.entries.push({ kind: "removed", text, oldLine: oldLineNum, newLine: newLineNum })
+      oldLineNum++
+      oldLeft--
+    } else if (raw.startsWith(" ") || (raw === "" && oldLeft > 0 && newLeft > 0)) {
       currentFile.lines.push({ line: newLineNum, text: raw.slice(1), kind: "context" })
+      currentHunk.entries.push({ kind: "context", text: raw.slice(1), oldLine: oldLineNum, newLine: newLineNum })
       newLineNum++
+      oldLineNum++
+      oldLeft--
+      newLeft--
     }
   }
   return files.filter((f) => f.file)
+}
+
+// The b/ path of a `diff --git a/<old> b/<new>` line. When both sides are
+// the same path the split is exact even if the path contains " b/"; the
+// ---/+++ and rename headers that follow correct any other case.
+function diffGitPath(raw) {
+  const same = /^diff --git a\/(.+) b\/\1$/.exec(raw)
+  if (same) return same[1]
+  const match = /\sb\/(.+)$/.exec(raw)
+  if (match) return match[1]
+  const quoted = /\s"b\/((?:[^"\\]|\\.)*)"$/.exec(raw)
+  return quoted ? unquoteGitPath(`"${quoted[1]}"`) : ""
+}
+
+// The path in a `--- a/<path>` or `+++ b/<path>` header, or null for
+// /dev/null. Git ends the header with a tab when the path has a space.
+function headerPath(value, prefix) {
+  const text = unquoteGitPath(value.replace(/\t$/, ""))
+  if (text === "/dev/null") return null
+  return text.startsWith(prefix) ? text.slice(prefix.length) : text
+}
+
+// Extended header lines between `diff --git` and the first hunk.
+function readFileHeader(entry, raw) {
+  if (raw.startsWith("new file mode ")) {
+    entry.status = "added"
+  } else if (raw.startsWith("deleted file mode ")) {
+    entry.status = "deleted"
+  } else if (raw.startsWith("rename from ")) {
+    entry.status = "renamed"
+    entry.oldFile = unquoteGitPath(raw.slice("rename from ".length))
+  } else if (raw.startsWith("rename to ")) {
+    entry.status = "renamed"
+    entry.file = unquoteGitPath(raw.slice("rename to ".length))
+  } else if (raw.startsWith("--- ")) {
+    const oldPath = headerPath(raw.slice(4), "a/")
+    if (oldPath === null) entry.status = "added"
+    else entry.oldFile = oldPath
+  } else if (raw.startsWith("+++ ")) {
+    const newPath = headerPath(raw.slice(4), "b/")
+    if (newPath === null) {
+      entry.status = "deleted"
+      entry.file = entry.oldFile
+    } else {
+      entry.file = newPath
+    }
+  }
+}
+
+// Git quotes a path with special characters C-style: "caf\303\251.mjs".
+function unquoteGitPath(value) {
+  if (!(value.length >= 2 && value.startsWith("\"") && value.endsWith("\""))) return value
+  const escapes = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 }
+  const bytes = []
+  for (const [, escape, run] of value.slice(1, -1).matchAll(/\\([0-7]{3}|.)|([^\\]+)/gsu)) {
+    if (run !== undefined) bytes.push(...Buffer.from(run, "utf8"))
+    else if (/^[0-7]{3}$/.test(escape)) bytes.push(Number.parseInt(escape, 8))
+    else bytes.push(...(escape in escapes ? [escapes[escape]] : Buffer.from(escape, "utf8")))
+  }
+  return Buffer.from(bytes).toString("utf8")
 }
 
 // ---- allow markers ----
@@ -166,6 +455,237 @@ function prevLineAllows(lines, line, ruleId) {
 
 function lineIsAllowed(text, line, lines, ruleId) {
   return lineHasAllow(text, ruleId) || prevLineAllows(lines, line, ruleId)
+}
+
+// ---- code masking (weakened-test rules) ----
+
+const MAX_SCANNED_LINE = 5000
+
+// Blank comments and fill string, template and regex literal contents with
+// "x", keeping every other character in its column. Structural scans (call
+// starts, brackets, commas) then never read text inside a literal or a
+// comment. `code` drops comments only; `masked` also fills literals.
+// `state` carries an open template literal, triple-quoted string or block
+// comment into the next line. `keepString(content)` keeps a string intact,
+// so JSON keys such as "exclude" stay visible.
+function createMaskState(file) {
+  return { hashComments: HASH_COMMENT_FILE.test(file), quote: null, blockComment: false }
+}
+
+function maskLine(text, state, keepString = null) {
+  // A very long line is data (minified or generated). Scanning it costs more
+  // than it can find, so it reads as blank and leaves the state alone.
+  if (text.length > MAX_SCANNED_LINE) {
+    const blank = " ".repeat(text.length)
+    return { code: blank, masked: blank }
+  }
+  const code = text.split("")
+  const masked = text.split("")
+  const blank = (from, to) => {
+    for (let k = from; k < to; k++) {
+      code[k] = " "
+      masked[k] = " "
+    }
+  }
+  const fill = (from, to) => {
+    for (let k = from; k < to; k++) masked[k] = "x"
+  }
+  let carried = Boolean(state.quote)
+  let i = 0
+  while (i < text.length) {
+    if (state.blockComment) {
+      const end = text.indexOf("*/", i)
+      const stop = end < 0 ? text.length : end + 2
+      blank(i, stop)
+      i = stop
+      if (end >= 0) state.blockComment = false
+      continue
+    }
+    if (state.quote) {
+      const close = findClosingQuote(text, i, state.quote)
+      const contentEnd = close < 0 ? text.length : close
+      if (carried || close < 0 || !keepString?.(text.slice(i, contentEnd))) fill(i, contentEnd)
+      carried = false
+      if (close < 0) {
+        // Plain quotes end with the line; template and triple quotes carry.
+        if (state.quote === "\"" || state.quote === "'") state.quote = null
+        break
+      }
+      i = close + state.quote.length
+      state.quote = null
+      continue
+    }
+    const ch = text[i]
+    if (startsLineComment(text, i, state.hashComments)) {
+      blank(i, text.length)
+      break
+    }
+    if (!state.hashComments && text.startsWith("/*", i)) {
+      blank(i, i + 2)
+      i += 2
+      state.blockComment = true
+      continue
+    }
+    const triple = state.hashComments && (text.startsWith("\"\"\"", i) || text.startsWith("'''", i))
+    if (triple || ch === "\"" || ch === "'" || ch === "`") {
+      state.quote = triple ? text.slice(i, i + 3) : ch
+      i += state.quote.length
+      continue
+    }
+    if (!state.hashComments && ch === "/" && regexLiteralCanStart(text, i)) {
+      const end = findRegexLiteralEnd(text, i + 1)
+      if (end > 0) {
+        fill(i + 1, end)
+        i = end + 1
+        continue
+      }
+    }
+    i++
+  }
+  return { code: code.join(""), masked: masked.join("") }
+}
+
+function maskLines(texts, file, keepString = null) {
+  const state = createMaskState(file)
+  return texts.map((text) => maskLine(text, state, keepString))
+}
+
+function startsLineComment(text, index, hashComments) {
+  if (!hashComments) return text.startsWith("//", index)
+  // A `#` right after a word character, `$`, `/` or `{` is not a comment:
+  // $#, ${#name}, a#b, url/#fragment.
+  return text[index] === "#" && !/[\w$/{]/.test(text[index - 1] ?? "")
+}
+
+function findClosingQuote(text, from, quote) {
+  for (let j = from; j < text.length; j++) {
+    if (text[j] === "\\") {
+      j++
+      continue
+    }
+    if (text.startsWith(quote, j)) return j
+  }
+  return -1
+}
+
+// A slash starts a regex literal where an expression can begin. Only the
+// previous token is examined, so long lines stay linear.
+function regexLiteralCanStart(text, index) {
+  let j = index - 1
+  while (j >= 0 && /\s/.test(text[j])) j--
+  if (j < 0) return true
+  // Not a regex: `</p>` closes a JSX tag (a `<` right against the slash;
+  // `a < /re/` with a space still compares), `{expr} />` closes one too, and
+  // `i++ / 2` divides. Starting a regex there would swallow the next quote
+  // and flip every later string.
+  if (text[j] === "<" && j === index - 1) return false
+  if (text[j] === "}" && text[index + 1] === ">") return false
+  if ((text[j] === "+" || text[j] === "-") && text[j - 1] === text[j]) return false
+  if (/[(,=:[!&|?{};+\-*%<>~^]/.test(text[j])) return true
+  const tail = text.slice(Math.max(0, j - 7), j + 1)
+  return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(tail)
+}
+
+function findRegexLiteralEnd(text, from) {
+  let inClass = false
+  for (let j = from; j < text.length; j++) {
+    const ch = text[j]
+    if (ch === "\\") {
+      j++
+    } else if (inClass) {
+      if (ch === "]") inClass = false
+    } else if (ch === "[") {
+      inClass = true
+    } else if (ch === "/") {
+      return j
+    }
+  }
+  return -1
+}
+
+function bracketDelta(masked) {
+  let delta = 0
+  for (const ch of masked) {
+    if (ch === "(" || ch === "[" || ch === "{") delta++
+    else if (ch === ")" || ch === "]" || ch === "}") delta--
+  }
+  return delta
+}
+
+// Slice code and masked text together, trimmed by the masked whitespace so
+// both stay aligned column for column. `start` is the slice's offset.
+function trimmedSlice(code, masked, start, end) {
+  let from = start
+  let to = end
+  while (from < to && /\s/.test(masked[from])) from++
+  while (to > from && /\s/.test(masked[to - 1])) to--
+  return { code: code.slice(from, to), masked: masked.slice(from, to), start: from }
+}
+
+// Split the bracketed list opened at openIndex into top-level items.
+// `closed` is false when the list runs past the end of the text.
+function splitTopLevel(code, masked, openIndex) {
+  const items = []
+  let depth = 0
+  let start = openIndex + 1
+  const push = (end) => {
+    const item = trimmedSlice(code, masked, start, end)
+    if (item.masked) items.push(item)
+  }
+  for (let i = openIndex; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      depth--
+      if (depth === 0) {
+        push(i)
+        return { items, end: i + 1, closed: true }
+      }
+    } else if (ch === "," && depth === 1) {
+      push(i)
+      start = i + 1
+    }
+  }
+  push(masked.length)
+  return { items, end: masked.length, closed: false }
+}
+
+function splitCallArgs(code, masked, openIndex) {
+  const call = splitTopLevel(code, masked, openIndex)
+  return call.closed ? { args: call.items, end: call.end } : null
+}
+
+function isAssertionCode(masked, file) {
+  return ASSERTION_CALL.test(masked) || (PYTHON_FILE.test(file) && PYTHON_ASSERT_STATEMENT.test(masked))
+}
+
+// A test file by its runner naming convention alone: foo.test.mjs,
+// test_foo.py, __tests__/foo.js.
+function isNamedTestFile(file) {
+  const base = path.posix.basename(file)
+  return TEST_BASENAME_PATTERNS.some((re) => re.test(base)) || TEST_PATH_PATTERNS.some((re) => re.test(file))
+}
+
+function isTestFilePath(file) {
+  return isNamedTestFile(file) || (JS_TEST_DIR_FILE.test(file) && !TEST_SUPPORT_DIR.test(file))
+}
+
+function isTestConfigFile(file) {
+  const base = path.posix.basename(file)
+  return JS_TEST_CONFIG_BASENAME.test(base) || PYTHON_TEST_CONFIG_BASENAME.test(base)
+}
+
+function textAtNewLine(entry, line) {
+  return entry.lines.find((candidate) => candidate.line === line)?.text ?? ""
+}
+
+function plural(count, singular, pluralForm = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : pluralForm}`
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 // ---- per-rule scanners ----
@@ -570,18 +1090,1137 @@ function scanNewDependency(file, addedLines, lines, options = {}) {
   return out
 }
 
+// ---- weakened-test scanners ----
+
+// Masked rows for one side ("new" or "old") of a file diff, in runs: the
+// whole file, or one run per hunk. Whole-file contents give exact masking;
+// without them each hunk is masked from its own first line, which is exact
+// only for a hunk that starts at line 1.
+function createSide(entry, sideName, content) {
+  const lineKey = sideName === "new" ? "newLine" : "oldLine"
+  const otherKind = sideName === "new" ? "removed" : "added"
+  const hunkLines = entry.hunks.map((hunk) => hunk.entries.filter((e) => e.kind !== otherKind))
+  if (typeof content === "string") {
+    const texts = content.split("\n")
+    // Use the file only when it is the text the diff describes.
+    if (hunkLines.every((entries) => entries.every((e) => sameText(texts[e[lineKey] - 1], e.text)))) {
+      const rows = maskLines(texts, entry.file)
+      return buildSide([{ lines: texts.map((_, index) => index + 1), rows }], () => true)
+    }
+  }
+  const exactLines = new Set()
+  const parts = entry.hunks.map((hunk, index) => {
+    const entries = hunkLines[index]
+    if ((sideName === "new" ? hunk.newStart : hunk.oldStart) <= 1) {
+      for (const e of entries) exactLines.add(e[lineKey])
+    }
+    return { lines: entries.map((e) => e[lineKey]), rows: maskLines(entries.map((e) => e.text), entry.file) }
+  })
+  return buildSide(parts, (line) => exactLines.has(line))
+}
+
+// A CRLF checkout differs from git's LF diff only by each line's trailing \r.
+function sameText(fileLine, diffLine) {
+  if (fileLine === undefined) return false
+  return fileLine === diffLine || fileLine.replace(/\r$/, "") === diffLine.replace(/\r$/, "")
+}
+
+function buildSide(parts, exact) {
+  const places = new Map()
+  const runs = parts.map(({ lines, rows }) => {
+    const run = createRun(lines, rows)
+    for (const [index, line] of lines.entries()) places.set(line, { run, index })
+    return run
+  })
+  return {
+    runs,
+    exact,
+    row: (line) => {
+      const place = places.get(line)
+      return place ? place.run.rows[place.index] : null
+    },
+    // The run holding a line, and the line's offset in the run's text.
+    place: (line) => {
+      const place = places.get(line)
+      return place ? { run: place.run, start: place.run.starts[place.index] } : null
+    },
+  }
+}
+
+// A run's rows joined by "\n", so calls can be parsed across lines once.
+function createRun(lines, rows) {
+  const starts = []
+  let offset = 0
+  for (const row of rows) {
+    starts.push(offset)
+    offset += row.masked.length + 1
+  }
+  return {
+    lines,
+    rows,
+    starts,
+    code: rows.map((row) => row.code).join("\n"),
+    masked: rows.map((row) => row.masked).join("\n"),
+    analysis: null,
+  }
+}
+
+function createSideView(entry, options) {
+  return {
+    new: createSide(entry, "new", options.fileContentsByPath?.[entry.file]),
+    old: createSide(entry, "old", options.baseFileContentsByPath?.[entry.oldFile]),
+  }
+}
+
+function lineAtOffset(run, offset) {
+  let low = 0
+  let high = run.starts.length - 1
+  while (low < high) {
+    const mid = (low + high + 1) >> 1
+    if (run.starts[mid] <= offset) low = mid
+    else high = mid - 1
+  }
+  return run.lines[low]
+}
+
+// Top-level argument spans of every bracket opened at one of `openers`, in a
+// single pass over the text (at most maxArgs each). An unclosed call's last
+// span runs to the end of the text.
+function collectArgSpans(masked, openers, maxArgs = MAX_CALL_ARGS) {
+  const spans = new Map()
+  if (openers.size === 0) return spans
+  const stack = []
+  const add = (frame, end) => {
+    const list = spans.get(frame.index)
+    if (list.length < maxArgs) list.push({ start: frame.argStart, end })
+  }
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") {
+      const tracked = openers.has(i)
+      if (tracked) spans.set(i, [])
+      stack.push({ index: i, tracked, argStart: i + 1 })
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      const frame = stack.pop()
+      if (frame?.tracked) add(frame, i)
+    } else if (ch === ",") {
+      const frame = stack[stack.length - 1]
+      if (frame?.tracked) {
+        add(frame, i)
+        frame.argStart = i + 1
+      }
+    }
+  }
+  for (const frame of stack) {
+    if (frame.tracked) add(frame, masked.length)
+  }
+  return spans
+}
+
+// The start of each argument span, from its first non-blank character:
+// enough to read a title, an options object or the head of a callback.
+// Blanked comments count as blanks, so skipping them first keeps an
+// argument after a long comment visible. The skip stays linear: the leading
+// blank runs of different spans never overlap. `end` is the span's end.
+function argHeads(run, spans = []) {
+  const heads = []
+  for (const { start, end } of spans) {
+    let from = start
+    while (from < end && /\s/.test(run.masked[from])) from++
+    const head = trimmedSlice(run.code, run.masked, from, Math.min(end, from + ARG_HEAD_LENGTH))
+    if (head.masked) heads.push({ ...head, end })
+  }
+  return heads
+}
+
+// Whether run.masked[start, end) is one complete string or template literal
+// and nothing else: "title", but not "webkit" === browserName. Masking left
+// only the delimiting quotes, so the literal closes at the next one.
+function isCompleteLiteral(run, start, end) {
+  const quote = run.masked[start]
+  if (quote !== "\"" && quote !== "'" && quote !== "`") return false
+  let close = start + 1
+  while (close < end && run.masked[close] !== quote) close++
+  if (close >= end) return false
+  for (let i = close + 1; i < end; i++) {
+    if (!/\s/.test(run.masked[i])) return false
+  }
+  return true
+}
+
+// Every focus, skip or options call in a run with its argument spans, and
+// the top-level properties of test-call options objects by line:
+// test("name", { only: true, retry: 2 }, fn). Two linear passes per run,
+// however many calls a line packs.
+function analyzeRun(run) {
+  if (run.analysis) return run.analysis
+  const openers = new Set()
+  const optionCalls = []
+  for (const pattern of [RUNNER_MARKER_CALL, PREFIXED_MARKER_CALL, TEST_OPTIONS_CALL]) {
+    for (const match of run.masked.matchAll(pattern)) {
+      if (!match[0].endsWith("(")) continue
+      const open = match.index + match[0].length - 1
+      openers.add(open)
+      if (pattern === TEST_OPTIONS_CALL) optionCalls.push(open)
+    }
+  }
+  const calls = collectArgSpans(run.masked, openers)
+  // Options objects come before the callback; nested objects never count.
+  const objectOpeners = new Set()
+  for (const open of optionCalls) {
+    for (const arg of argHeads(run, calls.get(open)).slice(1)) {
+      if (CALLBACK_ARG.test(arg.masked)) break
+      if (arg.masked.startsWith("{")) objectOpeners.add(arg.start)
+    }
+  }
+  const optionsByLine = new Map()
+  for (const spans of collectArgSpans(run.masked, objectOpeners, Infinity).values()) {
+    for (const property of argHeads(run, spans)) {
+      const key = /^["']?([\w$]+)["']?\s*:/.exec(property.code)
+      if (!key) continue
+      const value = trimmedSlice(property.code, property.masked, key[0].length, property.code.length)
+      const line = lineAtOffset(run, property.start)
+      if (!optionsByLine.has(line)) optionsByLine.set(line, [])
+      optionsByLine.get(line).push({ key: key[1], code: value.code, masked: value.masked })
+    }
+  }
+  run.analysis = { calls, optionsByLine }
+  return run.analysis
+}
+
+// Deleted files have no surviving line, so the finding is file-level
+// (line 0) and cannot carry an allow marker; justify it in the handoff.
+function scanDeletedTestFile(entry) {
+  if (entry.status === "deleted" && isTestFilePath(entry.file)) {
+    const rows = maskLines(entry.removed.map((removed) => removed.text), entry.file)
+    const assertions = rows.filter((row) => isAssertionCode(row.masked, entry.file)).length
+    return [{
+      rule: "deleted-test-file",
+      severity: "warn",
+      file: entry.file,
+      line: 0,
+      preview: "",
+      detail: `Test file deleted (${plural(entry.removed.length, "line")}, ${plural(assertions, "assertion line")}).`,
+    }]
+  }
+  // A runner that collects by name stops collecting a file that loses its
+  // test name, even when it stays under test/.
+  const lostName = isNamedTestFile(entry.oldFile) && !isNamedTestFile(entry.file)
+  if (entry.status === "renamed" && (lostName || (isTestFilePath(entry.oldFile) && !isTestFilePath(entry.file)))) {
+    return [{
+      rule: "deleted-test-file",
+      severity: "warn",
+      file: entry.oldFile,
+      line: 0,
+      preview: `${entry.oldFile} -> ${entry.file}`,
+      detail: isTestFilePath(entry.file)
+        ? "Test file renamed to a path without a test-file name, so runners that collect by name stop collecting it."
+        : "Test file renamed to a non-test path, so test runners stop collecting it.",
+    }]
+  }
+  return []
+}
+
+function assertionKey(code) {
+  return code.trim().replace(/\s+/g, " ")
+}
+
+// Removed (or added) matcher lines of a multi-line assertion whose first
+// line survives as context: `expect(value)` kept while `  .toBe(1)` below it
+// goes. A chain joined onto or split from its expect line is left out, since
+// that expect line is itself removed and added.
+function chainedMatcherEntries(hunk, view, sideName, file) {
+  const lineKey = sideName === "new" ? "newLine" : "oldLine"
+  const kind = sideName === "new" ? "added" : "removed"
+  const side = hunk.entries.filter((e) => e.kind !== (sideName === "new" ? "removed" : "added"))
+  const rowOf = (e) => view[sideName].row(e[lineKey])
+  if (!side.some((e) => e.kind === kind && CHAINED_CALL_LINE.test(rowOf(e)?.masked ?? ""))) return []
+  const found = []
+  for (const statement of extractAssertionStatements(side, side.map(rowOf), file)) {
+    if (statement.start.kind !== "context") continue
+    for (const e of statement.entries) {
+      const row = rowOf(e)
+      if (e.kind === kind && row && CHAINED_CALL_LINE.test(row.masked) && !isAssertionCode(row.masked, file)) found.push({ e, row })
+    }
+  }
+  return found
+}
+
+// Per hunk, assertion lines removed versus added. Identical lines cancel
+// out, first within a hunk and then anywhere in the file, so a test that
+// only moved is not a removal.
+function scanRemovedAssertion(entry, view) {
+  const hunks = entry.hunks.map((hunk) => {
+    const removed = []
+    for (const e of hunk.entries) {
+      if (e.kind !== "removed") continue
+      const row = view.old.row(e.oldLine)
+      if (row && isAssertionCode(row.masked, entry.file)) removed.push({ entry: e, key: assertionKey(row.code), moved: false })
+    }
+    const added = []
+    for (const { line } of hunk.added) {
+      const row = view.new.row(line)
+      if (row && isAssertionCode(row.masked, entry.file)) added.push({ key: assertionKey(row.code), used: false })
+    }
+    for (const { e, row } of chainedMatcherEntries(hunk, view, "old", entry.file)) {
+      removed.push({ entry: e, key: assertionKey(row.code), moved: false })
+    }
+    for (const { row } of chainedMatcherEntries(hunk, view, "new", entry.file)) {
+      added.push({ key: assertionKey(row.code), used: false })
+    }
+    removed.sort((a, b) => a.entry.oldLine - b.entry.oldLine)
+    return { removed, added }
+  })
+  const cancel = (removed, candidates) => {
+    const twin = candidates.find((added) => !added.used && added.key === removed.key)
+    if (!twin) return
+    twin.used = true
+    removed.moved = true
+  }
+  for (const { removed, added } of hunks) {
+    for (const r of removed) cancel(r, added)
+  }
+  const allAdded = hunks.flatMap(({ added }) => added)
+  for (const { removed } of hunks) {
+    for (const r of removed) if (!r.moved) cancel(r, allAdded)
+  }
+  const out = []
+  for (const { removed, added } of hunks) {
+    const lost = removed.filter((r) => !r.moved)
+    const gained = added.filter((a) => !a.used).length
+    if (lost.length <= gained) continue
+    const first = lost[0].entry
+    if (lineIsAllowed(textAtNewLine(entry, first.newLine), first.newLine, entry.lines, "removed-assertion")) continue
+    out.push({
+      rule: "removed-assertion",
+      severity: "warn",
+      file: entry.file,
+      line: first.newLine,
+      preview: first.text.trim().slice(0, 200),
+      detail: `Hunk removes ${plural(lost.length, "assertion line")} and adds ${gained} (old line ${first.oldLine}).`,
+    })
+  }
+  return out
+}
+
+// Test-call option properties on one side, by line.
+function sideOptionProperties(side) {
+  const byLine = new Map()
+  for (const run of side.runs) {
+    for (const [line, properties] of analyzeRun(run).optionsByLine) byLine.set(line, properties)
+  }
+  return byLine
+}
+
+// Whether a focus or skip call's arguments look like a test declaration
+// (see RUNNER_MARKER_CALL): two arguments, with a literal callback, or a
+// title that is a whole string or template literal when the receiver is a
+// real test function.
+function qualifiesAsTestCall(run, args, titleReceiver) {
+  if (args.length < 2) return false
+  if (args.slice(1).some((arg) => CALLBACK_ARG.test(arg.masked))) return true
+  return titleReceiver && isCompleteLiteral(run, args[0].start, args[0].end)
+}
+
+// Names such as fit or xit that the file defines, or imports from a module
+// that is not a test framework: calls to them are helpers, not focus. The
+// import patterns are bounded, so the scan stays linear on packed lines.
+function shadowedMarkerNames(side) {
+  const code = side.runs.map((run) => run.code).join("\n")
+  const imported = []
+  for (const match of code.matchAll(/\bimport\s+([^;'"]{0,300}?)\bfrom\s*(["'])([^"'\n]{1,300})\2/g)) imported.push([match[1], match[3]])
+  for (const match of code.matchAll(/\b(?:const|let|var)\s*\{([^}]{0,500})\}\s*=\s*require\s*\(\s*(["'])([^"'\n]{1,300})\2/g)) {
+    imported.push([match[1], match[3]])
+  }
+  for (const match of code.matchAll(/\bfrom\s+([\w.]{1,200})\s+import\s+([^\n]{0,500})/g)) imported.push([match[2], match[1]])
+  const names = new Set()
+  for (const name of PREFIXED_MARKER_NAMES) {
+    if (!code.includes(name)) continue
+    const word = new RegExp(`\\b${name}\\b`)
+    const defined = new RegExp(`\\b(?:function\\s*\\*?\\s*|def\\s+|class\\s+)${name}\\b|\\b(?:const|let|var)\\s+${name}\\s*=`).test(code)
+    const importedHelper = imported.some(([clause, module]) => word.test(clause) && !TEST_FRAMEWORK_MODULES.has(module))
+    if (defined || importedHelper) names.add(name)
+  }
+  return names
+}
+
+function isSkipValue(masked) {
+  return masked === "true" || (/^["'`]/.test(masked) && masked.length > 2)
+}
+
+// Focus and skip markers on one line of a side. `id` identifies a marker for
+// matching against removed lines; `label` names it in the finding.
+function markersOnLine(side, line, optionsByLine, isShadowed, file) {
+  const row = side.row(line)
+  const place = side.place(line)
+  if (!row || !place) return []
+  const markers = []
+  const add = (kind, label) => markers.push({ kind, label, id: `${kind}:${label.replace(/\s+/g, "")}` })
+  // Argument heads of the call a match opens, from the run's one-pass parse.
+  const argsOf = (match) => {
+    if (!match[0].endsWith("(")) return []
+    const open = place.start + match.index + match[0].length - 1
+    return argHeads(place.run, analyzeRun(place.run).calls.get(open))
+  }
+  for (const match of row.masked.matchAll(RUNNER_MARKER_CALL)) {
+    const [, receiver, verb, each] = match
+    if (!each && !qualifiesAsTestCall(place.run, argsOf(match), TITLE_RECEIVERS.has(receiver))) continue
+    add(verb === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+  }
+  for (const match of row.masked.matchAll(PREFIXED_MARKER_CALL)) {
+    const [, name, each] = match
+    if (isShadowed(name)) continue
+    if (!each && !qualifiesAsTestCall(place.run, argsOf(match), TITLE_RECEIVERS.has(name))) continue
+    add(name.startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+  }
+  for (const property of optionsByLine.get(line) ?? []) {
+    if (property.key === "only" && property.masked === "true") add("focus", "only: true")
+    if ((property.key === "skip" || property.key === "todo") && isSkipValue(property.masked)) add("skip", `${property.key}:`)
+  }
+  if (PYTHON_FILE.test(file)) {
+    if (/\bpytest\.mark\.skip\b/.test(row.masked)) add("skip", "@pytest.mark.skip")
+    if (/@unittest\.skip\s*\(/.test(row.masked)) add("skip", "@unittest.skip")
+  }
+  return markers
+}
+
+// skipped-test and focused-test: markers on added lines that no removed line
+// carried, so a moved or re-indented marker is not new. Removed markers
+// cancel added ones first within a hunk, then anywhere in the file, count by
+// count. A focused test is hard only when both sides were masked from the
+// top of the file; hunk-by-hunk masking can mistake a string or comment for
+// code.
+function scanTestMarkers(entry, view, newOptions) {
+  let shadowed = null
+  const isShadowed = (name) => (shadowed ??= shadowedMarkerNames(view.new)).has(name)
+  const oldOptions = sideOptionProperties(view.old)
+  const oldExact = entry.removed.every(({ line }) => view.old.exact(line))
+  const hunks = entry.hunks.map((hunk) => {
+    const existing = hunk.removed.flatMap(({ line }) => markersOnLine(view.old, line, oldOptions, isShadowed, entry.file).map((m) => m.id))
+    const lines = hunk.added.map(({ line, text }) => {
+      const fresh = []
+      for (const marker of markersOnLine(view.new, line, newOptions, isShadowed, entry.file)) {
+        const seen = existing.indexOf(marker.id)
+        if (seen >= 0) existing.splice(seen, 1)
+        else fresh.push(marker)
+      }
+      return { line, text, fresh }
+    })
+    return { existing, lines }
+  })
+  const pool = hunks.flatMap(({ existing }) => existing)
+  const out = []
+  for (const { lines } of hunks) {
+    for (const { line, text, fresh: candidates } of lines) {
+      const fresh = {}
+      for (const marker of candidates) {
+        const seen = pool.indexOf(marker.id)
+        if (seen >= 0) pool.splice(seen, 1)
+        else fresh[marker.kind] ??= marker
+      }
+      const preview = text.trim().slice(0, 200)
+      if (fresh.focus && !lineIsAllowed(text, line, entry.lines, "focused-test")) {
+        const exact = view.new.exact(line) && oldExact
+        out.push({
+          rule: "focused-test",
+          severity: exact ? "hard" : "warn",
+          file: entry.file,
+          line,
+          preview,
+          detail: `Focused test \`${fresh.focus.label}\` makes the runner skip every other test.` +
+            (exact ? "" : " Warn only: the file was masked hunk by hunk, so this may sit in a string or comment."),
+        })
+      }
+      if (fresh.skip && !lineIsAllowed(text, line, entry.lines, "skipped-test")) {
+        const label = fresh.skip.label
+        out.push({
+          rule: "skipped-test",
+          severity: "warn",
+          file: entry.file,
+          line,
+          preview,
+          detail: /todo/.test(label)
+            ? `Test marked todo (\`${label}\`): it still runs, but its failures no longer fail the suite.`
+            : `New unconditional skip \`${label}\`.`,
+        })
+      }
+    }
+  }
+  return out
+}
+
+function normalizeSubject(text) {
+  return String(text).trim().replace(/^(?:!+\s*|not\s+)/, "").replace(/\s+/g, "").replace(/'/g, "\"")
+}
+
+function stripOuterParens(part) {
+  let current = part
+  while (current.masked.startsWith("(")) {
+    const inner = splitTopLevel(current.code, current.masked, 0)
+    if (!inner.closed || inner.end !== current.masked.length) break
+    current = trimmedSlice(current.code, current.masked, 1, current.masked.length - 1)
+  }
+  return current
+}
+
+// The first top-level comparison in an expression: { left, op } or null.
+function splitComparison(part, python) {
+  const { code, masked } = stripOuterParens(part)
+  let depth = 0
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") depth++
+    else if (ch === ")" || ch === "]" || ch === "}") depth--
+    if (depth !== 0) continue
+    if (python) {
+      const word = /^\s+(is\s+not|is)\s+/.exec(masked.slice(i, i + 24))
+      if (word && i > 0) return { left: code.slice(0, i).trim(), op: word[1].replace(/\s+/g, " ") }
+    }
+    const op = COMPARISON_OPERATORS.find((candidate) => masked.startsWith(candidate, i))
+    if (!op) continue
+    // Skip arrows (=>, ->) and shifts (<<, >>).
+    if (op === ">" && /[=\->]/.test(masked[i - 1] ?? "")) continue
+    if ((op === ">" || op === "<") && masked[i + 1] === op) {
+      i++
+      continue
+    }
+    return { left: code.slice(0, i).trim(), op }
+  }
+  return null
+}
+
+function gradeTruthiness(part, label, python) {
+  const comparison = splitComparison(part, python)
+  if (comparison) {
+    return {
+      subject: normalizeSubject(comparison.left),
+      strict: STRICT_COMPARISONS.has(comparison.op),
+      label: `${label} (${comparison.op})`,
+    }
+  }
+  return { subject: normalizeSubject(part.code), strict: false, label }
+}
+
+function gradeByName(first, strictNames, looseNames, name, label) {
+  if (strictNames.has(name)) return { subject: normalizeSubject(first.code), strict: true, label }
+  if (looseNames.has(name)) return { subject: normalizeSubject(first.code), strict: false, label }
+  return null
+}
+
+function parseNodeAssertion(match, code, masked) {
+  const call = splitCallArgs(code, masked, match[0].length - 1)
+  if (!call || call.args.length === 0) return null
+  const [first] = call.args
+  const method = match[1] || "ok"
+  const label = match[0].replace(/\s*\($/, "")
+  if (method === "ok") return gradeTruthiness(first, label, false)
+  if (method === "throws" || method === "rejects") {
+    const strict = call.args.length > 1
+    return { subject: normalizeSubject(first.code), strict, label: `${label} ${strict ? "with" : "without"} an error matcher` }
+  }
+  return gradeByName(first, STRICT_NODE_ASSERTS, LOOSE_NODE_ASSERTS, method, label)
+}
+
+function parseExpectAssertion(code, masked) {
+  const subjectCall = splitCallArgs(code, masked, masked.indexOf("("))
+  if (!subjectCall || subjectCall.args.length === 0) return null
+  const chain = /^\s*((?:\.\s*(?:not|resolves|rejects)\s*)*)\.\s*(\w+)\s*\(/.exec(masked.slice(subjectCall.end))
+  if (!chain) return null
+  const matcher = chain[2]
+  const negated = /\bnot\b/.test(chain[1])
+  const matcherCall = splitCallArgs(code, masked, subjectCall.end + chain[0].length - 1)
+  const argCount = matcherCall ? matcherCall.args.length : 0
+  const subject = normalizeSubject(subjectCall.args[0].code)
+  const label = `expect().${negated ? "not." : ""}${matcher}`
+  if (negated) return { subject, strict: false, label }
+  if (matcher === "toThrow" || matcher === "toThrowError") {
+    return { subject, strict: argCount > 0, label: `${label} ${argCount > 0 ? "with" : "without"} an error matcher` }
+  }
+  if (matcher === "toHaveProperty") return { subject, strict: argCount > 1, label }
+  if (STRICT_EXPECT_MATCHERS.has(matcher)) return { subject, strict: true, label }
+  if (LOOSE_EXPECT_MATCHERS.has(matcher)) return { subject, strict: false, label }
+  return null
+}
+
+function parseUnittestAssertion(match, code, masked) {
+  const call = splitCallArgs(code, masked, match[0].length - 1)
+  if (!call || call.args.length === 0) return null
+  const method = match[1]
+  const label = `self.${method}`
+  if (method === "assertTrue") return gradeTruthiness(call.args[0], label, true)
+  return gradeByName(call.args[0], STRICT_UNITTEST_ASSERTS, LOOSE_UNITTEST_ASSERTS, method, label)
+}
+
+function parseRaisesAssertion(code, masked) {
+  const call = splitCallArgs(code, masked, masked.indexOf("("))
+  if (!call || call.args.length === 0) return null
+  const strict = call.args.some((arg) => /^match\s*=/.test(arg.masked))
+  return { subject: normalizeSubject(call.args[0].code), strict, label: `pytest.raises ${strict ? "with" : "without"} match=` }
+}
+
+// `assert expression, message`: grade the expression before the message.
+function parsePythonAssert(code, masked, afterKeyword) {
+  let depth = 0
+  let end = masked.length
+  for (let i = afterKeyword; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") depth++
+    else if (ch === ")" || ch === "]" || ch === "}") depth--
+    else if (ch === "," && depth === 0) {
+      end = i
+      break
+    }
+  }
+  const expression = trimmedSlice(code, masked, afterKeyword, end)
+  return expression.masked ? gradeTruthiness(expression, "assert", true) : null
+}
+
+// Parse one assertion statement (its text starts at the assertion) into the
+// subject it checks and whether the check is strict. Null when ungraded.
+function parseAssertion(code, masked, file) {
+  let match = /^self\.(assert[A-Z]\w*)\s*\(/.exec(masked)
+  if (match) return parseUnittestAssertion(match, code, masked)
+  if (/^pytest\.raises\s*\(/.test(masked)) return parseRaisesAssertion(code, masked)
+  if (/^expect\s*\(/.test(masked)) return parseExpectAssertion(code, masked)
+  if (PYTHON_FILE.test(file)) {
+    match = /^assert\b/.exec(masked)
+    return match ? parsePythonAssert(code, masked, match[0].length) : null
+  }
+  match = /^assert(?:\.strict)?(?:\.(\w+))?\s*\(/.exec(masked)
+  return match ? parseNodeAssertion(match, code, masked) : null
+}
+
+// `expect(x)` with its matcher on the next line: `expect(x)\n  .toBe(1)`.
+function awaitsExpectMatcher(masked, nextMasked) {
+  return /^expect\s*\(/.test(masked) && !/\)\s*\.\s*\w+\s*\(/.test(masked) && /^\s*\./.test(nextMasked)
+}
+
+function findAssertionStart(masked, file) {
+  if (PYTHON_FILE.test(file)) {
+    const statement = /^(\s*)assert\b(?!\s*\.)/.exec(masked)
+    if (statement) return statement[1].length
+  }
+  const call = ASSERTION_START.exec(masked)
+  return call ? call.index : -1
+}
+
+// Assertion statements on one side of a hunk (context plus removed, or
+// context plus added). `rows` are the masked rows of those entries. A
+// statement joins following lines of the side until its brackets balance,
+// and an expect() whose matcher sits on the next line.
+function extractAssertionStatements(side, rows, file) {
+  const statements = []
+  for (let index = 0; index < rows.length; index++) {
+    if (!rows[index]) continue
+    const start = findAssertionStart(rows[index].masked, file)
+    if (start < 0) continue
+    let code = rows[index].code.slice(start)
+    let masked = rows[index].masked.slice(start)
+    let depth = bracketDelta(masked)
+    let end = index
+    const last = Math.min(rows.length - 1, index + MAX_STATEMENT_LINES - 1)
+    const canExtend = () => end < last && rows[end + 1]
+    const extend = () => {
+      end++
+      code += `\n${rows[end].code}`
+      masked += `\n${rows[end].masked}`
+      depth += bracketDelta(rows[end].masked)
+    }
+    while (depth > 0 && canExtend()) extend()
+    while (depth <= 0 && canExtend() && awaitsExpectMatcher(masked, rows[end + 1].masked)) {
+      extend()
+      while (depth > 0 && canExtend()) extend()
+    }
+    const parsed = parseAssertion(code, masked, file)
+    if (parsed) statements.push({ ...parsed, start: side[index], entries: side.slice(index, end + 1) })
+  }
+  return statements
+}
+
+function statementAllows(entry, statement, ruleId) {
+  return (
+    statement.entries.some((e) => lineHasAllow(e.text, ruleId)) ||
+    Boolean(prevLineAllows(entry.lines, statement.start.newLine, ruleId))
+  )
+}
+
+// A strict check on a subject is removed in a hunk, and the only checks on
+// that subject the hunk adds (or rewrites in place) are loose.
+function scanLoosenedAssertion(entry, view) {
+  const out = []
+  for (const hunk of entry.hunks) {
+    if (hunk.removed.length === 0) continue
+    const oldSide = hunk.entries.filter((e) => e.kind !== "added")
+    const oldStatements = extractAssertionStatements(oldSide, oldSide.map((e) => view.old.row(e.oldLine)), entry.file)
+    const changedOld = oldStatements.filter((s) => s.entries.some((e) => e.kind === "removed"))
+    if (!changedOld.some((s) => s.strict)) continue
+    const newSide = hunk.entries.filter((e) => e.kind !== "removed")
+    const newStatements = extractAssertionStatements(newSide, newSide.map((e) => view.new.row(e.newLine)), entry.file)
+    // A multi-line statement can change without an added line (its matcher
+    // line was only removed); pair it by the context line it starts on.
+    const rewrittenStarts = new Set(changedOld.map((s) => s.start).filter((start) => start.kind === "context"))
+    const changedNew = newStatements.filter((s) => s.entries.some((e) => e.kind === "added") || rewrittenStarts.has(s.start))
+    const reported = new Set()
+    for (const strong of changedOld) {
+      if (!strong.strict || reported.has(strong.subject)) continue
+      const candidates = changedNew.filter((s) => s.subject === strong.subject)
+      if (candidates.length === 0 || candidates.some((s) => s.strict)) continue
+      reported.add(strong.subject)
+      const [weak] = candidates
+      if (statementAllows(entry, weak, "loosened-assertion")) continue
+      const subject = strong.subject.length > 80 ? `${strong.subject.slice(0, 77)}...` : strong.subject
+      out.push({
+        rule: "loosened-assertion",
+        severity: "warn",
+        file: entry.file,
+        line: weak.start.newLine,
+        preview: weak.start.text.trim().slice(0, 200),
+        detail: `\`${subject}\`: ${strong.label} replaced by ${weak.label}.`,
+      })
+    }
+  }
+  return out
+}
+
+// A row's code with numbers replaced by NUL (comments already dropped), so
+// two lines that differ only in numbers, or in a trailing comment, share a key.
+function numberTemplate(row) {
+  const line = trimmedSlice(row.code, row.masked, 0, row.code.length)
+  const numbers = []
+  const key = line.code.replace(NUMBER_LITERAL, (raw, offset) => {
+    numbers.push({ raw, offset, value: Number(raw.replaceAll("_", "")), inCode: /\d/.test(line.masked[offset]) })
+    return "\u0000"
+  })
+  return { key, numbers, code: line.code, masked: line.masked }
+}
+
+function comparisonBound(prefix, suffix) {
+  if (/(?<!>)>=\s*$/.test(prefix) || /(?<![=\->])>\s*$/.test(prefix) || LOWER_BOUND_CALL.test(prefix)) return "lower"
+  if (/(?<!<)<=?\s*$/.test(prefix) || UPPER_BOUND_CALL.test(prefix)) return "upper"
+  if (/^\s*<(?!<)/.test(suffix)) return "lower"
+  if (/^\s*>(?!>)/.test(suffix)) return "upper"
+  return null
+}
+
+function runCountSettings(keys) {
+  return keys.map((key) => ({
+    name: key,
+    loosens: "lowered",
+    scope: "any",
+    before: new RegExp(`(?:^|[^\\w$])${escapeRegExp(key)}["']?\\s*(?:[:=]|\\|\\||\\?\\?)\\s*["']?$`),
+  }))
+}
+
+// The THRESHOLD_SETTINGS scopes that apply to every line of a file.
+function thresholdScopes(file) {
+  const scopes = new Set(["any"])
+  const testConfig = isTestConfigFile(file)
+  if (testConfig || COMMAND_FILE.test(file)) scopes.add("config")
+  if (testConfig) scopes.add("testConfig").add("runner")
+  return scopes
+}
+
+function isRunnerRetryLine(row, optionProperties = []) {
+  return RUNNER_RETRY_CALL.test(row.masked) || optionProperties.some(({ key }) => key === "retry" || key === "retries")
+}
+
+// The first differing number that loosens a setting, or (when checkBounds)
+// a comparison bound. Null when no number loosens anything.
+function thresholdChange(before, after, settings, scopes, checkBounds) {
+  for (let index = 0; index < after.numbers.length; index++) {
+    const from = before.numbers[index]
+    const to = after.numbers[index]
+    if (from.value === to.value) continue
+    const lowered = to.value < from.value
+    const prefix = after.code.slice(Math.max(0, to.offset - THRESHOLD_WINDOW), to.offset)
+    const setting = settings.find((candidate) => scopes.has(candidate.scope) && candidate.before.test(prefix))
+    let name = null
+    if (setting) {
+      if ((setting.loosens === "lowered") === lowered) name = setting.name
+    } else if (checkBounds && to.inCode) {
+      const suffixStart = to.offset + to.raw.length
+      const bound = comparisonBound(prefix, after.code.slice(suffixStart, suffixStart + THRESHOLD_WINDOW))
+      if ((bound === "lower" && lowered) || (bound === "upper" && !lowered)) name = `${bound} bound`
+    }
+    if (name) return { name, direction: lowered ? "lowered" : "raised", from: from.raw, to: to.raw }
+  }
+  return null
+}
+
+function scanLoweredThreshold(entry, view, testOptions, options) {
+  const fileScopes = thresholdScopes(entry.file)
+  const testFile = isTestFilePath(entry.file)
+  const settings = [...options.runCountSettings, ...THRESHOLD_SETTINGS]
+  const out = []
+  for (const hunk of entry.hunks) {
+    if (hunk.removed.length === 0 || hunk.added.length === 0) continue
+    // Removed lines with numbers, by template; each pairs with one added line.
+    const removedByKey = new Map()
+    for (const removed of hunk.removed) {
+      const row = view.old.row(removed.line)
+      if (!row) continue
+      const template = numberTemplate(row)
+      if (template.numbers.length === 0) continue
+      if (!removedByKey.has(template.key)) removedByKey.set(template.key, [])
+      removedByKey.get(template.key).push(template)
+    }
+    for (const added of hunk.added) {
+      const row = view.new.row(added.line)
+      if (!row) continue
+      const after = numberTemplate(row)
+      const before = after.numbers.length > 0 ? removedByKey.get(after.key)?.shift() : undefined
+      if (!before) continue
+      // In a test file only runner retry settings count as retries, and bare
+      // comparisons (>= 10, <= 100) only on assertion lines.
+      const runnerLine = testFile && isRunnerRetryLine(row, testOptions.get(added.line))
+      const scopes = runnerLine ? new Set([...fileScopes, "runner"]) : fileScopes
+      const checkBounds = testFile && isAssertionCode(row.masked, entry.file)
+      const change = thresholdChange(before, after, settings, scopes, checkBounds)
+      if (!change || lineIsAllowed(added.text, added.line, entry.lines, "lowered-threshold")) continue
+      out.push({
+        rule: "lowered-threshold",
+        severity: "warn",
+        file: entry.file,
+        line: added.line,
+        preview: added.text.trim().slice(0, 200),
+        detail: `${change.name} ${change.direction} from ${change.from} to ${change.to}.`,
+      })
+    }
+  }
+  return out
+}
+
+// Defaults plus configured names, deduplicated; invalid names are dropped.
+function resolveKeyList(defaults, configured) {
+  const extra = Array.isArray(configured) ? configured : []
+  const keys = [...defaults, ...extra]
+    .map((key) => String(key ?? "").trim())
+    .filter((key) => CONFIG_KEY_NAME.test(key))
+  return [...new Set(keys)]
+}
+
+function ignoreListKeysFor(file, keys) {
+  const scoped = JS_TEST_CONFIG_BASENAME.test(path.posix.basename(file))
+  return keys.filter((key) => key !== "exclude" || scoped)
+}
+
+function ignoreListMatchers(keys) {
+  const names = [...keys].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|")
+  const keySet = new Set(keys)
+  return {
+    // KEY = [ / "KEY": [ / KEY: Type = new Map([ / KEY = Object.freeze({
+    opener: new RegExp(`(?:^|[^\\w$])["'\`]?(${names})["'\`]?\\s*(?::[^=\\n]*?)?[:=]\\s*(?:(?:new\\s+)?[\\w.$]+\\s*\\(\\s*)*[\\[{(]`),
+    // KEY.push( / KEY.append( / KEY += [
+    append: new RegExp(`(?:^|[^\\w$.])(${names})\\s*(?:\\.\\s*(?:append|extend|push|unshift|add|set|insert)\\s*\\(|\\+=)`),
+    keepKey: (content) => keySet.has(content),
+  }
+}
+
+// Ignore-list literals in a contiguous run of new-file lines. A block keeps
+// its opener, the bracket depth of its entries and each member line with the
+// depth the line starts at. An unterminated block runs to the end of the run.
+function findIgnoreListBlocks(run, file, matchers) {
+  const rows = maskLines(run.map((row) => row.text), file, matchers.keepKey)
+  const blocks = []
+  let open = null
+  for (const [index, { line, text }] of run.entries()) {
+    const { code, masked } = rows[index]
+    if (open) {
+      const startDepth = open.depth
+      open.depth += bracketDelta(masked)
+      open.members.push({ line, text, code, masked, startDepth })
+      if (open.depth <= 0) {
+        blocks.push(open)
+        open = null
+      }
+      continue
+    }
+    const match = matchers.opener.exec(masked)
+    if (!match) continue
+    const keyIndex = match.index + match[0].indexOf(match[1])
+    const depth = bracketDelta(masked.slice(keyIndex))
+    const block = { key: match[1], keyIndex, opener: { index, line, text, code }, entryDepth: depth, depth, members: [] }
+    if (depth > 0) open = block
+    else blocks.push(block)
+  }
+  if (open) blocks.push(open)
+  return { blocks, rows }
+}
+
+const EXCLUDE_PARENT_ON_LINE = new RegExp(`(?:^|[^\\w$])["']?(?:${[...EXCLUDE_PARENT_KEYS].join("|")})["']?\\s*:\\s*\\{[^{}]*$`)
+
+// `exclude` in shared config counts only under a test or coverage key: on
+// the opener line before the key, or on a less indented line above it.
+function hasTestParentKey(rows, block) {
+  if (EXCLUDE_PARENT_ON_LINE.test(block.opener.code.slice(0, block.keyIndex))) return true
+  let indent = leadingSpaces(block.opener.code)
+  for (let index = block.opener.index - 1; index >= 0 && indent > 0; index--) {
+    const { code } = rows[index]
+    if (!code.trim()) continue
+    const lineIndent = leadingSpaces(code)
+    if (lineIndent >= indent) continue
+    indent = lineIndent
+    const key = /^\s*["']?([\w$-]+)["']?\s*:\s*[{[]/.exec(code)
+    if (key && EXCLUDE_PARENT_KEYS.has(key[1])) return true
+  }
+  return false
+}
+
+function leadingSpaces(text) {
+  return text.length - text.trimStart().length
+}
+
+function openerKeyOn(text, file, matchers) {
+  const match = matchers.opener.exec(maskLine(text, createMaskState(file), matchers.keepKey).masked)
+  return match ? match[1] : null
+}
+
+// A list item compared without whitespace, with quotes unified and trailing
+// commas before a closer dropped, so reformatting and requoting match.
+function normalizeItem(code) {
+  return code.replace(/\s+/g, "").replace(/'/g, "\"").replace(/,(?=[\]})]|$)/g, "")
+}
+
+// Top-level items on one line of a list: `"a", "b",` gives two. A line that
+// opens a list gives the items after its bracket.
+function lineItems(text, file, matchers) {
+  const { code, masked } = maskLine(text, createMaskState(file), matchers.keepKey)
+  const opener = matchers.opener.exec(masked)
+  const start = opener ? opener.index + opener[0].length : 0
+  const items = []
+  let depth = 0
+  let from = start
+  const push = (end) => {
+    const item = normalizeItem(code.slice(from, end))
+    if (item) items.push(item)
+  }
+  for (let i = start; i < masked.length; i++) {
+    const ch = masked[i]
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) {
+        push(i)
+        return items
+      }
+      depth--
+    } else if (ch === "," && depth === 0) {
+      push(i)
+      from = i + 1
+    }
+  }
+  push(masked.length)
+  return items
+}
+
+// A multiset of items, for takeFresh.
+function itemPool(items) {
+  const pool = new Map()
+  for (const item of items) pool.set(item, (pool.get(item) ?? 0) + 1)
+  return pool
+}
+
+// Items not found in the pool; the ones found are used up.
+function takeFresh(items, pool) {
+  return items.filter((item) => {
+    const count = pool.get(item) ?? 0
+    if (count === 0) return true
+    pool.set(item, count - 1)
+    return false
+  })
+}
+
+// Claim a removed line of the hunk with the same statement, so an append
+// that only moved or was re-indented is not new.
+function claimRemovedTwin(hunk, text, file, claimed) {
+  const normalize = (value) => normalizeItem(maskLine(value, createMaskState(file)).code)
+  if (!claimed.has(hunk)) claimed.set(hunk, itemPool(hunk.removed.map((removed) => normalize(removed.text))))
+  return takeFresh([normalize(text)], claimed.get(hunk)).length === 0
+}
+
+function isListEntry(masked) {
+  const trimmed = masked.trim()
+  return trimmed !== "" && !/^[\]}),;]+$/.test(trimmed)
+}
+
+function scanIgnoreListEntries(entry, keys, fileContentsByPath) {
+  const loaded = fileContentsByPath?.[entry.file]
+  // A loaded file that never names a key holds no list to add to.
+  if (typeof loaded === "string" && !keys.some((key) => loaded.includes(key))) return []
+  const matchers = ignoreListMatchers(keys)
+  const hunkByAddedLine = new Map()
+  for (const hunk of entry.hunks) {
+    for (const { line } of hunk.added) hunkByAddedLine.set(line, hunk)
+  }
+  // Every item a removed line held. An added entry that matches one was
+  // reformatted, requoted or moved rather than added.
+  const removedItems = itemPool(entry.removed.flatMap((removed) => lineItems(removed.text, entry.file, matchers)))
+  // Whole-file contents find lists that open above the hunk; without them
+  // each hunk's new side is scanned on its own.
+  const runs = typeof loaded === "string"
+    ? [loaded.split("\n").map((text, index) => ({ line: index + 1, text }))]
+    : entry.hunks.map((hunk) => hunk.entries.filter((e) => e.kind !== "removed").map((e) => ({ line: e.newLine, text: e.text })))
+  const sharedConfig = SHARED_CONFIG_BASENAME.test(path.posix.basename(entry.file))
+  const claimed = new Map()
+  const reported = new Set()
+  const out = []
+  const report = (line, text, detail) => {
+    if (reported.has(line) || lineIsAllowed(text, line, entry.lines, "test-ignore-added")) return
+    reported.add(line)
+    out.push({ rule: "test-ignore-added", severity: "warn", file: entry.file, line, preview: text.trim().slice(0, 200), detail })
+  }
+  for (const run of runs) {
+    const { blocks, rows } = findIgnoreListBlocks(run, entry.file, matchers)
+    for (const block of blocks) {
+      if (block.key === "exclude" && sharedConfig && !hasTestParentKey(rows, block)) continue
+      const openerHunk = hunkByAddedLine.get(block.opener.line)
+      if (openerHunk) {
+        // A rewritten opener line is an existing list only when a removed
+        // line of the same hunk opened the same key; otherwise the list is new.
+        if (!openerHunk.removed.some((removed) => openerKeyOn(removed.text, entry.file, matchers) === block.key)) continue
+        const fresh = takeFresh(lineItems(block.opener.text, entry.file, matchers), removedItems)
+        if (fresh.length > 0) {
+          report(block.opener.line, block.opener.text, `Adds ${plural(fresh.length, "entry", "entries")} to the existing \`${block.key}\` list.`)
+        }
+      }
+      for (const member of block.members) {
+        if (member.startDepth !== block.entryDepth || !isListEntry(member.masked)) continue
+        if (!hunkByAddedLine.has(member.line)) continue
+        if (takeFresh(lineItems(member.text, entry.file, matchers), removedItems).length === 0) continue
+        report(member.line, member.text, `New entry in the existing \`${block.key}\` list (opened at line ${block.opener.line}).`)
+      }
+    }
+  }
+  // Appends to a list defined elsewhere: KEY.push(...), KEY.append(...), KEY += [...]
+  for (const hunk of entry.hunks) {
+    const side = hunk.entries.filter((e) => e.kind !== "removed")
+    const rows = maskLines(side.map((e) => e.text), entry.file, matchers.keepKey)
+    for (const [index, e] of side.entries()) {
+      if (e.kind !== "added") continue
+      const match = matchers.append.exec(rows[index].masked)
+      if (!match || claimRemovedTwin(hunk, e.text, entry.file, claimed)) continue
+      report(e.newLine, e.text, `Adds an entry to the existing \`${match[1]}\` list.`)
+    }
+  }
+  return out
+}
+
+// Filter-flag occurrences on one line, as "flag value". Pytest-only flags
+// count when `inPytest` says the line is a pytest command or option.
+function flagOccurrences(text, file, inPytest = () => true) {
+  const { code } = maskLine(text, createMaskState(file))
+  const out = []
+  for (const match of code.matchAll(IGNORE_FLAG)) {
+    out.push(VALUELESS_FLAGS.has(match[1]) ? match[1] : `${match[1]} ${match[2]}`.trim())
+  }
+  for (const match of code.matchAll(PYTEST_IGNORE_FLAG)) {
+    if (inPytest(code.slice(0, match.index))) out.push(`${match[1]} ${match[2]}`.trim())
+  }
+  return out
+}
+
+// Whether an added line sits in a pytest command or addopts value: `pytest`
+// or `addopts` earlier on the line, a pytest.ini file, a `pytest … \`
+// continuation line above, or an addopts key above it in the hunk with no
+// other key or section in between. The walk up is bounded.
+// `newSide` is the hunk's context and added entries; `index` is the line's.
+function pytestContext(entry, newSide, index) {
+  if (path.posix.basename(entry.file) === "pytest.ini") return () => true
+  return (before) => {
+    if (PYTEST_COMMAND.test(before)) return true
+    for (let i = index - 1; i >= Math.max(0, index - MAX_OPTION_LINES); i--) {
+      const { code } = maskLine(newSide[i].text, createMaskState(entry.file))
+      if (/\baddopts\b/.test(code) || (PYTEST_COMMAND.test(code) && /\\\s*$/.test(code))) return true
+      if (!code.trim() || CONFIG_KEY_OR_SECTION.test(code)) return false
+    }
+    return false
+  }
+}
+
+// Filter-flag occurrences that no removed line of the same hunk already had.
+function scanIgnoreFlags(entry) {
+  const out = []
+  for (const hunk of entry.hunks) {
+    if (hunk.added.length === 0) continue
+    const existing = hunk.removed.flatMap((removed) => flagOccurrences(removed.text, entry.file))
+    const newSide = hunk.entries.filter((e) => e.kind !== "removed")
+    for (const [index, e] of newSide.entries()) {
+      if (e.kind !== "added") continue
+      const added = { line: e.newLine, text: e.text }
+      const fresh = []
+      for (const occurrence of flagOccurrences(added.text, entry.file, pytestContext(entry, newSide, index))) {
+        const index = existing.indexOf(occurrence)
+        if (index >= 0) existing.splice(index, 1)
+        else fresh.push(occurrence)
+      }
+      if (fresh.length === 0 || lineIsAllowed(added.text, added.line, entry.lines, "test-ignore-added")) continue
+      out.push({
+        rule: "test-ignore-added",
+        severity: "warn",
+        file: entry.file,
+        line: added.line,
+        preview: added.text.trim().slice(0, 200),
+        detail: `Adds \`${fresh.join("`, `")}\` to a test command.`,
+      })
+    }
+  }
+  return out
+}
+
+function scanTestIgnoreAdded(entry, options) {
+  if (entry.added.length === 0) return []
+  const out = []
+  const keys = ignoreListKeysFor(entry.file, options.ignoreListKeys)
+  if (keys.length > 0) out.push(...scanIgnoreListEntries(entry, keys, options.fileContentsByPath))
+  if (COMMAND_FILE.test(entry.file) || isTestConfigFile(entry.file)) out.push(...scanIgnoreFlags(entry))
+  return out
+}
+
+function scanWeakenedTests(entry, options) {
+  const out = scanDeletedTestFile(entry)
+  if (entry.status === "deleted" || DOC_FILE.test(entry.file)) return out
+  const view = createSideView(entry, options)
+  const testFile = isTestFilePath(entry.file)
+  const testOptions = testFile ? sideOptionProperties(view.new) : new Map()
+  if (testFile) {
+    out.push(
+      ...scanRemovedAssertion(entry, view),
+      ...scanTestMarkers(entry, view, testOptions),
+      ...scanLoosenedAssertion(entry, view),
+    )
+  }
+  out.push(...scanLoweredThreshold(entry, view, testOptions, options), ...scanTestIgnoreAdded(entry, options))
+  return out
+}
+
 // ---- public scan entry ----
 
+// Options:
+//   fileContentsByPath      new-side contents by path (dependency manifests,
+//                           ignore-list files, test files)
+//   baseFileContentsByPath  old-side contents by old path (test files)
+//   ignoreListKeys          test-ignore-added list names beyond the defaults
+//   runCountKeys            lowered-threshold run-count names beyond the defaults
 export function scanDiff(diff, options = {}) {
   const files = parseUnifiedDiff(diff)
+  const weakenedTestOptions = {
+    fileContentsByPath: options.fileContentsByPath,
+    baseFileContentsByPath: options.baseFileContentsByPath,
+    ignoreListKeys: resolveKeyList(DEFAULT_IGNORE_LIST_KEYS, options.ignoreListKeys),
+    runCountSettings: runCountSettings(resolveKeyList(DEFAULT_RUN_COUNT_KEYS, options.runCountKeys)),
+  }
   const violations = []
-  for (const { file, added, lines } of files) {
-    if (added.length === 0) continue
-    violations.push(...scanHardcodedSecret(file, added, lines))
-    violations.push(...scanCorsWildcard(file, added, lines))
-    violations.push(...scanEnvVarRequired(file, added, lines))
-    violations.push(...scanUnprotectedRoute(file, added, lines))
-    violations.push(...scanNewDependency(file, added, lines, options))
+  for (const entry of files) {
+    const { file, added, lines } = entry
+    if (added.length > 0) {
+      violations.push(...scanHardcodedSecret(file, added, lines))
+      violations.push(...scanCorsWildcard(file, added, lines))
+      violations.push(...scanEnvVarRequired(file, added, lines))
+      violations.push(...scanUnprotectedRoute(file, added, lines))
+      violations.push(...scanNewDependency(file, added, lines, options))
+    }
+    // Deletions and removal-only hunks still matter here.
+    violations.push(...scanWeakenedTests(entry, weakenedTestOptions))
   }
   // Stable sort: by file, then line, then rule.
   violations.sort((a, b) => {
@@ -658,15 +2297,22 @@ async function hasHeadCommit(repoRoot) {
 }
 
 async function execDiff(repoRoot, args) {
-  const { stdout } = await execFileAsync("git", args, { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
+  const { stdout } = await execFileAsync("git", [...DIFF_CONFIG_ARGS, ...args], { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
   return stdout
 }
+
+// Pin the diff format against local git config: rename detection on
+// (diff.renames), a/ and b/ prefixes (diff.noprefix, diff.mnemonicPrefix),
+// no color, no external diff driver, and blank context lines written with
+// their leading space (diff.suppressBlankEmpty).
+const DIFF_CONFIG_ARGS = ["-c", "diff.suppressBlankEmpty=false"]
+const DIFF_FORMAT_ARGS = ["--unified=3", "--find-renames", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"]
 
 async function getLaneDiff(repoRoot, { base, head, lane }) {
   // If both base and head are provided, diff between them.
   // Otherwise, default to HEAD vs index/worktree so staged-only edits are
   // included in local pre-handoff scans.
-  const args = ["diff", "--unified=3"]
+  const args = ["diff", ...DIFF_FORMAT_ARGS]
   const pathspecs = await getLanePathspecs(repoRoot, lane)
   if (base) {
     args.push(`${base}${head ? `..${head}` : ""}`)
@@ -676,8 +2322,8 @@ async function getLaneDiff(repoRoot, { base, head, lane }) {
     args.push("HEAD")
   } else {
     const pathArgs = pathspecs.length > 0 ? ["--", ...pathspecs] : []
-    const cached = await execDiff(repoRoot, ["diff", "--cached", "--unified=3", ...pathArgs])
-    const unstaged = await execDiff(repoRoot, ["diff", "--unified=3", ...pathArgs])
+    const cached = await execDiff(repoRoot, ["diff", "--cached", ...DIFF_FORMAT_ARGS, ...pathArgs])
+    const unstaged = await execDiff(repoRoot, ["diff", ...DIFF_FORMAT_ARGS, ...pathArgs])
     return [cached, unstaged].filter(Boolean).join("\n")
   }
   if (pathspecs.length > 0) {
@@ -686,42 +2332,135 @@ async function getLaneDiff(repoRoot, { base, head, lane }) {
   return execDiff(repoRoot, args)
 }
 
-async function readFileForReview(repoRoot, file, head) {
-  if (head) {
-    try {
-      const { stdout } = await execFileAsync("git", ["show", `${head}:${file}`], {
-        cwd: repoRoot,
-        maxBuffer: DIFF_MAX_BUFFER,
-      })
-      return stdout
-    } catch {
-      return null
-    }
-  }
-
-  try {
-    return await fs.readFile(path.join(repoRoot, file), "utf8")
-  } catch {
-    return null
-  }
-}
-
-async function readDependencyFileContents(repoRoot, diff, head) {
-  const files = parseUnifiedDiff(diff)
+// Contents of `paths` at `ref`, read with one `git cat-file --batch`, or
+// from the worktree when ref is null. Files that are missing are left out.
+async function readContents(repoRoot, ref, paths) {
+  const files = [...new Set(paths)].filter((file) => file && !file.includes("\n"))
+  if (files.length === 0) return {}
+  if (ref) return readBlobsAtRef(repoRoot, ref, files)
   const contents = {}
-  for (const { file } of files) {
-    if (!DEPENDENCY_FILES.some((entry) => entry.name === path.basename(file))) continue
-    const content = await readFileForReview(repoRoot, file, head)
-    if (typeof content === "string") {
-      contents[file] = content
+  for (const file of files) {
+    try {
+      contents[file] = await fs.readFile(path.join(repoRoot, file), "utf8")
+    } catch {
+      // Deleted or unreadable: the rules fall back to hunk-by-hunk masking.
     }
   }
   return contents
 }
 
-function getDependencyContentRef({ base, head }) {
-  if (base && head) return head
-  return null
+function readBlobsAtRef(repoRoot, ref, files) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["cat-file", "--batch"], { cwd: repoRoot, stdio: ["pipe", "pipe", "ignore"] })
+    const chunks = []
+    child.stdout.on("data", (chunk) => chunks.push(chunk))
+    child.on("error", () => resolve({}))
+    child.on("close", () => resolve(parseCatFileBatch(Buffer.concat(chunks), files)))
+    child.stdin.on("error", () => {})
+    child.stdin.end(files.map((file) => `${ref}:${file}\n`).join(""))
+  })
+}
+
+// `git cat-file --batch` answers each request with "<oid> <type> <size>\n"
+// and the content plus "\n", or with "<name> missing\n".
+function parseCatFileBatch(buffer, files) {
+  const contents = {}
+  let offset = 0
+  for (const file of files) {
+    const newline = buffer.indexOf(10, offset)
+    if (newline < 0) break
+    const header = /^\S+ (\S+) (\d+)$/.exec(buffer.toString("utf8", offset, newline))
+    offset = newline + 1
+    if (!header) continue
+    const size = Number(header[2])
+    if (header[1] === "blob") contents[file] = buffer.toString("utf8", offset, offset + size)
+    offset += size + 1
+  }
+  return contents
+}
+
+const GREP_PATH_CHUNK = 200
+
+// Paths among `files` whose content at `ref` contains any needle. One
+// `git grep` per chunk instead of a read per file.
+async function filesMentioningAtRef(repoRoot, ref, files, needles) {
+  const found = []
+  for (let index = 0; index < files.length; index += GREP_PATH_CHUNK) {
+    const chunk = files.slice(index, index + GREP_PATH_CHUNK)
+    const args = ["--literal-pathspecs", "grep", "-l", "-z", "-F", ...needles.flatMap((needle) => ["-e", needle]), ref, "--", ...chunk]
+    try {
+      const { stdout } = await execFileAsync("git", args, { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
+      for (const name of stdout.split("\0")) {
+        if (name.startsWith(`${ref}:`)) found.push(name.slice(ref.length + 1))
+      }
+    } catch (error) {
+      // Exit 1 means no match; any other failure falls back to reading all.
+      if (error?.code !== 1) found.push(...chunk)
+    }
+  }
+  return found
+}
+
+// Contents of the files that mention an ignore-list key that applies to
+// them (`exclude` only in JS test config), grepped once per key set.
+async function readIgnoreListContents(repoRoot, ref, files, keys) {
+  const groups = new Map()
+  for (const file of files) {
+    const needles = ignoreListKeysFor(file, keys)
+    if (needles.length === 0) continue
+    const id = needles.join("\0")
+    if (!groups.has(id)) groups.set(id, { needles, files: [] })
+    groups.get(id).files.push(file)
+  }
+  const contents = {}
+  for (const { needles, files: group } of groups.values()) {
+    const mentioning = ref ? await filesMentioningAtRef(repoRoot, ref, group, needles) : group
+    for (const [file, content] of Object.entries(await readContents(repoRoot, ref, mentioning))) {
+      if (needles.some((needle) => content.includes(needle))) contents[file] = content
+    }
+  }
+  return contents
+}
+
+// File contents the rules need beyond the hunks. New side: dependency
+// manifests, ignore-list files, and test files (masked whole, since a string
+// or comment can open above a hunk). Old side: test files with removals.
+async function readReviewFileContents(repoRoot, diff, { newRef, oldRef }, ignoreListKeys) {
+  const newPaths = new Set()
+  const oldPaths = new Set()
+  const listCandidates = []
+  for (const entry of parseUnifiedDiff(diff)) {
+    if (DEPENDENCY_FILES.some((dependency) => dependency.name === path.basename(entry.file))) newPaths.add(entry.file)
+    if (entry.status === "deleted") continue
+    if (isTestFilePath(entry.file)) {
+      if (entry.hunks.some((hunk) => hunk.newStart > 1)) newPaths.add(entry.file)
+      if (entry.hunks.some((hunk) => hunk.removed.length > 0 && hunk.oldStart > 1)) oldPaths.add(entry.oldFile)
+    }
+    if (entry.added.length > 0 && !DOC_FILE.test(entry.file) && !newPaths.has(entry.file)) listCandidates.push(entry.file)
+  }
+  const newContents = await readContents(repoRoot, newRef, [...newPaths])
+  Object.assign(newContents, await readIgnoreListContents(repoRoot, newRef, listCandidates, ignoreListKeys))
+  const oldContents = oldRef ? await readContents(repoRoot, oldRef, [...oldPaths]) : {}
+  return { newContents, oldContents }
+}
+
+// Where the diff's two sides live. The new side is `head` for a base..head
+// range and the worktree otherwise; the old side is what the diff compares
+// against.
+async function getReviewContentRefs(repoRoot, { base, head }) {
+  const newRef = base && head ? head : null
+  const oldRef = base || head || ((await hasHeadCommit(repoRoot)) ? "HEAD" : null)
+  return { newRef, oldRef }
+}
+
+// `[review_code]` in .btrain/project.toml, or {} when there is none.
+async function readReviewCodeConfig(repoRoot) {
+  try {
+    const config = await readProjectConfig(repoRoot)
+    return config?.review_code ?? {}
+  } catch {
+    return {}
+  }
 }
 
 // ---- formatting ----
@@ -736,7 +2475,9 @@ export function formatSummary(result) {
   }
   for (const v of violations) {
     const sev = v.severity === "hard" ? "✖" : "⚠"
-    lines.push(`  ${sev} [${v.rule}] ${v.file}:${v.line}`)
+    // Line 0 marks a file-level finding such as a deleted test file.
+    const location = v.line > 0 ? `${v.file}:${v.line}` : v.file
+    lines.push(`  ${sev} [${v.rule}] ${location}`)
     if (v.detail) lines.push(`      ${v.detail}`)
     if (v.preview) lines.push(`      > ${v.preview}`)
   }
@@ -751,11 +2492,20 @@ export async function reviewCode(repoRoot, options = {}) {
     head: options.head,
     lane: options.lane,
   })
-  const fileContentsByPath = await readDependencyFileContents(
+  const config = await readReviewCodeConfig(repoRoot)
+  const ignoreListKeys = resolveKeyList(DEFAULT_IGNORE_LIST_KEYS, config.ignore_list_keys)
+  const runCountKeys = resolveKeyList(DEFAULT_RUN_COUNT_KEYS, config.run_count_keys)
+  const { newContents, oldContents } = await readReviewFileContents(
     repoRoot,
     diff,
-    getDependencyContentRef(options),
+    await getReviewContentRefs(repoRoot, options),
+    ignoreListKeys,
   )
-  const result = scanDiff(diff, { fileContentsByPath })
+  const result = scanDiff(diff, {
+    fileContentsByPath: newContents,
+    baseFileContentsByPath: oldContents,
+    ignoreListKeys,
+    runCountKeys,
+  })
   return result
 }
