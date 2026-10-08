@@ -25,7 +25,9 @@
 //                                 lines that moved within the file cancel out
 //   skipped-test        (warn)  — new unconditional skip, todo or fixme
 //   focused-test        (hard)  — new focused test (only / fit / fdescribe);
-//                                 warn when the file was masked hunk by hunk
+//                                 warn when the file was masked hunk by hunk.
+//                                 A marker that moved within the file, even
+//                                 to another hunk, is not new
 //   loosened-assertion  (warn)  — in one hunk, a strict check on a subject is
 //                                 replaced by a looser check on that subject
 //   lowered-threshold   (warn)  — otherwise identical lines where a run
@@ -1469,23 +1471,37 @@ function markersOnLine(side, line, optionsByLine, isShadowed, file) {
 }
 
 // skipped-test and focused-test: markers on added lines that no removed line
-// of the same hunk carried, so a moved or re-indented marker is not new. A
-// focused test is hard only when both sides were masked from the top of the
-// file; hunk-by-hunk masking can mistake a string or comment for code.
+// carried, so a moved or re-indented marker is not new. Removed markers
+// cancel added ones first within a hunk, then anywhere in the file, count by
+// count. A focused test is hard only when both sides were masked from the
+// top of the file; hunk-by-hunk masking can mistake a string or comment for
+// code.
 function scanTestMarkers(entry, view, newOptions) {
   let shadowed = null
   const isShadowed = (name) => (shadowed ??= shadowedMarkerNames(view.new)).has(name)
   const oldOptions = sideOptionProperties(view.old)
-  const out = []
-  for (const hunk of entry.hunks) {
-    if (hunk.added.length === 0) continue
+  const oldExact = entry.removed.every(({ line }) => view.old.exact(line))
+  const hunks = entry.hunks.map((hunk) => {
     const existing = hunk.removed.flatMap(({ line }) => markersOnLine(view.old, line, oldOptions, isShadowed, entry.file).map((m) => m.id))
-    const oldExact = hunk.removed.every(({ line }) => view.old.exact(line))
-    for (const { line, text } of hunk.added) {
-      const fresh = {}
+    const lines = hunk.added.map(({ line, text }) => {
+      const fresh = []
       for (const marker of markersOnLine(view.new, line, newOptions, isShadowed, entry.file)) {
         const seen = existing.indexOf(marker.id)
         if (seen >= 0) existing.splice(seen, 1)
+        else fresh.push(marker)
+      }
+      return { line, text, fresh }
+    })
+    return { existing, lines }
+  })
+  const pool = hunks.flatMap(({ existing }) => existing)
+  const out = []
+  for (const { lines } of hunks) {
+    for (const { line, text, fresh: candidates } of lines) {
+      const fresh = {}
+      for (const marker of candidates) {
+        const seen = pool.indexOf(marker.id)
+        if (seen >= 0) pool.splice(seen, 1)
         else fresh[marker.kind] ??= marker
       }
       const preview = text.trim().slice(0, 200)

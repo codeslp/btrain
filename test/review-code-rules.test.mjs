@@ -2300,3 +2300,45 @@ describe("test files under a singular test/ directory", () => {
     assert.deepEqual(findingsFor(result, "deleted-test-file").map((v) => v.file), ["test/cache.test.mjs"])
   })
 })
+
+describe("focus and skip markers moved across hunks", () => {
+  // A 30-line test file whose marker line moves from line 5 to line 25.
+  const file = "test/moved.test.mjs"
+  const build = (marker) => {
+    const body = Array.from({ length: 29 }, (_, i) => `it("t${i + 2}", () => {})`)
+    const old = ['import { it } from "node:test"', ...body]
+    old[4] = marker
+    const moved = [...old.slice(0, 4), ...old.slice(5, 25), marker, ...old.slice(25)]
+    const ctx = (lines, from, to) => lines.slice(from - 1, to).map((line) => ` ${line}`)
+    const diff = [
+      `diff --git a/${file} b/${file}`,
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      "@@ -2,7 +2,6 @@",
+      ...ctx(old, 2, 4),
+      `-${marker}`,
+      ...ctx(old, 6, 8),
+      "@@ -23,6 +22,7 @@",
+      ...ctx(old, 23, 25),
+      `+${marker}`,
+      ...ctx(old, 26, 28),
+    ].join("\n") + "\n"
+    return { diff, old: old.join("\n"), moved: moved.join("\n") }
+  }
+
+  it("does not report a moved .only or .skip as new", () => {
+    for (const marker of [`it.${T.only}("legacy", () => {})`, `it.${T.skip}("legacy", () => {})`]) {
+      const { diff, old, moved } = build(marker)
+      const whole = { fileContentsByPath: { [file]: moved }, baseFileContentsByPath: { [file]: old } }
+      assert.deepEqual(scanDiff(diff, whole).violations, [], marker)
+      assert.deepEqual(scanDiff(diff).violations, [], marker)
+    }
+  })
+
+  it("still reports a second copy of a marker that moved", () => {
+    const marker = `it.${T.only}("legacy", () => {})`
+    const { diff } = build(marker)
+    const doubled = diff.replace(`+${marker}\n`, `+${marker}\n+${marker}\n`).replace("@@ -23,6 +22,7 @@", "@@ -23,6 +22,8 @@")
+    assert.deepEqual(findingsFor(scanDiff(doubled), "focused-test").map((v) => v.line), [26])
+  })
+})
