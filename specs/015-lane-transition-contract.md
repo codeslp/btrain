@@ -680,12 +680,12 @@ Consequences worth restating:
   had gated on the resulting status, so every later `--pr` or `--next` on a
   lane whose work lives in a separate git worktree re-ran the diff check in
   the shared checkout and failed until `--no-diff` was added. A hard cgraph
-  audit finding could reject the update the same way. As with row 2's own data guards, the
-  check runs outside `applyTransition`, so the structural guard in
-  `transitions.mjs` stays `none`. `src/brain_train/needs_review_gate.mjs`
-  holds the rule, and `test/handoff-update-needs-review-metadata.test.mjs`
-  covers it with a repository whose lane diff lives only on a worktree
-  branch.
+  audit finding could reject the update the same way. As with row 2's own
+  data guards, the check runs outside `applyTransition`, so the structural
+  guard in `transitions.mjs` stays `none`.
+  `src/brain_train/needs_review_gate.mjs` holds the rule, and
+  `test/handoff-update-needs-review-metadata.test.mjs` covers it with a
+  repository whose lane diff lives only on a worktree branch.
 
 ---
 
