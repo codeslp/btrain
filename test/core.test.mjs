@@ -5018,6 +5018,62 @@ describe("managed pre-push hook scoped to lane locks", () => {
     }
   })
 
+  it("blocks pushing locked-file commits into another branch even when a remote branch already has them", async () => {
+    // Commits already on origin/feat must still count when they are pushed
+    // into main: the target branch lacks them.
+    await runGit(["checkout", "-b", "feat"], tmpDir)
+    await commitChange("src/auth/guard.ts", "export const featGuard = true", "Auth change on feat")
+    const grant = await runBtrain(
+      [
+        "override", "grant", "--repo", tmpDir, "--action", "push", "--requested-by", "OwnerBot",
+        "--confirmed-by", "HumanOperator", "--reason", "Seed a remote branch that holds lane work.",
+      ],
+      tmpDir,
+    )
+    assert.equal(grant.code, 0, grant.stderr)
+    const seeded = await push(["feat"])
+    assert.equal(seeded.code, 0, seeded.output)
+    try {
+      const result = await push(["feat:main"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["checkout", "main"], tmpDir)
+    }
+  })
+
+  it("blocks a merge commit whose own changes touch a locked file", async () => {
+    await runGit(["checkout", "-b", "scoring-side"], tmpDir)
+    await commitChange("src/scoring/score.ts", "export const sideScore = 4", "Scoring side change")
+    await runGit(["checkout", "main"], tmpDir)
+    const merge = await runGit(["merge", "--no-ff", "--no-commit", "scoring-side"], tmpDir)
+    assert.equal(merge.code, 0, `${merge.stdout}\n${merge.stderr}`)
+    await fs.appendFile(path.join(tmpDir, "src", "auth", "guard.ts"), "export const mergeEdit = true\n", "utf8")
+    await runGit(["add", "src/auth/guard.ts"], tmpDir)
+    const commit = await runGit(["commit", "--no-verify", "-m", "Merge with an auth edit"], tmpDir)
+    assert.equal(commit.code, 0, `${commit.stdout}\n${commit.stderr}`)
+    try {
+      const result = await push(["HEAD:refs/heads/merge-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("matches locked paths with non-ASCII names", async () => {
+    await fs.writeFile(path.join(tmpDir, "src", "auth", "café.ts"), "export const cafe = true\n", "utf8")
+    await runGit(["add", "src/auth/café.ts"], tmpDir)
+    await runGit(["commit", "--no-verify", "-m", "Add café"], tmpDir)
+    try {
+      const result = await push(["HEAD:refs/heads/cafe-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /src\/auth\/café\.ts/)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
   it("blocks a push that renames a file out of a locked directory", async () => {
     await runGit(["mv", "src/auth/guard.ts", "src/guard.ts"], tmpDir)
     await runGit(["commit", "-m", "Move guard"], tmpDir, { BTRAIN_AGENT: "OwnerBot" })
