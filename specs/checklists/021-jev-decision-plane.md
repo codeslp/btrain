@@ -38,10 +38,15 @@ quality checks, not claims that the runtime work is complete.
   and calibration; grouped splits cannot borrow support from another partition.
 - [x] Evaluation runs, traces, and promotion records pin the family policy and code revision;
   G4–G10 require low provider failure and minimum actionable decision coverage before promotion.
+- [x] Each evaluated attempt has an immutable evaluation-run link, and each frozen run lists
+  its exact attempt IDs and attempt-set hash behind aggregate metrics.
+- [x] A shadow run preserves preregistered duration, volume, benefit, harmful-error, and
+  provider-failure criteria alongside observed results, so limits cannot be selected afterward.
 - [x] G6-R repository-rule findings are the only WS6 pre-gate advisory pilot; end-of-turn and
   review-risk stay offline until separate frozen subgates pass.
-- [x] Benchmark-backed assist promotion requires a completed same-policy/model/repository shadow record meeting
-  preregistered duration, case count, live benefit, failure, and harmful-error criteria.
+- [x] Broad advisory outside the bounded G4/G6-R pilot and every benchmark-backed assist promotion
+  require a completed same-policy/model/repository shadow record meeting preregistered duration,
+  case count, live benefit, failure, and harmful-error criteria.
 
 ## Requirement-to-plan coverage
 

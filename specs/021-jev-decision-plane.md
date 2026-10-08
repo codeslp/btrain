@@ -15,7 +15,8 @@ and only then to a separately approved, reversible assist action. A use case can
 The existing PR review-signal interpreter runs in feedback-only `assist` by default when Jev
 credentials are configured, under the explicit 2026-10-01 user activation instruction below.
 Other families retain their own integration and evaluation requirements. G4 and G6-R may run a
-limited advisory label-gathering pilot subject to FR-10.
+limited opt-in advisory label-gathering pilot before their quality benchmark passes, subject to
+the privacy and safety prerequisites in FR-10.
 
 This spec covers the btrain opportunities identified in
 [`research/jev-typesafe-repo-assessment.md`](../research/jev-typesafe-repo-assessment.md).
@@ -81,7 +82,7 @@ The existing deterministic approval, review, head, identity and merge gates rema
 
 ## Scope and priority
 
-| Family | Potential value | Current evidence | Earliest permitted use |
+| Family | Potential value | Current evidence | Eventual use once its FR-10 gates pass |
 | --- | --- | --- | --- |
 | PR review-signal interpretation | Catch actionable feedback missed by regex | Small positive pilot; larger corpus pending | Default feedback-only assist with configured credentials |
 | Handoff evidence lint | Expose vague, contradictory, or unsupported packets | Small positive pilot with one important miss | Advisory to owner and reviewer |
@@ -212,7 +213,7 @@ criteria before benchmark-backed broad advisory or assist. The recorded PR activ
 operator exception to this promotion gate. Benchmark-backed PR promotion requires a two-week shadow; other
 families require at least seven consecutive days and 30 eligible live cases, with higher
 family-specific minima set before observation. A human records the approved threshold and
-allowed assist action, plus the completed shadow-run reference for assist. The operator can
+allowed action, plus the completed shadow-run reference for broad advisory or assist. The operator can
 return that family to off or shadow immediately; on provider failure, btrain follows its
 current deterministic behavior.
 Promotion is per family, policy hash, evaluated code revision, pinned model, and repository, never
