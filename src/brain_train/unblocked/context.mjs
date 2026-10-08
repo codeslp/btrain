@@ -91,6 +91,7 @@ async function resolveUnblockedHelper(repoRoot, options = {}) {
   const candidates = [
     options.helperPath,
     path.join(repoRoot, ".claude", "scripts", "unblocked-context.sh"),
+    path.join(repoRoot, ".btrain", "tools", ".claude", "scripts", "unblocked-context.sh"),
     path.join(PACKAGE_ROOT, ".claude", "scripts", "unblocked-context.sh"),
   ].filter(Boolean)
 

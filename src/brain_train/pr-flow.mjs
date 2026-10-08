@@ -426,7 +426,8 @@ function semanticCandidatesForBot({ bot, headSha, rawComments, baselineState }) 
       sourceId: selected.item.id || null,
       body: String(selected.item.body || ""),
       url: selected.item.html_url || selected.item.url || "",
-      reviewedCommit: reviewCommit(selected.item),
+      // Selection already requires the comment to attest headSha; keep the full SHA.
+      reviewedCommit: headSha,
       at: selected.item.submitted_at || selected.item.created_at || selected.item.updated_at || "",
     }))
 }

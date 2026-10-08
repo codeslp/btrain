@@ -64,6 +64,22 @@ describe("comment capture and Jev evidence composition", () => {
     }
   })
 
+  it("still logs comments when Jev evidence capture fails", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-evidence-bad-"))
+    try {
+      const dir = path.join(root, ".btrain", "jev", "evidence", "source-snapshots")
+      await fs.mkdir(dir, { recursive: true })
+      await fs.writeFile(path.join(dir, `${"f".repeat(64)}.json`), "{not json")
+      const at = "2026-09-01T10:00:00Z"
+      const comment = { surface: "issue", id: 5, author: "bot", body: "Fix it", url: "https://example.test/5", at }
+      const added = await persistCapturedComments(root, { identity: { owner: "o", repo: "r" }, laneId: "a", prNumber: "7", comments: [comment], captureHead: { head: "a".repeat(40), observedAt: at }, capturedAt: at })
+      assert.equal(added.length, 1)
+      assert.deepEqual((await readComments(root, "a", "7")).map((row) => row.id), [5])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("writes provenance and the original comment once across repeated pulls", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-evidence-"))
     try {
@@ -137,6 +153,28 @@ describe("shapeComments", () => {
     assert.equal(out[2].state, "CHANGES_REQUESTED")
     assert.equal(out[1].reviewedCommit, "a".repeat(40))
     assert.equal(out[2].reviewedCommit, "b".repeat(40))
+  })
+
+  it("records an inline comment's original commit, not the head GitHub re-anchored it to", () => {
+    const writtenOn = "a".repeat(40)
+    const laterHead = "b".repeat(40)
+    const out = shapeComments({
+      reviewComments: [
+        {
+          id: 11,
+          user: { login: "bot" },
+          body: "still broken",
+          html_url: "u",
+          created_at: "2026-05-02T00:00:00Z",
+          path: "src/foo.ts",
+          line: 7,
+          pull_request_review_id: 99,
+          original_commit_id: writtenOn,
+          commit_id: laterHead,
+        },
+      ],
+    })
+    assert.equal(out[0].reviewedCommit, writtenOn)
   })
 
   it("sorts by timestamp ascending, then by id", () => {

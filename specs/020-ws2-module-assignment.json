@@ -99,7 +99,6 @@
     "agents": [
       "buildAgentRunnerLines",
       "canonicalizeAgentName",
-      "collectRuntimeAgentHints",
       "detectCurrentAgent",
       "getAgentRunnerMap",
       "getAgentRunnerValue",

@@ -743,6 +743,23 @@ describe("PR review flow classification", () => {
     assert.equal(status.semantic.appliedCount, 0)
   })
 
+  it("records the full head SHA, not the comment's short commit prefix, on semantic decisions", async () => {
+    const input = ambiguousCurrentHeadComment("One issue remains in the current revision.")
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 0.99, unavailable: 0, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.99 },
+        },
+        latencyMs: 10,
+      }),
+    })
+    assert.equal(status.semantic.decisions[0].reviewedCommit, input.pr.headRefOid)
+  })
+
   it("does not apply low-confidence feedback pluralities", async () => {
     const status = await classifyPrReviewStateWithSemantic(
       ambiguousCurrentHeadComment("The result needs interpretation."),

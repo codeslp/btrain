@@ -7,6 +7,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
+import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const exec = promisify(execFile)
 const CLI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/brain_train/cli.mjs")
@@ -33,7 +34,7 @@ function dispatchEnv(cwd, extra = {}) {
 
 async function runBtrain(args, cwd, envOverrides = {}) {
   try {
-    const result = await exec("node", [CLI_PATH, ...args], {
+    const result = await exec("node", [CLI_PATH, ...withTrackedInit(args)], {
       cwd,
       env: dispatchEnv(cwd, envOverrides),
       maxBuffer: 5 * 1024 * 1024,

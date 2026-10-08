@@ -1,10 +1,10 @@
 # 015 — Lane Transition Contract as a Guarded-Action List
 
 **Status**: Draft
-**Version**: 0.1.7
+**Version**: 0.1.8
 **Author**: btrain
 **Date**: 2026-09-01
-**Updated**: 2026-09-09 (v0.1.7: records Brian's confirmation of the five WS4 readings; v0.1.6: spec 016 WS4 designates rows 6, 8-10, 12, 14, 16, 17, 19, 20 and stages every remaining legacy row in advisory; v0.1.5: spec 016 WS3 designates rows 2, 13, 15 and stages L3, L7, and the L4 repair cases in advisory; v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
+**Updated**: 2026-09-30 (v0.1.8: records Brian's decision that a metadata-only update of a `needs-review` lane re-checks only the reviewer context it edits; v0.1.7: records Brian's confirmation of the five WS4 readings; v0.1.6: spec 016 WS4 designates rows 6, 8-10, 12, 14, 16, 17, 19, 20 and stages every remaining legacy row in advisory; v0.1.5: spec 016 WS3 designates rows 2, 13, 15 and stages L3, L7, and the L4 repair cases in advisory; v0.1.4: records the human answers to the eight open questions; v0.1.3: stages L8 reviewer-authority advisory and restricts L9 to the recorded reviewer)
 
 ## Decision
 
@@ -174,7 +174,7 @@ uses `explicitPr || linkedPr`, `pr-flow.mjs:394-420`).
 | 16 | Rescope | `handoff update --files` (set differs) | `in-progress`, `changes-requested`, `repair-needed` | same | owner in `in-progress` or `changes-requested`; system or override in `repair-needed` | non-empty; no cross-lane conflict | replace | 014 rescope designation (set differs); 006 FR-20 | designated (2026-09-09; L6 in advisory) |
 | 17 | Resync | `handoff update --files` (set equals handoff record); `btrain doctor --repair` | Active | same | owner in any active status; system (doctor) only in `in-progress`, `changes-requested`, `repair-needed` | set equals the handoff record after `normalizePathList` (a different set is a rescope); no cross-lane conflict | restore coverage | 006 FR-2 resync authority; 014 rescope/resync split (Q2 Option B) | designated (2026-09-09; L6 in advisory) |
 | 18 | ForceRelease | `locks release`, `locks release-lane` | Active | same | override | none beyond the override | suspend | 002 Force-release override | designated |
-| 19 | MetadataUpdate | `handoff update` without `--status`, `--files`, `--owner`, or `--reviewer` | any | same | lane-agent | none | unchanged | 002 CLI Commands, update authority | designated (2026-09-09; L12 in advisory) |
+| 19 | MetadataUpdate | `handoff update` without `--status`, `--files`, `--owner`, or `--reviewer` | any | same | lane-agent | none; on a `needs-review` lane, an edit to the reviewer context or `--base` must leave the context complete (the needs-review gate's reviewable-diff, code-simplifier, and cgraph audit checks stay with the transition, 2026-09-30) | unchanged | 002 CLI Commands, update authority | designated (2026-09-09; L12 in advisory) |
 | 20 | Reassign | `handoff update --owner` or `--reviewer` | `in-progress`, `needs-review`, `changes-requested` without a linked PR | same | `--owner`: owner only; `--reviewer`: lane-agent (Q8 Option C) | new owner and reviewer distinct; the new reviewer is not in the task's author history (swap policy A-i); no linked PR | unchanged (registry owner label follows the new owner; the new owner becomes the responsible actor) | 005 FR-5 reassignment | designated (2026-09-09; L10 in advisory) |
 | L1 | legacy | `handoff resolve` | PrFlow, and `changes-requested` with a linked PR | `resolved` | any | PR-flow status, or `changes-requested` with a linked PR (an unlinked `changes-requested` abandon by a non-lane-agent is L11) | release | forbidden by 002 Lock Enforcement (locks held until merge or close) | advisory (#4; 14-day minimum begins when spec 016 WS4 merges to `main`) |
 | L2 | legacy | `handoff resolve` | `idle` | `resolved` | any | none | none | forbidden by implication of 002 CLI Commands | advisory (#5; 14-day minimum begins when spec 016 WS4 merges to `main`) |
@@ -393,7 +393,9 @@ directing PR feedback back through local review. Prevents recurrence: yes, this
 finding is the list. Blast radius: `test/core.test.mjs:1495-1503` sets
 `ready-to-merge` directly; `test/core.test.mjs:4972` moves `repair-needed` to
 `needs-review`, which spec 014 line 111 forbids; identity updates (same status)
-must stay accepted.
+must stay accepted. Designated 2026-10-06 in spec 002 (Resolve, update, and
+claim authority): a `--status` equal to the current status is a row 19
+metadata update, as `classifyTransitionEvent` already records it, not L4.
 
 **#8 raw `ENOENT` on a missing lane file.** Code-wrong; pure error handling.
 Owner: none; spec 006 FR-2a covers the spirit. No prose change. Prevents
@@ -664,6 +666,23 @@ Consequences worth restating:
   77 reconciliation (close on GitHub, then `pr poll --apply`). (v) Row 16 is
   designated on Q2 plus the spec 014 rescope paragraph, whose "provisionally
   until spec 002 adopts its own" wording stands until spec 002 owns rescope.
+- Row 19 on a `needs-review` lane (decided by Brian Farish on 2026-09-30,
+  over designating a full re-run): a metadata-only update does not re-enter
+  row 2's gate. The reviewable-diff and code-simplifier checks and the cgraph
+  review packet and audit belong to the transition into `needs-review`. Only
+  completeness carries over: an update that edits a reviewer-context field or
+  `--base` must leave the context complete. An explicit `--status
+  needs-review`, or an update with `--files`, `--owner`, or `--reviewer`,
+  still meets the whole gate. `patchHandoff` had gated on the resulting
+  status, so every later `--pr` or `--next` on a lane whose work lives in a
+  separate git worktree re-ran the diff check in the shared checkout and
+  failed until `--no-diff` was added. A hard cgraph audit finding could
+  reject the update the same way. As with row 2's own data guards, the
+  check runs outside `applyTransition`, so the structural guard in
+  `transitions.mjs` stays `none`. `src/brain_train/needs_review_gate.mjs`
+  holds the rule, and `test/handoff-update-needs-review-metadata.test.mjs`
+  covers it with a repository whose lane diff lives only on a worktree
+  branch.
 
 ---
 

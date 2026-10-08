@@ -220,7 +220,9 @@ export function shapeComments({ issueComments, reviewComments, reviews }) {
       file: c.path || null,
       line: c.line ?? c.original_line ?? null,
       review_id: c.pull_request_review_id || null,
-      reviewedCommit: c.commit_id || null,
+      // GitHub moves commit_id forward to newer heads; original_commit_id keeps
+      // the commit the comment was written on (same order as pr-flow.mjs).
+      reviewedCommit: c.original_commit_id || c.commit_id || null,
     })
   }
   for (const r of reviews || []) {
@@ -300,17 +302,23 @@ export function formatComment(c) {
 export async function persistCapturedComments(repoRoot, { identity, laneId, prNumber, comments, captureHead, capturedAt }) {
   // Store evidence before the comment log so a failed log append can be
   // retried. Existing historical comments are safely backfilled as unknown.
+  // Jev evidence is optional: a capture failure is reported, never allowed to
+  // block the deterministic comment log or cursor.
   if (comments.length) {
-    const snapshots = comments.map((comment) => createSourceSnapshot({
-      repository: `${identity.owner}/${identity.repo}`,
-      prNumber,
-      laneId,
-      comment,
-      capturedAt,
-      captureHead: captureHead.head,
-      captureHeadObservedAt: captureHead.observedAt,
-    }))
-    await appendSourceSnapshots(repoRoot, snapshots)
+    try {
+      const snapshots = comments.map((comment) => createSourceSnapshot({
+        repository: `${identity.owner}/${identity.repo}`,
+        prNumber,
+        laneId,
+        comment,
+        capturedAt,
+        captureHead: captureHead.head,
+        captureHeadObservedAt: captureHead.observedAt,
+      }))
+      await appendSourceSnapshots(repoRoot, snapshots)
+    } catch (error) {
+      console.error(`btrain: Jev evidence capture skipped: ${error?.message || error}`)
+    }
   }
   return appendComments(repoRoot, laneId, prNumber, comments)
 }

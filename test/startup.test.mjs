@@ -1,4 +1,4 @@
-import { withoutLaneScope } from "./helpers/runner-scope.mjs"
+import { withoutAgentIdentity, withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
@@ -7,6 +7,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { getStartupSnapshot } from "../src/brain_train/core.mjs"
+import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const exec = promisify(execFile)
 
@@ -20,7 +21,7 @@ async function rmDir(dirPath) {
 
 async function runCli(args, cwd, envOverrides = {}) {
   try {
-    const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
+    const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...withTrackedInit(args)], {
       cwd,
       env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"), ...envOverrides },
       maxBuffer: 5 * 1024 * 1024,
@@ -210,16 +211,11 @@ describe("getStartupSnapshot: role-aware focus lanes", () => {
   })
 
   it("falls back to shared active-lane focus when no agent is pinned", async () => {
-    const prior = process.env.BTRAIN_AGENT
-    delete process.env.BTRAIN_AGENT
-    try {
-      const snapshot = await getStartupSnapshot(tmpDir)
-      const laneA = snapshot.focusLanes.find((lane) => lane.laneId === "a")
-      assert.ok(laneA, "shared fallback should still surface active lanes")
-      assert.equal(laneA.role, "shared")
-    } finally {
-      if (prior !== undefined) process.env.BTRAIN_AGENT = prior
-    }
+    // Hide the agent CLI running the suite too, or detection finds it.
+    const snapshot = await withoutAgentIdentity(() => getStartupSnapshot(tmpDir))
+    const laneA = snapshot.focusLanes.find((lane) => lane.laneId === "a")
+    assert.ok(laneA, "shared fallback should still surface active lanes")
+    assert.equal(laneA.role, "shared")
   })
 
   it("caps focus lanes at three even when more are active", async () => {
