@@ -8,6 +8,36 @@ import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import {
+  STORAGE_LOCAL,
+  STORAGE_TRACKED,
+  IGNORE_TARGET_EXCLUDE,
+  IGNORE_TARGET_GITIGNORE,
+  getStorageMode,
+  getDefaultLaneHandoffRelativePath,
+  getModeRepoPaths,
+  ensureLocalStateIgnored,
+  listTrackedLocalStateFiles,
+  isLocalStateIgnored,
+  getDefaultFeatureMap,
+  getAllOnFeatureMap,
+  getFeatureMapFromConfig,
+  hasFeaturesTable,
+  isFeatureEnabled,
+  upsertFeaturesTable,
+  isSkillEnabled,
+  isDevToolEnabled,
+  orderAgentsForReviewer,
+  featureDisabledMessage,
+  getHookHandoffGlob,
+  resolveInitStorage,
+  localizeProjectToml,
+  IGNORE_TARGET_AUTO,
+  getEffectiveFeatureMap,
+  isLocalizableTextFile,
+  localizeStateText,
+  removeManagedGitHooks,
+} from "./repo_mode.mjs"
+import {
   DEFAULT_HARNESS_PROFILE_ID,
   FALLBACK_LOOP_DISPATCH_PROMPT,
   loadHarnessProfile,
@@ -708,7 +738,10 @@ function replaceManagedBlock(existingContent, managedBlock) {
 const PRE_COMMIT_HOOK_MARKER = "# btrain:pre-commit-hook"
 const PRE_PUSH_HOOK_MARKER = "# btrain:pre-push-hook"
 
-function renderPreCommitHook() {
+function renderPreCommitHook(mode = STORAGE_TRACKED) {
+  const nonHandoffFilter = mode === STORAGE_LOCAL
+    ? 'NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.btrain/")'
+    : 'NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF")'
   return [
     "#!/bin/sh",
     PRE_COMMIT_HOOK_MARKER,
@@ -717,7 +750,7 @@ function renderPreCommitHook() {
     "# Bypass with: git commit --no-verify",
     "",
     'STAGED=$(git diff --cached --name-only)',
-    'NON_HANDOFF=$(echo "$STAGED" | grep -v "^\\.claude/collab/HANDOFF")',
+    nonHandoffFilter,
     'if [ -z "$NON_HANDOFF" ]; then',
     "  exit 0",
     "fi",
@@ -753,7 +786,7 @@ function renderPreCommitHook() {
     "  return 1",
     "}",
     "",
-    'for HANDOFF in .claude/collab/HANDOFF*.md; do',
+    `for HANDOFF in ${getHookHandoffGlob(mode)}; do`,
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    if [ "$STATUS" = "needs-review" ]; then',
@@ -810,7 +843,7 @@ function renderPreCommitHook() {
   ].join("\n")
 }
 
-function renderPrePushHook() {
+function renderPrePushHook(mode = STORAGE_TRACKED) {
   return [
     "#!/bin/sh",
     PRE_PUSH_HOOK_MARKER,
@@ -819,7 +852,7 @@ function renderPrePushHook() {
     "# Override path: btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason \"...\"",
     "",
     'ACTIVE_HANDOFFS=""',
-    'for HANDOFF in .claude/collab/HANDOFF*.md; do',
+    `for HANDOFF in ${getHookHandoffGlob(mode)}; do`,
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    case "$STATUS" in',
@@ -983,7 +1016,7 @@ function getLaneConfigs(config) {
   const laneConfigs = []
   for (const id of laneIds) {
     const laneSection = lanes[id]
-    const handoffPath = laneSection?.handoff_path || `.claude/collab/HANDOFF_${id.toUpperCase()}.md`
+    const handoffPath = laneSection?.handoff_path || getDefaultLaneHandoffRelativePath(getStorageMode(config), id)
     laneConfigs.push({ id, handoffPath })
   }
 
@@ -1569,25 +1602,25 @@ function decorateLaneStates(laneStates, locks) {
 // The one registry of btrain-managed hooks. Install and drift detection
 // both read it, so a new managed hook cannot be added to one and missed by
 // the other.
-function managedHookSpecs() {
+function managedHookSpecs(mode = STORAGE_TRACKED) {
   return [
-    { key: "preCommit", filename: "pre-commit", marker: PRE_COMMIT_HOOK_MARKER, content: renderPreCommitHook() },
-    { key: "prePush", filename: "pre-push", marker: PRE_PUSH_HOOK_MARKER, content: renderPrePushHook() },
+    { key: "preCommit", filename: "pre-commit", marker: PRE_COMMIT_HOOK_MARKER, content: renderPreCommitHook(mode) },
+    { key: "prePush", filename: "pre-push", marker: PRE_PUSH_HOOK_MARKER, content: renderPrePushHook(mode) },
   ]
 }
 
-function managedHookSpec(key) {
-  const spec = managedHookSpecs().find((hook) => hook.key === key)
+function managedHookSpec(key, mode = STORAGE_TRACKED) {
+  const spec = managedHookSpecs(mode).find((hook) => hook.key === key)
   if (!spec) throw new Error(`Unknown managed hook: ${key}`)
   return spec
 }
 
 async function installPreCommitHook(repoRoot) {
-  return installManagedHook(repoRoot, managedHookSpec("preCommit"))
+  return installManagedHook(repoRoot, managedHookSpec("preCommit", getStorageMode(await readProjectConfig(repoRoot).catch(() => null))))
 }
 
 async function installPrePushHook(repoRoot) {
-  return installManagedHook(repoRoot, managedHookSpec("prePush"))
+  return installManagedHook(repoRoot, managedHookSpec("prePush", getStorageMode(await readProjectConfig(repoRoot).catch(() => null))))
 }
 
 async function installManagedHook(repoRoot, { filename, marker, content }) {
@@ -1626,7 +1659,7 @@ async function findStaleManagedHooks(repoRoot) {
   if (!gitHooksDir) return []
 
   const stale = []
-  for (const hook of managedHookSpecs()) {
+  for (const hook of managedHookSpecs(getStorageMode(await readProjectConfig(repoRoot).catch(() => null)))) {
     const hookPath = path.join(gitHooksDir, hook.filename)
     if (!(await pathExists(hookPath))) continue
     const existing = await readText(hookPath)
@@ -1653,7 +1686,7 @@ async function findStaleManagedHooks(repoRoot) {
 
 async function installGitHooks(repoRoot) {
   const results = {}
-  for (const hook of managedHookSpecs()) {
+  for (const hook of managedHookSpecs(getStorageMode(await readProjectConfig(repoRoot).catch(() => null)))) {
     results[hook.key] = await installManagedHook(repoRoot, hook)
   }
   return results
@@ -1674,7 +1707,8 @@ function getBrainTrainHome() {
   return path.resolve(process.env.BRAIN_TRAIN_HOME || path.join(os.homedir(), ".btrain"))
 }
 
-function getRepoPaths(repoRoot) {
+function getRepoPaths(repoRoot, mode = STORAGE_TRACKED) {
+  const modePaths = getModeRepoPaths(repoRoot, mode)
   return {
     repoRoot,
     brainTrainDir: path.join(repoRoot, ".btrain"),
@@ -1694,6 +1728,8 @@ function getRepoPaths(repoRoot) {
     skillsPath: path.join(repoRoot, ".claude", "skills"),
     agentSkillsPath: path.join(repoRoot, ".agents", "skills"),
     feedbackLogPath: path.join(repoRoot, ".claude", "collab", "FEEDBACK_LOG.md"),
+    ...modePaths,
+    handoffPath: path.resolve(repoRoot, getDefaultLaneHandoffRelativePath(mode, "a")),
   }
 }
 
@@ -1701,14 +1737,14 @@ function getConfiguredHandoffPath(repoRoot, config) {
   const configuredPath =
     typeof config?.handoff_path === "string" && config.handoff_path.trim()
       ? config.handoff_path.trim()
-      : DEFAULT_HANDOFF_RELATIVE_PATH
+      : getDefaultLaneHandoffRelativePath(getStorageMode(config), "a")
 
   return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(repoRoot, configuredPath)
 }
 
 function getConfiguredRepoPaths(repoRoot, config) {
   return {
-    ...getRepoPaths(repoRoot),
+    ...getRepoPaths(repoRoot, getStorageMode(config)),
     handoffPath: getConfiguredHandoffPath(repoRoot, config),
   }
 }
@@ -1769,6 +1805,9 @@ function formatInlineCodeList(values) {
 }
 
 function buildManagedBlockVariables(config, { includeFeedbackGuidance = true } = {}) {
+  const feedbackLogRelative = getStorageMode(config) === STORAGE_LOCAL
+    ? ".btrain/collab/FEEDBACK_LOG.md"
+    : ".claude/collab/FEEDBACK_LOG.md"
   const collaborators = getCollaborationAgentNames(config)
   const laneIds = (getLaneConfigs(config) || getDerivedLaneIds(config)).map((lane) => lane.id || lane)
   const laneExamples = laneIds.slice(0, Math.min(laneIds.length, 6))
@@ -1783,7 +1822,7 @@ function buildManagedBlockVariables(config, { includeFeedbackGuidance = true } =
     laneSummary: `${laneIds.length} lane(s) (${lanesPerAgent} per collaborating agent): ${formatInlineCodeList(laneIds)}`,
     laneExamples: formatInlineCodeList(laneExamples),
     feedbackGuidance: feedbackEnabled
-      ? "- Use the `feedback-triage` skill when processing user-reported issues. It logs entries to `.claude/collab/FEEDBACK_LOG.md` and drives test-first resolution.\n- Use the `bug-fix` skill for developer-found bugs. Write a failing reproduction test before editing production code."
+      ? "- Use the `feedback-triage` skill when processing user-reported issues. It logs entries to `" + feedbackLogRelative + "` and drives test-first resolution.\n- Use the `bug-fix` skill for developer-found bugs. Write a failing reproduction test before editing production code."
       : "",
   }
 }
@@ -2063,7 +2102,12 @@ async function copyMissingTree(sourcePath, targetPath, options = {}, relativePat
   }
 
   await ensureDir(path.dirname(targetPath))
-  await fs.copyFile(sourcePath, targetPath)
+  if (options.transformText && isLocalizableTextFile(sourcePath)) {
+    const original = await fs.readFile(sourcePath, "utf8")
+    await fs.writeFile(targetPath, options.transformText(original), "utf8")
+  } else {
+    await fs.copyFile(sourcePath, targetPath)
+  }
   await fs.chmod(targetPath, sourceStats.mode)
   return 1
 }
@@ -2106,11 +2150,17 @@ async function syncBundledSkills(targetSkillsPath, options = {}) {
       continue
     }
 
+    if (options.featureMap && !isSkillEnabled(options.featureMap, entry.name)) {
+      skippedSkills.push(entry.name)
+      continue
+    }
+
     const sourcePath = path.join(sourceSkillsDir, entry.name)
     const targetPath = path.join(targetSkillsPath, entry.name)
     const targetExisted = await pathExists(targetPath)
     const copiedCount = await copyMissingTree(sourcePath, targetPath, {
       overwrite: options.overwrite,
+      transformText: options.transformText,
     })
     if (!targetExisted || (options.overwrite && copiedCount > 0)) {
       copiedSkills.push(entry.name)
@@ -2124,12 +2174,17 @@ async function syncBundledSkills(targetSkillsPath, options = {}) {
   }
 }
 
-async function syncBundledSkillTargets(repoPaths) {
+async function syncBundledSkillTargets(repoPaths, { featureMap = null } = {}) {
+  const transformText = repoPaths.storageMode === STORAGE_LOCAL ? localizeStateText : undefined
   const claude = await syncBundledSkills(repoPaths.skillsPath, {
     sourceSkillsDir: BUNDLED_SKILLS_DIR,
+    featureMap,
+    transformText,
   })
   const agents = await syncBundledSkills(repoPaths.agentSkillsPath, {
     sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
+    featureMap,
+    transformText,
   })
   const copiedSkills = Array.from(new Set([
     ...claude.copiedSkills,
@@ -2155,7 +2210,7 @@ async function syncBundledSkillTargets(repoPaths) {
   }
 }
 
-async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null } = {}) {
+async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null, targetRoot = null, featureMap = null, transformText = undefined } = {}) {
   const copiedTools = []
   const missingTools = []
   const selfTools = []
@@ -2165,12 +2220,15 @@ async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null 
     if (labels && !labels.has(tool.label)) {
       continue
     }
+    if (featureMap && !isDevToolEnabled(featureMap, tool.label)) {
+      continue
+    }
     if (!(await pathExists(tool.sourcePath))) {
       missingTools.push(tool.label)
       continue
     }
 
-    const targetPath = path.join(repoRoot, ...tool.targetParts)
+    const targetPath = path.join(targetRoot || repoRoot, ...tool.targetParts)
     if (path.resolve(tool.sourcePath) === path.resolve(targetPath)) {
       selfTools.push(tool.label)
       continue
@@ -2179,6 +2237,9 @@ async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null 
     const copiedForTool = await copyMissingTree(tool.sourcePath, targetPath, {
       overwrite,
       shouldSkip: tool.shouldSkip,
+      // Only the small helper scripts carry state paths; never rewrite the
+      // agentchattr tree.
+      transformText: tool.label === "agentchattr" ? undefined : transformText,
     })
     copiedFileCount += copiedForTool
 
@@ -2207,10 +2268,10 @@ async function syncBundledDevTools(repoRoot, { overwrite = false, labels = null 
   }
 }
 
-function buildLaneSections(laneIds) {
+function buildLaneSections(laneIds, mode = STORAGE_TRACKED) {
   return laneIds.flatMap((id) => [
     `[lanes.${id}]`,
-    `handoff_path = ".claude/collab/HANDOFF_${id.toUpperCase()}.md"`,
+    `handoff_path = "${getDefaultLaneHandoffRelativePath(mode, id)}"`,
     "",
   ]).join("\n").trimEnd()
 }
@@ -2260,10 +2321,10 @@ function buildProjectTemplateVariables(repoRoot, agentNames = [], timestamp = fo
     timestamp,
     activeAgentsToml: renderTomlArray(collaborators),
     writerDefault: collaborators[0] || "",
-    reviewerDefault: collaborators[1] || "",
+    reviewerDefault: options.reviewer || collaborators[1] || "",
     runnerLines: buildAgentRunnerLines(collaborators),
     lanesPerAgent,
-    laneSections: buildLaneSections(getDerivedLaneIds(configSeed)),
+    laneSections: buildLaneSections(getDerivedLaneIds(configSeed), options.storage),
   }
 }
 
@@ -2396,7 +2457,7 @@ function syncLaneConfigInToml(content, laneIds, options = {}) {
       `per_agent = ${perAgent}`,
       `ids = ${renderTomlArray(laneIds)}`,
       "",
-      buildLaneSections(laneIds),
+      buildLaneSections(laneIds, options.storage),
     ].join("\n")
     return `${nextContent.trimEnd()}\n\n${lanesBlock}\n`
   }
@@ -2414,7 +2475,7 @@ function syncLaneConfigInToml(content, laneIds, options = {}) {
     if (findTomlSectionBounds(nextContent, `lanes.${laneId}`)) {
       continue
     }
-    nextContent = `${nextContent.trimEnd()}\n\n${buildLaneSections([laneId])}\n`
+    nextContent = `${nextContent.trimEnd()}\n\n${buildLaneSections([laneId], options.storage)}\n`
   }
 
   return nextContent
@@ -2728,8 +2789,63 @@ async function initRepo(repoPathInput, options = {}) {
   }
 
   const repoName = normalizeRepoName(repoRoot)
-  const repoPaths = getRepoPaths(repoRoot)
+  const baseRepoPaths = getRepoPaths(repoRoot)
+  const projectTomlExists = await pathExists(baseRepoPaths.projectTomlPath)
+  const existingConfig = projectTomlExists ? await readProjectConfig(repoRoot) : null
+  const storage = await resolveInitStorage({
+    repoRoot,
+    projectTomlExists,
+    existingConfig,
+    storage: options.storage,
+    defaultStorage: options.defaultStorage,
+    managedStartMarker: MANAGED_START,
+  })
+  if (storage.conflict) {
+    const { current, requested } = storage.conflict
+    throw new BtrainError({
+      message: `This repo already uses ${current} btrain storage; refusing to switch it to ${requested}.`,
+      reason: "btrain init does not migrate existing handoffs, locks, or instruction files between storage modes.",
+      fix: current === STORAGE_TRACKED
+        ? "Re-run `btrain init` without --local/--exclude-local. Moving a tracked repo to local storage is a manual step (see specs/022-local-only-init.md)."
+        : "Re-run `btrain init` without --tracked. Moving a local repo to tracked storage is a manual step (see specs/022-local-only-init.md).",
+    })
+  }
+  const storageMode = storage.mode
+  const isLocal = storageMode === STORAGE_LOCAL
+  const repoPaths = getRepoPaths(repoRoot, storageMode)
   const { registryPath, registry, homeDir } = await loadRegistry()
+
+  // Feature map (spec 022). null means "legacy": every feature on, and no
+  // [features] table is written, so pre-022 repos see no change.
+  let featureMap = null
+  if (options.featureMap && typeof options.featureMap === "object") {
+    featureMap = { ...getAllOnFeatureMap(), ...options.featureMap }
+  } else if (hasFeaturesTable(existingConfig)) {
+    featureMap = getFeatureMapFromConfig(existingConfig)
+  } else if (!projectTomlExists && isLocal) {
+    featureMap = getDefaultFeatureMap()
+  }
+  const previousFeatureMap = projectTomlExists ? getEffectiveFeatureMap(existingConfig) : null
+  // Arrow helpers (not declarations) keep core's function inventory unchanged.
+  // A feature that owns a runtime section turns that section on with it, so
+  // `[features]` and the section can never disagree about an enabled feature.
+  // Disabling leaves [cgraph] alone ([features] gates it); [pr_flow].enabled
+  // follows the toggle when the section exists.
+  const applyFeatureSections = (tomlContent) => {
+    let next = upsertFeaturesTable(tomlContent, featureMap)
+    if (featureMap.cgraph) {
+      next = upsertTomlEntryInSection(next, "cgraph", "enabled", "enabled = true")
+    }
+    if (parseProjectToml(next)?.pr_flow || featureMap.pr_flow) {
+      next = upsertTomlEntryInSection(next, "pr_flow", "enabled", `enabled = ${featureMap.pr_flow ? "true" : "false"}`)
+    }
+    return next
+  }
+  const writeInstructionFile = async (filePath, managedBlockContent, stubContent) => {
+    const exists = await pathExists(filePath)
+    const content = exists ? await readText(filePath) : ""
+    await writeText(filePath, exists ? replaceManagedBlock(content, managedBlockContent) : stubContent)
+  }
 
   // Seed global templates if needed
   await ensureTemplates()
@@ -2739,7 +2855,9 @@ async function initRepo(repoPathInput, options = {}) {
   await ensureDir(path.dirname(repoPaths.handoffPath))
 
   const now = formatIsoTimestamp()
-  const requestedAgents = normalizeStringList(options.agent)
+  // --reviewer only reorders an explicit --agents list; alone it sets reviewer_default.
+  const explicitAgents = normalizeStringList(options.agent)
+  const requestedAgents = explicitAgents.length > 0 ? orderAgentsForReviewer(explicitAgents, options.reviewer) : []
   const shouldScaffoldBundledSkills = options.scaffoldBundledSkills === true
   const shouldScaffoldDevTools = options.scaffoldDevTools === true
   const requestedLanesPerAgent = normalizePositiveInteger(
@@ -2749,22 +2867,31 @@ async function initRepo(repoPathInput, options = {}) {
   )
   const templateVars = buildProjectTemplateVariables(repoRoot, requestedAgents, now, {
     lanesPerAgent: requestedLanesPerAgent,
+    storage: storageMode,
+    reviewer: typeof options.reviewer === "string" ? options.reviewer.trim() : "",
   })
   const instructionTemplate = await loadTemplate("instruction-stub.md")
 
-  if (!(await pathExists(repoPaths.projectTomlPath))) {
+  if (!projectTomlExists) {
     const tomlTemplate = await loadTemplate("project.toml")
-    await writeText(repoPaths.projectTomlPath, renderTemplate(tomlTemplate, templateVars))
+    let rendered = localizeProjectToml(renderTemplate(tomlTemplate, templateVars), storageMode)
+    if (featureMap) {
+      rendered = applyFeatureSections(rendered)
+    }
+    await writeText(repoPaths.projectTomlPath, rendered)
   } else {
     let existingToml = await readText(repoPaths.projectTomlPath)
     const originalToml = existingToml
-    const existingConfig = parseProjectToml(existingToml)
+    const parsedExisting = parseProjectToml(existingToml)
 
-    if (requestedAgents.length > 0 || existingConfig?.agents?.active !== undefined) {
+    if (requestedAgents.length > 0 || parsedExisting?.agents?.active !== undefined) {
       const nextAgents = requestedAgents.length > 0
         ? requestedAgents
-        : getCollaborationAgentNames(existingConfig)
+        : getCollaborationAgentNames(parsedExisting)
       existingToml = syncAgentsSectionInToml(existingToml, nextAgents)
+    }
+    if (templateVars.reviewerDefault && explicitAgents.length === 0) {
+      existingToml = upsertTomlEntryInSection(existingToml, "agents", "reviewer_default", `reviewer_default = "${escapeTomlString(templateVars.reviewerDefault)}"`)
     }
 
     const nextConfig = parseProjectToml(existingToml)
@@ -2776,9 +2903,13 @@ async function initRepo(repoPathInput, options = {}) {
         per_agent: nextLanesPerAgent,
       },
     })
-    const syncedToml = syncLaneConfigInToml(existingToml, desiredLaneIds, {
+    let syncedToml = syncLaneConfigInToml(existingToml, desiredLaneIds, {
       perAgent: nextLanesPerAgent,
+      storage: storageMode,
     })
+    if (options.featureMap && featureMap) {
+      syncedToml = applyFeatureSections(syncedToml)
+    }
 
     if (syncedToml !== originalToml) {
       await writeText(repoPaths.projectTomlPath, syncedToml)
@@ -2786,44 +2917,51 @@ async function initRepo(repoPathInput, options = {}) {
   }
 
   const config = await readProjectConfig(repoRoot)
+  const includeFeedbackGuidance = shouldScaffoldBundledSkills && getFeedbackConfig(config).enabled
   const managedBlock = await getManagedBlockTemplate(repoRoot, { includeFeedbackGuidance: shouldScaffoldBundledSkills })
   const instructionTemplateVars = {
     roleLabel: "agent",
     ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }),
   }
 
-  const agentsExists = await pathExists(repoPaths.agentsPath)
-  const agentsContent = agentsExists ? await readText(repoPaths.agentsPath) : ""
-  await writeText(
-    repoPaths.agentsPath,
-    agentsExists
-      ? replaceManagedBlock(agentsContent, managedBlock)
-      : renderTemplate(instructionTemplate, instructionTemplateVars),
-  )
+  if (options.skipInstructionRefresh === true) {
+    // `btrain features` toggles that scaffold nothing leave instruction files alone.
+  } else if (isLocal) {
+    // Local mode never touches tracked instruction files. One untracked file
+    // inside .btrain/ carries the managed block for every agent.
+    await writeInstructionFile(
+      repoPaths.agentsPath,
+      managedBlock,
+      renderTemplate(instructionTemplate, instructionTemplateVars),
+    )
+  } else {
+    await writeInstructionFile(
+      repoPaths.agentsPath,
+      managedBlock,
+      renderTemplate(instructionTemplate, instructionTemplateVars),
+    )
+    await writeInstructionFile(
+      repoPaths.claudePath,
+      managedBlock,
+      renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }) }),
+    )
 
-  const claudeExists = await pathExists(repoPaths.claudePath)
-  const claudeContent = claudeExists ? await readText(repoPaths.claudePath) : ""
-  await writeText(
-    repoPaths.claudePath,
-    claudeExists
-      ? replaceManagedBlock(claudeContent, managedBlock)
-      : renderTemplate(instructionTemplate, { roleLabel: "Claude", ...buildManagedBlockVariables(config, { includeFeedbackGuidance: shouldScaffoldBundledSkills }) }),
-  )
+    // Symlink GEMINI.md → CLAUDE.md (Gemini CLI reads GEMINI.md)
+    await ensureSymlink(repoPaths.claudePath, repoPaths.geminiPath)
 
-  // Symlink GEMINI.md → CLAUDE.md (Gemini CLI reads GEMINI.md)
-  await ensureSymlink(repoPaths.claudePath, repoPaths.geminiPath)
-
-  // Symlink .codex/prompts/AGENTS.md → ../../AGENTS.md (Codex CLI reads .codex/prompts/)
-  await ensureDir(repoPaths.codexPromptsDir)
-  await ensureSymlink(repoPaths.agentsPath, repoPaths.codexAgentsPath)
+    // Symlink .codex/prompts/AGENTS.md → ../../AGENTS.md (Codex CLI reads .codex/prompts/)
+    await ensureDir(repoPaths.codexPromptsDir)
+    await ensureSymlink(repoPaths.agentsPath, repoPaths.codexAgentsPath)
+  }
 
   // Only create the single-file handoff if lanes are NOT enabled.
   // When lanes are enabled, per-lane handoff files are created below instead.
   const laneConfigs = getLaneConfigs(config)
+  const configuredHandoffPath = getConfiguredRepoPaths(repoRoot, config).handoffPath
   if (!laneConfigs) {
-    if (!(await pathExists(repoPaths.handoffPath))) {
+    if (!(await pathExists(configuredHandoffPath))) {
       const handoffTemplate = await loadTemplate("handoff.md")
-      await writeText(repoPaths.handoffPath, renderTemplate(handoffTemplate, { ...templateVars, laneId: "a" }))
+      await writeText(configuredHandoffPath, renderTemplate(handoffTemplate, { ...templateVars, laneId: "a" }))
     }
   }
 
@@ -2847,19 +2985,42 @@ async function initRepo(repoPathInput, options = {}) {
 
   // Scaffold FEEDBACK_LOG.md if feedback tracking is enabled and bundled skills are included.
   // --core-only skips bundled skills including feedback-triage, so the log is not useful without the skill.
-  if (shouldScaffoldBundledSkills && getFeedbackConfig(config).enabled && !(await pathExists(repoPaths.feedbackLogPath))) {
+  if (includeFeedbackGuidance && !(await pathExists(repoPaths.feedbackLogPath))) {
     const feedbackLogTemplate = await loadTemplate("feedback-log.md")
     await writeText(repoPaths.feedbackLogPath, renderTemplate(feedbackLogTemplate, templateVars))
   }
 
-  // Ensure .gitignore excludes btrain operational files
-  await ensureBtrainGitignore(repoRoot, { includeDevToolIgnores: shouldScaffoldDevTools })
+  // Keep btrain state out of git.
+  let ignoreResult = null
+  if (isLocal) {
+    try {
+      ignoreResult = await ensureLocalStateIgnored(repoRoot, {
+        target: options.ignoreTarget === IGNORE_TARGET_EXCLUDE
+          ? IGNORE_TARGET_EXCLUDE
+          : !projectTomlExists || options.ignoreTarget === IGNORE_TARGET_GITIGNORE
+            ? IGNORE_TARGET_GITIGNORE
+            : IGNORE_TARGET_AUTO,
+      })
+    } catch (error) {
+      throw new BtrainError({
+        message: error.message,
+        reason: "`.git/info/exclude` only exists inside a git repository.",
+        fix: `Run \`git init\` first, or drop --exclude-local to use .gitignore: btrain init ${repoRoot}`,
+      })
+    }
+  } else {
+    await ensureBtrainGitignore(repoRoot, { includeDevToolIgnores: shouldScaffoldDevTools })
+  }
 
   const bundledSkillsResult = shouldScaffoldBundledSkills
-    ? await syncBundledSkillTargets(repoPaths)
+    ? await syncBundledSkillTargets(repoPaths, { featureMap })
     : null
   const devToolsResult = shouldScaffoldDevTools
-    ? await syncBundledDevTools(repoRoot)
+    ? await syncBundledDevTools(repoRoot, {
+      targetRoot: repoPaths.toolsRoot,
+      featureMap,
+      transformText: isLocal ? localizeStateText : undefined,
+    })
     : null
 
   upsertRepoEntry(registry, {
@@ -2867,15 +3028,24 @@ async function initRepo(repoPathInput, options = {}) {
     path: repoRoot,
     enabled: true,
     project_config_path: repoPaths.projectTomlPath,
-    handoff_path: repoPaths.handoffPath,
+    handoff_path: configuredHandoffPath,
+    ...(isLocal ? { storage: STORAGE_LOCAL } : {}),
     registered_at: now,
     updated_at: now,
   })
   await saveRegistry(registryPath, registry)
 
   let hookResult = null
-  if (options.hooks) {
+  let removedHooks = []
+  const explicitFeatures = Boolean(options.featureMap && typeof options.featureMap === "object")
+  const hooksTurnedOn = explicitFeatures && featureMap.hooks === true && previousFeatureMap?.hooks === false
+  const hooksTurnedOff = explicitFeatures && featureMap.hooks === false && previousFeatureMap?.hooks !== false
+  const shouldInstallHooks = options.hooks === true
+    || (options.hooks !== false && featureMap?.hooks === true && (!projectTomlExists || hooksTurnedOn))
+  if (shouldInstallHooks) {
     hookResult = await installGitHooks(repoRoot)
+  } else if (hooksTurnedOff && projectTomlExists) {
+    removedHooks = await removeManagedGitHooks(repoRoot)
   }
 
   return {
@@ -2883,8 +3053,13 @@ async function initRepo(repoPathInput, options = {}) {
     repoRoot,
     homeDir,
     registryPath,
-    repoPaths,
+    repoPaths: { ...repoPaths, handoffPath: configuredHandoffPath },
+    storageMode,
+    storageDetected: storage.detected,
+    ignoreResult,
+    featureMap,
     hookResult,
+    removedHooks,
     bundledSkillsResult,
     devToolsResult,
   }
@@ -3864,7 +4039,7 @@ function hasCgraphConfig(config) {
 }
 
 function isCgraphEnabled(config) {
-  return hasCgraphConfig(config) && config?.cgraph?.enabled !== false
+  return hasCgraphConfig(config) && config?.cgraph?.enabled !== false && isFeatureEnabled(config, "cgraph")
 }
 
 function getCgraphLaneConfig(config, laneId = "") {
@@ -5618,6 +5793,13 @@ async function claimHandoff(repoRoot, options) {
   }
 
   const config = await readProjectConfig(repoRoot)
+  if (shouldRunClaimUnblockedContext(options) && !isFeatureEnabled(config, "unblocked")) {
+    throw new BtrainError({
+      message: featureDisabledMessage("unblocked", "--unblocked-context"),
+      reason: "[features].unblocked is false in .btrain/project.toml.",
+      fix: "Drop --unblocked-context, or run `btrain features enable unblocked`.",
+    })
+  }
   const configuredAgents = getConfiguredAgentNames(config)
   const laneConfigs = getLaneConfigs(config)
   let laneId = options.lane || null
@@ -7542,7 +7724,7 @@ function getPrFlowConfig(config) {
   }
 
   return {
-    enabled: prFlow.enabled === true,
+    enabled: prFlow.enabled === true && isFeatureEnabled(config, "pr_flow"),
     base:
       typeof prFlow.base === "string" && prFlow.base.trim()
         ? prFlow.base.trim()
@@ -7614,7 +7796,7 @@ function isLockExpired(lock, ttlMs) {
 function getFeedbackConfig(config) {
   const feedback = config?.feedback && typeof config.feedback === "object" ? config.feedback : {}
   return {
-    enabled: feedback.enabled !== false,
+    enabled: feedback.enabled !== false && isFeatureEnabled(config, "feedback"),
   }
 }
 
@@ -9134,6 +9316,9 @@ async function dispatchNeedsReviewReviewer(repoRoot, {
   if (skip || isTruthyEnvFlag(process.env.BTRAIN_NO_REVIEW_DISPATCH)) {
     return { status: "skipped", reason: "disabled" }
   }
+  if (config && !isFeatureEnabled(config, "loop")) {
+    return { status: "skipped", reason: "feature-disabled" }
+  }
   if (isTruthyEnvFlag(process.env[BTRAIN_LOOP_ACTIVE_ENV])) {
     return { status: "skipped", reason: "loop-active" }
   }
@@ -10052,7 +10237,7 @@ async function getManagedBlockTemplate(repoRoot = null, { includeFeedbackGuidanc
   // If includeFeedbackGuidance is not explicitly passed, auto-detect from the repo
   let feedbackGuidance = includeFeedbackGuidance
   if (feedbackGuidance === undefined && repoRoot) {
-    const repoPaths = getRepoPaths(repoRoot)
+    const repoPaths = getConfiguredRepoPaths(repoRoot, config)
     feedbackGuidance = await pathExists(path.join(repoPaths.skillsPath, "feedback-triage"))
   }
   if (feedbackGuidance === undefined) {
@@ -10077,7 +10262,7 @@ function hasTemplateDrift(content, managedTemplate) {
 }
 
 async function detectTemplateDrift(repoRoot) {
-  const repoPaths = getRepoPaths(repoRoot)
+  const repoPaths = getConfiguredRepoPaths(repoRoot, await readProjectConfig(repoRoot))
   const managedTemplate = await getManagedBlockTemplate(repoRoot)
   const drift = {
     agents: false,
@@ -10113,10 +10298,11 @@ async function registerRepo(repoPathInput) {
     })
   }
 
-  const repoPaths = getRepoPaths(repoRoot)
-  const hasProjectToml = await pathExists(repoPaths.projectTomlPath)
+  const hasProjectToml = await pathExists(getRepoPaths(repoRoot).projectTomlPath)
   const config = hasProjectToml ? await readProjectConfig(repoRoot) : null
   const configuredRepoPaths = getConfiguredRepoPaths(repoRoot, config)
+  const repoPaths = configuredRepoPaths
+  const isLocal = getStorageMode(config) === STORAGE_LOCAL
   const hasHandoff = await pathExists(configuredRepoPaths.handoffPath)
 
   if (!hasProjectToml && !hasHandoff) {
@@ -10137,9 +10323,9 @@ async function registerRepo(repoPathInput) {
     warnings.push(`Missing handoff file: ${configuredRepoPaths.handoffPath}`)
   }
   if (!(await pathExists(repoPaths.agentsPath))) {
-    warnings.push("Missing `AGENTS.md`.")
+    warnings.push(isLocal ? "Missing `.btrain/AGENTS.md`." : "Missing `AGENTS.md`.")
   }
-  if (!(await pathExists(repoPaths.claudePath))) {
+  if (!isLocal && !(await pathExists(repoPaths.claudePath))) {
     warnings.push("Missing `CLAUDE.md`.")
   }
 
@@ -10222,17 +10408,26 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       continue
     }
 
-    const repoPaths = getRepoPaths(absoluteRepoRoot)
+    const repoConfig = await readProjectConfig(absoluteRepoRoot)
+    const repoPaths = getConfiguredRepoPaths(absoluteRepoRoot, repoConfig)
+    // A repo with a [features] table only receives skills for enabled
+    // features; an explicitly named skill is always honored.
+    const featureMap = hasFeaturesTable(repoConfig) && !skillName ? getFeatureMapFromConfig(repoConfig) : null
+    const transformText = repoPaths.storageMode === STORAGE_LOCAL ? localizeStateText : undefined
     const [claude, agents] = await Promise.all([
       syncBundledSkills(repoPaths.skillsPath, {
         sourceSkillsDir: BUNDLED_SKILLS_DIR,
         skillName,
         overwrite,
+        featureMap,
+        transformText,
       }),
       syncBundledSkills(repoPaths.agentSkillsPath, {
         sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
         skillName,
         overwrite,
+        featureMap,
+        transformText,
       }),
     ])
 
@@ -10249,11 +10444,13 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
           sourceSkillsDir: BUNDLED_SKILLS_DIR,
           skillName: CONTEXT_SCOUT_SKILL_NAME,
           overwrite: false,
+          transformText,
         }),
         syncBundledSkills(repoPaths.agentSkillsPath, {
           sourceSkillsDir: BUNDLED_AGENT_SKILLS_DIR,
           skillName: CONTEXT_SCOUT_SKILL_NAME,
           overwrite: false,
+          transformText,
         }),
       ])
       : []
@@ -10276,10 +10473,16 @@ async function syncSkills({ repoRoot, skillName, overwrite = false } = {}) {
       syncBundledDevTools(absoluteRepoRoot, {
         overwrite: unblockedHelperOverwrite,
         labels: new Set([UNBLOCKED_CONTEXT_HELPER_LABEL]),
+        targetRoot: repoPaths.toolsRoot,
+        featureMap,
+        transformText,
       }),
       syncBundledDevTools(absoluteRepoRoot, {
         overwrite: zvecHelperOverwrite,
         labels: new Set([ZVEC_CONTEXT_HELPER_LABEL]),
+        targetRoot: repoPaths.toolsRoot,
+        featureMap,
+        transformText,
       }),
     ])
     const copiedTools = supportToolResults.flatMap((result) => result.copiedTools)
@@ -10321,10 +10524,10 @@ async function syncTemplates({ repoRoot, dryRun = false } = {}) {
       continue
     }
 
-    const repoPaths = getRepoPaths(absoluteRepoRoot)
+    const repoPaths = getConfiguredRepoPaths(absoluteRepoRoot, await readProjectConfig(absoluteRepoRoot))
     const managedTemplate = await getManagedBlockTemplate(absoluteRepoRoot)
     const fileResults = []
-    for (const filePath of [repoPaths.agentsPath, repoPaths.claudePath]) {
+    for (const filePath of [...new Set([repoPaths.agentsPath, repoPaths.claudePath])]) {
       fileResults.push(await syncManagedFile(filePath, managedTemplate, { dryRun }))
     }
 
@@ -10435,6 +10638,7 @@ async function getGitBranchName(repoRoot) {
 async function collectStartupReadFirstPaths(repoRoot) {
   const results = []
   const candidates = [
+    ".btrain/AGENTS.md",
     "AGENTS.md",
     "CLAUDE.md",
     ".btrain/project.toml",
@@ -10622,7 +10826,7 @@ async function getStartupSnapshot(repoRoot) {
     readFirstPaths: await collectStartupReadFirstPaths(repoRoot),
     focusLanes,
     commands: buildStartupCommands(handoff, focusLanes),
-    note: "Do not read .claude/collab/HANDOFF_*.md directly — always use the CLI.",
+    note: `Do not read ${getStorageMode(config) === STORAGE_LOCAL ? ".btrain/collab" : ".claude/collab"}/HANDOFF_*.md directly — always use the CLI.`,
   }
 }
 
@@ -10714,6 +10918,9 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
   const repairs = repair ? await applyWatchdogRepairs(repoRoot, { config, actorLabel: "btrain doctor" }) : []
   const staleHooks = await findStaleManagedHooks(repoRoot)
   const cgraph = await getDoctorCgraphSummary(repoRoot, config)
+  const storageMode = getStorageMode(config)
+  const isLocalStorage = storageMode === STORAGE_LOCAL
+  const features = hasFeaturesTable(config) ? getFeatureMapFromConfig(config) : null
 
   if (!(await pathExists(repoRoot))) {
     issues.push(`Repo path is missing: ${repoRoot}`)
@@ -10762,18 +10969,35 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     }
   }
 
-  if (!(await pathExists(repoPaths.agentsPath))) {
-    issues.push("Missing `AGENTS.md`.")
-  } else {
-    const content = await readText(repoPaths.agentsPath)
-    if (!content.includes(MANAGED_START)) {
-      warnings.push("`AGENTS.md` is missing the managed btrain block.")
-    } else if (hasTemplateDrift(content, managedTemplate)) {
-      warnings.push("`AGENTS.md` managed block differs from template. Run `btrain sync-templates`.")
+  // spec 022: local storage must leave nothing for git to commit.
+  if (isLocalStorage && (await pathExists(path.join(repoRoot, ".git")))) {
+    const trackedStateFiles = await listTrackedLocalStateFiles(repoRoot)
+    if (trackedStateFiles.length > 0) {
+      const preview = trackedStateFiles.slice(0, 5).join(", ")
+      warnings.push(
+        `Local storage mode, but git tracks ${trackedStateFiles.length} file(s) under \`.btrain/\` (${preview}${trackedStateFiles.length > 5 ? ", ..." : ""}). Untrack them with \`git rm -r --cached .btrain\`.`,
+      )
+    }
+    if (!(await isLocalStateIgnored(repoRoot))) {
+      warnings.push("Local storage mode, but `.btrain/` is not ignored by git. Re-run `btrain init .` (or `btrain init . --exclude-local`).")
     }
   }
 
-  if (!(await pathExists(repoPaths.claudePath))) {
+  const agentsLabel = isLocalStorage ? ".btrain/AGENTS.md" : "AGENTS.md"
+  if (!(await pathExists(repoPaths.agentsPath))) {
+    issues.push(`Missing \`${agentsLabel}\`.`)
+  } else {
+    const content = await readText(repoPaths.agentsPath)
+    if (!content.includes(MANAGED_START)) {
+      warnings.push(`\`${agentsLabel}\` is missing the managed btrain block.`)
+    } else if (hasTemplateDrift(content, managedTemplate)) {
+      warnings.push(`\`${agentsLabel}\` managed block differs from template. Run \`btrain sync-templates\`.`)
+    }
+  }
+
+  if (isLocalStorage) {
+    // Local mode keeps one instruction file; CLAUDE.md is not btrain's.
+  } else if (!(await pathExists(repoPaths.claudePath))) {
     issues.push("Missing `CLAUDE.md`.")
   } else {
     const content = await readText(repoPaths.claudePath)
@@ -10804,7 +11028,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
         warnings.push(issue)
       }
     } else if (await pathExists(repoPaths.projectTomlPath)) {
-      warnings.push("Missing `.claude/collab/FEEDBACK_LOG.md`. Run `btrain init .` to create it.")
+      warnings.push(`Missing \`${path.relative(repoRoot, repoPaths.feedbackLogPath)}\`. Run \`btrain init .\` to create it.`)
     }
   }
 
@@ -10949,6 +11173,8 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
   return {
     repoRoot,
     healthy: issues.length === 0,
+    storageMode,
+    features,
     issues,
     warnings,
     cgraph,

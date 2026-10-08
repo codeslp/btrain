@@ -61,7 +61,8 @@ The CLI manages the collaboration state machine. All state is file-based (no dat
 
 | Command | Purpose |
 |---------|---------|
-| `btrain init <repo> [--hooks]` | Bootstrap repo with lanes, handoff files, git hooks, local dashboard, and agentchattr |
+| `btrain init <repo> [--tracked\|--exclude-local] [--features a,b] [--agents a,b]` | Bootstrap repo with lanes, handoff files, and the chosen features. Local by default: all state under git-ignored `.btrain/` (spec 022) |
+| `btrain features list\|enable\|disable <names>` | Show or change per-repo feature toggles |
 | `btrain handoff` | Check state, print per-agent guidance |
 | `btrain handoff claim --lane a --task "..." --owner "..." --reviewer "..."` | Claim a task on a lane |
 | `btrain handoff update --lane a --status needs-review` | Transition lane status |
