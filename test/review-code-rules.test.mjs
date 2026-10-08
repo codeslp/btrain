@@ -2342,3 +2342,45 @@ describe("focus and skip markers moved across hunks", () => {
     assert.deepEqual(findingsFor(scanDiff(doubled), "focused-test").map((v) => v.line), [26])
   })
 })
+
+describe("blank context lines written without a leading space", () => {
+  it("counts an empty line inside a hunk as context so later lines keep their numbers", () => {
+    const diff = [
+      "diff --git a/test/blank.test.mjs b/test/blank.test.mjs",
+      "--- a/test/blank.test.mjs",
+      "+++ b/test/blank.test.mjs",
+      "@@ -3,4 +3,5 @@",
+      " it('one', () => {})",
+      "",
+      "",
+      " it('two', () => {})",
+      `+it.${T.only}('focus', () => {})`,
+      "",
+    ].join("\n")
+    const [entry] = parseUnifiedDiff(diff)
+    assert.deepEqual(entry.added, [{ line: 7, text: `it.${T.only}('focus', () => {})` }])
+    assert.deepEqual(entry.lines.map((line) => [line.line, line.kind]), [[3, "context"], [4, "context"], [5, "context"], [6, "context"], [7, "added"]])
+  })
+
+  it("reports the right line and keeps focused-test hard when git config sets diff.suppressBlankEmpty", async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-code-blank-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "codex@example.com"])
+      await git(repo, ["config", "user.name", "Codex"])
+      await git(repo, ["config", "diff.suppressBlankEmpty", "true"])
+      await fs.mkdir(path.join(repo, "test"), { recursive: true })
+      const file = path.join(repo, "test", "blank.test.mjs")
+      const body = ['import { it } from "node:test"', "", "it('one', () => {})", "", "", "it('two', () => {})", "it('three', () => {})"]
+      await fs.writeFile(file, `${body.join("\n")}\n`)
+      await git(repo, ["add", "."])
+      await git(repo, ["commit", "-m", "baseline"])
+
+      await fs.writeFile(file, `${[...body.slice(0, 6), `it.${T.only}('focus', () => {})`, ...body.slice(6)].join("\n")}\n`)
+      const result = await reviewCode(repo, { base: "HEAD" })
+      assert.deepEqual(result.violations.map((v) => [v.rule, v.severity, v.line]), [["focused-test", "hard", 7]])
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true })
+    }
+  })
+})

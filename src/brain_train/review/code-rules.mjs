@@ -301,6 +301,11 @@ export function parseUnifiedDiff(diff) {
   let newLineNum = 0
   let oldLineNum = 0
   let inHunk = false
+  // Lines the current hunk header still promises on each side. An empty
+  // line while both remain is a blank context line written without its
+  // leading space (diff.suppressBlankEmpty).
+  let oldLeft = 0
+  let newLeft = 0
 
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff --git ")) {
@@ -311,6 +316,8 @@ export function parseUnifiedDiff(diff) {
       currentHunk = null
       newLineNum = 0
       oldLineNum = 0
+      oldLeft = 0
+      newLeft = 0
       inHunk = false
       continue
     }
@@ -321,6 +328,9 @@ export function parseUnifiedDiff(diff) {
       if (match) newLineNum = Number.parseInt(match[1], 10)
       const oldMatch = /^@@ -(\d+)/.exec(raw)
       if (oldMatch) oldLineNum = Number.parseInt(oldMatch[1], 10)
+      const counts = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(raw)
+      oldLeft = counts ? Number.parseInt(counts[1] ?? "1", 10) : 0
+      newLeft = counts ? Number.parseInt(counts[2] ?? "1", 10) : 0
       currentHunk = { oldStart: oldLineNum, newStart: newLineNum, added: [], removed: [], entries: [] }
       currentFile.hunks.push(currentHunk)
       inHunk = true
@@ -338,6 +348,7 @@ export function parseUnifiedDiff(diff) {
       currentHunk.added.push({ line: entry.line, text: entry.text })
       currentHunk.entries.push({ kind: "added", text: entry.text, oldLine: null, newLine: entry.line })
       newLineNum++
+      newLeft--
     } else if (raw.startsWith("-")) {
       // removed; line numbers in the new file don't advance
       const text = raw.slice(1)
@@ -345,11 +356,14 @@ export function parseUnifiedDiff(diff) {
       currentHunk.removed.push({ line: oldLineNum, text })
       currentHunk.entries.push({ kind: "removed", text, oldLine: oldLineNum, newLine: newLineNum })
       oldLineNum++
-    } else if (raw.startsWith(" ")) {
+      oldLeft--
+    } else if (raw.startsWith(" ") || (raw === "" && oldLeft > 0 && newLeft > 0)) {
       currentFile.lines.push({ line: newLineNum, text: raw.slice(1), kind: "context" })
       currentHunk.entries.push({ kind: "context", text: raw.slice(1), oldLine: oldLineNum, newLine: newLineNum })
       newLineNum++
       oldLineNum++
+      oldLeft--
+      newLeft--
     }
   }
   return files.filter((f) => f.file)
@@ -2283,13 +2297,15 @@ async function hasHeadCommit(repoRoot) {
 }
 
 async function execDiff(repoRoot, args) {
-  const { stdout } = await execFileAsync("git", args, { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
+  const { stdout } = await execFileAsync("git", [...DIFF_CONFIG_ARGS, ...args], { cwd: repoRoot, maxBuffer: DIFF_MAX_BUFFER })
   return stdout
 }
 
 // Pin the diff format against local git config: rename detection on
 // (diff.renames), a/ and b/ prefixes (diff.noprefix, diff.mnemonicPrefix),
-// no color, no external diff driver.
+// no color, no external diff driver, and blank context lines written with
+// their leading space (diff.suppressBlankEmpty).
+const DIFF_CONFIG_ARGS = ["-c", "diff.suppressBlankEmpty=false"]
 const DIFF_FORMAT_ARGS = ["--unified=3", "--find-renames", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"]
 
 async function getLaneDiff(repoRoot, { base, head, lane }) {
