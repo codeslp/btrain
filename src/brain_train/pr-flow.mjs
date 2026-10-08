@@ -486,7 +486,11 @@ export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowCo
   }))
   const candidates = []
   const excluded = []
-  const sourceHost = (source) => new URL(normalizedSourceRef(source.sourceRef) || "https://invalid.local").host.toLowerCase()
+  // null for a missing or unparseable ref, so it never equals the PR's host.
+  const sourceHost = (source) => {
+    const ref = normalizedSourceRef(source.sourceRef)
+    return ref ? new URL(ref).host.toLowerCase() : null
+  }
   for (const candidate of selected) {
     const eventVersions = sourceSnapshots.filter((source) => source?.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
     const matchesIdentity = (source) => identity && source.repository === identity.repository && source.prNumber === pr.number
