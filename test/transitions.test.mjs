@@ -138,12 +138,50 @@ describe("lane transition contract", () => {
         input: { to: "repair-needed", reasonCode: "invalid-handoff" },
         runModel: (model) => model.update({ lane: "a", actor: "claude", status: "repair-needed", reason: "invalid-handoff" }),
       },
+      ...["in-progress", "resolved"].flatMap((status) => ["codex", "claude"].map((actor) => ({
+        name: `lane agent ${actor} updates metadata from ${status} (row 19)`,
+        state: { status, actor },
+        event: "handoff update --metadata",
+        input: { to: status },
+        runModel: (model) => model.metadata({ lane: "a", actor }),
+      }))),
+      {
+        name: "a third agent cannot update metadata (L12 is not designated)",
+        state: { status: "resolved", actor: "gemini" },
+        event: "handoff update --metadata",
+        input: { to: "resolved" },
+        runModel: (model) => model.metadata({ lane: "a", actor: "gemini" }),
+      },
+      // A --status equal to the current status is a row 19 identity update
+      // (that reading designated 2026-10-06): the runtime classifies it as a
+      // metadata update, and the contract model routes it through row 19.
+      ...["in-progress", "needs-review", "pr-review", "ready-to-merge", "repair-needed"].flatMap((status) =>
+        ["codex", "claude", "gemini"].map((actor) => ({
+          name: `${actor} re-writes --status ${status} on a ${status} lane (${actor === "gemini" ? "L12" : "row 19"})`,
+          state: { status, actor, prLinked: ["pr-review", "ready-to-merge"].includes(status) },
+          event: classifyTransitionEvent({ status }, status, status),
+          input: { to: status },
+          runModel: (model) => model.update({
+            lane: "a",
+            actor,
+            status,
+            reason: status === "repair-needed" ? "lock-mismatch" : undefined,
+          }),
+        })),
+      ),
       ...[false, true].map((disposed) => ({
         name: `lane agent resolves repair-needed with disposition=${disposed} (row 15 / L7)`,
         state: { status: "repair-needed", actor: "codex", disposed },
         event: "handoff resolve",
         input: { to: "resolved", prFlowEnabled: true, humanDisposition: disposed },
         runModel: (model) => model.resolve({ lane: "a", actor: "codex", final: false }),
+      })),
+      ...["codex", "claude"].map((actor) => ({
+        name: `lane agent ${actor} cannot resolve a resolved lane again (L14 is not designated)`,
+        state: { status: "resolved", actor },
+        event: "handoff resolve",
+        input: { to: "resolved", prFlowEnabled: true },
+        runModel: (model) => model.resolve({ lane: "a", actor, final: false }),
       })),
       ...[false, true].map((prLinked) => ({
         name: `system clears bots with prLinked=${prLinked}`,

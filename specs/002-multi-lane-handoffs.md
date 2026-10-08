@@ -4,7 +4,7 @@
 **Version**: 1.1.2
 **Author**: btrain
 **Date**: 2026-03-15
-**Updated**: 2026-09-01
+**Updated**: 2026-10-07
 
 The multi-lane lock baseline through v1.1.1 is implemented. Version 1.1.2 is the designated contract, including close-without-merge as terminal `resolved` and audited force-release. Both paths, and the `--final` review bypass, were repaired in PR #33 (merged 2026-09-01). The drift notes that remain inside the sections pinned by `specs/tla/LaneLock.tla` are kept verbatim until that model's pin is refreshed; read them as history, not as open drift.
 
@@ -132,7 +132,7 @@ Designated 2026-09-09 (spec 015 Phase B steps 3 and 4; open questions Q5 and Q8 
 - `handoff resolve` requires an active lane. Resolving an `idle` lane, or resolving a `resolved` lane again, is rejected (ledger findings 5 and L14).
 - A plain `handoff resolve` from `ready-for-pr`, `pr-review`, `ready-to-merge`, or from `changes-requested` with a linked PR is rejected. A PR-flow lane terminates only through its PR outcome, `btrain pr poll --apply` after the PR merges or is closed (ledger finding 4).
 - Either the owner or the reviewer may resolve an active lane that has not entered review or the PR flow and has no linked PR: `in-progress`, or `changes-requested` without a linked PR (spec 015 row 6; Q5, Option A).
-- `handoff update` that changes only metadata (no `--status`, `--files`, `--owner`, or `--reviewer`) is a lane-agent action: the owner or the reviewer (spec 015 row 19).
+- `handoff update` that changes only metadata (no `--status`, `--files`, `--owner`, or `--reviewer`) is a lane-agent action: the owner or the reviewer (spec 015 row 19). A `--status` equal to the lane's current status, without `--files`, `--owner`, or `--reviewer`, is the same metadata update (designated 2026-10-06): the lane keeps its status, locks, and repair assignment, and `--status repair-needed` on a `repair-needed` lane is not a new repair entry. `--status resolved` stays rejected on every lane; only `handoff resolve` enters `resolved`.
 - `handoff claim` requires an `idle` or `resolved` lane in single-handoff mode as well as in lane mode; a claim over an active handoff is rejected (spec 015 L13).
 - `handoff request-changes` is the recorded reviewer's action (spec 005 FR-8). An actor verified as someone other than the recorded reviewer is rejected, as today. With no recorded reviewer, or with no verifiable actor at all, the request is accepted with a `transition-advisory` (spec 015 L15) during the advisory window and rejected after it.
 

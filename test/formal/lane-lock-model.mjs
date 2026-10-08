@@ -56,9 +56,10 @@ function emptyLane() {
     // Whether a handoff file exists for the lane. patchHandoff crashes on a
     // never-claimed lane, so the implementation mirror needs this.
     fileExists: false,
-    // FR-18 tracking: every workflow-integrity reason seen (the
-    // implementation counts history per reason) and whether the contract
-    // now expects human escalation (same-reason re-entry).
+    // FR-18 tracking: the reasons of the task's repair-needed entries since
+    // the last claim (the implementation counts entries per reason) and
+    // whether the current repair expects human escalation (a same-reason
+    // re-entry).
     repairReasonsSeen: [],
     escalationExpected: false,
     // Canonical reason code carried by the lane (spec 005/006 taxonomies).
@@ -81,6 +82,8 @@ function emptyLane() {
     authors: [],
     // spec 002 Force-release override: TRUE while registry coverage for an
     // active lane is suspended (registry emptied outside a claim or rescope).
+    // Only the contract coverage invariant reads it; a re-acquire or a
+    // rescope to a new set leaves it set, so doctorRepair reads the registry.
     uncovered: false,
   }
 }
@@ -132,6 +135,7 @@ export class LaneLockModel {
   // In implementation mode the handoff locked-file record and the registry
   // can drift apart (unaudited release). patchHandoff rejects active-status
   // updates while they disagree; requestChanges and peer resolve re-acquire.
+  // doctorRepair reads the same disagreement in both modes.
   #coverageMismatch(laneId) {
     const s = this.lane(laneId)
     const expected = JSON.stringify([...s.lockedFiles].sort())
@@ -162,6 +166,21 @@ export class LaneLockModel {
     }
     s.prFeedbackEntered = false
     s.lastActor = actor
+  }
+
+  // spec 006 FR-18 (spec 015 Q4, Option A): one repair-needed entry against
+  // the task's reason memory, as resolveRepairAssignment counts entries since
+  // the last claim (countRepairEntries). The entry escalates to a human when
+  // an earlier entry of the task had the same reason; the first entry for a
+  // reason starts its count. The entry also starts a new repair, so an
+  // earlier repair's FR-29 disposition no longer counts (hasRepairDisposition
+  // reads only dispositions recorded after the latest entry). `update` in
+  // both modes and `doctorRepair` record their entries here; a same-status
+  // write is no entry in either mode.
+  #recordRepairEntry(s, reason) {
+    s.disposition = false
+    s.escalationExpected = s.repairReasonsSeen.includes(reason)
+    if (!s.escalationExpected) s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
   }
 
   // Mirrors inferPeerReviewer after spec 015 FR-9 (spec 016 WS3): a current
@@ -245,6 +264,36 @@ export class LaneLockModel {
     return this.#accept()
   }
 
+  // spec 015 row 19 (spec 002 update authority, designated 2026-09-09): an
+  // update with none of --status, --files, --owner, or --reviewer changes only
+  // metadata, in any status, `resolved` included. Contract: a lane agent acts;
+  // any other actor is L12, accepted with a `transition-advisory` record during
+  // the spec 015 FR-5 window. Status, locks, reason, repair records, and PR
+  // provenance are unchanged, but the update is a recorded workflow event, so
+  // its actor becomes the spec 006 FR-7 canonical actor. Implementation
+  // mirror: patchHandoff keeps the current status and reruns its lock guards,
+  // so an active lane must still be covered and hold its locked files
+  // (re-acquired), and an inactive lane drops both lock records.
+  metadata({ lane, actor }) {
+    const s = this.lane(lane)
+    if (this.mode === "implementation") {
+      if (!s.fileExists) return this.#reject("no-handoff-file")
+      if (ACTIVE_STATUSES.has(s.status)) {
+        if (this.#coverageMismatch(lane)) return this.#reject("lock-state-mismatch")
+        if (s.lockedFiles.length === 0) return this.#reject("active-status-needs-locks")
+        if (this.#conflicts(lane, s.lockedFiles)) return this.#reject("lock-conflict")
+        this.#setRegistry(lane, s.lockedFiles)
+      } else {
+        s.lockedFiles = []
+        this.#releaseRegistry(lane)
+      }
+    } else if (actor !== s.owner && actor !== s.reviewer) {
+      return this.#reject("metadata-update-requires-lane-agent")
+    }
+    s.lastActor = actor
+    return this.#accept()
+  }
+
   // Registry loss outside btrain (or an audited force-release): the handoff
   // keeps its paths, the registry entry disappears, coverage is suspended.
   dropRegistry({ lane }) {
@@ -257,29 +306,50 @@ export class LaneLockModel {
   // spec 006 FR-2 lock/status resync with the spec 014 rescope/resync split
   // (spec 015 row 17; Q2 Option B): `btrain doctor --repair` restores
   // coverage for the handoff's recorded set only while the lane is
-  // in-progress, changes-requested, or repair-needed. In needs-review and
-  // the PR flow it leaves coverage to the owner; the lane then fails the
-  // active-without-locks integrity check and enters repair-needed (spec 015
-  // row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
-  // lock-mismatch).
+  // in-progress, changes-requested, or repair-needed, and only when no other
+  // lane holds a lock that overlaps the set (row 17's guard; the doctor catches
+  // the acquireLocks conflict error). In needs-review and the PR flow it leaves
+  // coverage to the owner. A lane left without locks fails the
+  // active-without-locks integrity check, and the doctor writes repair-needed
+  // (spec 015 row 13 via watchdog-repair, spec 006 FR-4, FR-7, FR-18, reason
+  // lock-mismatch). Like the real doctor (buildLaneLockState and
+  // analyzeLaneIntegrity's lockCount check), it reads coverage from the
+  // registry, not from the `uncovered` flag: a re-acquire or a rescope to a
+  // new set restores coverage without clearing the flag.
   doctorRepair() {
     for (const [lane, s] of this.lanes) {
-      if (!s.uncovered) continue
-      if (["in-progress", "changes-requested", "repair-needed"].includes(s.status)) {
-        if (this.#conflicts(lane, s.lockedFiles)) continue
+      if (!ACTIVE_STATUSES.has(s.status)) continue
+      const resyncPermitted = ["in-progress", "changes-requested", "repair-needed"].includes(s.status)
+      if (
+        this.#coverageMismatch(lane)
+        && resyncPermitted
+        && s.lockedFiles.length > 0
+        && !this.#conflicts(lane, s.lockedFiles)
+      ) {
         this.#setRegistry(lane, s.lockedFiles)
         s.uncovered = false
         continue
       }
-      if (ACTIVE_STATUSES.has(s.status)) {
-        const reason = "lock-mismatch"
-        if (s.repairReasonsSeen.includes(reason)) s.escalationExpected = true
-        else s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
+      // The integrity check repairs only an active lane that holds no
+      // registry entry.
+      if (this.registryPaths(lane).length > 0) continue
+      const reason = "lock-mismatch"
+      if (s.status !== "repair-needed") {
+        this.#recordRepairEntry(s, reason)
         s.status = "repair-needed"
-        s.reasonCode = reason
         s.repairOwner = s.lastActor || s.owner
         s.prFeedbackEntered = false
+      } else if (this.mode === "contract") {
+        // A failed resync of a lane already repair-needed is guardian
+        // intervention that still cannot restore a healthy state, so spec
+        // 006 FR-18 escalates to a human (spec 015 row 13: the watchdog
+        // re-write computes the escalation; designated 2026-10-07). It is
+        // still no entry (FR-29), so the repair owner and disposition stay.
+        s.escalationExpected = true
       }
+      // Implementation mirror: the doctor's re-write keeps the recorded
+      // repair owner, escalation, and disposition (core.mjs repairMetadata).
+      s.reasonCode = reason
     }
     return this.#accept()
   }
@@ -318,11 +388,36 @@ export class LaneLockModel {
       if (s.lockedFiles.length === 0) return this.#reject("active-status-needs-locks")
       if (this.#conflicts(lane, s.lockedFiles)) return this.#reject("lock-conflict")
       this.#setRegistry(lane, s.lockedFiles)
+      // spec 006 FR-18 as patchHandoff applies it: only an entry from another
+      // status consults the reason memory; a write while the lane is already
+      // repair-needed keeps the recorded escalation.
+      const repairEntry = status === "repair-needed" && s.status !== "repair-needed"
       s.status = status
       if (status === "needs-review") this.#reassignReviewer(s, actor)
       this.#applyUpdateEffects(s, status, actor, reason)
+      if (repairEntry) this.#recordRepairEntry(s, s.reasonCode)
       if (pr) s.prNumber = String(pr)
       return this.#accept()
+    }
+
+    // spec 015 row 19 also covers a --status equal to the lane's current
+    // status (spec 002 Resolve, update, and claim authority, designated
+    // 2026-10-06): an identity update, not a transition.
+    // classifyTransitionEvent records it as `handoff update --metadata`, and
+    // spec 015 keeps identity updates accepted, so `metadata` decides: a lane
+    // agent acts, and any other agent is L12. Status, locks, and the repair
+    // records stay as they are, so a repair-needed re-write is no FR-18 entry
+    // (spec 006 FR-29; row 13's CLI source excludes repair-needed). Like
+    // patchHandoff, the write still records a supplied PR number and reason
+    // code (resolveReasonMetadata, which refuses a reason code on a status
+    // that takes none; the harness sends one only with repair-needed).
+    if (status === s.status) {
+      const result = this.metadata({ lane, actor })
+      if (result.ok) {
+        if (reason) s.reasonCode = reason
+        if (pr) s.prNumber = String(pr)
+      }
+      return result
     }
 
     if (status === "needs-review") {
@@ -367,19 +462,15 @@ export class LaneLockModel {
       // designation: re-entering for the same unresolved reason exhausts the
       // one-attempt budget, so the contract expects human escalation.
       if (!ACTIVE_STATUSES.has(s.status)) return this.#reject("repair-from-inactive")
-      if (reason && s.repairReasonsSeen.includes(reason)) {
-        s.escalationExpected = true
-      } else if (reason) {
-        s.repairReasonsSeen = [...s.repairReasonsSeen, reason]
-      }
       s.status = "repair-needed"
       this.#applyUpdateEffects(s, status, actor, reason)
+      this.#recordRepairEntry(s, s.reasonCode)
       return this.#accept()
     }
 
     if (status === "in-progress") {
       // spec 006 FR-15: the responsible actor clears repair-needed.
-      if (!["repair-needed", "in-progress", "changes-requested"].includes(s.status)) {
+      if (!["repair-needed", "changes-requested"].includes(s.status)) {
         return this.#reject("in-progress-from-invalid-status")
       }
       if (s.status === "repair-needed") {
@@ -423,10 +514,19 @@ export class LaneLockModel {
   resolve({ lane, actor, final }) {
     const s = this.lane(lane)
     // The implementation still resolves from statuses outside the designated
-    // review path, including idle. During L8's advisory window, implementation
-    // mode also accepts non-reviewer approval while contract mode rejects it.
+    // review path, including idle and resolved. During L8's advisory window,
+    // implementation mode also accepts non-reviewer approval while contract
+    // mode rejects it.
     if (this.mode === "contract" && s.status === "idle") {
       return this.#reject("resolve-from-idle")
+    }
+    // spec 002 CLI Commands resolve authority (designated 2026-09-09):
+    // resolving a `resolved` lane again is rejected for every actor, and
+    // LaneLock.tla has no resolve action from `resolved`. The implementation
+    // accepts it with a `transition-advisory: L14` record during the spec 015
+    // FR-5 window, so the implementation mirror still does.
+    if (this.mode === "contract" && s.status === "resolved") {
+      return this.#reject("resolve-from-resolved")
     }
 
     // spec 002 v1.1.2: `--final` is the merge path, not a review bypass —

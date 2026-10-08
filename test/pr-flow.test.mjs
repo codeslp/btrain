@@ -7,8 +7,11 @@ import os from "node:os"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
+import { createHash } from "node:crypto"
+import { createSourceSnapshot, appendSourceSnapshots, readEvidence } from "../src/brain_train/jev/evidence.mjs"
 import {
   applyPrStatusToHandoff,
+  buildPrSemanticReplayCandidates,
   classifyPrReviewState,
   classifyPrReviewStateWithSemantic,
   formatPrStatusSummary,
@@ -25,6 +28,9 @@ import {
   patchHandoff,
 } from "../src/brain_train/core.mjs"
 import { createSystemOneClient } from "../src/brain_train/system-one.mjs"
+import { freezeLabeledManifest, sourceSnapshotHashFor } from "../src/brain_train/jev/manifest.mjs"
+import { replayManifest } from "../src/brain_train/jev/replay.mjs"
+import { createDecisionFamily } from "../src/brain_train/jev/decision.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -341,6 +347,314 @@ describe("PR review flow classification", () => {
     }
   }
 
+  it("reconciles current-head semantic candidates with exact source evidence for offline replay", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null,
+    }
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+    assert.deepEqual(result.excluded, [])
+    assert.equal(result.candidates.length, 1)
+    assert.deepEqual(result.candidates[0], {
+      sourceId: snapshot.id, sourceRef: snapshot.sourceRef, sourceRefs: [snapshot.sourceRef],
+      sourceHash: snapshot.sourceHash, sourceContent: comment.body, baseline: "uncertain",
+      eligible: true, privacyClass: "private", callIndex: 0, reviewedCommit: input.pr.headRefOid,
+      headEvidence: "event-head",
+    })
+    const equivalent = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [{ ...snapshot, eventHead: snapshot.eventHead.toUpperCase() }] })
+    assert.deepEqual(equivalent.excluded, [])
+    assert.equal(equivalent.candidates.length, 1)
+    const oldVersion = { ...snapshot, id: "c".repeat(64), sourceHash: createHash("sha256").update("previous comment body").digest("hex") }
+    const edited = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [oldVersion, snapshot] })
+    assert.deepEqual(edited.excluded, [{ sourceId: oldVersion.id, reason: "not-current-semantic-candidate" }])
+    assert.deepEqual(edited.candidates, result.candidates)
+  })
+
+  it("does not let foreign source identities make a valid snapshot ambiguous", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = input.pr.url
+    const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null }
+    for (const changes of [{ sourceRef: "https://ghe.internal/o/r/pull/12" }, { repository: "other/repo" }, { prNumber: 13 }]) {
+      const foreign = { ...snapshot, ...changes, id: "c".repeat(64) }
+      for (const sourceSnapshots of [[foreign, snapshot], [snapshot, foreign]]) {
+        const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots })
+        assert.equal(result.candidates.length, 1)
+        assert.equal(result.candidates[0].sourceId, snapshot.id)
+        assert.deepEqual(result.excluded, [{ sourceId: foreign.id, reason: "source-identity-mismatch" }])
+      }
+    }
+  })
+
+  it("captures persists and replays same-event snapshots on different hosts without losing valid evidence", async () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const raw = input.rawComments.issueComments[0]
+    raw.html_url = input.pr.url
+    const comment = { surface: "issue", id: raw.id, author: raw.user.login, body: raw.body,
+      at: raw.created_at, updatedAt: raw.created_at, url: raw.html_url }
+    const snapshot = (url) => createSourceSnapshot({ repository: "o/r", prNumber: 12, laneId: "a",
+      comment: { ...comment, url }, capturedAt: "2026-09-20T20:05:00Z" })
+    const foreign = snapshot("https://ghe.internal/o/r/pull/12")
+    const valid = snapshot(comment.url)
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-pr-host-composition-"))
+    try {
+      assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 2)
+      assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 0)
+      const sourceSnapshots = (await readEvidence(root)).snapshots
+      assert.equal(sourceSnapshots.length, 2)
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [valid.id])
+      assert.deepEqual(result.excluded, [{ sourceId: foreign.id, reason: "source-identity-mismatch" }])
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
+  it("rejects frozen comments from another GitHub host with the same repository and PR", () => {
+    for (const host of ["ghe.internal", "evilgithub.com"]) {
+      const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+      input.pr.url = "https://github.com/o/r/pull/12"
+      const comment = input.rawComments.issueComments[0]
+      comment.html_url = `https://${host}/o/r/pull/12#issuecomment-100`
+      const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+        sourceRef: `https://${host}/o/r/pull/12`, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+        eventHead: input.pr.headRefOid, reviewedCommit: null }
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+      assert.deepEqual(result.candidates, [])
+      assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "source-identity-mismatch" }])
+    }
+  })
+
+  it("labels leftover snapshots from another GitHub host as an identity mismatch, not stale", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = input.pr.url
+    const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null }
+    const foreignHost = { ...snapshot, eventId: "999", sourceRef: "https://ghe.internal/o/r/pull/12" }
+    for (const leftover of [
+      { ...foreignHost, id: "c".repeat(64) },
+      { ...foreignHost, id: "d".repeat(64), eventHead: "f".repeat(40) },
+      { ...foreignHost, id: "e".repeat(64), eventHead: "unknown" },
+      { ...foreignHost, id: "1".repeat(64), eventHead: "not-a-sha" },
+      { ...foreignHost, id: "2".repeat(64), reviewedCommit: "f".repeat(40) },
+      { ...foreignHost, id: "3".repeat(64), sourceRef: "https://github.com:8443/o/r/pull/12" },
+      { ...foreignHost, id: "4".repeat(64), sourceRef: "not a url" },
+      { ...foreignHost, id: "5".repeat(64), sourceRef: undefined },
+      { ...foreignHost, id: "6".repeat(64), sourceRef: "https://evilgithub.com/o/r/pull/12" },
+    ]) {
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, leftover] })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [snapshot.id])
+      assert.deepEqual(result.excluded, [{ sourceId: leftover.id, reason: "source-identity-mismatch" }])
+    }
+  })
+
+  it("labels leftover snapshots by the PR's own host when the PR lives on GitHub Enterprise", () => {
+    for (const host of ["ghe.internal", "invalid.local"]) {
+      const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+      input.pr.url = `https://${host}/o/r/pull/12`
+      const comment = input.rawComments.issueComments[0]
+      comment.html_url = input.pr.url
+      const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+        sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+        eventHead: input.pr.headRefOid, reviewedCommit: null }
+      const sameHost = { ...snapshot, id: "c".repeat(64), eventId: "999" }
+      const github = { ...sameHost, id: "d".repeat(64), sourceRef: "https://github.com/o/r/pull/12" }
+      const malformed = { ...sameHost, id: "e".repeat(64), sourceRef: "not a url" }
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, sameHost, github, malformed] })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [snapshot.id])
+      assert.deepEqual(result.excluded, [
+        { sourceId: sameHost.id, reason: "not-current-semantic-candidate" },
+        { sourceId: github.id, reason: "source-identity-mismatch" },
+        { sourceId: malformed.id, reason: "source-identity-mismatch" },
+      ])
+    }
+  })
+
+  it("retains frozen semantic candidates after the PR merges, closes, or returns to draft", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null,
+    }
+
+    for (const [label, changes] of [
+      ["MERGED", { state: "MERGED" }],
+      ["CLOSED", { state: "CLOSED" }],
+      ["DRAFT", { draft: true }],
+    ]) {
+      const result = buildPrSemanticReplayCandidates({
+        ...input, pr: { ...input.pr, ...changes }, sourceSnapshots: [snapshot],
+      })
+      assert.deepEqual(result.excluded, [])
+      assert.equal(result.candidates.length, 1, `${label} PR should retain its captured candidate`)
+      assert.equal(result.candidates[0].sourceId, snapshot.id)
+    }
+  })
+
+  it("reports a frozen review as stale when its comment is filtered by the current head", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.body = comment.body.replace(input.pr.headRefOid.slice(0, 10), "b".repeat(10))
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: "unknown", reviewedCommit: "b".repeat(40),
+    }
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+    assert.deepEqual(result.candidates, [])
+    assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "stale-reviewed-commit" }])
+  })
+
+  it("counts ambiguous frozen snapshots once each with the ambiguity reason", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12",
+      sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid, reviewedCommit: null,
+    }
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, { ...snapshot, id: "c".repeat(64) }] })
+    assert.deepEqual(result.candidates, [])
+    assert.deepEqual(result.excluded, [
+      { sourceId: snapshot.id, reason: "ambiguous-source-snapshot" },
+      { sourceId: "c".repeat(64), reason: "ambiguous-source-snapshot" },
+    ])
+    const duplicate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, { ...snapshot }] })
+    assert.deepEqual(duplicate.excluded, [{ sourceId: snapshot.id, reason: "ambiguous-source-snapshot" }])
+  })
+
+
+
+  it("uses a full reviewed-commit attestation without claiming an event-time head", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://api.github.com/repos/o/r/pulls/12"
+    input.pr.html_url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.body = comment.body.replace(input.pr.headRefOid.slice(0, 10), input.pr.headRefOid)
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
+      captureHead: input.pr.headRefOid,
+    })
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+    assert.deepEqual(result.excluded, [])
+    assert.equal(result.candidates[0].headEvidence, "reviewed-commit")
+    assert.equal(result.candidates[0].callIndex, 0)
+    assert.equal(snapshot.eventHead, "unknown")
+    assert.equal(snapshot.reviewedCommit, input.pr.headRefOid)
+    const restOnly = buildPrSemanticReplayCandidates({ ...input, pr: { ...input.pr, html_url: null }, sourceSnapshots: [snapshot] })
+    assert.equal(restOnly.candidates.length, 1)
+    const unverified = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [{ ...snapshot, reviewedCommit: null }] })
+    assert.deepEqual(unverified.excluded, [{ sourceId: snapshot.id, reason: "unknown-event-head" }])
+    const edited = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: "2026-09-20T20:00:30Z", url: comment.html_url, body: comment.body },
+    })
+    assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: edited.id, reason: "unknown-event-head" }])
+  })
+
+  it("uses a frozen unedited short reviewed-commit attestation for normal bot comments", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.html_url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const source = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
+    })
+    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] })
+    assert.equal(source.eventHead, "unknown")
+    assert.equal(source.reviewedCommit, input.pr.headRefOid.slice(0, 10))
+    assert.equal(result.candidates.length, 1)
+    assert.equal(result.candidates[0].headEvidence, "reviewed-commit-prefix")
+    assert.notEqual(sourceSnapshotHashFor([source]), sourceSnapshotHashFor([{ ...source, reviewedCommit: "b".repeat(10) }]))
+    const edited = { ...source, updatedAt: "2026-09-20T20:00:30Z" }
+    assert.deepEqual(buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [edited] }).excluded, [{ sourceId: source.id, reason: "stale-reviewed-commit" }])
+  })
+
+  it("requires a full current PR head before accepting a short attestation", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.", "a".repeat(10))
+    const comment = input.rawComments.issueComments[0]
+    const source = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: "https://github.com/o/r/pull/12#issuecomment-100", body: comment.body },
+    })
+    assert.throws(() => buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }), /full PR head/)
+  })
+
+  it("freezes the captured reviewed commit before replaying a PR candidate", async () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.html_url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.body = comment.body.replace(input.pr.headRefOid.slice(0, 10), input.pr.headRefOid)
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const source = createSourceSnapshot({
+      repository: "o/r", prNumber: 12, laneId: "a", capturedAt: "2026-09-20T20:01:00Z",
+      comment: { surface: "issue", id: comment.id, author: comment.user.login, at: comment.created_at, updatedAt: comment.created_at, url: comment.html_url, body: comment.body },
+    })
+    const candidate = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [source] }).candidates[0]
+    const family = createDecisionFamily({ id: "pr-signal", questionVersion: "1", policyVersion: "1", policyConfig: { evaluation: { baselineId: "deterministic", thresholds: { feedback: 0.8 } } }, choices: ["clear", "feedback", "unavailable", "uncertain"], privacyClass: "private", allowedActions: ["flag"], threshold: 0.8, inputBuilder: (row) => ({ text: row.text }), actionPolicy: (choice) => choice === "feedback" ? "flag" : null, fallback: (baseline) => baseline })
+    const labels = [...family.choices]
+    const manifest = freezeLabeledManifest({
+      sources: [source],
+      cases: [{ sourceId: source.id, repository: "o/r", prNumber: 12, templateGroup: source.templateGroup, split: "test", label: "uncertain", baseline: "uncertain", eligible: true, privacyClass: "private", callIndex: 0, annotations: [{ by: "one", label: "uncertain" }, { by: "two", label: "uncertain" }], adjudication: { by: "three", label: "uncertain", reason: "confirmed" } }],
+      pins: { family: family.id, questionVersion: family.questionVersion, policyHash: family.policyHash, model: "local", codeRevision: "a".repeat(40), baseline: "deterministic", thresholds: { feedback: 0.8 } },
+      labels,
+    })
+    assert.equal(manifest.sources[0].reviewedCommit, input.pr.headRefOid)
+    assert.notEqual(sourceSnapshotHashFor([{ ...manifest.sources[0], reviewedCommit: "c".repeat(40) }]), manifest.sourceSnapshotHash)
+    const provider = { localOnly: true, decide: async () => ({ ok: true, model: "local", answers: { signal: { choice: "uncertain", probabilities: { clear: 0, feedback: 0, unavailable: 0, uncertain: 1 } } } }) }
+    const replay = await replayManifest({ manifest, family, candidates: { [source.id]: candidate }, provider })
+    assert.equal(replay.splits.test.counts.attempted, 1)
+  })
+
+  it("excludes unknown, stale, and changed source evidence before offline replay", () => {
+    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+    input.pr.url = "https://github.com/o/r/pull/12"
+    const comment = input.rawComments.issueComments[0]
+    comment.html_url = "https://github.com/o/r/pull/12#issuecomment-100"
+    const snapshot = {
+      id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+      sourceRef: "https://github.com/o/r/pull/12", sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      eventHead: input.pr.headRefOid,
+    }
+    for (const [changed, reason] of [
+      [{ ...snapshot, eventHead: "unknown" }, "unknown-event-head"],
+      [{ ...snapshot, eventHead: "c".repeat(40) }, "stale-event-head"],
+      [{ ...snapshot, reviewedCommit: "c".repeat(40) }, "stale-reviewed-commit"],
+      [{ ...snapshot, sourceRef: "https://github.com/o/r/pull/other" }, "source-ref-mismatch"],
+      [{ ...snapshot, sourceHash: "d".repeat(64) }, "source-hash-mismatch"],
+      [{ ...snapshot, repository: "other/repo" }, "source-identity-mismatch"],
+    ]) {
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [changed] })
+      assert.deepEqual(result.candidates, [])
+      assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason }])
+    }
+  })
+
   it("keeps a typed clear result advisory on otherwise ambiguous current-head bot text", async () => {
     const input = ambiguousCurrentHeadComment("Everything checks out on this revision; it is ready to ship.")
     assert.equal(classifyPrReviewState(input).overall, "waiting")
@@ -477,6 +791,23 @@ describe("PR review flow classification", () => {
     assert.equal(status.overall, "waiting")
     assert.equal(status.semantic.decisions[0].outcome, "invalid-answer")
     assert.equal(status.semantic.appliedCount, 0)
+  })
+
+  it("records the full head SHA, not the comment's short commit prefix, on semantic decisions", async () => {
+    const input = ambiguousCurrentHeadComment("One issue remains in the current revision.")
+    const status = await classifyPrReviewStateWithSemantic(input, {
+      mode: "assist",
+      decide: async () => ({
+        ok: true,
+        model: "jev-1.13.0",
+        answers: {
+          signal: { type: "choice", choice: "feedback", confidence: 0.99, probabilities: { clear: 0, feedback: 0.99, unavailable: 0, uncertain: 0.01 } },
+          hasVerdict: { type: "noul", noul: 0.99 },
+        },
+        latencyMs: 10,
+      }),
+    })
+    assert.equal(status.semantic.decisions[0].reviewedCommit, input.pr.headRefOid)
   })
 
   it("does not apply low-confidence feedback pluralities", async () => {

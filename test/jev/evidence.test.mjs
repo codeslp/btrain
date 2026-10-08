@@ -1,0 +1,162 @@
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { createHash } from "node:crypto"
+import { createSourceSnapshot, appendSourceSnapshots, appendSourceOutcome, readEvidence } from "../../src/brain_train/jev/evidence.mjs"
+
+describe("Jev source evidence", () => {
+  const comment = { surface: "review", id: 42, author: "review-bot", body: "Fix the test", url: "https://example.test/42", at: "2026-09-01T10:00:00Z", state: "CHANGES_REQUESTED", reviewedCommit: "a".repeat(40) }
+
+  it("does not turn a later capture head into an event-time head", () => {
+    const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z", captureHead: "b".repeat(40) })
+    assert.equal(row.eventHead, "unknown")
+    assert.equal(row.captureHead, "b".repeat(40))
+    assert.equal(row.reviewedCommit, "a".repeat(40))
+    assert.equal(row.body, undefined)
+    assert.equal(row.sourceHash.length, 64)
+    const sameTemplate = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "a", comment: { ...comment, id: 43, body: "Fix the test" }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(row.templateGroup, sameTemplate.templateGroup)
+    const sanitized = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...comment, url: "https://user:pass@example.test/42?token=secret#part" }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(sanitized.sourceRef, "https://example.test/42")
+  })
+
+  it("groups review-request templates across volatile lane and head markers", () => {
+    const base = { ...comment, body: "Please review.\n\n<!-- btrain-pr-review bot=codex lane=a head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->" }
+    const first = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: base, capturedAt: "2026-09-01T10:05:00Z" })
+    const second = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "b", comment: { ...base, id: 43, body: "Please review.\n\n<!-- btrain-pr-review bot=codex lane=b head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->" }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(first.templateGroup, second.templateGroup)
+    assert.notEqual(first.sourceHash, second.sourceHash)
+  })
+
+  it("captures an unedited issue comment's reviewed-commit attestation", () => {
+    const at = "2026-09-01T10:00:00Z"
+    const issue = { ...comment, surface: "issue", at, updatedAt: at, reviewedCommit: null, body: `Review done. **Reviewed commit:** \`${"c".repeat(40)}\`` }
+    const captured = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: issue, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(captured.reviewedCommit, "c".repeat(40))
+    assert.equal(captured.updatedAt, at)
+    const short = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...issue, body: `Review done. **Reviewed commit:** \`${"c".repeat(10)}\`` }, capturedAt: "2026-09-01T10:05:00Z" })
+    assert.equal(short.reviewedCommit, "c".repeat(10))
+    for (const changed of [
+      { updatedAt: "2026-09-01T10:01:00Z" },
+      { updatedAt: null },
+      { body: `Review done. **Reviewed commit:** \`${"c".repeat(7)}\`` },
+      { body: `Review done. **Reviewed commit:** \`${"c".repeat(9)}\`` },
+    ]) {
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...issue, ...changed }, capturedAt: "2026-09-01T10:05:00Z" })
+      assert.equal(row.reviewedCommit, null)
+    }
+  })
+
+  it("appends each source once and records later outcomes without rewriting the source", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-evidence-"))
+    try {
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      assert.equal(await appendSourceSnapshots(root, [row, row]), 1)
+      assert.equal(await appendSourceSnapshots(root, [row]), 0)
+      await appendSourceOutcome(root, { sourceId: row.id, outcome: "repaired", observedAt: "2026-09-02T10:00:00Z", evidenceRef: "https://example.test/repair" })
+      const evidence = await readEvidence(root)
+      assert.equal(evidence.snapshots.length, 1)
+      assert.deepEqual(evidence.outcomes.map((entry) => entry.outcome), ["pending", "repaired"])
+      assert.equal(evidence.snapshots[0].eventHead, "unknown")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("deduplicates concurrent snapshot appends", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-concurrent-"))
+    try {
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      const counts = await Promise.all(Array.from({ length: 12 }, () => appendSourceSnapshots(root, [row])))
+      assert.equal(counts.reduce((sum, count) => sum + count, 0), 1)
+      assert.equal((await readEvidence(root)).snapshots.length, 1)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps hosts distinct while deduplicating unchanged schema 1 and 2 recaptures", async () => {
+    for (const schemaVersion of [1, 2]) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "jev-host-identity-"))
+      try {
+        const snapshot = (url) => createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a",
+          comment: { ...comment, url }, capturedAt: "2026-09-01T10:05:00Z" })
+        const foreign = snapshot("https://ghe.internal/42")
+        const valid = snapshot("https://github.com/42")
+        assert.notEqual(foreign.id, valid.id)
+        const legacy = { ...foreign, schemaVersion, id: "a".repeat(64) }
+        await appendSourceSnapshots(root, [legacy])
+        assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 1)
+        assert.equal(await appendSourceSnapshots(root, [foreign, valid]), 0)
+        assert.deepEqual(new Set((await readEvidence(root)).snapshots.map((row) => row.id)), new Set([legacy.id, valid.id]))
+      } finally { await fs.rm(root, { recursive: true, force: true }) }
+    }
+  })
+
+  it("captures edited comment versions separately while deduplicating repeated observations", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-edits-"))
+    const snapshot = (current, capturedAt) => createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: current, capturedAt })
+    try {
+      const first = snapshot(comment, "2026-09-01T10:05:00Z")
+      const next = snapshot({ ...comment, body: "Fix a different test", updatedAt: "2026-09-01T11:00:00Z" }, "2026-09-01T11:05:00Z")
+      assert.notEqual(first.id, next.id)
+      assert.equal(next.id, snapshot({ ...comment, body: "Fix a different test", updatedAt: "2026-09-01T11:00:00Z" }, "2026-09-02T11:05:00Z").id)
+      assert.equal(await appendSourceSnapshots(root, [first, next]), 2)
+      assert.equal(await appendSourceSnapshots(root, [first, next]), 0)
+      assert.equal((await readEvidence(root)).snapshots.length, 2)
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
+  it("continues capture after an orphaned snapshot lock", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-orphan-"))
+    try {
+      const directory = path.join(root, ".btrain", "jev", "evidence")
+      await fs.mkdir(directory, { recursive: true })
+      await fs.writeFile(path.join(directory, "source-snapshots.jsonl.lock"), "orphaned by crashed process")
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      assert.equal(await appendSourceSnapshots(root, [row]), 1)
+      assert.deepEqual((await readEvidence(root)).snapshots.map((source) => source.id), [row.id])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("reads legacy snapshots and ignores a crashed unpublished write", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-legacy-"))
+    try {
+      const directory = path.join(root, ".btrain", "jev", "evidence")
+      const snapshotDirectory = path.join(directory, "source-snapshots")
+      await fs.mkdir(snapshotDirectory, { recursive: true })
+      const old = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      const recaptured = { ...old }
+      old.schemaVersion = 1
+      old.id = createHash("sha256").update(`o/r/pull/7/${comment.surface}/${comment.id}`).digest("hex")
+      const next = createSourceSnapshot({ repository: "o/r", prNumber: 8, laneId: "a", comment, capturedAt: "2026-09-01T10:06:00Z" })
+      await fs.writeFile(path.join(directory, "source-snapshots.jsonl"), `${JSON.stringify(old)}\n`)
+      await fs.writeFile(path.join(snapshotDirectory, ".unfinished.tmp"), "incomplete")
+      assert.equal(await appendSourceSnapshots(root, [old, recaptured, next]), 1)
+      assert.deepEqual(new Set((await readEvidence(root)).snapshots.map((source) => source.id)), new Set([old.id, next.id]))
+      await appendSourceOutcome(root, { sourceId: next.id, outcome: "repaired", observedAt: "2026-09-02T10:00:00Z", evidenceRef: "https://example.test/repair" })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+
+  it("removes credentials from outcome evidence references and rejects non-HTTP URLs", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-jev-outcome-ref-"))
+    try {
+      const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment, capturedAt: "2026-09-01T10:05:00Z" })
+      await appendSourceSnapshots(root, [row])
+      const outcome = { sourceId: row.id, outcome: "repaired", observedAt: "2026-09-02T10:00:00Z" }
+      await appendSourceOutcome(root, { ...outcome, evidenceRef: "https://user:pass@example.test/repair?token=secret#part" })
+      assert.equal((await readEvidence(root)).outcomes.at(-1).evidenceRef, "https://example.test/repair")
+      await assert.rejects(() => appendSourceOutcome(root, { ...outcome, evidenceRef: "file:///private/secret" }), /HTTP URL/)
+      assert.equal((await readEvidence(root)).outcomes.length, 2)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+})

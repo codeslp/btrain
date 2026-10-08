@@ -27,7 +27,7 @@ import {
 } from "./handoff/pr-comments.mjs"
 import {
   createSystemOneClient,
-  readSystemOneRuntimeConfig,
+  loadSystemOneRuntimeConfig,
 } from "./system-one.mjs"
 
 const execFileAsync = promisify(execFile)
@@ -426,9 +426,129 @@ function semanticCandidatesForBot({ bot, headSha, rawComments, baselineState }) 
       sourceId: selected.item.id || null,
       body: String(selected.item.body || ""),
       url: selected.item.html_url || selected.item.url || "",
+      // Selection already requires the comment to attest headSha; keep the full SHA.
       reviewedCommit: headSha,
       at: selected.item.submitted_at || selected.item.created_at || selected.item.updated_at || "",
     }))
+}
+
+function sourceRepository(pr) {
+  for (const value of [pr?.html_url, pr?.url]) {
+    if (typeof value !== "string") continue
+    try {
+      const url = new URL(value)
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) continue
+      const parts = url.pathname.split("/").filter(Boolean)
+      if (parts.length === 4 && parts[2] === "pull" && parts[3] === String(pr?.number)) return { repository: `${parts[0]}/${parts[1]}`, host: url.host.toLowerCase() }
+      if (parts.length === 5 && parts[0] === "repos" && parts[3] === "pulls" && parts[4] === String(pr?.number)) return { repository: `${parts[1]}/${parts[2]}`, host: url.host.toLowerCase() === "api.github.com" ? "github.com" : url.host.toLowerCase() }
+    } catch { /* Try the other GitHub URL shape. */ }
+  }
+  return null
+}
+
+function normalizedSourceRef(value) {
+  if (typeof value !== "string") return null
+  try {
+    const url = new URL(value)
+    if (!["https:", "http:"].includes(url.protocol)) return null
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.hash = ""
+    return url.toString()
+  } catch { return null }
+}
+
+function frozenReviewedCommitMatches(source, body, headSha) {
+  const attested = source.reviewedCommit
+  if (!commitMatches(attested, headSha)) return false
+  if (attested.length === 40) return true
+  return source.surface === "issue"
+    && source.eventAt && source.updatedAt
+    && Date.parse(source.eventAt) === Date.parse(source.updatedAt)
+    && extractReviewedCommit(body).toLowerCase() === attested.toLowerCase()
+}
+
+// Build source-bound cases for offline replay. A captured full reviewed-commit
+// attestation can prove the evaluated commit without claiming an event-time head.
+// A later polling-time head alone never makes an unknown event head current.
+export function buildPrSemanticReplayCandidates({ pr, rawComments = {}, prFlowConfig, sourceSnapshots }) {
+  if (!Array.isArray(sourceSnapshots)) throw new Error("Source snapshots are required for PR replay")
+  const baseline = classifyPrReviewState({ pr, rawComments, prFlowConfig })
+  const headSha = baseline.pr.headSha
+  if (!/^[a-f0-9]{40}$/i.test(headSha || "")) throw new Error("A full PR head SHA is required for offline replay")
+  const identity = sourceRepository(pr)
+  const repository = identity?.repository
+  const bots = (prFlowConfig.requiredBots || []).map((id) => prFlowConfig.bots[id]).filter(Boolean)
+  const selected = bots.flatMap((bot) => semanticCandidatesForBot({
+    bot, headSha, rawComments,
+    baselineState: baseline.bots.find((result) => result.id === bot.id)?.state,
+  }))
+  const candidates = []
+  const excluded = []
+  // null for a missing or unparseable ref, so it never equals the PR's host.
+  const sourceHost = (source) => {
+    const ref = normalizedSourceRef(source.sourceRef)
+    return ref ? new URL(ref).host.toLowerCase() : null
+  }
+  for (const candidate of selected) {
+    const eventVersions = sourceSnapshots.filter((source) => source?.surface === candidate.surface && String(source.eventId) === String(candidate.sourceId))
+    const matchesIdentity = (source) => identity && source.repository === identity.repository && source.prNumber === pr.number
+      && sourceHost(source) === identity.host
+      && typeof source.id === "string" && /^[a-f0-9]{64}$/.test(source.id)
+    const versions = eventVersions.filter(matchesIdentity)
+    excluded.push(...[...new Set(eventVersions.filter((source) => !matchesIdentity(source)).map((source) => source.id || candidate.sourceId))]
+      .map((sourceId) => ({ sourceId, reason: "source-identity-mismatch" })))
+    if (eventVersions.length && !versions.length) continue
+    const bodyHash = crypto.createHash("sha256").update(candidate.body).digest("hex")
+    const exactVersions = versions.filter((source) => source.sourceHash === bodyHash)
+    const matches = exactVersions.length ? exactVersions : versions
+    if (matches.length > 1) {
+      excluded.push(...[...new Set(matches.map((source) => source.id))].map((sourceId) => ({ sourceId, reason: "ambiguous-source-snapshot" })))
+      continue
+    }
+    const source = matches[0] || null
+    const sourceId = source?.id || candidate.sourceId
+    const candidateSourceRef = normalizedSourceRef(candidate.url)
+    let reason = null
+    if (!source) reason = "missing-source-snapshot"
+    else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
+    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead.toLowerCase() !== headSha.toLowerCase()) reason = "stale-event-head"
+    else if (source.reviewedCommit && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "stale-reviewed-commit"
+    else if ((!source.eventHead || source.eventHead === "unknown") && !frozenReviewedCommitMatches(source, candidate.body, headSha)) reason = "unknown-event-head"
+    else if (!candidateSourceRef || candidateSourceRef !== source.sourceRef) reason = "source-ref-mismatch"
+    else if (crypto.createHash("sha256").update(candidate.body).digest("hex") !== source.sourceHash) reason = "source-hash-mismatch"
+    if (reason) {
+      excluded.push({ sourceId, reason })
+      continue
+    }
+    candidates.push({
+      sourceId: source.id,
+      sourceRef: source.sourceRef,
+      sourceRefs: [source.sourceRef],
+      sourceHash: source.sourceHash,
+      sourceContent: candidate.body,
+      baseline: "uncertain",
+      eligible: true,
+      privacyClass: "private",
+      callIndex: 0,
+      reviewedCommit: headSha,
+      headEvidence: source.eventHead?.toLowerCase() === headSha.toLowerCase() ? "event-head" : source.reviewedCommit.length === 40 ? "reviewed-commit" : "reviewed-commit-prefix",
+    })
+  }
+  const accounted = new Set([...candidates, ...excluded].map((entry) => entry.sourceId))
+  for (const source of sourceSnapshots) {
+    if (!source || source.repository !== repository || source.prNumber !== pr.number || !source.id || accounted.has(source.id)) continue
+    let reason = "not-current-semantic-candidate"
+    if (sourceHost(source) !== identity?.host) reason = "source-identity-mismatch"
+    else if (source.eventHead && source.eventHead !== "unknown" && !/^[a-f0-9]{40}$/i.test(source.eventHead)) reason = "invalid-event-head"
+    else if (source.eventHead && source.eventHead !== "unknown" && source.eventHead.toLowerCase() !== headSha.toLowerCase()) reason = "stale-event-head"
+    else if (source.reviewedCommit && !commitMatches(source.reviewedCommit, headSha)) reason = "stale-reviewed-commit"
+    else if ((!source.eventHead || source.eventHead === "unknown") && !source.reviewedCommit) reason = "unknown-event-head"
+    excluded.push({ sourceId: source.id, reason })
+    accounted.add(source.id)
+  }
+  return { candidates, excluded }
 }
 
 function noulProbability(answer) {
@@ -764,7 +884,7 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
     cwd: repoRoot,
   })
   const input = { pr, rawComments, prFlowConfig }
-  const semanticConfig = readSystemOneRuntimeConfig(process.env)
+  const semanticConfig = await loadSystemOneRuntimeConfig(process.env)
   if (semanticConfig.mode === "off" && semanticConfig.reason === "mode-off") {
     return classifyPrReviewState(input)
   }

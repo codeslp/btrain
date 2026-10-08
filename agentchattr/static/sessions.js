@@ -97,11 +97,18 @@ window._messageRenderers['session_draft'] = function (el, msg) {
             </div>`;
     } else {
         const phases = tmpl.phases || [];
+        const rolePill = r => `<span class="session-draft-phase-participant-pill">${window.escapeHtml(r)}</span>`;
         const phasesDetailHtml = phases.map((p, i) => {
-            const parts = (p.participants || [])
-                .map(r => `<span class="session-draft-phase-participant-pill">${window.escapeHtml(r)}</span>`)
-                .join('');
+            const parts = (p.participants || []).map(rolePill).join('');
             const promptText = p.prompt ? window.escapeHtml(p.prompt) : '';
+            // A role prompt replaces the phase prompt for one participant, so
+            // the human approving the draft must see each one, by role.
+            const rolePrompts = p.role_prompts && typeof p.role_prompts === 'object' && !Array.isArray(p.role_prompts)
+                ? Object.entries(p.role_prompts)
+                : [];
+            const rolePromptsHtml = rolePrompts
+                .map(([role, text]) => `<div class="session-draft-phase-prompt">${rolePill(role)} ${window.escapeHtml(text)}</div>`)
+                .join('');
             return `<div class="session-draft-phase-detail">
                 <span class="session-draft-phase-num">${i + 1}</span>
                 <div class="session-draft-phase-copy">
@@ -110,9 +117,20 @@ window._messageRenderers['session_draft'] = function (el, msg) {
                         ${parts ? `<span class="session-draft-phase-participants">${parts}</span>` : ''}
                     </div>
                     ${promptText ? `<div class="session-draft-phase-prompt">${promptText}</div>` : ''}
+                    ${rolePromptsHtml}
                 </div>
             </div>`;
         }).join('');
+        // Casting rules the server will enforce, shown before anyone runs the draft.
+        const distinctHtml = _distinctGroups(tmpl).map(group => `<div class="session-draft-phase-detail">
+                <span class="session-draft-phase-num">&ne;</span>
+                <div class="session-draft-phase-copy">
+                    <div class="session-draft-phase-top">
+                        <span class="session-draft-phase-name">Different agents</span>
+                        <span class="session-draft-phase-participants">${group.map(rolePill).join('')}</span>
+                    </div>
+                </div>
+            </div>`).join('');
         const metaLabel = revision > 1 ? `rev ${revision}` : '';
         el.dataset.draftTemplate = JSON.stringify(tmpl);
         el.dataset.draftMsgId = msg.id;
@@ -127,6 +145,7 @@ window._messageRenderers['session_draft'] = function (el, msg) {
                 ${tmpl.description ? `<div class="proposal-body session-proposal-desc">${window.escapeHtml(tmpl.description)}</div>` : ''}
                 <div class="session-draft-details">
                     ${phasesDetailHtml}
+                    ${distinctHtml}
                 </div>
                 <div class="proposal-actions">
                     <button class="proposal-accept" onclick="runDraft(${msg.id})">Run</button>
@@ -313,15 +332,72 @@ function _getAvailableAgents() {
         .map(([name]) => name);
 }
 
-function _autoCast(roles, agents) {
-    const cast = {};
-    let pool = [...agents];
+// A template's distinct_roles lists groups of roles that must go to different
+// agents, e.g. [["builder", "red_team"]] so nobody red-teams their own build.
+// _distinctGroups, _autoCast and _castConflicts mirror _distinct_groups,
+// auto_cast and validate_cast in session_store.py; the server check is the
+// one that holds, this copy only keeps the launcher from proposing a bad cast.
+// A template with both builder and red_team keeps them apart even when its
+// distinct_roles leaves them out.
+function _distinctGroups(tmpl) {
+    const groups = Array.isArray(tmpl?.distinct_roles) ? tmpl.distinct_roles : [];
+    const result = groups
+        .filter(group => Array.isArray(group))
+        .map(group => [...new Set(group.filter(role => typeof role === 'string'))]);
+    const pair = ['builder', 'red_team'];
+    const roles = Array.isArray(tmpl?.roles) ? tmpl.roles : [];
+    if (pair.every(role => roles.includes(role)) && !result.some(group => pair.every(role => group.includes(role)))) {
+        result.push(pair);
+    }
+    return result;
+}
+
+// Round-robin in role order, reusing agents when roles outnumber them, but
+// never giving two roles of one distinct group the same agent. Returns null
+// when a role cannot be cast, and the user picks by hand.
+function _autoCast(tmpl, agents) {
+    const roles = Array.isArray(tmpl?.roles) ? tmpl.roles : [];
+    const pool = [...new Set(agents)];
+    if (!roles.length || !pool.length) return null;
+    const groups = _distinctGroups(tmpl);
+    // Role names are template text: a plain {} would swallow a role named __proto__.
+    const cast = Object.create(null);
+    let turn = 0;
     for (const role of roles) {
-        if (!pool.length) pool = [...agents];
-        if (!pool.length) return null;
-        cast[role] = pool.shift();
+        const taken = new Set();
+        for (const group of groups) {
+            if (!group.includes(role)) continue;
+            for (const other of group) {
+                if (other !== role && Object.hasOwn(cast, other)) taken.add(cast[other]);
+            }
+        }
+        let pick = -1;
+        for (let step = 0; step < pool.length; step++) {
+            const idx = (turn + step) % pool.length;
+            if (!taken.has(pool[idx])) { pick = idx; break; }
+        }
+        if (pick < 0) return null;
+        cast[role] = pool[pick];
+        turn = (pick + 1) % pool.length;
     }
     return cast;
+}
+
+function _castConflicts(tmpl, cast) {
+    const conflicts = [];
+    for (const group of _distinctGroups(tmpl)) {
+        const firstRoleByAgent = new Map();
+        for (const role of group) {
+            const agent = cast && Object.hasOwn(cast, role) ? cast[role] : '';
+            if (!agent) continue;
+            if (firstRoleByAgent.has(agent)) {
+                conflicts.push(`Cast conflict: '${firstRoleByAgent.get(agent)}' and '${role}' must be different agents, but both are '${agent}'.`);
+            } else {
+                firstRoleByAgent.set(agent, role);
+            }
+        }
+    }
+    return conflicts;
 }
 
 function syncSessionCastRole(selectEl) {
@@ -452,7 +528,7 @@ function showCastPreview(templateId) {
     if (!tmpl) return;
 
     const agents = _getAvailableAgents();
-    const cast = _autoCast(tmpl.roles || [], agents);
+    const cast = _autoCast(tmpl, agents);
 
     // All possible assignees: agents + "user" (self) + "none" (skip)
     const assignees = [...agents, window.username];
@@ -488,10 +564,17 @@ async function launchSessionWithCast(templateId) {
     const goal = goalInput ? goalInput.value.trim() : '';
 
     // Read cast from dropdowns
-    const cast = {};
+    const cast = Object.create(null);
     document.querySelectorAll('#session-step-cast .session-cast-select').forEach(sel => {
         cast[sel.dataset.role] = sel.value;
     });
+
+    // Keep the modal open on a conflicting pick so the user can fix it.
+    const conflicts = _castConflicts(sessionTemplates.find(t => t.id === templateId), cast);
+    if (conflicts.length) {
+        alert(conflicts.join('\n'));
+        return;
+    }
 
     const modal = document.getElementById('session-launcher-modal');
     if (modal) modal.remove();
@@ -617,10 +700,15 @@ function _supersedePreviousDrafts(draftId, currentRevision) {
     }
 }
 
-function runDraft(msgId) {
+function _draftTemplate(msgId) {
     const el = document.querySelector(`.message[data-id="${msgId}"]`);
-    if (!el || !el.dataset.draftTemplate) return;
-    const tmpl = JSON.parse(el.dataset.draftTemplate);
+    if (!el || !el.dataset.draftTemplate) return null;
+    return JSON.parse(el.dataset.draftTemplate);
+}
+
+function runDraft(msgId) {
+    const tmpl = _draftTemplate(msgId);
+    if (!tmpl) return;
 
     // Open the cast preview modal with draft context
     showDraftCastPreview(tmpl, msgId);
@@ -628,7 +716,7 @@ function runDraft(msgId) {
 
 function showDraftCastPreview(tmpl, draftMsgId) {
     const agents = _getAvailableAgents();
-    const cast = _autoCast(tmpl.roles || [], agents);
+    const cast = _autoCast(tmpl, agents);
     const assignees = [...agents, window.username];
 
     let existing = document.getElementById('session-launcher-modal');
@@ -663,10 +751,17 @@ async function launchDraftSession(draftMsgId) {
     const goalInput = document.getElementById('session-goal-input');
     const goal = goalInput ? goalInput.value.trim() : '';
 
-    const cast = {};
+    const cast = Object.create(null);
     document.querySelectorAll('#session-step-cast .session-cast-select').forEach(sel => {
         cast[sel.dataset.role] = sel.value;
     });
+
+    // Keep the modal open on a conflicting pick so the user can fix it.
+    const conflicts = _castConflicts(_draftTemplate(draftMsgId), cast);
+    if (conflicts.length) {
+        alert(conflicts.join('\n'));
+        return;
+    }
 
     const modal = document.getElementById('session-launcher-modal');
     if (modal) modal.remove();

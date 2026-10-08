@@ -1,4 +1,8 @@
 import { performance } from "node:perf_hooks"
+import fs from "node:fs/promises"
+import { constants as fsConstants } from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 const DEFAULT_MODEL = "jev-latest"
@@ -25,7 +29,7 @@ function boundedInteger(value, fallback, minimum, maximum) {
 }
 
 export function readSystemOneRuntimeConfig(env = process.env) {
-  const requestedMode = normalizeText(env.BTRAIN_JEV_MODE).toLowerCase() || "off"
+  const requestedMode = normalizeText(env.BTRAIN_JEV_MODE).toLowerCase() || "assist"
   const mode = new Set(["off", "shadow", "assist"]).has(requestedMode) ? requestedMode : "off"
   const apiKey = normalizeText(env.BTRAIN_JEV_API_KEY || env.JEV_API_KEY || env.TYPESAFE_API_KEY)
   const endpoint = normalizeText(env.BTRAIN_JEV_ENDPOINT) || DEFAULT_ENDPOINT
@@ -39,6 +43,39 @@ export function readSystemOneRuntimeConfig(env = process.env) {
       : "missing-api-key"
 
   return { mode, enabled, apiKey, endpoint, model, timeoutMs, reason }
+}
+
+// Credentials belong to the current user's global btrain config, never a repository.
+// Explicit environment keys take precedence; off/invalid modes do not read a file.
+export async function loadSystemOneRuntimeConfig(env = process.env) {
+  const config = readSystemOneRuntimeConfig(env)
+  if (config.reason !== "missing-api-key") return config
+  const home = normalizeText(env.BRAIN_TRAIN_HOME) || path.join(os.homedir(), ".btrain")
+  const credentialPath = normalizeText(env.BTRAIN_JEV_CREDENTIALS_FILE) || path.join(home, "jev.json")
+  let file
+  try {
+    file = await fs.open(path.resolve(credentialPath), fsConstants.O_RDONLY
+      | (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0))
+    const stat = await file.stat()
+    if (!stat.isFile() || stat.size > 4096) return { ...config, reason: "invalid-credential-file" }
+    if (process.platform !== "win32" && ((stat.mode & 0o077) !== 0
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid()))) {
+      return { ...config, reason: "insecure-credential-file" }
+    }
+    const buffer = Buffer.alloc(4097)
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
+    if (bytesRead > 4096) return { ...config, reason: "invalid-credential-file" }
+    const stored = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"))
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)
+      || typeof stored.apiKey !== "string" || !stored.apiKey.trim()) {
+      return { ...config, reason: "invalid-credential-file" }
+    }
+    return readSystemOneRuntimeConfig({ ...env, BTRAIN_JEV_API_KEY: stored.apiKey })
+  } catch (error) {
+    return error.code === "ENOENT" ? config : { ...config, reason: "invalid-credential-file" }
+  } finally {
+    await file?.close().catch(() => {})
+  }
 }
 
 function requestIssue(request) {

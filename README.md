@@ -49,8 +49,12 @@ required_bots = ["codex", "unblocked"]
 # Install
 git clone https://github.com/codeslp/btrain.git && cd btrain && npm link
 
-# Bootstrap a repo
-btrain init /path/to/repo --agent "claude" --agent "codex" --agent "gemini"
+# Bootstrap a repo (local by default: everything lives in .btrain/, which is git-ignored)
+btrain init /path/to/repo            # asks which features and agents to start with
+btrain init /path/to/repo --yes --agents claude,codex --reviewer codex --no-feature dashboard
+
+# Keep the pre-022 committed layout (AGENTS.md/CLAUDE.md blocks, .claude/collab/, skills)
+btrain init /path/to/repo --tracked --agent "claude" --agent "codex"
 
 # Launch the chat UI with all agents
 btrain-chat all /path/to/repo
@@ -99,13 +103,58 @@ btrain handoff request-changes --lane a \
 
 ---
 
+## Local vs tracked storage
+
+`btrain init` defaults to **local storage** (spec 022). Everything btrain generates lives in `.btrain/`:
+config, locks, lane handoffs (`.btrain/collab/`), agent instructions (`.btrain/AGENTS.md`), skills
+(`.btrain/skills/`), and helper tools (`.btrain/tools/`). Init adds one line, `.btrain/`, to `.gitignore`, so
+working a lane end to end leaves nothing btrain-related to commit except that line. Use `--exclude-local`
+to write the line to `.git/info/exclude` instead and leave no tracked change at all.
+
+Local mode does not edit your `AGENTS.md` or `CLAUDE.md`. Point agents at btrain with
+"Read `.btrain/AGENTS.md` and run `btrain startup`" (init prints this hint).
+
+`btrain init --tracked` (alias `--shared`) keeps the committed layout: handoffs in `.claude/collab/`,
+managed blocks in `AGENTS.md`/`CLAUDE.md`, skills in `.claude/skills/` and `.agents/skills/`. Repos that
+already have `.btrain/project.toml` keep their mode on re-init; btrain never migrates between modes.
+`BTRAIN_INIT_STORAGE=tracked` changes the default for new repos. `btrain doctor` shows the mode and warns
+when `.btrain/` files are tracked in a local repo.
+
+## Choosing features
+
+On a terminal, `btrain init` asks which optional features to enable and which agents to start with
+(and the default reviewer). Scripts and agents use flags instead: `--features a,b` (exactly these),
+`--feature x` / `--no-feature x`, `--agents a,b`, `--reviewer name`, `--yes`. Non-TTY runs never prompt.
+
+| Feature | What it controls | New-repo default |
+|---------|------------------|------------------|
+| `hooks` | pre-commit lock guard and pre-push guard | on |
+| `skills` | bundled workflow skills (pre-handoff, bug-fix, test-writer, context-scout, ...) | on |
+| `speckit` | `speckit-*` skills | on |
+| `formal` | TLA+/Specula skills (`tla-*`, `speckit-formal`) | off |
+| `feedback` | feedback-triage skill and feedback log checks | on |
+| `cgraph` | cgraph review packets, audits, advisories | off |
+| `unblocked` | Unblocked helper and `handoff claim --unblocked-context` | off |
+| `zvec` | zvec-grep context helper | off |
+| `pr_flow` | `btrain pr ...` with GitHub bot reviews | off |
+| `loop` | `btrain loop` and reviewer auto-dispatch on `needs-review` | on |
+| `dashboard` | `btrain dashboard` and auto-start | on |
+| `agentchattr` | agentchattr sidecar | off |
+| `handoff_history` | handoff-history watcher scripts | off |
+
+Change them later with `btrain features enable formal` or `btrain features disable cgraph,loop`. A repo
+with no `[features]` table (every repo initialized before spec 022) has every feature on.
+
+---
+
 ## What's Included
 
 ### btrain CLI
 
 | Command | What it does |
 |---------|-------------|
-| `btrain init <repo>` | Bootstrap handoff files, lanes, config, skills, dashboard, and agentchattr |
+| `btrain init <repo>` | Bootstrap lanes, locks, handoffs, config, and the features you pick. Local by default: all state under `.btrain/`, added to `.gitignore` (`--exclude-local` uses `.git/info/exclude`; `--tracked` keeps the committed layout) |
+| `btrain features list\|enable\|disable <names>` | Show or change the per-repo feature toggles (`[features]` in `.btrain/project.toml`) |
 | `btrain handoff` | Print current state and what to do next |
 | `btrain handoff wait` | Block on one lane's state hash, ignore unrelated lanes, then print the new canonical guidance; timeout exits 2 |
 | `btrain handoff claim` | Claim a lane with task, owner, reviewer, file locks, and a delegation packet |

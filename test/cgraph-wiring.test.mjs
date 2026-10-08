@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const exec = promisify(execFile)
 
@@ -39,7 +40,7 @@ async function runCli(args, cwd, envOverrides = {}) {
   })
 
   try {
-    const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...args], {
+    const result = await exec("node", [path.resolve("src/brain_train/cli.mjs"), ...withTrackedInit(args)], {
       cwd,
       env,
       maxBuffer: 10 * 1024 * 1024,

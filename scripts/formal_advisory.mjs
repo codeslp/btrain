@@ -494,10 +494,21 @@ export function classifyHarnessResult(run, { modeledAssertions = false } = {}) {
   return "infrastructure_failure"
 }
 
+// The npm test scripts preload this helper so git's background auto-maintenance
+// can't race a test repo's teardown (ENOTEMPTY). Pass it to the suites run here
+// too. It goes after --test, and only when the repo has it: advisory fixtures
+// copy just the scripts, and their fake runner matches args[0] === "--test".
+function nodeTestArgs(root, file) {
+  const preload = "test/helpers/git-test-env.mjs"
+  return fs.existsSync(path.join(root, preload))
+    ? ["--test", "--import", `./${preload}`, file]
+    : ["--test", file]
+}
+
 function runCliContractTests(root) {
   const run = command(
     "node",
-    ["--test", "test/core.test.mjs"],
+    nodeTestArgs(root, "test/core.test.mjs"),
     { cwd: root, timeoutMs: CLI_CONTRACT_TIMEOUT_MS, measureMemory: true },
   )
   return { name: "cli-contract", verdict: classifyHarnessResult(run), ...run }
@@ -740,7 +751,7 @@ async function main() {
     if (selection.tlc && !pinBlocked) result.checks.push(...runTlc(root, tlaFiles, { directory: cacheDirectory, head: executionTree.head }))
     if (selection.selfTest) {
       result.checks.push(runAdvisorySelfTest(root))
-      const run = command("node", ["--test", "test/formal-advisory.test.mjs"], { cwd: root, timeoutMs: ADVISORY_INTEGRATION_TIMEOUT_MS, measureMemory: true })
+      const run = command("node", nodeTestArgs(root, "test/formal-advisory.test.mjs"), { cwd: root, timeoutMs: ADVISORY_INTEGRATION_TIMEOUT_MS, measureMemory: true })
       result.checks.push({ name: "advisory-integration", verdict: classifyHarnessResult(run), ...run })
     }
     if (selection.harness) result.checks.push(runHarness(root))
