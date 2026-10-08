@@ -183,6 +183,7 @@
       "ensureTemplates",
       "extractManagedBlock",
       "findStaleManagedHooks",
+      "getHookStateFilePattern",
       "getManagedBlockTemplate",
       "hasTemplateDrift",
       "installGitHooks",
