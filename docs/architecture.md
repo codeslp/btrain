@@ -362,14 +362,17 @@ Enforcement 1: btrain CLI Validation (hard gate)
 Enforcement 2: Git Hooks (hard gate)
 ┌───────────────────────────────────────────────────┐
 │  .git/hooks/pre-commit                            │
-│  - Blocks non-handoff commits while any lane is   │
-│    in needs-review (allows HANDOFF*.md changes)   │
-│  - Does NOT check file locks                      │
+│  - Blocks a commit whose staged files fall under  │
+│    the locks of a lane in needs-review, unless    │
+│    the peer reviewer runs it                      │
 │                                                   │
 │  .git/hooks/pre-push                              │
-│  - Blocks ALL pushes while any handoff is active  │
-│    (in-progress, needs-review, changes-requested, │
-│     repair-needed)                                │
+│  - Blocks a push whose new commits touch files    │
+│    under the locks of a lane that is in-progress, │
+│    needs-review, repair-needed, pr-review,        │
+│    ready-to-merge, or changes-requested (except   │
+│    a PR-linked feedback round)                    │
+│  - A lane with no locks covers the whole repo     │
 │  - Override: btrain override grant + consume      │
 └───────────────────────────────────────────────────┘
 ```

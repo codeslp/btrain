@@ -5086,6 +5086,62 @@ describe("managed pre-push hook scoped to lane locks", () => {
     }
   })
 
+  it("matches locked paths that git C-quotes even with core.quotePath=false", async () => {
+    const name = 'a"b\\c\td.ts'
+    await fs.writeFile(path.join(tmpDir, "src", "auth", name), "export const odd = true\n", "utf8")
+    await runGit(["add", "--", `src/auth/${name}`], tmpDir)
+    await runGit(["commit", "--no-verify", "-m", "Add oddly named auth file"], tmpDir)
+    try {
+      const result = await push(["HEAD:refs/heads/odd-feature"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.ok(result.output.includes(`src/auth/${name}`), result.output)
+    } finally {
+      await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
+    }
+  })
+
+  it("does not treat an unrelated remote's branches as the destination's history", async () => {
+    // origin/feat holds a locked-file commit (seeded above). Pushing feat to a
+    // different URL must still count it: that destination has never seen it.
+    const otherRemote = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      await promisify(execFile)("git", ["init", "--bare", otherRemote])
+      const result = await runGit(["push", otherRemote, "feat:refs/heads/copy"], tmpDir, pushEnv)
+      const output = `${result.stdout}\n${result.stderr}`
+      assert.notEqual(result.code, 0, output)
+      assert.match(output, /src\/auth\/guard\.ts/)
+    } finally {
+      await rmDir(otherRemote)
+    }
+  })
+
+  it("treats a push by URL as a push to the remote with that URL", async () => {
+    // origin already has feat's commit, so a new branch there carries nothing
+    // new, just as `git push origin feat:refs/heads/feat-copy` would.
+    const result = await runGit(["push", remoteDir, "feat:refs/heads/feat-copy"], tmpDir, pushEnv)
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  })
+
+  it("blocks when it cannot list the pushed commits while a lane is unresolved", async () => {
+    // A guard that fails open is no guard: if git log errors, nothing shows
+    // the push is clear of the lane's locks.
+    const { spawnSync } = await import("node:child_process")
+    const hook = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const result = spawnSync("sh", [hook, "origin", remoteDir], {
+      cwd: tmpDir,
+      input: `refs/heads/ghost ${"1".repeat(40)} refs/heads/ghost ${"0".repeat(40)}\n`,
+      encoding: "utf8",
+      env: { ...withoutLaneScope(), ...pushEnv },
+    })
+    const output = `${result.stdout}\n${result.stderr}`
+    assert.notEqual(result.status, 0, output)
+    assert.match(output, /blocked push/i)
+    assert.match(output, /could not list/i)
+    assert.match(output, /refs\/heads\/ghost/)
+  })
+
   it("allows updating a pushed branch with main even when main gained a locked-file commit", async () => {
     // Commits the remote base branch already has are not this push's lane work.
     // origin/HEAD is unset after `git remote add`, so this also covers the

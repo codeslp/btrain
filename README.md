@@ -578,7 +578,7 @@ The helper executes one hybrid query in direct mode. It never exposes index-mana
 `btrain hooks` or `btrain init --hooks` installs:
 
 - **pre-commit** — blocks commits while a lane is waiting on review
-- **pre-push** — blocks a push whose new commits touch files locked by an unresolved lane (`in-progress`, `needs-review`, `repair-needed`, `pr-review`, `ready-to-merge`, or `changes-requested` without a linked PR). A lane with no locked files covers the whole repo. A push that touches no locked file goes through.
+- **pre-push** — blocks a push whose new commits touch files locked by an unresolved lane (`in-progress`, `needs-review`, `repair-needed`, `pr-review`, `ready-to-merge`, or `changes-requested` unless it is a PR, bot or CI feedback round with a linked PR). A lane with no locked files covers the whole repo. A push that touches no locked file goes through.
 
 Override: `btrain override grant --action push --requested-by <agent> --confirmed-by <human> --reason "..."`
 
