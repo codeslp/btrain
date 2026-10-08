@@ -73,8 +73,11 @@ export function validateCaseGroups(cases, sources) {
 export function validateCaseAnnotations(item, labels) {
   const text = (value) => typeof value === "string" && value.trim().length > 0
   if (!Array.isArray(item.annotations) || item.annotations.length < 2) throw new Error("Two independent annotators are required")
-  if (item.annotations.some((a) => !text(a?.by) || !labels.includes(a.label))) throw new Error("Invalid annotation")
-  if (new Set(item.annotations.map((a) => a.by.trim())).size < 2) throw new Error("Two independent annotators are required")
+  // Array.from turns holes in a sparse array into undefined, so they fail validation instead of
+  // being skipped by some() and then counted as an annotator by Set.
+  const annotations = Array.from(item.annotations)
+  if (annotations.some((a) => !text(a?.by) || !labels.includes(a.label))) throw new Error("Invalid annotation")
+  if (new Set(annotations.map((a) => a.by.trim())).size < 2) throw new Error("Two independent annotators are required")
   if (!text(item.adjudication?.by) || item.adjudication.label !== item.label || !text(item.adjudication.reason)) throw new Error("Explicit adjudication is required")
 }
 

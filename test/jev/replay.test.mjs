@@ -65,6 +65,9 @@ describe("Jev replay metrics", () => {
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r1 ", label: "feedback" }], adjudication }, /independent annotators/],
       [{ annotations: [{ by: {}, label: "feedback" }, { by: {}, label: "feedback" }], adjudication }, /Invalid annotation/],
       [{ annotations: [null, { by: "r1", label: "feedback" }], adjudication }, /Invalid annotation/],
+      // A hole is skipped by some() but iterated by Set, so it must not count as an annotator.
+      // eslint-disable-next-line no-sparse-arrays
+      [{ annotations: [, { by: "r1", label: "feedback" }], adjudication }, /Invalid annotation/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }] }, /adjudication/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { ...adjudication, label: "clear" } }, /adjudication/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { by: "lead", label: "feedback" } }, /adjudication/],
