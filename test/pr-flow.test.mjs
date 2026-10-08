@@ -419,16 +419,18 @@ describe("PR review flow classification", () => {
   })
 
   it("rejects frozen comments from another GitHub host with the same repository and PR", () => {
-    const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
-    input.pr.url = "https://github.com/o/r/pull/12"
-    const comment = input.rawComments.issueComments[0]
-    comment.html_url = "https://ghe.internal/o/r/pull/12#issuecomment-100"
-    const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
-      sourceRef: "https://ghe.internal/o/r/pull/12", sourceHash: createHash("sha256").update(comment.body).digest("hex"),
-      eventHead: input.pr.headRefOid, reviewedCommit: null }
-    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
-    assert.deepEqual(result.candidates, [])
-    assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "source-identity-mismatch" }])
+    for (const host of ["ghe.internal", "evilgithub.com"]) {
+      const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+      input.pr.url = "https://github.com/o/r/pull/12"
+      const comment = input.rawComments.issueComments[0]
+      comment.html_url = `https://${host}/o/r/pull/12#issuecomment-100`
+      const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+        sourceRef: `https://${host}/o/r/pull/12`, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+        eventHead: input.pr.headRefOid, reviewedCommit: null }
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+      assert.deepEqual(result.candidates, [])
+      assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "source-identity-mismatch" }])
+    }
   })
 
   it("labels leftover snapshots from another GitHub host as an identity mismatch, not stale", () => {
