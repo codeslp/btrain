@@ -227,7 +227,7 @@
           <p>Each use of Jev is meant to climb this ladder on its own. Passing for one use, one model, or one repository does not
           count for another. A use can stop at any step, and an operator can send it back to "off" or "watch only" at once.</p>
           <p><strong>One exception today:</strong> the maintainer switched the PR-comment helper straight to step 4 before it
-          finished steps 2 and 3, because it can only push in the cautious direction (see below). Its offline test and
+          finished steps 2 and 3, at the maintainer's explicit request. It can only push in the cautious direction (see below). Its offline test and
           watch-only period are still pending.</p>
         </div>
         <div class="speckit-flow">
@@ -264,12 +264,12 @@
         <div class="card">
           <div class="card-icon">&#128274;</div>
           <h3>Know what leaves your machine</h3>
-          <p>When the PR-comment helper is on, it sends the newest review-bot comment on your pull request to a hosted model (<code>api.typesafe.ai</code>). It sends nothing else, and its logs keep only IDs and fingerprints, never the comment text or your key. On a private repo where that matters, set <code>BTRAIN_JEV_MODE=off</code>. The written plan keeps the other uses offline until a data policy is approved.</p>
+          <p>When the PR-comment helper is on, it sends the newest review-bot comment on your pull request to a hosted model (<code>api.typesafe.ai</code>). It sends nothing else from your repo. Jev keeps no log of its own; its answers show up in <code>btrain pr status</code>. On a private repo where that matters, set <code>BTRAIN_JEV_MODE=off</code>. The written plan keeps the other uses offline until a data policy is approved.</p>
         </div>
         <div class="card">
           <div class="card-icon">&#128268;</div>
           <h3>Off until you give it a key</h3>
-          <p>Today Jev reads PR review comments only, and only after it finds an API key (the <code>BTRAIN_JEV_API_KEY</code> variable or a private <code>~/.btrain/jev.json</code> file). With a key, it starts in its cautious mode: it may flag a comment as "needs changes", never as "approved". Set <code>BTRAIN_JEV_MODE=shadow</code> to watch only, or <code>off</code> to turn it off. Without a key, btrain behaves exactly as before.</p>
+          <p>Today Jev reads PR review comments only, and only after it finds an API key (a <code>BTRAIN_JEV_API_KEY</code>, <code>JEV_API_KEY</code>, or <code>TYPESAFE_API_KEY</code> variable, or a private <code>~/.btrain/jev.json</code> file). With a key, it starts in its cautious mode: it may flag a comment as "needs changes", never as "approved". Set <code>BTRAIN_JEV_MODE=shadow</code> to watch only, or <code>off</code> to turn it off. Without a key, btrain behaves exactly as before.</p>
         </div>
       </div>
 
@@ -308,7 +308,7 @@
         </div>
         <div class="security-item">
           <h3>Next uses <span class="future-badge">Offline only</span></h3>
-          <p>The written plan is now in the repo, along with early prototypes for more uses. They run only against frozen test data, not on live work, until each one passes its own test:</p>
+          <p>The written plan is now in the repo, along with early prototypes for more uses. They run against frozen test data, not on live work, until each one passes its own test (two of them may run small opt-in live trials first):</p>
           <ul class="plain-list">
             <li>Record where each piece of evidence came from, and replay tests offline</li>
             <li>Suggest missing tests, only from an approved list</li>
