@@ -33,6 +33,13 @@ describe("git test env preload", () => {
     }
   })
 
+  it("is preloaded by the formal advisory's own node --test runs", async () => {
+    // formal-advisory.yml runs scripts/formal_advisory.mjs directly, outside npm.
+    const script = await fs.readFile(path.join(repoRoot, "scripts/formal_advisory.mjs"), "utf8")
+    assert.doesNotMatch(script, /\["--test", "test\//, "build node --test args with nodeTestArgs so the preload applies")
+    assert.match(script, /"--test", "--import", `\.\/\$\{preload\}`/)
+  })
+
   it("appends after existing GIT_CONFIG entries and does not stack on a second load", () => {
     const base = {
       PATH: "/bin",

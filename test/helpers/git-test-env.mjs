@@ -5,7 +5,7 @@
 // Git runs `git maintenance run --auto --detach` after commit, merge, fetch and
 // friends. On the git 2.55 that GitHub's ubuntu runners ship, that detached
 // child repacks a freshly bootstrapped test repo (`btrain init` + commit leaves
-// ~230 loose objects): `git repack -d --cruft --write-midx` keeps writing into
+// ~230 loose objects): `git repack -d -l --cruft --write-midx` keeps writing into
 // .git/objects/pack, .git/objects/info and .git/info after the commit has
 // returned. A test's teardown `fs.rm(dir, { recursive: true })` then races it
 // and fails with ENOTEMPTY on whichever directory gained an entry, failing a
@@ -17,7 +17,8 @@
 // `git config` would need every test's init helper to remember it.
 const GIT_TEST_CONFIG = [
   ["maintenance.auto", "false"],
-  // Older gits run `git gc --auto` directly instead of maintenance.
+  // Also stops the gc task inside `maintenance run --auto`, and covers gits
+  // before 2.29, which run `git gc --auto` directly.
   ["gc.auto", "0"],
 ]
 
