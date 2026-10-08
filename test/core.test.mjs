@@ -5039,6 +5039,47 @@ describe("managed pre-commit hook", () => {
     assert.match(output, /src\/auth\/guard\.ts/)
     assert.doesNotMatch(output, /src\/scoring\/score\.ts/)
   })
+
+  it("path_matches_lock: a file lock matches only that file, and only a literal /** suffix is a directory glob", async () => {
+    // In POSIX sh a `case` pattern `*/**` is just `*/*`, so it matched any
+    // lock path with a slash: lock `test/a.test.mjs` became prefix `test` and
+    // blocked every staged file under test/.
+    const hook = await fs.readFile(path.join(tmpDir, ".git", "hooks", "pre-commit"), "utf8")
+    const fn = hook.match(/^path_matches_lock\(\) \{\n[\s\S]*?\n\}\n/m)
+    assert.ok(fn, "expected path_matches_lock in the installed hook")
+
+    const cases = [
+      // [staged, lock, expected]
+      ["test/a.test.mjs", "test/a.test.mjs", true],
+      ["test/b.test.mjs", "test/a.test.mjs", false],
+      ["test/jev/replay.test.mjs", "test/review-code-rules.test.mjs", false],
+      ["src/brain_train/cli.mjs", "src/brain_train/core.mjs", false],
+      ["src/auth/guard.ts", "src/auth/", true],
+      ["src/auth/deep/x.ts", "src/auth/", true],
+      ["src/authz/x.ts", "src/auth/", false],
+      ["src/auth/guard.ts", "src/auth", true],
+      ["src/auth/guard.ts", "src/**", true],
+      ["src/auth/deep/x.ts", "src/auth/**", true],
+      ["src/authz/x.ts", "src/auth/**", false],
+      ["docs/a.md", "src/**", false],
+      ["test/a.test.mjs", " test/a.test.mjs ", true],
+      ["test/a.test.mjs", "(none)", false],
+    ]
+    const script = [
+      fn[0],
+      ...cases.map(([staged, lock]) =>
+        `if path_matches_lock '${staged}' '${lock}'; then echo yes; else echo no; fi`),
+    ].join("\n")
+
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const { stdout } = await promisify(execFile)("sh", ["-c", script])
+    const actual = stdout.trim().split("\n")
+    const mismatches = cases
+      .map(([staged, lock, expected], i) => ({ staged, lock, expected, got: actual[i] === "yes" }))
+      .filter(({ expected, got }) => expected !== got)
+    assert.deepEqual(mismatches, [])
+  })
 })
 
 describe("custom handoff_path", () => {
