@@ -5117,11 +5117,12 @@ describe("managed pre-push hook scoped to lane locks", () => {
     }
   })
 
-  it("treats a push by URL as a push to the remote with that URL", async () => {
-    // origin already has feat's commit, so a new branch there carries nothing
-    // new, just as `git push origin feat:refs/heads/feat-copy` would.
-    const result = await runGit(["push", remoteDir, "feat:refs/heads/feat-copy"], tmpDir, pushEnv)
-    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  it("counts lane commits copied to a new branch even when a cached remote branch has them", async () => {
+    // origin/feat may be stale (deleted or force-updated on the server since
+    // the last fetch), so only the remote's base branch vouches for commits.
+    const result = await push(["feat:refs/heads/feat-copy"])
+    assert.notEqual(result.code, 0, result.output)
+    assert.match(result.output, /src\/auth\/guard\.ts/)
   })
 
   it("blocks when it cannot list the pushed commits while a lane is unresolved", async () => {
@@ -5145,7 +5146,8 @@ describe("managed pre-push hook scoped to lane locks", () => {
   it("allows updating a pushed branch with main even when main gained a locked-file commit", async () => {
     // Commits the remote base branch already has are not this push's lane work.
     // origin/HEAD is unset after `git remote add`, so this also covers the
-    // fallback to origin/main.
+    // fallback to origin/main. The final push goes by URL, which must map to
+    // origin to find that base branch.
     await runGit(["checkout", "-b", "side-b", "main"], tmpDir)
     await commitChange("src/scoring/score.ts", "export const sideB = 5", "Side branch scoring change")
     const first = await push(["side-b"])
@@ -5168,8 +5170,8 @@ describe("managed pre-push hook scoped to lane locks", () => {
     const merge = await runGit(["merge", "--no-edit", "main"], tmpDir, { BTRAIN_AGENT: "OwnerBot" })
     assert.equal(merge.code, 0, `${merge.stdout}\n${merge.stderr}`)
     try {
-      const result = await push(["side-b"])
-      assert.equal(result.code, 0, result.output)
+      const result = await runGit(["push", remoteDir, "side-b"], tmpDir, pushEnv)
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
     } finally {
       await runGit(["checkout", "main"], tmpDir)
     }
