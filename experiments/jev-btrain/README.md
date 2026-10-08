@@ -118,6 +118,69 @@ and are not persisted by that writer.
 Frozen record adapters deeply copy the complete supplied source proof, preserving all
 canonical metadata used by the source snapshot hash through later caller mutations.
 
+## Offline repository rules, turn rules, and review risk (T012)
+
+`inspectRules` compiles one supplied explicit rule/evidence pair at a time into a closed
+`violation`/`conforming`/`uncertain` question. `repositoryRuleFamily` (diff) and
+`turnRuleFamily` (turn) have distinct IDs and policy hashes. Records contain
+`{kind, rules, artifacts, checks}`. Rules need unique IDs, versions, bounded text, source
+references, and explicit boolean `explicit` and `authorized` observations. Artifacts need
+unique IDs, matching kind, authorized source references, and bounded text. Checks reference
+supplied rule and artifact IDs, have `applicable: true`, and record the current deterministic
+baseline choice. Only explicit, authorized, applicable pairs reach the local provider.
+Authorization and applicability observations are captured from the deterministic workflow;
+this prototype does not infer them from text or fetch sources itself.
+
+At most 16 checks are attempted per run. A high-confidence violation returns a
+`possible-rule-violation` candidate citing exactly the supplied rule/version/reference and
+artifact/reference. Provider-generated rule IDs, citations, or extra metadata are ignored.
+Warnings contain no generated diagnosis and require human review. Invalid answers, uncertainty,
+low confidence, and provider failures produce no warning. The independent policies remain
+offline; the later G6-R opt-in label pilot is not activated by this code.
+
+`prioritizeReviews` reads `{objective, reviews}`. Every review has a unique ID, source
+reference, bounded evidence text, an explicit authorization observation, and a nonempty
+`requiredChecks` list. Only authorized evidence reaches the provider. It proposes an order
+for queues of at most 16 entries, keeps stable ties, and falls back to the entire original
+queue when scoring is incomplete, unauthorized, malformed, uncertain, or unavailable.
+Every original queue entry and mandatory check remains in `requiredReviews`, including
+items classified low risk. This adapter never skips or approves a review.
+
+All three adapters use the frozen serialized-record contract from T014, default to `off`,
+and reject live modes. Offline calls require a matching source proof, model pin, code revision,
+and a local provider for private inputs. They copy provenance before awaits and expose only
+validated scalar fields or copied arrays. Offline traces compose with the redacted writer;
+all traces retain `actionTaken: none`.
+
+`experiments/jev-btrain/rules-risk.mjs` reports G6-R and G6-T separately and keeps real,
+synthetic, and unknown origins separate. Rule reports compare baseline and semantic warning
+precision/recall, audit invented citations, and distinguish skipped candidates, attempted
+failures, failures without calls, valid abstentions, and actionable coverage. All three families
+retain optional per-attempt `latencyMs` and `cost`: latency reports observed-call count and
+nearest-rank p50/p95; cost reports observed-call count and the sum of measured costs.
+Missing costs report `total: null`, and measured zero is retained. Invalid negative or
+nonfinite measurements and measurements without attempted calls are rejected. G6-V reports
+severe findings in the top 30% of the queue (rounded up to whole entries), defect recall,
+and total reviewer time relative to baseline. Every review candidate must have one
+`gatewayAttempts` entry with its `reviewId`, boolean `eligible` and `attemptedCall`, and
+gateway `outcome`. Review reports apply the same failure, abstention, skip and coverage
+denominators as rule reports, separated by origin. Missing, duplicate, sparse, invented or
+contradictory gateway entries are rejected, so ranking and time gains cannot conceal failed
+calls. Incomplete scoring must retain the baseline order, matching the adapter fallback.
+A measurement that drops a required queue
+entry or invents a labeled finding is rejected. Reports always return `gateReady: false`.
+All queue and finding ID lists must be dense arrays with unique supplied IDs; missing
+array slots cannot stand in for retained reviews or labeled findings.
+
+Each G6 dataset still needs 100 independently labeled real cases: at least 30 violations
+in each diff/turn set and at least 10 severe findings in the review set. Frozen splits,
+policy/model/revision pins, gateway quality floors, privacy, shadow evidence, and a human
+promotion record remain separate prerequisites. Passing one family never promotes another.
+
+```sh
+rtk env -- node --test test/jev/rules-risk.test.mjs experiments/jev-btrain/rules-risk.test.mjs
+```
+
 ## Original PR and handoff experiment
 
 The frozen datasets cover:
@@ -197,6 +260,7 @@ Run the offline timeout regressions with `node --test experiments/jev-btrain/run
 
 Shared gateway repair safeguards: require every captured source to have its own nonempty template group before assigning any evaluation split; reject successful serialized traces without a real attempted call and valid catalog probabilities; measure wall time after provider completion so synchronous work cannot evade the timeout. Timer cancellation alone cannot bound synchronous provider work. Tests must exercise these invariants through freeze/replay and persisted trace paths.
 
+G6 paired gateway outcomes require `failureClass` (`provider` or `response-shape`) on failures and no class on nonfailures. Reports preserve both category counts, alongside attempts and failures without a call; imported measurements cannot silently collapse malformed answers into provider outages.
 Frozen PR evaluation also validates event identity, author/surface, timestamps and their ordering, explicit event-head knowledge, nullable formal state and deterministic disposition. A hash only establishes content identity; it cannot supply missing provenance. Imported records must meet the same contract as prospective captures. Invalid transport response shapes use the response-shape failure category.
 
 Snapshot schema 3 includes the source host in version identity. Schema 1/2 recaptures deduplicate only within the same host; a foreign-host observation must never suppress valid evidence. Composition tests capture, persist and replay actual snapshots rather than assigning artificial IDs.
