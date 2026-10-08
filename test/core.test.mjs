@@ -5085,6 +5085,39 @@ describe("managed pre-push hook scoped to lane locks", () => {
       await runGit(["reset", "--hard", "HEAD~1"], tmpDir)
     }
   })
+
+  it("allows updating a pushed branch with main even when main gained a locked-file commit", async () => {
+    // Commits the remote base branch already has are not this push's lane work.
+    // origin/HEAD is unset after `git remote add`, so this also covers the
+    // fallback to origin/main.
+    await runGit(["checkout", "-b", "side-b", "main"], tmpDir)
+    await commitChange("src/scoring/score.ts", "export const sideB = 5", "Side branch scoring change")
+    const first = await push(["side-b"])
+    assert.equal(first.code, 0, first.output)
+
+    await runGit(["checkout", "main"], tmpDir)
+    await commitChange("src/auth/guard.ts", "export const landedGuard = true", "Auth change landed on main")
+    const grant = await runBtrain(
+      [
+        "override", "grant", "--repo", tmpDir, "--action", "push", "--requested-by", "OwnerBot",
+        "--confirmed-by", "HumanOperator", "--reason", "Land a locked-file commit on main for the fixture.",
+      ],
+      tmpDir,
+    )
+    assert.equal(grant.code, 0, grant.stderr)
+    const landed = await push(["main"])
+    assert.equal(landed.code, 0, landed.output)
+
+    await runGit(["checkout", "side-b"], tmpDir)
+    const merge = await runGit(["merge", "--no-edit", "main"], tmpDir, { BTRAIN_AGENT: "OwnerBot" })
+    assert.equal(merge.code, 0, `${merge.stdout}\n${merge.stderr}`)
+    try {
+      const result = await push(["side-b"])
+      assert.equal(result.code, 0, result.output)
+    } finally {
+      await runGit(["checkout", "main"], tmpDir)
+    }
+  })
 })
 
 describe("managed pre-commit hook", () => {
