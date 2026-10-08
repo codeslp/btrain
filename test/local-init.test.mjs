@@ -168,6 +168,29 @@ describe("local-only init (default)", () => {
     assert.equal(await porcelain(repo), "")
   })
 
+  it("--reviewer without --agents sets only reviewer_default on a new repo", async () => {
+    const repo = await makeRepo("reviewer-only-new")
+    const baseline = await makeRepo("reviewer-only-baseline")
+    assert.equal((await btrain(["init", baseline, "--yes"], baseline)).code, 0)
+    const result = await btrain(["init", repo, "--reviewer", "codex", "--yes"], repo)
+    assert.equal(result.code, 0, result.stderr)
+    const config = await readProjectConfig(repo)
+    assert.deepEqual(config.agents.active, (await readProjectConfig(baseline)).agents.active)
+    assert.equal(config.agents.reviewer_default, "codex")
+  })
+
+  it("--reviewer without --agents keeps an existing repo's agents and lanes", async () => {
+    const repo = await makeRepo("reviewer-only-existing")
+    assert.equal((await btrain(["init", repo, "--agents", "claude,codex", "--yes"], repo)).code, 0)
+    const before = await readProjectConfig(repo)
+    const result = await btrain(["init", repo, "--reviewer", "claude", "--yes"], repo)
+    assert.equal(result.code, 0, result.stderr)
+    const config = await readProjectConfig(repo)
+    assert.deepEqual(config.agents.active, ["claude", "codex"])
+    assert.deepEqual(Object.keys(config.lanes).filter((key) => /^[a-z]$/.test(key)), Object.keys(before.lanes).filter((key) => /^[a-z]$/.test(key)))
+    assert.equal(config.agents.reviewer_default, "claude")
+  })
+
   it("keeps the lock guard working: blocks a non-reviewer commit on a locked file, allows others", async () => {
     const repo = await makeRepo()
     assert.equal((await btrain(["init", repo, "--agents", "claude,codex"], repo)).code, 0)

@@ -2840,7 +2840,9 @@ async function initRepo(repoPathInput, options = {}) {
   await ensureDir(path.dirname(repoPaths.handoffPath))
 
   const now = formatIsoTimestamp()
-  const requestedAgents = orderAgentsForReviewer(normalizeStringList(options.agent), options.reviewer)
+  // --reviewer only reorders an explicit --agents list; alone it sets reviewer_default.
+  const explicitAgents = normalizeStringList(options.agent)
+  const requestedAgents = explicitAgents.length > 0 ? orderAgentsForReviewer(explicitAgents, options.reviewer) : []
   const shouldScaffoldBundledSkills = options.scaffoldBundledSkills === true
   const shouldScaffoldDevTools = options.scaffoldDevTools === true
   const requestedLanesPerAgent = normalizePositiveInteger(
@@ -2872,6 +2874,9 @@ async function initRepo(repoPathInput, options = {}) {
         ? requestedAgents
         : getCollaborationAgentNames(parsedExisting)
       existingToml = syncAgentsSectionInToml(existingToml, nextAgents)
+    }
+    if (templateVars.reviewerDefault && explicitAgents.length === 0) {
+      existingToml = upsertTomlEntryInSection(existingToml, "agents", "reviewer_default", `reviewer_default = "${escapeTomlString(templateVars.reviewerDefault)}"`)
     }
 
     const nextConfig = parseProjectToml(existingToml)
