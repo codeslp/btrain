@@ -139,6 +139,12 @@ const TEST_PATH_PATTERNS = [
   new RegExp(`(?:^|/)__tests__/.+\\.${TEST_CODE_EXTENSION}$`, "i"),
   /(?:^|\/)tests\/[^/]+\.rs$/,
 ]
+// Node's test runner and mocha collect every JS file under a test/
+// directory by default, so test/smoke.js counts whatever its name. Files
+// in helper, fixture, mock or data folders under it do not.
+const JS_TEST_DIR_FILE = /(?:^|\/)test\/(?:[^/]+\/)*[^/]+\.[cm]?[jt]sx?$/i
+const TEST_SUPPORT_DIR =
+  /(?:^|\/)test\/(?:[^/]+\/)*(?:helpers?|fixtures?|__fixtures__|support|utils?|mocks?|__mocks__|stubs?|data|testdata|snapshots|__snapshots__|assets|resources)\//i
 const DOC_FILE = /\.(?:md|mdx|markdown|rst|txt|adoc)$/i
 const PYTHON_FILE = /\.pyi?$/
 // Files whose comments start with `#`; every other file uses // and /* */.
@@ -638,9 +644,15 @@ function isAssertionCode(masked, file) {
   return ASSERTION_CALL.test(masked) || (PYTHON_FILE.test(file) && PYTHON_ASSERT_STATEMENT.test(masked))
 }
 
-function isTestFilePath(file) {
+// A test file by its runner naming convention alone: foo.test.mjs,
+// test_foo.py, __tests__/foo.js.
+function isNamedTestFile(file) {
   const base = path.posix.basename(file)
   return TEST_BASENAME_PATTERNS.some((re) => re.test(base)) || TEST_PATH_PATTERNS.some((re) => re.test(file))
+}
+
+function isTestFilePath(file) {
+  return isNamedTestFile(file) || (JS_TEST_DIR_FILE.test(file) && !TEST_SUPPORT_DIR.test(file))
 }
 
 function isTestConfigFile(file) {
@@ -1275,14 +1287,19 @@ function scanDeletedTestFile(entry) {
       detail: `Test file deleted (${plural(entry.removed.length, "line")}, ${plural(assertions, "assertion line")}).`,
     }]
   }
-  if (entry.status === "renamed" && isTestFilePath(entry.oldFile) && !isTestFilePath(entry.file)) {
+  // A runner that collects by name stops collecting a file that loses its
+  // test name, even when it stays under test/.
+  const lostName = isNamedTestFile(entry.oldFile) && !isNamedTestFile(entry.file)
+  if (entry.status === "renamed" && (lostName || (isTestFilePath(entry.oldFile) && !isTestFilePath(entry.file)))) {
     return [{
       rule: "deleted-test-file",
       severity: "warn",
       file: entry.oldFile,
       line: 0,
       preview: `${entry.oldFile} -> ${entry.file}`,
-      detail: "Test file renamed to a non-test path, so test runners stop collecting it.",
+      detail: isTestFilePath(entry.file)
+        ? "Test file renamed to a path without a test-file name, so runners that collect by name stop collecting it."
+        : "Test file renamed to a non-test path, so test runners stop collecting it.",
     }]
   }
   return []

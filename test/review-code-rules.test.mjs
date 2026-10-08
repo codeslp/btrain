@@ -2270,3 +2270,33 @@ describe("test-ignore-added runner filter flags", () => {
     assert.deepEqual(findingsFor(scanDiff(flake8), "test-ignore-added"), [])
   })
 })
+
+describe("test files under a singular test/ directory", () => {
+  it("treats JS files under test/ as test files whatever their name", () => {
+    const focused = scanDiff(makeDiff("test/smoke.js", [`it.${T.only}("boots", () => {})`]))
+    assert.deepEqual(focused.violations.map((v) => [v.rule, v.severity]), [["focused-test", "hard"]])
+    const nested = scanDiff(makeDiff("packages/api/test/routes/users.ts", [`it.${T.skip}("lists users", () => {})`]))
+    assert.deepEqual(nested.violations.map((v) => v.rule), ["skipped-test"])
+    const deleted = scanDiff(makeDeletedDiff("test/smoke.js", ['it("boots", () => {', "  assert.ok(boot())", "})"]))
+    assert.deepEqual(deleted.violations.map((v) => [v.rule, v.file]), [["deleted-test-file", "test/smoke.js"]])
+    const removed = scanDiff(makeHunkDiff("test/smoke.js", ['   it("boots", () => {', "-    assert.ok(boot())", "   })"]))
+    assert.deepEqual(removed.violations.map((v) => v.rule), ["removed-assertion"])
+    const renamedAway = scanDiff(makeRenameDiff("test/smoke.js", "scripts/smoke.js"))
+    assert.deepEqual(renamedAway.violations.map((v) => [v.rule, v.file]), [["deleted-test-file", "test/smoke.js"]])
+  })
+
+  it("leaves helper, fixture and mock directories under test/ alone", () => {
+    const result = scanDiff(
+      makeDeletedDiff("test/helpers/runner-scope.mjs", ["export const scope = 1"]) +
+      makeDiff("test/fixtures/focused.js", [`it.${T.only}("fixture for the scanner", () => {})`]) +
+      makeDiff("test/__mocks__/fs.js", [`it.${T.skip}("mock", () => {})`]) +
+      makeDiff("test/support/setup.js", [`it.${T.skip}("support", () => {})`]),
+    )
+    assert.deepEqual(result.violations, [])
+  })
+
+  it("still flags a named test file renamed to an unnamed file under test/", () => {
+    const result = scanDiff(makeRenameDiff("test/cache.test.mjs", "test/cache-fixtures.mjs"))
+    assert.deepEqual(findingsFor(result, "deleted-test-file").map((v) => v.file), ["test/cache.test.mjs"])
+  })
+})
