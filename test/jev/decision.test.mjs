@@ -302,6 +302,19 @@ describe("offline decision gateway", () => {
     assert.notEqual(changed.policyHash, family.policyHash)
   })
 
+  it("applies candidate action eligibility under one stable family policy", async () => {
+    const conditional = createDecisionFamily({
+      ...family,
+      actionPolicy: (choice, currentCandidate) => choice === "feedback" && !currentCandidate.blocked ? "flag-feedback" : null,
+    })
+    const provider = fakeProvider(answer())
+    const decided = await decideCandidate({ family: conditional, candidate: { ...candidate, blocked: false }, provider, mode: "offline" })
+    const blocked = await decideCandidate({ family: conditional, candidate: { ...candidate, blocked: true }, provider, mode: "offline" })
+    assert.equal(decided.outcome, "decision")
+    assert.deepEqual([blocked.outcome, blocked.reason, blocked.suggestedAction], ["abstain", "no-permitted-action", undefined])
+    assert.equal(blocked.policyHash, decided.policyHash)
+  })
+
   it("pins captured policy configuration independently of caller mutation", async () => {
     const policyConfig = { action: "flag-feedback" }
     const create = (config) => createDecisionFamily({

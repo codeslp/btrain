@@ -25,6 +25,8 @@ The numbered workstreams in the [implementation plan](021-jev-decision-plane-imp
 ## Phase 3: Additive families (WS5–8)
 
 - [ ] T011 [US5] Implement catalog-only verification suggestions and G5 controls in `src/brain_train/jev/` and `test/jev/`.
+  - [x] Offline catalog prototype and synthetic authority controls in `verification.mjs` and its tests.
+  - [ ] Freeze 100 independently labeled real changes, including at least 30 missing-check cases, and evaluate the G5 thresholds before any live use.
 - [ ] T012 [US5] Implement independent G6-R, G6-T, and G6-V policies and frozen evaluations in `src/brain_train/jev/` and `experiments/jev-btrain/`.
 - [ ] T013 [US5] Implement pinned-item context selection and separate transcript selection evaluations in `src/brain_train/jev/` and `experiments/jev-btrain/`.
 - [ ] T014 [US5] Implement eligibility-first routing and source-linked memory warnings in `src/brain_train/jev/` and `test/jev/`.

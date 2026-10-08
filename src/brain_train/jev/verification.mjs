@@ -1,0 +1,130 @@
+import { createHash } from "node:crypto"
+import { createDecisionFamily, createDecisionRun, decideCandidate } from "./decision.mjs"
+
+export const VERIFICATION_CATALOG = Object.freeze([
+  "unit",
+  "integration",
+  "negative-path",
+  "migration-safety",
+  "security-boundary",
+  "formal-witness",
+])
+
+const contractTags = new Set(["cross-component", "negative-path", "migration", "security", "formal-impact"])
+const maxPaths = 256
+
+function changePaths(change) {
+  if (!Array.isArray(change?.changedPaths) || !change.changedPaths.length
+    || change.changedPaths.some((value) => typeof value !== "string" || !value)) {
+    throw new Error("Changed paths are required")
+  }
+  return change.changedPaths
+}
+
+function tagsFor(change) {
+  return Array.isArray(change?.contractTags)
+    ? change.contractTags.filter((tag) => contractTags.has(tag))
+    : []
+}
+
+export function mandatoryVerificationChecks(change) {
+  const paths = changePaths(change)
+  const tags = new Set(tagsFor(change))
+  const required = new Set()
+  if (paths.some((file) => file.startsWith("src/"))) required.add("unit")
+  if (tags.has("cross-component")) required.add("integration")
+  if (tags.has("negative-path")) required.add("negative-path")
+  if (tags.has("migration") || paths.some((file) => file.startsWith("migrations/") && file.endsWith(".sql"))) required.add("migration-safety")
+  if (tags.has("security") || paths.some((file) => /(^|\/)(auth|payment|entitlement)(\/|[.-])/i.test(file))) required.add("security-boundary")
+  if (tags.has("formal-impact") || paths.some((file) => file.endsWith(".tla") || file.startsWith("formal/"))) required.add("formal-witness")
+  return VERIFICATION_CATALOG.filter((check) => required.has(check))
+}
+
+function verificationEligible(paths, contractTags, selectedChecks) {
+  const input = verificationFamily.inputBuilder({ changedPaths: paths, contractTags, selectedChecks })
+  return paths.length <= maxPaths && Buffer.byteLength(JSON.stringify(input)) <= verificationFamily.maxInputBytes
+    && VERIFICATION_CATALOG.some((check) => !selectedChecks.includes(check))
+}
+
+function verifyFrozenChange(change, sourceProof) {
+  const sameStrings = (left, right) => Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value, index) => typeof value === "string" && value === right[index])
+  const content = change.sourceContent ?? change.sourceContents?.[change.sourceId]
+  const source = sourceProof?.sources?.find((entry) => entry.id === change.sourceId)
+  if (typeof content !== "string" || !source
+    || createHash("sha256").update(content).digest("hex") !== source.sourceHash
+    || (change.sourceContents && change.sourceContents[change.sourceId] !== content)) {
+    throw new Error("Planner metadata must match its frozen change record")
+  }
+  let record
+  try { record = JSON.parse(content) } catch { throw new Error("Planner metadata must match its frozen change record") }
+  if (!record || Array.isArray(record) || typeof record !== "object"
+    || !sameStrings(record.changedPaths, change.changedPaths)
+    || !sameStrings(record.contractTags, change.contractTags ?? [])) {
+    throw new Error("Planner metadata must match its frozen change record")
+  }
+  return { paths: [...record.changedPaths], contractTags: [...record.contractTags], content }
+}
+
+export const verificationFamily = createDecisionFamily({
+  id: "verification-planner",
+  questionVersion: "1",
+  policyVersion: "1",
+  policyConfig: {
+    maxPaths,
+    contractTags: [...contractTags],
+    mandatoryRules: [changePaths, tagsFor, mandatoryVerificationChecks].map((rule) => rule.toString()).join("\n"),
+    eligibilityRule: verificationEligible.toString(),
+    frozenRecordRule: verifyFrozenChange.toString(),
+  },
+  questionId: "signal",
+  choices: [...VERIFICATION_CATALOG, "none"],
+  privacyClass: "private",
+  allowedActions: VERIFICATION_CATALOG.map((check) => `check:${check}`),
+  threshold: 0.8,
+  maxCalls: 3,
+  maxInputBytes: 16 * 1024,
+  inputBuilder: (candidate) => ({
+    changedPaths: [...candidate.changedPaths],
+    contractTags: [...candidate.contractTags],
+    selectedChecks: [...candidate.selectedChecks],
+  }),
+  actionPolicy: (choice, candidate) => choice === "none" || candidate.selectedChecks.includes(choice) ? null : `check:${choice}`,
+  fallback: (baseline) => baseline,
+})
+
+export async function planVerification({ change, provider, mode = "off", modelPin = null, codeRevision = null, sourceProof = null }) {
+  changePaths(change)
+  if (mode === "offline" && !sourceProof) throw new Error("Frozen source proof is required for offline verification")
+  const frozen = mode === "offline" ? verifyFrozenChange(change, sourceProof) : null
+  const paths = frozen?.paths ?? [...change.changedPaths]
+  const contractTags = tagsFor({ contractTags: frozen?.contractTags ?? change.contractTags })
+  const mandatory = mandatoryVerificationChecks({ changedPaths: paths, contractTags })
+  const suggested = []
+  const traces = []
+  const run = createDecisionRun(verificationFamily)
+  for (let callIndex = 0; callIndex < verificationFamily.maxCalls; callIndex += 1) {
+    const selectedChecks = [...mandatory, ...suggested]
+    const candidate = {
+      eligible: verificationEligible(paths, contractTags, selectedChecks),
+      sourceId: change.sourceId,
+      sourceIds: change.sourceIds,
+      sourceContent: frozen?.content ?? change.sourceContent,
+      sourceContents: change.sourceContents,
+      sourceRefs: change.sourceRefs,
+      baseline: "none",
+      privacyClass: "private",
+      callIndex,
+      changedPaths: paths,
+      contractTags,
+      selectedChecks,
+    }
+    const trace = await decideCandidate({ family: verificationFamily, candidate, provider, mode, modelPin, codeRevision, sourceProof, run })
+    traces.push(trace)
+    if (trace.outcome !== "decision") break
+    const check = trace.suggestedAction?.slice("check:".length)
+    if (!VERIFICATION_CATALOG.includes(check) || mandatory.includes(check) || suggested.includes(check)) break
+    suggested.push(check)
+  }
+  return { mandatory, suggested, checks: [...mandatory, ...suggested], traces }
+}
