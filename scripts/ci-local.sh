@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run btrain's CI checks on this machine, mirroring .github/workflows/test.yml
-# and formal-advisory.yml. Use it as the merge gate when hosted CI is
+# and formal-advisory.yml (the formal check is looser: it uses any local
+# tla2tools.jar and ignores the PR-body impact declaration). Use it as the merge gate when hosted CI is
 # unavailable, or before pushing.
 #
 # Usage: scripts/ci-local.sh [--base <ref>] [--compat] [--no-python] [--no-formal] [--install]
@@ -22,12 +23,12 @@ FORMAL=1
 INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base) BASE="${2:?--base needs a ref}"; shift 2 ;;
+    --base) [ $# -ge 2 ] || { echo "ci-local: --base needs a ref" >&2; exit 2; }; BASE="$2"; shift 2 ;;
     --compat) COMPAT=1; shift ;;
     --no-python) PYTHON=0; shift ;;
     --no-formal) FORMAL=0; shift ;;
     --install) INSTALL=1; shift ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) echo "ci-local: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -61,17 +62,22 @@ step() { # step <required|advisory> <name> <command...>
       RESULTS+=("advisory  $name failed ($((SECONDS - start))s)  log: $log")
     fi
     tail -n 25 "$log" | sed 's/^/    /'
+    return 1
   fi
 }
 
 if [ "$INSTALL" = 1 ] || [ ! -d node_modules ]; then
-  step required "npm ci" npm ci
+  step required "npm ci" npm ci || true
 fi
 command -v ast-grep >/dev/null || echo "ci-local: ast-grep not on PATH; test/decomposition_inventory.test.mjs needs it (brew install ast-grep)" >&2
 
-step required "Node $(node --version) test suite" npm test
-step required "Experiment tests" npm run test:experiments
-step advisory "Formal regression witnesses" npm run test:formal:witnesses
+case "$(node --version)" in
+  v22.*|v24.*) ;;
+  *) echo "ci-local: warning: local Node is $(node --version); hosted CI's required matrix is Node 22 and 24" >&2 ;;
+esac
+step required "Node $(node --version) test suite" npm test || true
+step required "Experiment tests" npm run test:experiments || true
+step advisory "Formal regression witnesses" npm run test:formal:witnesses || true
 
 if [ "$COMPAT" = 1 ]; then
   # Node 18 and 20 can't take npm test's quoted glob, so list the files here
@@ -81,7 +87,7 @@ if [ "$COMPAT" = 1 ]; then
   PRELOAD=()
   [ -f test/helpers/git-test-env.mjs ] && PRELOAD=(--import ./test/helpers/git-test-env.mjs)
   for v in 18 20; do
-    step required "Node $v (runtime compatibility)" npx --yes "node@$v" ${PRELOAD[@]+"${PRELOAD[@]}"} --test "${TEST_FILES[@]}"
+    step required "Node $v (runtime compatibility)" npx --yes "node@$v" ${PRELOAD[@]+"${PRELOAD[@]}"} --test "${TEST_FILES[@]}" || true
   done
 fi
 
@@ -92,8 +98,8 @@ if [ "$PYTHON" = 1 ]; then
     "$VENV/bin/python" -m pip install -q -r agentchattr/requirements.txt pytest
   }
   if step required "Python environment" python_setup; then
-    step required "agentchattr tests" "$VENV/bin/python" -m pytest agentchattr/tests -q
-    step required "Option A review tests" "$VENV/bin/python" scripts/test_option_a_review.py
+    step required "agentchattr tests" "$VENV/bin/python" -m pytest agentchattr/tests -q || true
+    step required "Option A review tests" "$VENV/bin/python" scripts/test_option_a_review.py || true
   fi
 fi
 
@@ -105,11 +111,12 @@ if [ "$FORMAL" = 1 ]; then
   [ -z "$JAR" ] && echo "ci-local: no tla2tools.jar found (set TLC_JAR); model checks will report infrastructure_failure" >&2
   step advisory "Formal advisory (base $BASE)" env TLC_JAR="$JAR" node scripts/formal_advisory.mjs \
     --base "$(git rev-parse "$BASE")" --head "$(git rev-parse HEAD)" \
-    --cache-dir "$CACHE/tlc-cache" --output "$LOGS/formal-advisory.json"
+    --cache-dir "$CACHE/tlc-cache" --output "$LOGS/formal-advisory.json" || true
 fi
 
 echo
-echo "ci-local summary ($(git rev-parse --short HEAD) on $(git branch --show-current || echo detached))"
+BRANCH="$(git branch --show-current)"
+echo "ci-local summary ($(git rev-parse --short HEAD) on ${BRANCH:-detached HEAD})"
 for line in "${RESULTS[@]}"; do echo "  $line"; done
 echo "  logs: $LOGS"
 exit "$FAILED"
