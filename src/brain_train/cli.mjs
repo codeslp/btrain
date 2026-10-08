@@ -69,6 +69,7 @@ import {
   showTrace,
 } from "./harness/trace-discovery.mjs"
 import { pullPrComments } from "./handoff/pr-comments.mjs"
+import { findInternalOnlyOptions, internalOnlyOptionError } from "./internal_options.mjs"
 import {
   runPrCreate,
   runPrPoll,
@@ -247,6 +248,12 @@ function parseOptions(args) {
     }
     index += 1
   }
+
+  // `btrain handoff` passes these options straight to core, so the
+  // transition-gate inputs that only btrain may set are refused for every
+  // command (see internal_options.mjs).
+  const internalOnly = findInternalOnlyOptions(options)
+  if (internalOnly.length > 0) throw new BtrainError(internalOnlyOptionError(internalOnly))
 
   const scopedLane = typeof process.env.BTRAIN_LANE === "string"
     ? process.env.BTRAIN_LANE.trim().toLowerCase()
@@ -1714,9 +1721,6 @@ async function run() {
     }
 
     if (subcommand === "resolve") {
-      // viaPrOutcome is internal-only (set by applyPrStatusToHandoff);
-      // block CLI callers from forging it to bypass --final guards.
-      delete options.viaPrOutcome
       await resolveHandoff(repoRoot, {
         ...options,
         onEvent: (line) => console.log(line),
