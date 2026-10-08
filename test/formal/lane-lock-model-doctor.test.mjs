@@ -14,6 +14,11 @@
 // escalation. The contract escalates, because a failed resync is guardian
 // intervention that still cannot restore a healthy state (FR-18; designated
 // 2026-10-07), so the two modes differ there.
+//
+// The real doctor reads coverage from the registry (buildLaneLockState and
+// analyzeLaneIntegrity's lockCount check), so a lane whose coverage came back
+// outside a resync is left alone in any status; the harness's doctor coverage
+// witnesses compare those cases with the real doctor.
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
@@ -55,9 +60,19 @@ function abandonY(model) {
   return model.resolve({ lane: "y", actor: "gamma", final: false })
 }
 
+function rescopeX(files) {
+  return (model) => model.rescope({ lane: "x", actor: "alpha", files })
+}
+
+function resolveX(actor) {
+  return (model) => model.resolve({ lane: "x", actor, final: false })
+}
+
 const idleY = { status: "idle", reasonCode: "", repairOwner: "", escalationExpected: false, registry: [] }
 
 const conflict = [dropRegistry("x"), claimY, doctorRepair]
+
+const coveredX = { reasonCode: "", repairOwner: "", repairReasonsSeen: [], escalationExpected: false, registry: ["src/a/"] }
 
 const CASES = [
   {
@@ -154,14 +169,57 @@ const CASES = [
     y: { status: "repair-needed", reasonCode: "lock-mismatch", repairOwner: "gamma", escalationExpected: false, registry: [] },
     disposeReason: "dispose-requires-repair-needed",
   },
+  {
+    // needs-review is no resync status (row 17, Q2 Option B), so a review
+    // lane without registry entries enters repair-needed.
+    name: "an uncovered review lane enters repair-needed",
+    steps: [update("alpha", "needs-review"), dropRegistry("x"), doctorRepair],
+    x: { status: "repair-needed", reasonCode: "lock-mismatch", repairOwner: "alpha", repairReasonsSeen: ["lock-mismatch"], escalationExpected: false, registry: [] },
+    y: idleY,
+    disposeReason: "dispose-requires-escalation",
+  },
+  // The real doctor reads coverage from the registry, so a lane whose
+  // coverage came back outside a resync is left alone in any status. The
+  // re-acquire cases run in implementation mode only: the contract model does
+  // not re-acquire on request-changes or peer resolve (the runtime's L9).
+  {
+    name: "a ready-for-pr lane re-acquired by the peer resolve is left alone",
+    modes: ["implementation"],
+    steps: [update("alpha", "needs-review"), dropRegistry("x"), resolveX("beta"), doctorRepair],
+    x: { ...coveredX, status: "ready-for-pr" },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
+    name: "a review lane re-acquired by request-changes is left alone",
+    modes: ["implementation"],
+    steps: [update("alpha", "needs-review"), dropRegistry("x"), requestChanges, update("alpha", "needs-review"), doctorRepair],
+    x: { ...coveredX, status: "needs-review" },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
+    name: "a review lane rescoped to a new set is left alone",
+    steps: [dropRegistry("x"), rescopeX(["src/b/"]), update("alpha", "needs-review"), doctorRepair],
+    x: { ...coveredX, status: "needs-review", registry: ["src/b/"] },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
+  {
+    name: "a ready-for-pr lane rescoped to a new set is left alone",
+    steps: [dropRegistry("x"), rescopeX(["src/b/"]), update("alpha", "needs-review"), resolveX("beta"), doctorRepair],
+    x: { ...coveredX, status: "ready-for-pr", registry: ["src/b/"] },
+    y: idleY,
+    disposeReason: "dispose-requires-repair-needed",
+  },
 ]
 
 const yHoldsPath = { status: "in-progress", reasonCode: "", repairOwner: "", escalationExpected: false, registry: ["src/a/"] }
 
-for (const { name, steps, contract, ...expected } of CASES) {
-  for (const mode of ["contract", "implementation"]) {
+for (const { name, steps, contract, modes = ["contract", "implementation"], ...expected } of CASES) {
+  for (const mode of modes) {
     const { x, y = yHoldsPath, disposeReason } = mode === "contract" && contract ? { ...expected, ...contract } : expected
-    test(`doctor resync conflict: ${name} (${mode} mode)`, () => {
+    test(`doctorRepair: ${name} (${mode} mode)`, () => {
       const model = new LaneLockModel({ lanes: ["x", "y"], agents: ["alpha", "beta", "gamma"], mode })
       for (const [i, step] of [claimX, ...steps].entries()) {
         const result = step(model)
@@ -193,4 +251,19 @@ for (const { name, steps, contract, ...expected } of CASES) {
       assert.deepEqual(model.dispose({ lane: "x" }), disposeReason ? { ok: false, reason: disposeReason } : { ok: true })
     })
   }
+}
+
+// The real doctor resyncs only from a non-empty handoff record, and its
+// integrity check repairs only an active lane with no registry entry. Only an
+// adopted real state reaches an active lane with an empty record.
+for (const mode of ["contract", "implementation"]) {
+  test(`doctor coverage from the registry: an empty record is never resynced (${mode} mode)`, () => {
+    const model = new LaneLockModel({ lanes: ["x", "y"], agents: ["alpha", "beta", "gamma"], mode })
+    const adopted = { status: "in-progress", owner: "alpha", reviewer: "beta", lockedFiles: [] }
+    model.adoptReal("x", { ...adopted, registry: ["src/a/"] })
+    model.adoptReal("y", { ...adopted, registry: [] })
+    assert.deepEqual(model.doctorRepair(), { ok: true })
+    assert.deepEqual([model.lane("x").status, model.registryPaths("x")], ["in-progress", ["src/a/"]], "x keeps its entries")
+    assert.deepEqual([model.lane("y").status, model.lane("y").reasonCode], ["repair-needed", "lock-mismatch"], "y holds no entry")
+  })
 }

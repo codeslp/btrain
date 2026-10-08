@@ -24,8 +24,9 @@ contract, using fast-check model-based command sequences per spec 014 FR-6.
   repair-memory witnesses run the same cases against the real entry points.
 - `lane-lock-model-doctor.test.mjs` — checks how the model's `doctorRepair`
   handles a resync that conflicts with another lane's lock (spec 015 rows 17
-  and 13) in both modes. It runs in the default `npm test`; the harness's
-  doctor resync conflict witnesses run the same cases against the real
+  and 13) and a lane whose coverage came back outside a resync, in both
+  modes. It runs in the default `npm test`; the harness's doctor resync
+  conflict and doctor coverage witnesses run the same cases against the real
   `doctor --repair`.
 
 ## Run
@@ -278,13 +279,16 @@ that only carry another lane's reviewed work.
   escalation). Contract mode expects that escalation. The implementation
   keeps the recorded escalation on the re-write, so the mirror does too and
   contract mode tallies `repair-escalation-missing`, which persists like the
-  other candidate labels until the runtime escalates. The model still
-  reads coverage loss from its `uncovered` flag, while the real doctor reads
-  the registry: a re-acquire (implementation-mode request-changes and peer
-  resolve) or a contract-mode rescope to a new set restores coverage without
-  clearing the flag, so a later doctor run sends a covered review or PR-flow
-  lane to repair-needed that the real doctor leaves alone. That gap is also
-  left for a later lane.
+  other candidate labels until the runtime escalates. Like the real doctor,
+  the model reads coverage from the registry: it resyncs a lane in one of
+  the three permitted statuses whose registry entries differ from a
+  non-empty recorded set that overlaps no other lane's lock, and otherwise
+  repairs an active lane only when it holds no registry entry. Until 2026-10-07 it read coverage loss
+  from its `uncovered` flag, which a re-acquire (implementation-mode
+  request-changes and peer resolve) or a contract-mode rescope to a new set
+  leaves set, so a later doctor run sent a covered review or PR-flow lane to
+  repair-needed that the real doctor leaves alone. The doctor coverage
+  witnesses and `lane-lock-model-doctor.test.mjs` guard the registry read.
 - PR-flow `changes-requested` provenance: the implementation reads the
   workflow event that entered `changes-requested` (`details.transitionEvent
   === "pr-poll"`); the mirror tracks the same fact as `prFeedbackEntered`,
