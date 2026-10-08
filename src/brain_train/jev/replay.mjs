@@ -1,5 +1,5 @@
 import { createDecisionRun, decideCandidate, validProbabilityVector } from "./decision.mjs"
-import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision, validateCaseGroups } from "./manifest.mjs"
+import { datasetHashFor, sourceSnapshotHashFor, validCodeRevision, validateCaseAnnotations, validateCaseGroups } from "./manifest.mjs"
 import { createHash } from "node:crypto"
 
 const ratio = (numerator, denominator) => denominator ? numerator / denominator : null
@@ -107,6 +107,7 @@ export async function replayManifest({ manifest, family, candidates, provider })
   if (manifest.cases.some((item) => !["train", "calibration", "test"].includes(item?.split))) throw new Error("Invalid manifest case split")
   if (manifest.cases.some((item) => !family.choices.includes(item.label))) throw new Error("Invalid manifest case label")
   if (manifest.cases.some((item) => !family.choices.includes(item.baseline))) throw new Error("Invalid manifest case baseline")
+  for (const item of manifest.cases) validateCaseAnnotations(item, manifest.labels)
   if (manifest.datasetHash !== datasetHashFor(manifest.cases, manifest.labels, manifest.sourceSnapshotHash, manifest.pins)) throw new Error("Manifest dataset hash does not match frozen cases and pins")
   const sources = validateCaseGroups(manifest.cases, manifest.sources)
   const replayCandidates = new Map()
