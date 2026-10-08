@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>btrain - Semi-Autonomous Multi-Agent Collaboration</title>
-  <meta name="description" content="Deterministic coordination for Claude, Codex, and Gemini. File-locked lanes, auto-notify handoffs, and tmux CLI integration — rules, not LLMs, orchestrate the workflow.">
+  <meta name="description" content="btrain lets several AI coding agents (Claude Code, Codex, Gemini) work in one repository without colliding. Plain rules, not another AI, decide who edits which files and when work counts as reviewed. The rules are checked with TLA+ and random tests, and an optional AI helper, Jev, may only advise.">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,16 +17,16 @@
       <a href="#" class="nav-logo">
         <span class="logo-icon">&#9650;</span> btrain
       </a>
-      <button class="nav-toggle" aria-label="Toggle menu" onclick="document.querySelector('.nav-links').classList.toggle('open')">
+      <button type="button" class="nav-toggle" aria-label="Toggle menu" onclick="document.querySelector('.nav-links').classList.toggle('open')">
         <span></span><span></span><span></span>
       </button>
       <div class="nav-links">
         <a href="#problem">Why</a>
         <a href="#how">How</a>
-        <a href="#autonomy">Autonomy</a>
-        <a href="#dashboard">Visibility</a>
-        <a href="#security">Security</a>
+        <a href="#jev">Jev</a>
         <a href="#formal">Guarantees</a>
+        <a href="#new">What's new</a>
+        <a href="#security">Security</a>
         <a href="#compare">Compare</a>
         <a href="https://github.com/codeslp/btrain" class="btn btn-sm">GitHub &#8594;</a>
       </div>
@@ -42,12 +42,12 @@
       <div class="hero-image-wrap">
         <img src="hero-train.jpg" alt="B-Train datacenter locomotive pulling Codex and Claude AI data center cars through mountains at night" class="hero-image">
       </div>
-      <div class="hero-badge">Deterministic &middot; File-backed &middot; Zero dependencies &middot; MIT</div>
+      <div class="hero-badge">Rule-based &middot; File-backed &middot; Zero runtime dependencies &middot; MIT</div>
       <p class="hero-tagline">Semi-autonomous multi-agent<br>collaboration that runs on rules</p>
       <p class="hero-sub">
-        Claude, Codex, and Gemini work in parallel lanes through tmux CLI sessions.
-        A deterministic state machine coordinates handoffs, enforces reviews, and auto-notifies agents &mdash;
-        no LLM overhead for orchestration.
+        btrain lets two or more AI coding assistants, such as Claude Code, Codex, and Gemini, work in the same repository without
+        stepping on each other. Plain rules, not another AI, decide which files each one may edit, whose turn it is,
+        and when work counts as reviewed.
       </p>
       <div class="hero-cta">
         <a href="#quickstart" class="btn btn-primary">Get Started</a>
@@ -87,28 +87,38 @@
   <section id="problem" class="section">
     <div class="container">
       <div class="section-label">The Problem</div>
-      <h2>LLM-driven coordination<br>doesn't scale</h2>
+      <h2>Two AI helpers, one repo,<br>no referee</h2>
+      <p class="section-intro">
+        An <strong>AI coding agent</strong> is a program, such as Claude Code, Codex, or Gemini CLI, that reads your code,
+        runs commands, and edits files on its own. One agent is like one fast teammate. Two agents in the same
+        repository act like two teammates who never talk to each other.
+      </p>
       <div class="cards">
         <div class="card">
           <div class="card-icon">&#128256;</div>
-          <h3>Context Desync</h3>
-          <p>Agent A edits files that Agent B has cached. Neither knows the other's changes exist. File locks prevent this.</p>
+          <h3>They collide</h3>
+          <p>Both agents edit the same file. One overwrites the other's work, and neither one notices.</p>
         </div>
         <div class="card">
-          <div class="card-icon">&#128123;</div>
-          <h3>Token Burn</h3>
-          <p>Using an LLM to decide whose turn it is wastes tokens on coordination instead of code. Rules are free.</p>
+          <div class="card-icon">&#128064;</div>
+          <h3>They skip review</h3>
+          <p>An agent writes code and pushes it before anyone else has looked at it.</p>
         </div>
         <div class="card">
-          <div class="card-icon">&#128269;</div>
-          <h3>Unpredictable Routing</h3>
-          <p>LLM-based routing hallucinates, drops handoffs, and loses state across sessions. A state machine doesn't.</p>
+          <div class="card-icon">&#9989;</div>
+          <h3>They say "done" too early</h3>
+          <p>An agent reports success while a test fails or a step was skipped. Nobody checks the claim.</p>
         </div>
         <div class="card">
-          <div class="card-icon">&#129335;</div>
-          <h3>No Enforcement</h3>
-          <p>Without git hooks, agents push unreviewed code. btrain blocks it at the pre-push level.</p>
+          <div class="card-icon">&#129689;</div>
+          <h3>An AI referee is costly</h3>
+          <p>You could ask a third AI to decide whose turn it is. That costs tokens (the units AI services bill by) on every step, and it can forget or invent state.</p>
         </div>
+      </div>
+      <div class="flow-detail" style="margin-top:2rem">
+        <p><strong>btrain's answer: plain rules, written down and checked.</strong> Think of a sign-out sheet for files.
+        An agent signs out the files it will change, and no other agent may touch them until they come back. Before
+        work counts as done, a <em>different</em> agent must review it, and the author must say what changed and how it was tested.</p>
       </div>
     </div>
   </section>
@@ -124,40 +134,53 @@
   <section id="how" class="section section-dark">
     <div class="container">
       <div class="section-label">How It Works</div>
-      <h2>Deterministic state machine.<br>Agents follow rules.</h2>
+      <h2>A fixed set of rules.<br>Agents follow them.</h2>
+      <div class="table-scroll" style="max-width:760px; margin-bottom:3rem">
+        <table class="security-table glossary">
+          <thead>
+            <tr><th scope="col">Word</th><th scope="col">What it means here</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Lane</td><td>One slot for one task, like a lane in a pool. Each lane has an <strong>owner</strong> (the agent doing the work) and a <strong>reviewer</strong> (a different agent).</td></tr>
+            <tr><td>Lock</td><td>The files a lane has signed out. No other lane may claim them.</td></tr>
+            <tr><td>Status</td><td>Where a lane is right now, for example <code>in-progress</code>, <code>needs-review</code>, or <code>resolved</code> (done).</td></tr>
+            <tr><td>Handoff</td><td>Passing a lane from owner to reviewer, or back. It carries a short report: what changed, what tests ran, and what to check.</td></tr>
+          </tbody>
+        </table>
+      </div>
       <div class="flow">
         <div class="flow-step">
           <div class="flow-number">1</div>
           <h3>Claim</h3>
-          <p>Agent claims a lane, locks files. Status &rarr; <strong>in-progress</strong>. Other agents can't touch those files.</p>
+          <p>An agent picks a task and locks the files it needs. The lane moves to <strong>in-progress</strong>. Other agents can't edit those files.</p>
         </div>
         <div class="flow-arrow">&rarr;</div>
         <div class="flow-step">
           <div class="flow-number">2</div>
           <h3>Work</h3>
-          <p>Agent works in its tmux session. btrain injects lane context (~20 words) into each prompt. No chat history reading.</p>
+          <p>The agent works in its own terminal session. btrain adds a one-line reminder (lane, status, role, next command) to each prompt.</p>
         </div>
         <div class="flow-arrow">&rarr;</div>
         <div class="flow-step">
           <div class="flow-number">3</div>
-          <h3>Notify</h3>
-          <p>Agent runs <code>btrain handoff update --status needs-review</code>. The poller detects the transition within 5 seconds and auto-@mentions the reviewer.</p>
+          <h3>Hand off</h3>
+          <p>The agent runs <code>btrain handoff update --status needs-review</code> with its report. btrain refuses empty or placeholder reports, then pings the reviewer within about 5 seconds.</p>
         </div>
         <div class="flow-arrow">&rarr;</div>
         <div class="flow-step">
           <div class="flow-number">4</div>
           <h3>Review</h3>
-          <p>Reviewer approves or requests changes. The state machine routes it back. Content-hash dedup ensures no notification gets lost.</p>
+          <p>The reviewer approves the work or sends it back with a reason code. btrain routes the lane to the next step.</p>
         </div>
       </div>
       <div class="flow-detail">
-        <p>State lives in <code>.claude/collab/HANDOFF_*.md</code> files and <code>.btrain/locks.json</code>. No database, no external service. Operational files are gitignored &mdash; only <code>.btrain/project.toml</code> is tracked.</p>
+        <p>State lives in plain files inside one folder, <code>.btrain/</code>: a handoff file per lane (<code>.btrain/collab/HANDOFF_*.md</code>) and a lock list (<code>.btrain/locks.json</code>). No database, no external service. <code>btrain init</code> adds <code>.btrain/</code> to <code>.gitignore</code>, so none of it ends up in your commits.</p>
       </div>
 
       <div class="section-label" style="margin-top:3.5rem">Concurrent Lanes</div>
       <h2>Three agents, nine lanes</h2>
       <div class="flow-detail">
-        <p>Lane count = active agents &times; lanes per agent. Each lane gets its own handoff file and file locks. Agents work in parallel without collisions.</p>
+        <p>Lane count = active agents &times; lanes per agent. Each lane gets its own handoff file and its own file locks, so agents work in parallel without collisions.</p>
       </div>
       <div class="code-block" style="margin-top:1.5rem">
         <pre><code><span class="t-prompt">$</span> btrain handoff claim --lane a --task "Auth" \
@@ -185,8 +208,297 @@
     <div class="track-line"></div>
   </div>
 
+  <!-- Jev -->
+  <section id="jev" class="section">
+    <div class="container">
+      <div class="section-label">Jev &middot; Optional decision helper</div>
+      <h2>An AI helper that advises.<br>The rules still decide.</h2>
+      <div class="speckit-content">
+        <div class="speckit-text">
+          <p>Fixed rules handle most of btrain's work. A few questions are hard for them. For example: a review bot
+          leaves a comment on your pull request. Did it ask for a change, or say "looks good"? Bots word this many ways,
+          and a text-matching rule misses the paraphrases.</p>
+          <p><strong>Jev, btrain's optional decision helper,</strong> sends a narrow question like that to a hosted AI
+          model. The model must answer with one label from a short, fixed list. For PR comments the list is
+          <code>clear</code>, <code>feedback</code>, <code>unavailable</code>, or <code>uncertain</code>. Jev only sees
+          the newest bot comment on the current commit, and only when the plain rules could not classify it.</p>
+          <p>Jev can label, rank, or flag evidence for a person or a rule to act on. It never runs the workflow.</p>
+          <h3>Earn trust one step at a time</h3>
+          <p>Each use of Jev climbs this ladder on its own. Passing for one use, one model, or one repository does not
+          count for another. A use can stop at any step, and an operator can send it back to "off" or "watch only" at once.</p>
+        </div>
+        <div class="speckit-flow">
+          <div class="speckit-step">
+            <div class="speckit-step-num">1</div>
+            <div class="speckit-step-text"><strong>Off.</strong> Every use starts switched off.</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">2</div>
+            <div class="speckit-step-text"><strong>Offline test.</strong> Run against a frozen, labeled test set and beat the plain-rules baseline. For PR comments the bar includes at least 95% accuracy and zero wrong "clear" answers on comments that are not clear.</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">3</div>
+            <div class="speckit-step-text"><strong>Watch only ("shadow").</strong> Runs on real work but changes nothing. Its answers are logged next to what really happened. Two weeks for PR comments; at least 7 days and 30 real cases for other uses.</div>
+          </div>
+          <div class="speckit-step">
+            <div class="speckit-step-num">4</div>
+            <div class="speckit-step-text"><strong>Small, reversible action ("assist").</strong> A person approves a threshold and one allowed action. A change to the model, the rules, or the code sends it back through the ladder.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cards" style="margin-top:3rem">
+        <div class="card">
+          <div class="card-icon">&#9878;</div>
+          <h3>Rules stay in charge</h3>
+          <p>The model cannot approve work, release a file lock, count as a required review, or skip a required check. If Jev says a comment is "clear", btrain still waits for the bot's real approval. If Jev says "feedback", btrain may send the pull request back for changes. That is the cautious direction, and a person can undo it.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128721;</div>
+          <h3>It fails safe</h3>
+          <p>If the model times out (2 seconds by default), errors, or answers with something outside the allowed list, btrain ignores it. It then does exactly what it would have done without Jev.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128274;</div>
+          <h3>Private data is protected</h3>
+          <p>Jev's design rules say: no credentials in its logs, private comment text stays in the repository it came from, and sending private text to a hosted model needs an explicit data-policy approval for that specific use.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128268;</div>
+          <h3>Off unless you turn it on</h3>
+          <p>Today Jev reads PR review comments only, and only after you give it your own API key. With a key, it starts in its cautious mode: it may flag a comment as "needs changes", never as "approved". Set <code>BTRAIN_JEV_MODE=shadow</code> to watch only, or <code>off</code> to turn it off. Without a key, btrain behaves exactly as before.</p>
+        </div>
+      </div>
+
+      <div class="code-block" style="margin-top:1.5rem">
+        <pre><code><span class="t-dim"># Watch-only: log what Jev would say, change nothing</span>
+<span class="t-prompt">$</span> export BTRAIN_JEV_MODE=shadow
+<span class="t-prompt">$</span> export BTRAIN_JEV_API_KEY=<span class="t-value">&lt;your key&gt;</span>
+<span class="t-prompt">$</span> btrain pr status --lane a
+<span class="t-dim">...</span>
+<span class="t-dim">semantic review signals: shadow — enabled</span></code></pre>
+      </div>
+
+      <div class="section-label" style="margin-top:3.5rem">The evidence so far</div>
+      <h3 class="sub-title">Promising, small, and stated plainly</h3>
+      <div class="security-grid">
+        <div class="security-item">
+          <h3>A small pilot</h3>
+          <p>Labels were frozen before any model ran. On cases held back from tuning:</p>
+          <div class="table-scroll">
+            <table class="security-table">
+              <thead>
+                <tr><th scope="col">Task</th><th scope="col">Plain rules</th><th scope="col">Jev</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>PR review comments (14 cases)</td><td>7 right</td><td>14 right</td></tr>
+                <tr><td>Handoff reports (9 cases)</td><td>6 right</td><td>8 right</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p style="margin-top:1rem; margin-bottom:0">Jev's one miss accepted a report whose tests skipped a required failure case. That is why a model check can never replace the required tests. A smaller local model tried in the same pilot did worse and is excluded.</p>
+        </div>
+        <div class="security-item">
+          <h3>Not enough data yet</h3>
+          <p>These are tiny test sets with one person labeling. They show the idea may help. They do not show production accuracy.</p>
+          <p style="margin-bottom:0">A follow-up audit of btrain's own pull request history found only 84 distinct message patterns once repeats were grouped. The rules ask for at least 200 distinct, well-documented cases before the full test. So that larger test and the two-week watch-only period are on hold until better data exists.</p>
+        </div>
+        <div class="security-item">
+          <h3>Next uses <span class="future-badge">Offline only</span></h3>
+          <p>The written plan is now in the repo, along with early prototypes for more uses. They run only against frozen test data, never on live work, until each one passes its own test:</p>
+          <ul class="plain-list">
+            <li>Record where each piece of evidence came from, and replay tests offline</li>
+            <li>Suggest missing tests, only from an approved list</li>
+            <li>Choose which notes to keep in an agent's working memory</li>
+            <li>Suggest a reviewer or skill, only from those already allowed</li>
+            <li>Warn when a saved summary is out of date</li>
+            <li>Check a change against the repo's written rules, citing the exact rule</li>
+            <li>Put riskier work first in the review queue without dropping any review</li>
+            <li>Search past records you are allowed to read</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Track Divider -->
+  <div class="track-divider">
+    <div class="track-line"></div>
+    <div class="track-dot"></div>
+    <div class="track-line"></div>
+  </div>
+
+  <!-- Formal Verification -->
+  <section id="formal" class="section section-dark">
+    <div class="container">
+      <div class="section-label">Guarantees &middot; Formal verification</div>
+      <h2>The rules are checked by machines,<br>not assumed.</h2>
+      <p class="section-intro">
+        btrain is only as good as its rules. So the rules are written down once, and then checked three ways:
+        against every possible order of events in a model of the design, against the real code with random command
+        sequences, and on every pull request in CI.
+      </p>
+      <div class="security-grid">
+        <div class="security-item">
+          <h3>&#128203; One written rule table</h3>
+          <p>Every status change a lane can make is one row in a table: where it starts, where it ends, who may do it
+          (the owner, the reviewer, or btrain itself), and what happens to the file locks. Every command that changes a
+          lane's status goes through one gate that checks this table.</p>
+          <p>A few older behaviors that the table forbids, such as approving work when you are not the named reviewer,
+          are still accepted for now. Each one prints a warning and is recorded. They will be blocked one at a time
+          after a planned grace period.</p>
+          <p style="margin-bottom:0">Print the table with <code>btrain transitions</code>, or a diagram with <code>--format mermaid</code>.</p>
+        </div>
+        <div class="security-item">
+          <h3>&#128208; The design, checked with TLA+</h3>
+          <p><strong>TLA+</strong> is a language for describing how a system moves between states. btrain's lane rules
+          are written as a TLA+ model. A model checker then tries every possible order of steps in a small setup
+          (2 lanes, 3 agents) and checks rules that must always hold:</p>
+          <ul class="plain-list">
+            <li>No two lanes ever lock the same files.</li>
+            <li>A finished lane holds no locks.</li>
+            <li>The owner never reviews their own work.</li>
+            <li>No lane reaches the pull request stage without a peer approval.</li>
+          </ul>
+          <p style="margin-bottom:0">Its last recorded full run explored more than 10 million distinct states. To prove
+          the checks can fail, the authors broke the model on purpose, for example letting a claim ignore other lanes'
+          locks, and confirmed the checker caught it.</p>
+        </div>
+        <div class="security-item">
+          <h3>&#127922; The real code, checked with random runs</h3>
+          <p>A test harness builds random sequences of commands: claims, reviews, pull request outcomes, and repairs.
+          It runs them against the real btrain code and compares every step with the rules. A mismatch is shrunk to the
+          shortest sequence that shows it, and printed with a <strong>seed</strong>. Run again with that seed and the
+          same sequence replays step for step on any machine.</p>
+          <p style="margin-bottom:0">Known open mismatches (the grace-period behaviors above) are counted, not hidden.
+          They keep <code>npm run test:formal</code> red on purpose until they are fixed.</p>
+        </div>
+        <div class="security-item">
+          <h3>&#9881; Runs in CI on every pull request</h3>
+          <p>A formal check job works out which checks a pull request could affect: the rule text, the model, the
+          harness, or the code the harness drives. It runs only those and posts a summary. A pull request that touches
+          none of them reports that and skips the work.</p>
+          <p style="margin-bottom:0">The result is <strong>advisory</strong> for now: a red result shows on the pull
+          request but does not block the merge. The same is true of the harness's 11 fixed regression tests, which
+          run next to the main test suite.</p>
+        </div>
+        <div class="security-item">
+          <h3>&#128190; Unchanged models are not re-checked</h3>
+          <p>A full model check takes minutes. Each result is saved with a fingerprint of everything it depends on: the
+          model, its settings, the rule text, the harness, btrain's source code, and the checker version. If none of
+          those changed, CI reuses the saved result and says so. The real-code check still runs fresh every time.</p>
+          <p style="margin-bottom:0">Each model also records a fingerprint of the spec paragraphs it was built from.
+          <code>python3 scripts/tla_pin.py --check</code> fails if those paragraphs change without a deliberate model
+          update, so the model can't quietly drift away from the written rules.</p>
+        </div>
+        <div class="security-item">
+          <h3>&#128027; Real bugs it found</h3>
+          <p>Each mismatch stays on the record until the code or the rule changes on purpose. Four are fixed, and each
+          fix has a regression test that fails if the old behavior returns:</p>
+          <table class="security-table">
+            <thead>
+              <tr><th scope="col">Bug</th><th scope="col">Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Closing a pull request without merging left its files locked</td><td>Fixed</td></tr>
+              <tr><td>A shortcut flag let a lane skip peer review</td><td>Fixed</td></tr>
+              <tr><td>Dropping another lane's locks needed no recorded sign-off</td><td>Fixed</td></tr>
+              <tr><td>Editing only the notes of a finished lane was wrongly refused (found by a random run)</td><td>Fixed</td></tr>
+            </tbody>
+          </table>
+          <p style="font-size:0.85rem; color: var(--text-muted); margin-top:1rem; margin-bottom:0">The full list is in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger">findings ledger</a>.</p>
+        </div>
+      </div>
+      <div class="code-block" style="margin-top:1.5rem">
+        <pre><code><span class="t-dim"># Compare the real code with the rules (no network, no AI provider needed)</span>
+<span class="t-prompt">$</span> npm install
+<span class="t-prompt">$</span> npm run test:formal
+
+<span class="t-dim"># Replay one failing run exactly</span>
+<span class="t-prompt">$</span> BTRAIN_FORMAL_SEED=<span class="t-value">&lt;seed&gt;</span> npm run test:formal
+
+<span class="t-dim"># Only the fixed regression tests (what CI runs with the main suite)</span>
+<span class="t-prompt">$</span> npm run test:formal:witnesses</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Track Divider -->
+  <div class="track-divider">
+    <div class="track-line"></div>
+    <div class="track-dot"></div>
+    <div class="track-line"></div>
+  </div>
+
+  <!-- What's New -->
+  <section id="new" class="section">
+    <div class="container">
+      <div class="section-label">What's New</div>
+      <h2>Recent improvements</h2>
+      <div class="cards">
+        <div class="card">
+          <div class="card-icon">&#128230;</div>
+          <h3>Nothing extra to commit</h3>
+          <p><code>btrain init</code> now keeps all of btrain's files in one ignored folder, <code>.btrain/</code>. Your commits contain only your code. It also asks which optional parts you want, such as the dashboard, git hooks, or PR review bots, and <code>btrain features</code> changes them later.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#129514;</div>
+          <h3>Tests on every pull request, or on your machine</h3>
+          <p>CI runs the full test suite on Node 22 and 24, a compatibility run on Node 18 and 20, the experiment tests, and the Python tests for the chat UI and review script. <code>scripts/ci-local.sh</code> runs the same checks locally, for when hosted CI or review bots are unavailable.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#129399;</div>
+          <h3>Honest reviewer names</h3>
+          <p>btrain warns when someone other than the named reviewer approves work. When the usual review bot ran out of credits, a Claude stand-in reviewed under its own name, <code>claude-reviewer</code>, instead of borrowing another agent's name.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#127991;</div>
+          <h3>Bots and agents can't be confused</h3>
+          <p>GitHub review bots now carry a <code>gh-</code> prefix (<code>gh-codex</code>, <code>gh-unblocked</code>). "codex the agent that owns a lane" and "codex the bot that left feedback" are no longer the same word.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128269;</div>
+          <h3>Correct agent detection</h3>
+          <p>btrain used to guess which AI tool was running by looking for words like "codex" anywhere in the environment. A macOS system path contains "codex", so every session looked ambiguous. It now reads only markers the tools set themselves.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128165;</div>
+          <h3>Red-team and mutation reviews</h3>
+          <p>Two new review skills. <code>red-team</code>: list 3 to 5 attacks first, then prove each break with a failing test. <code>mutation-round</code>: plant small deliberate bugs in a throwaway copy and check that the tests catch each one. The chat UI also never casts the builder as its own attacker.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128176;</div>
+          <h3>Token spend, measured</h3>
+          <p>About 70% of measured AI cost is the model re-reading context it has already seen. That grows with session size times number of turns. A new context-budget module reads a session's size against a warning ceiling (200,000 tokens) and a blocking ceiling (400,000). Wiring it into the handoff command comes next. <code>npx ccusage@latest session</code> reports spend per session.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128506;</div>
+          <h3>Safer code-graph checks</h3>
+          <p>btrain can ask an optional code-graph tool which other code depends on the files a lane is about to lock. An empty graph used to look like "no conflicts". Now it is reported as unavailable. A measured plan also splits btrain's largest source file into smaller modules.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128270;</div>
+          <h3>Search by meaning (optional)</h3>
+          <p>If you install and index <a href="https://github.com/zvec-ai/zvec-grep">zvec-grep</a>, agents can search for code by meaning, such as "where lane rules are enforced". Exact text search stays the default. <code>ast-grep</code>, which searches code by its structure, is also documented.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">&#128100;</div>
+          <h3>Solo mode <span class="future-badge">Planned</span></h3>
+          <p>When only one AI tool is available, a fresh session of it will review under a separate name. The review is labeled as weaker, because the same model can share the same blind spots. The design and plan are written; the reviewer-name check above is its first piece.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Track Divider -->
+  <div class="track-divider">
+    <div class="track-line"></div>
+    <div class="track-dot"></div>
+    <div class="track-line"></div>
+  </div>
+
   <!-- Autonomy -->
-  <section id="autonomy" class="section">
+  <section id="autonomy" class="section section-dark">
     <div class="container">
       <div class="section-label">Agent Autonomy</div>
       <h2>Semi-autonomous through<br>tmux CLI integration</h2>
@@ -194,37 +506,33 @@
         <div class="card">
           <div class="card-icon">&#128421;</div>
           <h3>tmux sessions</h3>
-          <p>Each agent runs in its own tmux session. The wrapper injects prompts via <code>send-keys</code> and monitors activity via <code>capture-pane</code> hashing. No API keys needed &mdash; subscription CLIs authenticate locally.</p>
+          <p>tmux is a terminal tool that keeps sessions running in the background. Each agent runs in its own session. btrain types prompts into it and watches for activity. No API keys needed &mdash; the agent CLIs sign in with your existing subscriptions.</p>
         </div>
         <div class="card">
           <div class="card-icon">&#128260;</div>
           <h3>Auto-notify handoffs</h3>
-          <p>A 5-second poller watches lane state. When a lane transitions, it auto-posts an @mention to the next agent. Content-hash fingerprints ensure lost notifications get re-sent.</p>
+          <p>A poller checks lane state every 5 seconds. When a lane changes status, it @mentions the next agent in the chat. A fingerprint of each message means a lost notification gets sent again.</p>
         </div>
         <div class="card">
           <div class="card-icon">&#128295;</div>
           <h3>Self-healing watchdog</h3>
-          <p>Runs every 5 minutes. Releases stale locks, compacts handoff history, and routes <code>repair-needed</code> lanes to the responsible agent with reason codes.</p>
+          <p>Runs every 5 minutes. Releases stale locks, trims old handoff history, and routes <code>repair-needed</code> lanes to the responsible agent with a reason code.</p>
         </div>
         <div class="card">
           <div class="card-icon">&#128218;</div>
-          <h3>Minimal token injection</h3>
-          <p>~20 words per trigger: lane ID, status, role, and the exact btrain command to run. Agents don't read chat logs. Rules handle coordination so LLMs handle code.</p>
+          <h3>Short prompts</h3>
+          <p>About 20 words per trigger: lane, status, role, and the exact btrain command to run. Agents don't read chat logs. Rules handle coordination so the AI's effort goes into code.</p>
         </div>
       </div>
       <div class="flow-detail" style="margin-top:1.5rem">
-        <p><code>btrain init</code> scaffolds <code>scripts/serve-dashboard.js</code> plus the handoff-history helper scripts into each bootstrapped repo, so the local HUD and archive tooling can run directly from that repo root.</p>
+        <p><code>btrain init</code> sets up a local dashboard for each repo. It shows every lane's status in your browser.</p>
       </div>
       <div class="code-block" style="margin-top:1.5rem">
-        <pre><code><span class="t-dim"># from the bootstrapped repo root</span>
-<span class="t-prompt">$</span> node scripts/serve-dashboard.js
-<span class="t-dim">[BTrain Dashboard] HUD Status monitor is running on http://localhost:3333</span>
-
-<span class="t-prompt">$</span> open http://localhost:3333
-<span class="t-dim"># or visit the URL in your browser</span></code></pre>
+        <pre><code><span class="t-dim"># from the repo root: start the dashboard and open it</span>
+<span class="t-prompt">$</span> btrain dashboard open</code></pre>
       </div>
       <div class="flow-detail" style="margin-top:1rem">
-        <p>The same init run also vendors <code>agentchattr/</code> into the repo, so the chat UI and launcher scripts live alongside the dashboard instead of depending on a separate tools checkout.</p>
+        <p>Optional parts can be switched on or off at any time with <code>btrain features list|enable|disable</code>. For example, <code>btrain features enable agentchattr</code> adds the multi-agent chat UI.</p>
       </div>
     </div>
   </section>
@@ -239,7 +547,7 @@
           <div class="code-step-label">Install btrain + agent CLIs</div>
           <div class="code-block">
             <pre><code>git clone https://github.com/codeslp/btrain.git
-cd btrain && npm link
+cd btrain &amp;&amp; npm link
 
 <span class="t-dim"># Agent CLIs (subscription auth, no API keys)</span>
 npm i -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
@@ -249,26 +557,24 @@ brew install tmux ripgrep</code></pre>
         <div class="code-step">
           <div class="code-step-label">Bootstrap your repo</div>
           <div class="code-block">
-            <pre><code>btrain init /path/to/your/repo \
-  --agent "Claude" \
-  --agent "GPT-5 Codex"</code></pre>
+            <pre><code>btrain init /path/to/your/repo --agents claude,codex
+
+<span class="t-dim"># Asks which optional features you want (or pass --yes for defaults).</span>
+<span class="t-dim"># Everything goes in .btrain/, plus one ".btrain/" line in .gitignore.</span>
+<span class="t-dim"># Prefer committing btrain's files with your code? Add --tracked.</span></code></pre>
           </div>
         </div>
         <div class="code-step">
-          <div class="code-step-label">Open the console dashboard <span style="opacity:0.5">(scaffolded by init)</span></div>
+          <div class="code-step-label">Open the dashboard</div>
           <div class="code-block">
-            <pre><code># from the bootstrapped repo root
-node scripts/serve-dashboard.js
-# then visit http://localhost:3333</code></pre>
+            <pre><code>btrain dashboard open --repo /path/to/your/repo</code></pre>
           </div>
         </div>
         <div class="code-step">
           <div class="code-step-label">Launch agentchattr <span style="opacity:0.5">(optional)</span></div>
           <div class="code-block">
-            <pre><code># from the bootstrapped repo root
-cd agentchattr
-sh macos-linux/start_codex.sh
-# then visit http://localhost:8300</code></pre>
+            <pre><code>btrain features enable agentchattr --repo /path/to/your/repo
+<span class="t-dim"># then start it with btrain-chat (see "Launch agents" below)</span></code></pre>
           </div>
         </div>
         <div class="code-step">
@@ -288,9 +594,8 @@ sh macos-linux/start_codex.sh
           <div class="code-block">
             <pre><code>btrain handoff --repo /path/to/your/repo
 
-<span class="t-dim"># Creates: .btrain/project.toml, AGENTS.md, CLAUDE.md,</span>
-<span class="t-dim"># GEMINI.md → CLAUDE.md (symlink), .codex/prompts/AGENTS.md → AGENTS.md (symlink)</span>
-<span class="t-dim"># Auto-adds .btrain/* and .claude/collab/ to .gitignore</span></code></pre>
+<span class="t-dim"># Shows every lane: its task, status, owner, reviewer,</span>
+<span class="t-dim"># and the exact command whoever's turn it is should run next.</span></code></pre>
           </div>
         </div>
         <div class="code-step">
@@ -342,7 +647,7 @@ btrain-chat status</code></pre>
           <p><code>btrain init --hooks</code> installs managed guards that enforce the workflow at the git level.</p>
           <table class="security-table">
             <thead>
-              <tr><th>Hook</th><th>Blocks when</th></tr>
+              <tr><th scope="col">Hook</th><th scope="col">Blocks when</th></tr>
             </thead>
             <tbody>
               <tr><td>pre-commit</td><td>Any lane is <code>needs-review</code></td></tr>
@@ -356,7 +661,7 @@ btrain-chat status</code></pre>
           <p>The CLI rejects <code>needs-review</code> transitions that have placeholder context, missing files-changed, or no reviewable diff in locked files.</p>
           <table class="security-table">
             <thead>
-              <tr><th>Required field</th><th>CLI flag</th></tr>
+              <tr><th scope="col">Required field</th><th scope="col">CLI flag</th></tr>
             </thead>
             <tbody>
               <tr><td>Base</td><td><code>--base</code></td></tr>
@@ -375,40 +680,6 @@ btrain-chat status</code></pre>
     </div>
   </section>
 
-  <!-- Formal Verification -->
-  <section id="formal" class="section">
-    <div class="container">
-      <div class="section-label">Guarantees</div>
-      <h2>The rules are checked, not assumed.</h2>
-      <div class="security-grid">
-        <div class="security-item">
-          <h3>&#128737; Catches rule-breaking when run</h3>
-          <p>An opt-in test harness generates random workflow sequences &mdash; agents claiming lanes, reviewing, merging, failing, and recovering, in every order the generator can produce. Each step is compared against the written rules. If any step lets something through that the rules forbid &mdash; a skipped review, a leaked lock, the wrong agent acting &mdash; the test fails. The harness runs on demand today (<code>npm run test:formal</code>). It is not yet a required pre-merge gate: a CI job runs it on every pull request that touches the covered code and posts the result, but the result is advisory. A red run does not block the merge, and a pull request that touches none of the covered files does not run it at all.</p>
-        </div>
-        <div class="security-item">
-          <h3>&#128027; Real gaps it surfaced</h3>
-          <p>Each difference the checks find stays on the record until the code is fixed or the rule changes deliberately. Three of them have been fixed, and each fix is now held in place by a regression test that fails if the old behavior returns:</p>
-          <table class="security-table">
-            <thead>
-              <tr><th>Gap</th><th>Status</th></tr>
-            </thead>
-            <tbody>
-              <tr><td>Closing a PR without merging left its files locked</td><td>Repaired &mdash; regression test in place</td></tr>
-              <tr><td>A shortcut flag let a lane skip peer review</td><td>Repaired &mdash; regression test in place</td></tr>
-              <tr><td>Dropping another lane's file locks needed no audited sign-off</td><td>Repaired &mdash; regression test in place</td></tr>
-            </tbody>
-          </table>
-          <p style="font-size:0.85rem; color: var(--text-muted);">Further candidate findings are still open, waiting on decisions about which side should change &mdash; the code or the rule. They hold <code>npm run test:formal</code> red on purpose, so they cannot be quietly forgotten. The test's own copy of expected behavior had also gone stale and failed one check; its fix is in PR #34. The open candidates are listed in the <a href="https://github.com/codeslp/btrain/blob/main/test/formal/README.md#findings-ledger" style="color: var(--accent, #7c3aed);">full findings ledger</a>.</p>
-        </div>
-        <div class="security-item">
-          <h3>&#127922; Every failure comes with a recipe</h3>
-          <p>A failing check prints a seed. Run the command again with that seed and the same sequence replays step for step, so a failure can be reproduced on any machine instead of argued about.</p>
-          <p style="font-size:0.85rem; color: var(--text-muted);">Under the hood: generated conformance tests against the real code, with a machine-checked model of the workflow design landing next. Details live in the repo.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
   <!-- Comparison -->
   <section id="compare" class="section">
     <div class="container">
@@ -418,11 +689,11 @@ btrain-chat status</code></pre>
         <table class="compare-table">
           <thead>
             <tr>
-              <th></th>
-              <th>btrain</th>
-              <th>Claude Squad</th>
-              <th>CrewAI / AutoGen</th>
-              <th>Manual Relay</th>
+              <th scope="col"></th>
+              <th scope="col">btrain</th>
+              <th scope="col">Claude Squad</th>
+              <th scope="col">CrewAI / AutoGen</th>
+              <th scope="col">Manual Relay</th>
             </tr>
           </thead>
           <tbody>
@@ -484,7 +755,7 @@ btrain-chat status</code></pre>
             </tr>
             <tr>
               <td>Setup</td>
-              <td><code>npm link && btrain-chat all .</code></td>
+              <td><code>npm link &amp;&amp; btrain-chat all .</code></td>
               <td><code>go install</code> + config</td>
               <td>Python env + YAML pipelines</td>
               <td>None</td>

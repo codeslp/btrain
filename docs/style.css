@@ -438,6 +438,52 @@ code {
   letter-spacing: -0.03em;
 }
 
+.section-intro {
+  max-width: 760px;
+  color: var(--text-dim);
+  font-size: 1.02rem;
+  line-height: 1.75;
+  margin: -28px 0 40px;
+}
+
+.sub-title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 28px;
+}
+
+.plain-list {
+  color: var(--text-dim);
+  font-size: 0.88rem;
+  line-height: 1.65;
+  margin: 0 0 16px 1.2rem;
+}
+
+.plain-list li {
+  margin-bottom: 4px;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.glossary td:first-child {
+  color: var(--amber);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.card code,
+.security-item code,
+.speckit-step-text code,
+.section-intro code,
+.flow-step code,
+.flow-detail code {
+  overflow-wrap: anywhere;
+}
+
 /* ── Cards ── */
 .cards {
   display: grid;
