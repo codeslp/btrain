@@ -57,7 +57,7 @@ not prescribe a second PR classifier or immediate activation.
 
 ## Scope and priority
 
-| Family | Potential value | Current evidence | Earliest permitted use |
+| Family | Potential value | Current evidence | Eventual use once its FR-10 gates pass |
 | --- | --- | --- | --- |
 | PR review-signal interpretation | Catch actionable feedback missed by regex | Small positive pilot; corpus gate failed | Offline after provenance repair, then shadow |
 | Handoff evidence lint | Expose vague, contradictory, or unsupported packets | Small positive pilot with one important miss | Advisory to owner and reviewer |
