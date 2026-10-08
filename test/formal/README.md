@@ -296,6 +296,14 @@ that only carry another lane's reviewed work.
   including a local `requestChanges`. A forged `pr-review-feedback` reason
   code from the CLI is covered by `test/core.test.mjs` (the shortcut then
   records L4); the harness never forges it.
+- Metadata-only updates of a `needs-review` lane (spec 015 row 19, decided
+  2026-09-30) skip row 2's reviewable-diff, code-simplifier, and cgraph
+  checks. They re-check reviewer-context completeness only when they edit a
+  context field or `--base`. The harness observes neither half: its metadata
+  updates send only `--next`, and its repos are plain directories without
+  cgraph, so the diff check never had a base to resolve even before the
+  change. `test/handoff-update-needs-review-metadata.test.mjs` covers the
+  rule with a real repository whose lane diff lives only on a worktree branch.
 
 - Crash-window injection (partial failure between the lock-registry write
   and the handoff write) is not exercised yet.

@@ -46,6 +46,7 @@ import {
   buildClaimReviewContextFields,
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
+import { needsReviewGateScope } from "./needs_review_gate.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 
@@ -6046,7 +6047,8 @@ async function patchHandoff(repoRoot, options) {
       const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
       let overrideRecord = null
 
-      if (nextStatus === "needs-review") {
+      const reviewGate = needsReviewGateScope(options, nextStatus)
+      if (reviewGate) {
         if (overrideId) {
           overrideRecord = await consumeOverride(repoRoot, {
             config,
@@ -6056,13 +6058,12 @@ async function patchHandoff(repoRoot, options) {
             actorLabel: resolvedActor || effectiveOwner,
           })
         } else {
-          const handoffCfg = getHandoffConfig(config)
           await validateNeedsReviewTransition(repoRoot, {
             laneId,
             base: baseForReview,
             contextSectionText: nextContextSectionText,
             pathspecs: effectiveFiles,
-            skipDiff: !handoffCfg.requireDiff || !!options["no-diff"],
+            skipDiff: reviewGate === "context" || !getHandoffConfig(config).requireDiff || !!options["no-diff"],
           })
         }
       }
@@ -6094,7 +6095,7 @@ async function patchHandoff(repoRoot, options) {
         updates.delegationPacket = nextDelegationPacket
       }
       const cgraphMetadata =
-        nextStatus === "needs-review"
+        reviewGate === "full"
           ? await buildNeedsReviewCgraphMetadata(repoRoot, config, {
               laneId,
               files: effectiveFiles,
@@ -6311,7 +6312,8 @@ async function patchHandoff(repoRoot, options) {
   const overrideId = typeof options["override-id"] === "string" ? options["override-id"].trim() : ""
   let overrideRecord = null
 
-  if (nextStatus === "needs-review") {
+  const reviewGate = needsReviewGateScope(options, nextStatus)
+  if (reviewGate) {
     if (overrideId) {
       overrideRecord = await consumeOverride(repoRoot, {
         config,
@@ -6320,11 +6322,10 @@ async function patchHandoff(repoRoot, options) {
         actorLabel: resolvedActor || updates.owner || existingCurrent.owner || "btrain",
       })
     } else {
-      const handoffCfg = getHandoffConfig(config)
       await validateNeedsReviewTransition(repoRoot, {
         base: options.base !== undefined ? options.base : existingCurrent.base,
         contextSectionText: nextContextSectionText,
-        skipDiff: !handoffCfg.requireDiff || !!options["no-diff"],
+        skipDiff: reviewGate === "context" || !getHandoffConfig(config).requireDiff || !!options["no-diff"],
       })
     }
   }
@@ -6342,7 +6343,7 @@ async function patchHandoff(repoRoot, options) {
     updates.delegationPacket = nextDelegationPacket
   }
   const cgraphMetadata =
-    nextStatus === "needs-review"
+    reviewGate === "full"
       ? await buildNeedsReviewCgraphMetadata(repoRoot, config, {
           files: updates.lockedFiles ?? existingCurrent.lockedFiles,
           base: options.base !== undefined ? options.base : existingCurrent.base,
