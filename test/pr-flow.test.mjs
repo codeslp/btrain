@@ -444,6 +444,8 @@ describe("PR review flow classification", () => {
       { ...foreignHost, id: "c".repeat(64) },
       { ...foreignHost, id: "d".repeat(64), eventHead: "f".repeat(40) },
       { ...foreignHost, id: "e".repeat(64), eventHead: "unknown" },
+      { ...foreignHost, id: "1".repeat(64), eventHead: "not-a-sha" },
+      { ...foreignHost, id: "2".repeat(64), reviewedCommit: "f".repeat(40) },
     ]) {
       const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, leftover] })
       assert.deepEqual(result.candidates.map((row) => row.sourceId), [snapshot.id])
