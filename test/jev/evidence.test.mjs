@@ -41,6 +41,7 @@ describe("Jev source evidence", () => {
     for (const changed of [
       { updatedAt: "2026-09-01T10:01:00Z" },
       { updatedAt: null },
+      { body: `Review done. **Reviewed commit:** \`${"c".repeat(7)}\`` },
       { body: `Review done. **Reviewed commit:** \`${"c".repeat(9)}\`` },
     ]) {
       const row = createSourceSnapshot({ repository: "o/r", prNumber: 7, laneId: "a", comment: { ...issue, ...changed }, capturedAt: "2026-09-01T10:05:00Z" })
