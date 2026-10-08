@@ -32,7 +32,11 @@
 //                                 count, coverage floor or lower bound drops,
 //                                 or a runner retry count or upper bound rises
 //   test-ignore-added   (warn)  — new entry in an existing test ignore list,
-//                                 or a new --deselect / --test-skip-pattern
+//                                 or a new runner filter flag (--deselect,
+//                                 --test-skip-pattern, --test-name-pattern,
+//                                 --test-only, jest --testPathIgnorePatterns /
+//                                 --testNamePattern, pytest --ignore /
+//                                 --ignore-glob / -k)
 //
 // Config, in `[review_code]` of .btrain/project.toml (single-line arrays):
 //   ignore_list_keys = ["NAME"]  more test-ignore-added list names
@@ -251,7 +255,21 @@ const UPPER_BOUND_CALL = /\b(?:toBeLessThan(?:OrEqual)?|assertLess(?:Equal)?)\(\
 // test-ignore-added list names; `[review_code] ignore_list_keys` adds more.
 const DEFAULT_IGNORE_LIST_KEYS = ["testPathIgnorePatterns", "testIgnore", "exclude", "collect_ignore", "collect_ignore_glob"]
 const CONFIG_KEY_NAME = /^[A-Za-z_$][\w$-]*$/
-const IGNORE_FLAG = /(?:^|[\s"'`=,[(])(--deselect|--test-skip-pattern)(?![\w-])(?:=|\s+|["'`]?\s*,\s*["'`]?)?([^\s"'`,\]]*)/g
+// Runner flags that drop or filter tests, with the value that follows. The
+// pytest-only flags share names with other tools (flake8 --ignore, curl -k),
+// so they count only after `pytest` on the line or inside a pytest addopts.
+const FLAG_VALUE = `(?:=|\\s+|["'\`]?\\s*,\\s*["'\`]?)?("[^"\\n]*"|'[^'\\n]*'|[^\\s"'\`,\\]]*)`
+const IGNORE_FLAG = new RegExp(
+  `(?:^|[\\s"'\`=,[(])(--deselect|--test-skip-pattern|--test-name-pattern|--testPathIgnorePatterns?|--testNamePattern|--test-only)(?![\\w-])${FLAG_VALUE}`,
+  "g",
+)
+const VALUELESS_FLAGS = new Set(["--test-only"])
+const PYTEST_IGNORE_FLAG = new RegExp(`(?:^|[\\s"'\`=,[(])(--ignore-glob|--ignore|-k)(?![\\w-])${FLAG_VALUE}`, "g")
+const PYTEST_COMMAND = /(?<![\w-])(?:py\.?test|addopts)(?![\w-])/
+// A config line that starts a new key or section ends an addopts value.
+const CONFIG_KEY_OR_SECTION = /^\s*(?:\[[^\]]*\]\s*$|["']?[\w.-]+["']?\s*[=:])/
+// Lines walked up from a flag to find its addopts key or pytest command.
+const MAX_OPTION_LINES = 20
 
 // ---- diff parsing ----
 
@@ -2040,21 +2058,50 @@ function scanIgnoreListEntries(entry, keys, fileContentsByPath) {
   return out
 }
 
-function flagOccurrences(text, file) {
+// Filter-flag occurrences on one line, as "flag value". Pytest-only flags
+// count when `inPytest` says the line is a pytest command or option.
+function flagOccurrences(text, file, inPytest = () => true) {
   const { code } = maskLine(text, createMaskState(file))
-  return [...code.matchAll(IGNORE_FLAG)].map((match) => `${match[1]} ${match[2]}`.trim())
+  const out = []
+  for (const match of code.matchAll(IGNORE_FLAG)) {
+    out.push(VALUELESS_FLAGS.has(match[1]) ? match[1] : `${match[1]} ${match[2]}`.trim())
+  }
+  for (const match of code.matchAll(PYTEST_IGNORE_FLAG)) {
+    if (inPytest(code.slice(0, match.index))) out.push(`${match[1]} ${match[2]}`.trim())
+  }
+  return out
 }
 
-// --deselect / --test-skip-pattern occurrences that no removed line of the
-// same hunk already had.
+// Whether an added line sits in a pytest command or addopts value: `pytest`
+// or `addopts` earlier on the line, a pytest.ini file, a `pytest … \`
+// continuation line above, or an addopts key above it in the hunk with no
+// other key or section in between. The walk up is bounded.
+// `newSide` is the hunk's context and added entries; `index` is the line's.
+function pytestContext(entry, newSide, index) {
+  if (path.posix.basename(entry.file) === "pytest.ini") return () => true
+  return (before) => {
+    if (PYTEST_COMMAND.test(before)) return true
+    for (let i = index - 1; i >= Math.max(0, index - MAX_OPTION_LINES); i--) {
+      const { code } = maskLine(newSide[i].text, createMaskState(entry.file))
+      if (/\baddopts\b/.test(code) || (PYTEST_COMMAND.test(code) && /\\\s*$/.test(code))) return true
+      if (!code.trim() || CONFIG_KEY_OR_SECTION.test(code)) return false
+    }
+    return false
+  }
+}
+
+// Filter-flag occurrences that no removed line of the same hunk already had.
 function scanIgnoreFlags(entry) {
   const out = []
   for (const hunk of entry.hunks) {
     if (hunk.added.length === 0) continue
     const existing = hunk.removed.flatMap((removed) => flagOccurrences(removed.text, entry.file))
-    for (const added of hunk.added) {
+    const newSide = hunk.entries.filter((e) => e.kind !== "removed")
+    for (const [index, e] of newSide.entries()) {
+      if (e.kind !== "added") continue
+      const added = { line: e.newLine, text: e.text }
       const fresh = []
-      for (const occurrence of flagOccurrences(added.text, entry.file)) {
+      for (const occurrence of flagOccurrences(added.text, entry.file, pytestContext(entry, newSide, index))) {
         const index = existing.indexOf(occurrence)
         if (index >= 0) existing.splice(index, 1)
         else fresh.push(occurrence)

@@ -2207,3 +2207,66 @@ describe("removed-assertion on multi-line expect chains", () => {
     assert.deepEqual(findingsFor(scanDiff(diff), "removed-assertion"), [])
   })
 })
+
+describe("test-ignore-added runner filter flags", () => {
+  it("flags node, jest and pytest flags that drop or filter tests", () => {
+    const added = [
+      ["package.json", "\"test\": \"node --test --test-only 'test/**/*.test.mjs'\","],
+      ["package.json", "\"test\": \"node --test --test-name-pattern=cache 'test/**/*.test.mjs'\","],
+      ["package.json", "\"test\": \"jest --testPathIgnorePatterns=legacy\","],
+      ["package.json", "\"test\": \"jest --testNamePattern 'fast'\","],
+      [".github/workflows/ci.yml", "      - run: pytest --ignore=tests/slow"],
+      [".github/workflows/ci.yml", "      - run: python -m pytest --ignore-glob='*_slow.py'"],
+      [".github/workflows/ci.yml", "      - run: pytest -k \"not network\""],
+    ]
+    for (const [file, line] of added) {
+      const findings = findingsFor(scanDiff(makeDiff(file, [line])), "test-ignore-added")
+      assert.equal(findings.length, 1, `${file}: ${line}`)
+      assert.equal(findings[0].severity, "warn", line)
+    }
+  })
+
+  it("flags a pytest ignore added to an addopts list", () => {
+    const toml = makeHunkDiff("pyproject.toml", [
+      " [tool.pytest.ini_options]",
+      " addopts = [",
+      '     "-ra",',
+      '+    "--ignore=tests/slow",',
+      " ]",
+    ])
+    const ini = makeHunkDiff("tox.ini", [
+      " [pytest]",
+      " addopts =",
+      "     -ra",
+      "+    --ignore-glob=*_slow.py",
+    ])
+    const continued = makeHunkDiff(".github/workflows/ci.yml", [
+      "       - run: |",
+      "           python -m pytest \\",
+      "+            --ignore=tests/slow \\",
+      "             tests",
+    ])
+    assert.deepEqual(
+      findingsFor(scanDiff(toml + ini + continued), "test-ignore-added").map((finding) => [finding.file, finding.line]),
+      [[".github/workflows/ci.yml", 3], ["pyproject.toml", 4], ["tox.ini", 4]],
+    )
+  })
+
+  it("does not flag the same flag names on other tools", () => {
+    const lines = [
+      "commands = flake8 --ignore=E501 src",
+      "      - run: ruff check --ignore E501 .",
+      "      - run: npm ci --ignore-scripts",
+      "      - run: curl -k https://example.test/health",
+      "      - run: python -m pytest tests",
+    ]
+    assert.deepEqual(findingsFor(scanDiff(makeDiff("tox.ini", lines.slice(0, 1))), "test-ignore-added"), [])
+    assert.deepEqual(findingsFor(scanDiff(makeDiff(".github/workflows/ci.yml", lines.slice(1))), "test-ignore-added"), [])
+    const flake8 = makeHunkDiff("setup.cfg", [
+      " [flake8]",
+      " extend-ignore =",
+      "+    --ignore=E501",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(flake8), "test-ignore-added"), [])
+  })
+})
