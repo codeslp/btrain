@@ -160,6 +160,8 @@ const COMMAND_FILE =
 // backtrack exponentially on a long identifier such as assert_A_A_A.
 const ASSERTION_CALL = /(?<![\w$])(?:assert(?=[A-Z_.!(\s])[\w.]*!?\s*\(|expect(?:\.\w+)?\s*\()/
 const PYTHON_ASSERT_STATEMENT = /^\s*assert\b(?!\s*\.)/
+// A line that continues a call chain: `  .toBe(1)`, `  .resolves.toEqual(x)`.
+const CHAINED_CALL_LINE = /^\s*\.\s*[\w$]+(?:\s*\.\s*[\w$]+)*\s*\(/
 
 // Focus and skip calls: it.only(, describe.skip(, test.concurrent.only(,
 // test.describe.serial.only(, it.only.each(, and fit( / xit( / xdescribe(
@@ -1272,6 +1274,27 @@ function assertionKey(code) {
   return code.trim().replace(/\s+/g, " ")
 }
 
+// Removed (or added) matcher lines of a multi-line assertion whose first
+// line survives as context: `expect(value)` kept while `  .toBe(1)` below it
+// goes. A chain joined onto or split from its expect line is left out, since
+// that expect line is itself removed and added.
+function chainedMatcherEntries(hunk, view, sideName, file) {
+  const lineKey = sideName === "new" ? "newLine" : "oldLine"
+  const kind = sideName === "new" ? "added" : "removed"
+  const side = hunk.entries.filter((e) => e.kind !== (sideName === "new" ? "removed" : "added"))
+  const rowOf = (e) => view[sideName].row(e[lineKey])
+  if (!side.some((e) => e.kind === kind && CHAINED_CALL_LINE.test(rowOf(e)?.masked ?? ""))) return []
+  const found = []
+  for (const statement of extractAssertionStatements(side, side.map(rowOf), file)) {
+    if (statement.start.kind !== "context") continue
+    for (const e of statement.entries) {
+      const row = rowOf(e)
+      if (e.kind === kind && row && CHAINED_CALL_LINE.test(row.masked) && !isAssertionCode(row.masked, file)) found.push({ e, row })
+    }
+  }
+  return found
+}
+
 // Per hunk, assertion lines removed versus added. Identical lines cancel
 // out, first within a hunk and then anywhere in the file, so a test that
 // only moved is not a removal.
@@ -1288,6 +1311,13 @@ function scanRemovedAssertion(entry, view) {
       const row = view.new.row(line)
       if (row && isAssertionCode(row.masked, entry.file)) added.push({ key: assertionKey(row.code), used: false })
     }
+    for (const { e, row } of chainedMatcherEntries(hunk, view, "old", entry.file)) {
+      removed.push({ entry: e, key: assertionKey(row.code), moved: false })
+    }
+    for (const { row } of chainedMatcherEntries(hunk, view, "new", entry.file)) {
+      added.push({ key: assertionKey(row.code), used: false })
+    }
+    removed.sort((a, b) => a.entry.oldLine - b.entry.oldLine)
     return { removed, added }
   })
   const cancel = (removed, candidates) => {

@@ -2156,3 +2156,54 @@ describe("scan time on nested typed callbacks and packed imports", () => {
     assert.ok(elapsed < 3000, `scan took ${elapsed} ms`)
   })
 })
+
+describe("removed-assertion on multi-line expect chains", () => {
+  it("flags a matcher line removed below a surviving expect(...)", () => {
+    const diff = makeHunkDiff("test/cache.test.mjs", [
+      '   it("reads", () => {',
+      '     expect(cache.get("a"))',
+      "-      .toBe(1)",
+      "   })",
+    ], { oldStart: 10, newStart: 10 })
+    const findings = findingsFor(scanDiff(diff), "removed-assertion")
+    assert.deepEqual(findings.map((finding) => [finding.line, finding.preview]), [[12, ".toBe(1)"]])
+  })
+
+  it("does not flag a matcher rewritten in place, or a chain joined onto or split from its expect line", () => {
+    const rewritten = makeHunkDiff("test/a.test.mjs", [
+      "     expect(value)",
+      "-      .toBe(1)",
+      "+      .toEqual(1)",
+    ])
+    const joined = makeHunkDiff("test/b.test.mjs", [
+      "-    expect(value)",
+      "-      .toBe(1)",
+      "+    expect(value).toBe(1)",
+    ])
+    const split = makeHunkDiff("test/c.test.mjs", [
+      "-    expect(value).toBe(1)",
+      "+    expect(value)",
+      "+      .toBe(1)",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(rewritten + joined + split), "removed-assertion"), [])
+  })
+
+  it("does not flag a matcher line that moved to another hunk with its expect", () => {
+    const diff = [
+      "diff --git a/test/cache.test.mjs b/test/cache.test.mjs",
+      "--- a/test/cache.test.mjs",
+      "+++ b/test/cache.test.mjs",
+      "@@ -10,4 +10,2 @@",
+      '   it("reads", () => {',
+      "-    expect(value)",
+      "-      .toBe(1)",
+      "   })",
+      "@@ -40,2 +38,4 @@",
+      '   it("writes", () => {',
+      "+    expect(value)",
+      "+      .toBe(1)",
+      "   })",
+    ].join("\n") + "\n"
+    assert.deepEqual(findingsFor(scanDiff(diff), "removed-assertion"), [])
+  })
+})
