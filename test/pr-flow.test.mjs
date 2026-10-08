@@ -419,16 +419,66 @@ describe("PR review flow classification", () => {
   })
 
   it("rejects frozen comments from another GitHub host with the same repository and PR", () => {
+    for (const host of ["ghe.internal", "evilgithub.com"]) {
+      const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+      input.pr.url = "https://github.com/o/r/pull/12"
+      const comment = input.rawComments.issueComments[0]
+      comment.html_url = `https://${host}/o/r/pull/12#issuecomment-100`
+      const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+        sourceRef: `https://${host}/o/r/pull/12`, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+        eventHead: input.pr.headRefOid, reviewedCommit: null }
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
+      assert.deepEqual(result.candidates, [])
+      assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "source-identity-mismatch" }])
+    }
+  })
+
+  it("labels leftover snapshots from another GitHub host as an identity mismatch, not stale", () => {
     const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
     input.pr.url = "https://github.com/o/r/pull/12"
     const comment = input.rawComments.issueComments[0]
-    comment.html_url = "https://ghe.internal/o/r/pull/12#issuecomment-100"
+    comment.html_url = input.pr.url
     const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
-      sourceRef: "https://ghe.internal/o/r/pull/12", sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+      sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
       eventHead: input.pr.headRefOid, reviewedCommit: null }
-    const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot] })
-    assert.deepEqual(result.candidates, [])
-    assert.deepEqual(result.excluded, [{ sourceId: snapshot.id, reason: "source-identity-mismatch" }])
+    const foreignHost = { ...snapshot, eventId: "999", sourceRef: "https://ghe.internal/o/r/pull/12" }
+    for (const leftover of [
+      { ...foreignHost, id: "c".repeat(64) },
+      { ...foreignHost, id: "d".repeat(64), eventHead: "f".repeat(40) },
+      { ...foreignHost, id: "e".repeat(64), eventHead: "unknown" },
+      { ...foreignHost, id: "1".repeat(64), eventHead: "not-a-sha" },
+      { ...foreignHost, id: "2".repeat(64), reviewedCommit: "f".repeat(40) },
+      { ...foreignHost, id: "3".repeat(64), sourceRef: "https://github.com:8443/o/r/pull/12" },
+      { ...foreignHost, id: "4".repeat(64), sourceRef: "not a url" },
+      { ...foreignHost, id: "5".repeat(64), sourceRef: undefined },
+      { ...foreignHost, id: "6".repeat(64), sourceRef: "https://evilgithub.com/o/r/pull/12" },
+    ]) {
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, leftover] })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [snapshot.id])
+      assert.deepEqual(result.excluded, [{ sourceId: leftover.id, reason: "source-identity-mismatch" }])
+    }
+  })
+
+  it("labels leftover snapshots by the PR's own host when the PR lives on GitHub Enterprise", () => {
+    for (const host of ["ghe.internal", "invalid.local"]) {
+      const input = ambiguousCurrentHeadComment("Review completed with an ambiguous verdict.")
+      input.pr.url = `https://${host}/o/r/pull/12`
+      const comment = input.rawComments.issueComments[0]
+      comment.html_url = input.pr.url
+      const snapshot = { id: "b".repeat(64), repository: "o/r", prNumber: 12, surface: "issue", eventId: "100",
+        sourceRef: input.pr.url, sourceHash: createHash("sha256").update(comment.body).digest("hex"),
+        eventHead: input.pr.headRefOid, reviewedCommit: null }
+      const sameHost = { ...snapshot, id: "c".repeat(64), eventId: "999" }
+      const github = { ...sameHost, id: "d".repeat(64), sourceRef: "https://github.com/o/r/pull/12" }
+      const malformed = { ...sameHost, id: "e".repeat(64), sourceRef: "not a url" }
+      const result = buildPrSemanticReplayCandidates({ ...input, sourceSnapshots: [snapshot, sameHost, github, malformed] })
+      assert.deepEqual(result.candidates.map((row) => row.sourceId), [snapshot.id])
+      assert.deepEqual(result.excluded, [
+        { sourceId: sameHost.id, reason: "not-current-semantic-candidate" },
+        { sourceId: github.id, reason: "source-identity-mismatch" },
+        { sourceId: malformed.id, reason: "source-identity-mismatch" },
+      ])
+    }
   })
 
   it("retains frozen semantic candidates after the PR merges, closes, or returns to draft", () => {
