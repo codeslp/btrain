@@ -28,7 +28,8 @@ code-review gates.
    must never appear in source. Use environment variables.
 
 5. **Test coverage** -- new features should have tests. The test runner is
-   `node --test test/<file>.test.mjs`. All tests must pass.
+   `node --import ./test/helpers/git-test-env.mjs --test test/<file>.test.mjs`
+   (`npm test` runs them all). All tests must pass.
 
 6. **Zero external dependencies** -- btrain's CLI is zero-dep Node.js.
    Do not add npm dependencies to the core CLI. Test-only or

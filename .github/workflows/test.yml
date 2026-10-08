@@ -134,7 +134,7 @@ jobs:
           unset GITHUB_HEAD_REF GITHUB_ACTOR GITHUB_TRIGGERING_ACTOR
           shopt -s globstar
           env -u BTRAIN_AGENT -u BRAIN_TRAIN_AGENT -u BTRAIN_LANE -u BTRAIN_LANE_LOCKED -u BTRAIN_REPO -u BTRAIN_LOOP_ACTIVE \
-            node --test test/**/*.test.mjs
+            node --import ./test/helpers/git-test-env.mjs --test test/**/*.test.mjs
 
   python:
     name: Python 3.12
