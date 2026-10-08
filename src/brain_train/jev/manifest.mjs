@@ -71,9 +71,11 @@ export function validateCaseGroups(cases, sources) {
 
 // Replay re-runs this because datasetHash is an unkeyed digest anyone can recompute.
 export function validateCaseAnnotations(item, labels) {
-  if (!Array.isArray(item.annotations) || item.annotations.length < 2 || new Set(item.annotations.map((a) => a?.by)).size < 2) throw new Error("Two independent annotators are required")
-  if (item.annotations.some((a) => !a?.by || !labels.includes(a.label))) throw new Error("Invalid annotation")
-  if (!item.adjudication?.by || item.adjudication.label !== item.label || !item.adjudication.reason) throw new Error("Explicit adjudication is required")
+  const text = (value) => typeof value === "string" && value.trim().length > 0
+  if (!Array.isArray(item.annotations) || item.annotations.length < 2) throw new Error("Two independent annotators are required")
+  if (item.annotations.some((a) => !text(a?.by) || !labels.includes(a.label))) throw new Error("Invalid annotation")
+  if (new Set(item.annotations.map((a) => a.by.trim())).size < 2) throw new Error("Two independent annotators are required")
+  if (!text(item.adjudication?.by) || item.adjudication.label !== item.label || !text(item.adjudication.reason)) throw new Error("Explicit adjudication is required")
 }
 
 export function sourceSnapshotHashFor(sources) {

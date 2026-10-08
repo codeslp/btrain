@@ -62,9 +62,13 @@ describe("Jev replay metrics", () => {
       [{ annotations: [{ by: "r1", label: "feedback" }], adjudication }, /independent annotators/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r1", label: "feedback" }], adjudication }, /independent annotators/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "unknown" }], adjudication }, /Invalid annotation/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r1 ", label: "feedback" }], adjudication }, /independent annotators/],
+      [{ annotations: [{ by: {}, label: "feedback" }, { by: {}, label: "feedback" }], adjudication }, /independent annotators|Invalid annotation/],
+      [{ annotations: [null, { by: "r1", label: "feedback" }], adjudication }, /independent annotators|Invalid annotation/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }] }, /adjudication/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { ...adjudication, label: "clear" } }, /adjudication/],
       [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { by: "lead", label: "feedback" } }, /adjudication/],
+      [{ annotations: [{ by: "r1", label: "feedback" }, { by: "r2", label: "clear" }], adjudication: { ...adjudication, reason: "  " } }, /adjudication/],
     ]) {
       const cases = [{ ...base, ...changed }]
       const manifest = { sources, cases, labels, pins, sourceSnapshotHash, datasetHash: datasetHashFor(cases, labels, sourceSnapshotHash, pins) }
