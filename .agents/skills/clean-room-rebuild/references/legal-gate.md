@@ -1,7 +1,9 @@
 # Legal gate
 
-Fill this before any observation. It is a risk screen, not legal advice. A **red** answer
-stops the work until a human decides, and the decision goes in `provenance.md`.
+Fill this before any observation. It is a risk screen, not legal advice.
+
+- A **hard stop** answer ends the work. No human decision overrides it.
+- Any other **red** answer stops the work until a human decides, and the decision goes in `provenance.md`.
 
 | # | Question | Answer | Green / red |
 |---|---|---|---|
@@ -14,7 +16,7 @@ stops the work until a human decides, and the decision goes in `provenance.md`.
 | 7 | Do the terms forbid building a competing product, or using the service for competitive analysis? | | red if yes |
 | 8 | Which account will we observe through? Is it ours, in good standing, used as intended? | | red if not ours |
 | 9 | Will observation expose other people's personal data? | | red if yes |
-| 10 | Does any step need to get past auth, rate limits, bot detection, DRM, or a license check? | | red if yes (never allowed) |
+| 10 | Does any step need to get past auth, rate limits, bot detection, DRM, or a license check? | | **hard stop** if yes |
 | 11 | Will anything be decompiled or de-minified? Is that allowed by the terms and local law? | | red if yes and not clearly allowed |
 | 12 | Is the target's look distinctive enough that copying it could confuse buyers? | | red if we plan to match it |
 

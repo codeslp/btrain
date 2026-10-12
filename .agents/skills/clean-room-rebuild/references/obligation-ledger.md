@@ -7,7 +7,7 @@ open.
 ```markdown
 # <Target> obligation ledger
 
-Built from spec version: <git hash>
+Built from spec version: <spec content hash recorded in provenance.md>
 
 | ID | Spec ref | Obligation | Module | Case types required | Fixtures | Test(s) | Status |
 |----|----------|------------|--------|---------------------|----------|---------|--------|

@@ -8,7 +8,7 @@ Write in our own words. Every claim carries a label and an evidence reference.
 ```markdown
 # <Target> behavior spec — <scope>
 
-Spec version: <git hash after firewall review>
+Spec version: see provenance.md (content hash recorded after the firewall review; never stored in this file)
 Study author: <agent>    Firewall reviewer: <agent or human>
 
 ## 1. Scope

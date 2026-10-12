@@ -7,7 +7,7 @@
 ## Question
 
 btrain agents are being asked to "rebuild the 20% of product X that matters" for client
-work (first case: Fowler Culinary Concepts, see `zo_cal/impl-notes/fcc-opportunity-research.md`).
+work.
 What method should a bundled skill teach so that agents can do this well, and without
 copying protected expression or breaching terms?
 

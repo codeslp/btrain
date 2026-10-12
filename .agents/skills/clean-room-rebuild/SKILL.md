@@ -25,17 +25,20 @@ In btrain, run each side in its own lane, owned by different agents (for example
 - **No decompiling into the build.** Decompiled code, minified bundles, and source maps may be read on the study side only when the ToS and law allow it, and only to describe behavior in prose. Nothing from them goes into the spec as code.
 - **Agent calls are not a data pipeline.** Fetch public docs, help centers, and changelogs with deterministic scripts. Use the agent to read and summarize what was fetched, not to crawl.
 - **Fail closed.** Unknown, skipped, truncated, or contradictory evidence never counts as a pass.
-- **Stop and ask** when the ToS forbids reverse engineering, scraping, or competitive use, when authorization is unclear, or when the target holds personal data you would have to look at. Record the human's decision in the provenance log.
+- **Stop and ask** when the ToS forbids reverse engineering, scraping, or competitive use, when authorization is unclear, or when the target holds personal data you would have to look at. Record the human's decision in the provenance log. A human decision never unlocks the circumvention rule above; that one is a hard stop.
 
 ## Workflow
 
-Keep all artifacts under `research/rebuilds/<target>/` (or `specs/<feature>/` in spec-driven repos). The build side reads only `spec.md` and `ledger.md` from that folder.
+Use two folders that do not overlap, so each side can lock its own (or the same pair under `specs/` in spec-driven repos):
+
+- **Study folder** `research/rebuilds/<target>/`: `legal-gate.md`, `provenance.md`, `spec.md`, and `captures/` (reduced HARs, screenshots, scenario scripts).
+- **Build folder** `research/rebuilds/<target>-build/`: a copy of the approved `spec.md` and `ledger.md`. The build side reads only this folder and the product code, never the study folder.
 
 ### Phase 0. Intake and legal gate (study side)
 
 1. Ask for, or find in the conversation: the target (product, version, URL), the exact features to rebuild, our target stack, and any docs, HAR files, logs, or screenshots the user already has.
 2. Check for an integration path first: public API, exports, webhooks, data formats. If one covers the scope, recommend it and stop unless the user still wants the rebuild.
-3. Fill [references/legal-gate.md](references/legal-gate.md): which ToS we accepted, the clauses on reverse engineering, scraping, and competitive use, the account used, and the source of every input. Any red answer stops the work until a human decides.
+3. Fill [references/legal-gate.md](references/legal-gate.md): which ToS we accepted, the clauses on reverse engineering, scraping, and competitive use, the account used, and the source of every input. A **hard stop** answer ends the work. Any other red answer stops the work until a human decides.
 4. Open `provenance.md`: a dated, append-only log of every input, who saw it, and every artifact that crossed the wall.
 
 ### Phase 1. Black-box observation (study side)
@@ -58,16 +61,22 @@ A reviewer who is neither the study author nor the builder checks `spec.md` for 
 - a description of distinctive look (trade dress) instead of function;
 - any credential, token, or personal data.
 
-Fix and re-review until clean. Record the approved spec's content hash (`git hash-object spec.md`) in `provenance.md`. Only that version crosses the wall. A content hash names the spec without depending on the commit that records it.
+Fix and re-review until clean. Record the approved spec's content hash (`git hash-object spec.md`) in `provenance.md`, then copy that file into the build folder. Only that version crosses the wall. The build side checks that its copy has the recorded hash. A content hash names the spec without depending on the commit that records it.
 
 ### Phase 2. Architecture and obligation ledger (build side)
 
 1. Split the spec into modules, each with a strict input/output contract (zod, pydantic, or typed interfaces) and a dependency graph that sets the build order.
-2. Write `ledger.md` with [references/obligation-ledger.md](references/obligation-ledger.md). Each spec claim to reproduce becomes an obligation with an ID, an owning module, the case types it needs (positive, negative, malformed, empty, permission-denied, concurrency, cancellation), and its fixtures. An obligation closes only when a passing test names its ID.
+2. Write `ledger.md` in the build folder with [references/obligation-ledger.md](references/obligation-ledger.md). Each spec claim to reproduce becomes an obligation with an ID, an owning module, the case types it needs (positive, negative, malformed, empty, permission-denied, concurrency, cancellation), and its fixtures. An obligation closes only when a passing test names its ID.
 
 ### Phase 3. Implementation loop (build side)
 
-The build session must not see the target. Deny it the target's domain (for example a `WebFetch` deny rule or a browser blocklist) and keep `captures/` out of its context.
+The build session must not see the target. Deny it the target's domain and the study folder, for example in the build session's `.claude/settings.local.json`:
+
+```json
+{ "permissions": { "deny": ["WebFetch(domain:target.example)", "Read(research/rebuilds/<target>/**)"] } }
+```
+
+Use the equivalent setting for other agents (a browser blocklist, a sandbox path rule).
 
 For each module in build order:
 
@@ -79,19 +88,19 @@ For each module in build order:
 ### Phase 4. Reconciliation and parity (both sides, through the wall)
 
 1. Wire the modules together. Run end-to-end Playwright tests against our app.
-2. The study side alone runs the same scenarios against the target and against our build, compares the reduced captures and screenshots, and returns **divergence descriptions only** (never target captures) to the build side.
+2. The study side alone runs the same scenarios against the target and against our build, compares the reduced captures and screenshots, and writes **divergence descriptions only** (never target captures). Divergences go through the Phase 1.5 firewall checks before they reach the build side, the same as a spec revision, because they can carry the target's wording.
 3. Close or explicitly accept each divergence. Unknown or truncated comparisons do not pass.
 
 ### Phase 5. Distinctiveness and close-out
 
-1. Give the rebuild its own name, branding, and copy. In FCC repos, write user-facing copy with `callie-voice`.
-2. Scan our code and UI strings against the study-side captures for long verbatim matches. Rewrite any that are not short functional terms.
+1. Give the rebuild its own name, branding, and copy. If the repo has a voice or brand skill, write user-facing copy with it.
+2. The study side or the firewall reviewer (never the build side) scans our code and UI strings against the study-side captures for long verbatim matches. Only the list of matching strings from *our* code goes back to the build side, which rewrites any that are not short functional terms.
 3. Revisit the Phase 1 checklist and the ledger. Report answered, partial, and unresolved items honestly.
 4. Close `provenance.md` with a dated closing entry: the spec content hash the build used and the commit the build branched from. Do not try to record the commit that contains the closing entry; a file cannot name the commit that adds it. Record the final implementation commit outside the tracked file, in the btrain handoff (`Verification run`) or the PR description.
 
 ## Acceptance checks
 
-- The legal gate is filled, and every red item has a recorded human decision.
+- The legal gate is filled, no hard-stop item is red, and every other red item has a recorded human decision.
 - Every spec claim has a label and an evidence reference. No raw HAR, cookie, token, or personal data is committed.
 - The firewall review passed, and the spec's content hash is in `provenance.md`.
 - Every in-scope obligation has an owner, fixtures for each required case type, and a passing test that names its ID.
@@ -101,7 +110,7 @@ For each module in build order:
 
 ## btrain handoff
 
-- Study lane locks `research/rebuilds/<target>/` except `build/`. Build lane locks the product code and tests.
+- Study lane locks the study folder `research/rebuilds/<target>/`. Build lane locks the build folder `research/rebuilds/<target>-build/` plus the product code and tests. The two lock sets do not overlap.
 - Study lane hands the firewall review to a reviewer who is not the builder. The build lane's `Why this was done` field names the spec content hash it built from.
 - Put open spec questions in the build lane's `Remaining gaps`, not in a side channel.
 
