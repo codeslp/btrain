@@ -58,7 +58,7 @@ A reviewer who is neither the study author nor the builder checks `spec.md` for 
 - a description of distinctive look (trade dress) instead of function;
 - any credential, token, or personal data.
 
-Fix and re-review until clean. Record the approved spec's `git` hash in `provenance.md`. Only that version crosses the wall.
+Fix and re-review until clean. Record the approved spec's content hash (`git hash-object spec.md`) in `provenance.md`. Only that version crosses the wall. A content hash names the spec without depending on the commit that records it.
 
 ### Phase 2. Architecture and obligation ledger (build side)
 
@@ -87,13 +87,13 @@ For each module in build order:
 1. Give the rebuild its own name, branding, and copy. In FCC repos, write user-facing copy with `callie-voice`.
 2. Scan our code and UI strings against the study-side captures for long verbatim matches. Rewrite any that are not short functional terms.
 3. Revisit the Phase 1 checklist and the ledger. Report answered, partial, and unresolved items honestly.
-4. Close `provenance.md` with the final commit hash.
+4. Close `provenance.md` with a dated closing entry: the spec content hash the build used and the commit the build branched from. Do not try to record the commit that contains the closing entry; a file cannot name the commit that adds it. Record the final implementation commit outside the tracked file, in the btrain handoff (`Verification run`) or the PR description.
 
 ## Acceptance checks
 
 - The legal gate is filled, and every red item has a recorded human decision.
 - Every spec claim has a label and an evidence reference. No raw HAR, cookie, token, or personal data is committed.
-- The firewall review passed, and its spec hash is in `provenance.md`.
+- The firewall review passed, and the spec's content hash is in `provenance.md`.
 - Every in-scope obligation has an owner, fixtures for each required case type, and a passing test that names its ID.
 - End-to-end parity has no unexplained divergence.
 - The verbatim-match scan is clean.
@@ -102,7 +102,7 @@ For each module in build order:
 ## btrain handoff
 
 - Study lane locks `research/rebuilds/<target>/` except `build/`. Build lane locks the product code and tests.
-- Study lane hands the firewall review to a reviewer who is not the builder. The build lane's `Why this was done` field names the spec hash it built from.
+- Study lane hands the firewall review to a reviewer who is not the builder. The build lane's `Why this was done` field names the spec content hash it built from.
 - Put open spec questions in the build lane's `Remaining gaps`, not in a side channel.
 
 ## Related skills

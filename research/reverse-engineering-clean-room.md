@@ -112,7 +112,7 @@ running them.
    - Phase 4: parity runs where only divergence descriptions cross the wall; fail closed.
    - Phase 5: own branding and copy, verbatim-match scan, close the provenance log.
 3. **Map the wall onto btrain lanes.** Study and build are different lanes owned by
-   different agents; the build lane names the spec hash it built from.
+   different agents; the build lane names the spec content hash it built from.
 4. **Respect the agent-call rule.** Public docs are fetched by deterministic scripts; agents
    read and summarize, they do not crawl.
 
