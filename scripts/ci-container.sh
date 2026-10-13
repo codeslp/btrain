@@ -46,16 +46,25 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   fi
 fi
 
-# The container runs as root over a bind mount owned by the Mac user, which git
-# refuses as "dubious ownership" without safe.directory. node_modules from the
-# Mac are reused: btrain's only dev dependency is pure JavaScript. Step logs
-# land under the host's cache dir so they outlive the container.
-LOG_HOST="${XDG_CACHE_HOME:-$HOME/.cache}/btrain-ci/container-logs"
-mkdir -p "$LOG_HOST"
+# The container runs as the Mac user's uid, not root: the hosted runner is
+# unprivileged too, and tests that rely on permission bits (an unreadable
+# template file, an executable check) pass vacuously as root. That uid has no
+# passwd entry in the image, so HOME is a mounted cache dir, which also keeps
+# the Python venv and npm cache between runs. git still wants safe.directory
+# because the bind mount's ownership is reported differently inside. Step
+# logs land under the host's cache dir so they outlive the container.
+# node_modules from the Mac are reused: btrain's only dev dependency is pure
+# JavaScript.
+CACHE_HOST="${XDG_CACHE_HOME:-$HOME/.cache}/btrain-ci"
+LOG_HOST="$CACHE_HOST/container-logs"
+HOME_HOST="$CACHE_HOST/container-home"
+mkdir -p "$LOG_HOST" "$HOME_HOST"
 echo "ci-container: step logs under $LOG_HOST" >&2
 exec docker run --rm \
+  --user "$(id -u):$(id -g)" \
   -v "$MAIN:$MAIN" \
   -v "$LOG_HOST:/ci-logs" \
+  -v "$HOME_HOST:/ci-home" \
   -w "$ROOT" \
-  -e CI=true -e BTRAIN_NO_REVIEW_DISPATCH=1 -e BTRAIN_CI_LOG_DIR=/ci-logs \
+  -e HOME=/ci-home -e CI=true -e BTRAIN_NO_REVIEW_DISPATCH=1 -e BTRAIN_CI_LOG_DIR=/ci-logs \
   "$IMAGE" bash -lc "git config --global --add safe.directory '*' && exec scripts/ci-local.sh $*"
