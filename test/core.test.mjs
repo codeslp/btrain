@@ -5145,9 +5145,9 @@ describe("managed pre-push hook scoped to lane locks", () => {
 
   it("allows updating a pushed branch with main even when main gained a locked-file commit", async () => {
     // Commits the remote base branch already has are not this push's lane work.
-    // origin/HEAD is unset after `git remote add`, so this also covers the
-    // fallback to origin/main. The final push goes by URL, which must map to
-    // origin to find that base branch.
+    // The remote's HEAD is unborn after `git init --bare`, so this also covers
+    // the fallback to its main. The final push goes by URL: the base comes from
+    // the destination's live refs, so no remote name is needed.
     await runGit(["checkout", "-b", "side-b", "main"], tmpDir)
     await commitChange("src/scoring/score.ts", "export const sideB = 5", "Side branch scoring change")
     const first = await push(["side-b"])
@@ -5175,6 +5175,72 @@ describe("managed pre-push hook scoped to lane locks", () => {
     } finally {
       await runGit(["checkout", "main"], tmpDir)
     }
+  })
+
+  it("counts a locked-file commit the remote's base branch lost even when the cached origin/main still has it", async () => {
+    // The bare remote's main is reset by another clone with no local fetch, so
+    // refs/remotes/origin/main is stale. The base must come from the remote's
+    // live refs, or the locked commit is excluded and the push gets through.
+    const pushedMain = await runGit(["rev-parse", "main"], tmpDir)
+    const beforeLanded = await runGit(["rev-parse", "main~1"], tmpDir)
+    const cached = await runGit(["rev-parse", "refs/remotes/origin/main"], tmpDir)
+    assert.equal(cached.stdout, pushedMain.stdout)
+    const reset = await runGit(["--git-dir", remoteDir, "update-ref", "refs/heads/main", beforeLanded.stdout], tmpDir)
+    assert.equal(reset.code, 0, reset.stderr)
+    try {
+      const result = await push(["main:refs/heads/copy"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /blocked push/i)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["--git-dir", remoteDir, "update-ref", "refs/heads/main", pushedMain.stdout], tmpDir)
+    }
+  })
+
+  it("counts every commit and says so when the remote's base branch is not fetched", async () => {
+    // Another clone moves the remote's main past what this repo has. The live
+    // base sha is not a local object, so nothing vouches for the history: the
+    // hook counts it all and tells the pusher to fetch.
+    const otherClone = await makeTmpDir()
+    const pushedMain = await runGit(["rev-parse", "main"], tmpDir)
+    try {
+      const clone = await runGit(["clone", "-q", remoteDir, otherClone], tmpDir)
+      assert.equal(clone.code, 0, clone.stderr)
+      await configureGitIdentity(otherClone)
+      await fs.appendFile(path.join(otherClone, "README.md"), "moved on\n", "utf8")
+      await runGit(["add", "README.md"], otherClone)
+      await runGit(["commit", "-q", "-m", "Advance main from another clone"], otherClone)
+      const advance = await runGit(["push", "-q", "origin", "main"], otherClone)
+      assert.equal(advance.code, 0, advance.stderr)
+
+      const result = await push(["side-b:refs/heads/side-b-copy"])
+      assert.notEqual(result.code, 0, result.output)
+      assert.match(result.output, /blocked push/i)
+      assert.match(result.output, /not fetched/i)
+      assert.match(result.output, /git fetch origin/)
+      assert.match(result.output, /src\/auth\/guard\.ts/)
+    } finally {
+      await runGit(["--git-dir", remoteDir, "update-ref", "refs/heads/main", pushedMain.stdout], tmpDir)
+      await rmDir(otherClone)
+    }
+  })
+
+  it("counts every commit and says so when it cannot read the remote's refs", async () => {
+    const { spawnSync } = await import("node:child_process")
+    const hook = path.join(tmpDir, ".git", "hooks", "pre-push")
+    const localSha = await runGit(["rev-parse", "main"], tmpDir)
+    const unreachable = path.join(tmpDir, "no-such-remote.git")
+    const result = spawnSync("sh", [hook, unreachable, unreachable], {
+      cwd: tmpDir,
+      input: `refs/heads/main ${localSha.stdout} refs/heads/main ${"0".repeat(40)}\n`,
+      encoding: "utf8",
+      env: { ...withoutLaneScope(), ...pushEnv },
+    })
+    const output = `${result.stdout}\n${result.stderr}`
+    assert.notEqual(result.status, 0, output)
+    assert.match(output, /blocked push/i)
+    assert.match(output, /could not read the refs of/i)
+    assert.match(output, /src\/auth\/guard\.ts/)
   })
 })
 
