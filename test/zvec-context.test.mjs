@@ -86,6 +86,34 @@ printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 }
 
 describe("optional zvec-grep context helper", () => {
+  for (const [failure, code] of [["missing executable", 127], ["denied executable", 126], ["command signal", 143]]) {
+    it(`preserves the exit code for a ${failure}`, async () => {
+      const tmpDir = await makeTmpDir()
+      const binDir = path.join(tmpDir, "bin")
+      await fs.mkdir(binDir)
+      await writeFakeZg(binDir)
+      const action = failure === "missing executable" ? 'rm -- "$0"'
+        : failure === "denied executable" ? 'chmod 644 -- "$0"' : ":"
+      await fs.writeFile(path.join(binDir, "zg"), `#!/bin/bash
+if [ "$1" = "status" ]; then
+  ${action}
+  exit 0
+fi
+kill -TERM "$$"
+`, { mode: 0o755 })
+      try {
+        const result = await runHelper(["search", "query", "--root", tmpDir], {
+          cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+          env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin` },
+        })
+        assert.equal(result.code, code, `${result.stdout}\n${result.stderr}`)
+        assert.doesNotMatch(result.stdout, /zvec-context: skipped/)
+        if (failure !== "command signal") assert.match(result.stderr, failure === "missing executable" ? /ENOENT/ : /EACCES/)
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true })
+      }
+    })
+  }
   it("requests graceful TERM before escalating a timed-out command", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
