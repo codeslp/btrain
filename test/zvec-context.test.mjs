@@ -86,6 +86,59 @@ printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 }
 
 describe("optional zvec-grep context helper", () => {
+  it("requests graceful TERM before escalating a timed-out command", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const termLog = path.join(tmpDir, "term")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    await fs.writeFile(path.join(binDir, "zg"), `#!/bin/bash
+if [ "$1" = "status" ]; then exit 0; fi
+trap 'printf "TERM\\n" > "$ZVEC_TEST_TERM_LOG"; exit 0' TERM
+while :; do /bin/sleep 0.01; done
+`, { mode: 0o755 })
+    try {
+      const result = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_CONTEXT_TIMEOUT: "1", ZVEC_TEST_TERM_LOG: termLog },
+      })
+      assert.equal(result.code, 0)
+      assert.match(result.stdout, /zvec-context: skipped/)
+      assert.equal(await fs.readFile(termLog, "utf8"), "TERM\n")
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+  it("does not let an inherited subshell signal cancel the parent's running executor", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    // The command substitution inherits the parent's live job table. Cleanup
+    // ownership alone cannot prevent it from signalling those parent jobs.
+    await fs.writeFile(bashEnv, `set -T
+subshell_signal() {
+  if [ "$BASH_SUBSHELL" -eq 0 ] && [[ "$1" == 'wait "$pid"'* ]]; then
+    trap - DEBUG
+    ignored=$(on_signal 15)
+  fi
+}
+trap 'subshell_signal "$BASH_COMMAND"' DEBUG
+`)
+    try {
+      const result = await runHelper(["search", "failing query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, BASH_ENV: bashEnv,
+          ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_TEST_QUERY_RC: "7" },
+      })
+      assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stderr, /query failed safely/)
+      assert.doesNotMatch(result.stderr, /No such file/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
   it("soft-skips before launching zg when the existing Node runtime is unavailable", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
