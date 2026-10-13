@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { listFiles, parseFrontmatter } from "./helpers/skill-files.mjs"
 
 // Review skills that btrain bundles for reviewers. `btrain init` and
 // `btrain sync-skills` copy every directory under both surfaces, so a skill
@@ -10,41 +11,6 @@ import path from "node:path"
 // and Codex reviewers as two different instructions.
 const REVIEW_SKILLS = ["red-team", "mutation-round"]
 const SURFACES = [".claude/skills", ".agents/skills"]
-
-// Every file under `dir`, as a sorted path relative to it. The walk is explicit
-// because readdir's `recursive` option needs Node 18.17 and Dirent.parentPath
-// needs Node 18.20, and the README advertises Node.js 18+.
-async function listFiles(dir) {
-  const files = []
-  async function walk(current, relative) {
-    for (const entry of await fs.readdir(current, { withFileTypes: true })) {
-      const entryRelative = path.join(relative, entry.name)
-      if (entry.isDirectory()) await walk(path.join(current, entry.name), entryRelative)
-      else if (entry.isFile()) files.push(entryRelative)
-    }
-  }
-  await walk(dir, "")
-  return files.sort()
-}
-
-// Enough of YAML frontmatter for `key: value` lines, plus indented
-// continuation lines for folded (`>`) values.
-function parseFrontmatter(text) {
-  const match = /^---\n([\s\S]*?)\n---\n/.exec(text)
-  if (!match) return null
-  const fields = {}
-  let key = null
-  for (const line of match[1].split("\n")) {
-    const field = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line)
-    if (field) {
-      key = field[1]
-      fields[key] = { raw: field[2], value: /^[>|]-?$/.test(field[2]) ? "" : field[2] }
-    } else if (key && /^\s+\S/.test(line)) {
-      fields[key].value = `${fields[key].value} ${line.trim()}`.trim()
-    }
-  }
-  return fields
-}
 
 describe("bundled review skills", () => {
   for (const name of REVIEW_SKILLS) {
