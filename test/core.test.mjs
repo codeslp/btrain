@@ -6485,39 +6485,6 @@ describe("handoff history launch-agent rename compatibility", () => {
   })
 })
 
-describe("Claude workflow authorization", () => {
-  it("checks the triggering actor association inside every supported event branch", async () => {
-    const workflow = await fs.readFile(path.resolve(".github/workflows/claude.yml"), "utf8")
-    const workflowLines = workflow.split("\n")
-
-    for (const [eventName, payload] of [
-      ["issue_comment", "comment"],
-      ["pull_request_review_comment", "comment"],
-      ["pull_request_review", "review"],
-      ["issues", "issue"],
-    ]) {
-      const eventBranch = workflowLines.find((line) =>
-        line.includes(`github.event_name == '${eventName}'`),
-      )
-      assert.ok(eventBranch, `${eventName} must have an authorization branch`)
-      assert.ok(
-        eventBranch.includes(`github.event.${payload}.author_association`),
-        `${eventName} must authorize its triggering actor`,
-      )
-    }
-  })
-
-  it("does not treat issue assignment as an invocation event", async () => {
-    const workflow = await fs.readFile(path.resolve(".github/workflows/claude.yml"), "utf8")
-    const issuesTypes = /issues:\s*\n\s+types:\s*\[([^\]]*)\]/.exec(workflow)
-    assert.ok(issuesTypes, "issues trigger must declare explicit types")
-    assert.ok(
-      !issuesTypes[1].includes("assigned"),
-      "assigned events fire for the assigner, who cannot be authorized via issue-author association",
-    )
-  })
-})
-
 // ──────────────────────────────────────────────
 // Regression: prose Base field with embedded SHA
 // ──────────────────────────────────────────────

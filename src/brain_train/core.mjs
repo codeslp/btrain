@@ -7,6 +7,7 @@ import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import { resolveStateRoot } from "./worktree.mjs"
 import {
   STORAGE_LOCAL,
   STORAGE_TRACKED,
@@ -796,7 +797,12 @@ function renderPreCommitHook(mode = STORAGE_TRACKED) {
     "",
     ...PATH_MATCHES_LOCK_SH,
     "",
-    `for HANDOFF in ${getHookHandoffGlob(mode)}; do`,
+    "# Lane state lives with the repository, not the checkout: a linked worktree",
+    "# reads its main checkout's handoff files. git names the shared .git dir.",
+    'COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || echo .git)',
+    'STATE_ROOT=$(dirname "$COMMON_DIR")',
+    '[ "$STATE_ROOT" = "." ] && STATE_ROOT=""',
+    `for HANDOFF in \${STATE_ROOT:+$STATE_ROOT/}${getHookHandoffGlob(mode)}; do`,
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    if [ "$STATUS" = "needs-review" ]; then',
@@ -941,7 +947,12 @@ function renderPrePushHook(mode = STORAGE_TRACKED) {
     "",
     'ACTIVE_HANDOFFS=""',
     'BLOCKED_FILES=""',
-    `for HANDOFF in ${getHookHandoffGlob(mode)}; do`,
+    "# Lane state lives with the repository, not the checkout: a linked worktree",
+    "# reads its main checkout's handoff files. git names the shared .git dir.",
+    'COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || echo .git)',
+    'STATE_ROOT=$(dirname "$COMMON_DIR")',
+    '[ "$STATE_ROOT" = "." ] && STATE_ROOT=""',
+    `for HANDOFF in \${STATE_ROOT:+$STATE_ROOT/}${getHookHandoffGlob(mode)}; do`,
     '  [ -f "$HANDOFF" ] || continue',
     '  STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '  BLOCKING=""',
@@ -1182,7 +1193,7 @@ function getLaneHandoffPath(repoRoot, config, laneId) {
   }
 
   const configuredPath = lane.handoffPath
-  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(repoRoot, configuredPath)
+  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(resolveStateRoot(repoRoot), configuredPath)
 }
 
 async function readLaneState(repoRoot, config, laneId) {
@@ -1397,7 +1408,7 @@ function samePathList(left, right) {
 // ---------------------------------------------------------------------------
 
 function getLocksPath(repoRoot) {
-  return path.join(repoRoot, ".btrain", LOCKS_FILENAME)
+  return path.join(resolveStateRoot(repoRoot), ".btrain", LOCKS_FILENAME)
 }
 
 async function readLockRegistry(repoRoot) {
@@ -1838,26 +1849,41 @@ function renderHandoffTemplate(repoName) {
 }
 
 function normalizeRepoName(repoRoot) {
-  return path.basename(repoRoot)
+  // A linked worktree is the repository, not a repo of its own.
+  return path.basename(resolveStateRoot(repoRoot))
 }
 
 function getBrainTrainHome() {
   return path.resolve(process.env.BRAIN_TRAIN_HOME || path.join(os.homedir(), ".btrain"))
 }
 
+// Two roots. `repoRoot` is the checkout btrain was pointed at: tracked files
+// (AGENTS.md, skills, FEEDBACK_LOG.md) and every git command use it, so a
+// lane's diff gate and branch name come from the worktree doing the work.
+// `stateRoot` is where the repository's lane state lives (`.btrain/`, handoff
+// files): the main checkout, shared by every linked worktree. In a primary
+// checkout the two are the same directory.
 function getRepoPaths(repoRoot, mode = STORAGE_TRACKED) {
-  const modePaths = getModeRepoPaths(repoRoot, mode)
+  const stateRoot = resolveStateRoot(repoRoot)
+  // Local mode keeps its instruction file and skills under `.btrain/` too, so
+  // those paths follow the state. Tracked mode's handoff dir is the only
+  // mode-specific path that is state rather than a tracked file.
+  const modePaths = getModeRepoPaths(mode === STORAGE_LOCAL ? stateRoot : repoRoot, mode)
+  if (mode !== STORAGE_LOCAL) {
+    modePaths.handoffDir = path.join(stateRoot, ".claude", "collab")
+  }
   return {
     repoRoot,
-    brainTrainDir: path.join(repoRoot, ".btrain"),
-    eventsDir: path.join(repoRoot, ".btrain", "events"),
-    historyDir: path.join(repoRoot, ".btrain", "history"),
-    overridesDir: path.join(repoRoot, ".btrain", "overrides"),
-    projectTomlPath: path.join(repoRoot, ".btrain", "project.toml"),
-    reviewsDir: path.join(repoRoot, ".btrain", "reviews"),
-    handoffNotesDir: path.join(repoRoot, ".btrain", HANDOFF_NOTES_DIRNAME),
-    locksPath: path.join(repoRoot, ".btrain", LOCKS_FILENAME),
-    handoffPath: path.resolve(repoRoot, DEFAULT_HANDOFF_RELATIVE_PATH),
+    stateRoot,
+    brainTrainDir: path.join(stateRoot, ".btrain"),
+    eventsDir: path.join(stateRoot, ".btrain", "events"),
+    historyDir: path.join(stateRoot, ".btrain", "history"),
+    overridesDir: path.join(stateRoot, ".btrain", "overrides"),
+    projectTomlPath: path.join(stateRoot, ".btrain", "project.toml"),
+    reviewsDir: path.join(stateRoot, ".btrain", "reviews"),
+    handoffNotesDir: path.join(stateRoot, ".btrain", HANDOFF_NOTES_DIRNAME),
+    locksPath: path.join(stateRoot, ".btrain", LOCKS_FILENAME),
+    handoffPath: path.resolve(stateRoot, DEFAULT_HANDOFF_RELATIVE_PATH),
     agentsPath: path.join(repoRoot, "AGENTS.md"),
     claudePath: path.join(repoRoot, "CLAUDE.md"),
     geminiPath: path.join(repoRoot, "GEMINI.md"),
@@ -1867,7 +1893,7 @@ function getRepoPaths(repoRoot, mode = STORAGE_TRACKED) {
     agentSkillsPath: path.join(repoRoot, ".agents", "skills"),
     feedbackLogPath: path.join(repoRoot, ".claude", "collab", "FEEDBACK_LOG.md"),
     ...modePaths,
-    handoffPath: path.resolve(repoRoot, getDefaultLaneHandoffRelativePath(mode, "a")),
+    handoffPath: path.resolve(stateRoot, getDefaultLaneHandoffRelativePath(mode, "a")),
   }
 }
 
@@ -1877,7 +1903,7 @@ function getConfiguredHandoffPath(repoRoot, config) {
       ? config.handoff_path.trim()
       : getDefaultLaneHandoffRelativePath(getStorageMode(config), "a")
 
-  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(repoRoot, configuredPath)
+  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(resolveStateRoot(repoRoot), configuredPath)
 }
 
 function getConfiguredRepoPaths(repoRoot, config) {
@@ -3108,7 +3134,7 @@ async function initRepo(repoPathInput, options = {}) {
     for (const lane of laneConfigs) {
       const laneHandoffPath = path.isAbsolute(lane.handoffPath)
         ? lane.handoffPath
-        : path.resolve(repoRoot, lane.handoffPath)
+        : path.resolve(resolveStateRoot(repoRoot), lane.handoffPath)
       await ensureDir(path.dirname(laneHandoffPath))
       if (!(await pathExists(laneHandoffPath))) {
         const handoffTemplate = await loadTemplate("handoff.md")
@@ -3247,6 +3273,14 @@ async function findRepoRoot(startPath = process.cwd()) {
     const currentProjectPath = path.join(currentPath, ".btrain", "project.toml")
     if (await pathExists(currentProjectPath)) {
       return currentPath
+    }
+    // A linked worktree of a local-mode repo has no project.toml of its own
+    // (the file is ignored); its main checkout's config makes it a repo root.
+    if (await pathExists(path.join(currentPath, ".git"))) {
+      const stateRoot = resolveStateRoot(currentPath)
+      if (stateRoot !== currentPath && (await pathExists(path.join(stateRoot, ".btrain", "project.toml")))) {
+        return currentPath
+      }
     }
 
     const parentPath = path.dirname(currentPath)
@@ -4527,7 +4561,7 @@ function dedupeCgraphAdvisories(advisories = []) {
 }
 
 function getCgraphAdvisoryStatePath(repoRoot) {
-  return path.join(repoRoot, ".btrain", "cgraph-advisory-state.jsonl")
+  return path.join(resolveStateRoot(repoRoot), ".btrain", "cgraph-advisory-state.jsonl")
 }
 
 function getCgraphAdvisoryLockPath(repoRoot) {
@@ -4535,7 +4569,7 @@ function getCgraphAdvisoryLockPath(repoRoot) {
 }
 
 function getCgraphAdvisoryTelemetryPath(repoRoot) {
-  return path.join(repoRoot, ".btrain", "logs", "cgraph-advisories.jsonl")
+  return path.join(resolveStateRoot(repoRoot), ".btrain", "logs", "cgraph-advisories.jsonl")
 }
 
 async function withCgraphAdvisoryLock(repoRoot, fn) {
@@ -7926,6 +7960,17 @@ function getHandoffConfig(config) {
   }
 }
 
+// Locks on a lane that is waiting on GitHub (ready-for-pr, pr-review,
+// ready-to-merge, or a PR-linked changes-requested round) outlive the TTL on
+// purpose: the workflow keeps them until the PR merges or closes, and the PR is
+// the evidence the lane is alive. Doctor neither warns about nor releases them.
+const PR_WAIT_STATUSES = new Set(["ready-for-pr", "pr-review", "ready-to-merge"])
+
+function laneWaitsOnPr(laneState) {
+  if (PR_WAIT_STATUSES.has(laneState.status)) return true
+  return laneState.status === "changes-requested" && Boolean(laneState.prNumber)
+}
+
 function isLockExpired(lock, ttlMs) {
   if (!lock.acquired_at) return false
   return Date.now() - new Date(lock.acquired_at).getTime() > ttlMs
@@ -10231,7 +10276,7 @@ async function applyWatchdogRepairs(repoRoot, {
     const handoffCfg = getHandoffConfig(config)
     const laneLocks = registry.locks.filter((l) => l.lane === laneState._laneId)
     const expiredLocks = laneLocks.filter((l) => isLockExpired(l, handoffCfg.lockTtlMs))
-    if (expiredLocks.length > 0 && laneState.lockState !== "stale") {
+    if (expiredLocks.length > 0 && laneState.lockState !== "stale" && !laneWaitsOnPr(laneState)) {
       const expiredPaths = expiredLocks.map((l) => l.path)
       applyTransition(laneState, "watchdog-lock-release", {
         to: laneState.status,
@@ -10426,7 +10471,8 @@ async function detectTemplateDrift(repoRoot) {
 }
 
 async function registerRepo(repoPathInput) {
-  const repoRoot = path.resolve(repoPathInput)
+  // Register the repository, never one of its linked worktrees.
+  const repoRoot = resolveStateRoot(path.resolve(repoPathInput))
   const stats = await fs.stat(repoRoot)
   if (!stats.isDirectory()) {
     throw new BtrainError({
@@ -11178,7 +11224,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     for (const laneConfig of inspectedLaneConfigs) {
       const laneHandoffPath = path.isAbsolute(laneConfig.handoffPath)
         ? laneConfig.handoffPath
-        : path.resolve(repoRoot, laneConfig.handoffPath)
+        : path.resolve(resolveStateRoot(repoRoot), laneConfig.handoffPath)
 
       if (!(await pathExists(laneHandoffPath))) {
         issues.push(`Missing lane ${laneConfig.id} handoff file: ${laneHandoffPath}. Run \`btrain init .\`.`)
@@ -11253,7 +11299,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
             const handoffCfg = getHandoffConfig(config)
             const laneLocks = registry.locks.filter((l) => l.lane === laneState._laneId)
             const expiredLocks = laneLocks.filter((l) => isLockExpired(l, handoffCfg.lockTtlMs))
-            if (expiredLocks.length > 0) {
+            if (expiredLocks.length > 0 && !laneWaitsOnPr(laneState)) {
               const ttlHours = Math.round(handoffCfg.lockTtlMs / 3600000)
               warnings.push(
                 `Lane ${laneState._laneId} has ${expiredLocks.length} lock${expiredLocks.length === 1 ? "" : "s"} older than ${ttlHours}h TTL. Run \`btrain doctor --repair\` to auto-release.`,

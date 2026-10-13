@@ -3,6 +3,7 @@
 import fs from "node:fs/promises"
 import { realpathSync } from "node:fs"
 import path from "node:path"
+import { resolveStateRoot } from "./worktree.mjs"
 import {
   BtrainError,
   checkHandoff,
@@ -2711,7 +2712,7 @@ async function run() {
     const isLocalStorage = getStorageMode(config) === "local"
     const claudeMd = path.join(repoRoot, "CLAUDE.md")
     const agentsMd = path.join(repoRoot, "AGENTS.md")
-    const localAgentsMd = path.join(repoRoot, ".btrain", "AGENTS.md")
+    const localAgentsMd = path.join(resolveStateRoot(repoRoot), ".btrain", "AGENTS.md")
     for (const filePath of isLocalStorage ? [localAgentsMd, claudeMd, agentsMd] : [claudeMd, agentsMd]) {
       try {
         await fs.access(filePath)

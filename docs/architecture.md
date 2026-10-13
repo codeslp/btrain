@@ -96,6 +96,22 @@ The CLI manages the collaboration state machine. All state is file-based (no dat
 └── ...
 ```
 
+#### Two roots: checkout and state
+
+`getRepoPaths` in `core.mjs` separates the checkout btrain was pointed at
+(`repoRoot`) from where the repository's lane state lives (`stateRoot`).
+`src/brain_train/worktree.mjs` resolves the state root by reading `.git` the
+way git does: a primary checkout is its own state root; a linked worktree's
+`.git` file points at a gitdir whose `commondir` names the main checkout's
+`.git`, and that main checkout is the state root. Everything under `.btrain/`
+(locks, history, overrides, events, reviews, PR comment logs, Jev evidence)
+and the handoff files resolve against the state root. Tracked files
+(AGENTS.md, skills, FEEDBACK_LOG.md) and every git command use the checkout,
+so a lane's diff gate, branch name and pushes come from the worktree doing the
+work. The managed hooks apply the same rule in shell with
+`git rev-parse --git-common-dir`. The registry records the state root, so a
+worktree never registers as a repository of its own.
+
 ### 2. agentchattr Server (FastAPI + Python)
 
 **Entry point:** `agentchattr/run.py` -> `app.py`

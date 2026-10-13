@@ -12,6 +12,7 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 import fs from "node:fs/promises"
 import { appendSourceSnapshots, createSourceSnapshot } from "../jev/evidence.mjs"
 
@@ -22,7 +23,8 @@ const GH_MAX_BUFFER = 16 * 1024 * 1024
 // ---- path helpers ----
 
 export function getPrCommentsDir(repoRoot) {
-  return path.join(repoRoot, ".btrain", "pr-comments")
+  // Lane state: a linked worktree shares its main checkout's log.
+  return path.join(resolveStateRoot(repoRoot), ".btrain", "pr-comments")
 }
 
 export function getPrCommentsLogPath(repoRoot, laneId, prNumber) {
