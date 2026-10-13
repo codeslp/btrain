@@ -106,7 +106,9 @@ resync by a non-owner (`resync-requires-owner`).
    `Previous Handoffs` entry into a newly created lane file using another
    lane's task text (reproduced 2026-09-01). **Enforced 2026-10-13 (entry
    13):** spec 015 L2 is retired; the transition gate rejects a resolve on an
-   idle lane before any write, in lane and single-handoff mode. The
+   idle lane before lane/event publication, in lane and single-handoff
+   mode. Idle resolve can write `locks.json` before the gate and restores
+   its logical contents on rejection. The
    missing-file half was closed by finding 8.
 6. When the reviewer (not the owner) moves a lane to `needs-review`,
    `inferPeerReviewer` reassigns the reviewer to the owner. The lane then
@@ -134,7 +136,7 @@ resync by a non-owner (`resync-requires-owner`).
    2026-10-08 (`transition-advisory: L5` in `.btrain/events/lane-j.jsonl`),
    which is exactly the harness's `pr-outcome-from-invalid-status` case.
    Spec 015 FR-5 forbids merging the enforcement while an L5 event is less
-   than 7 days old, so L5 cannot retire before 2026-10-16, and retiring it
+   than 7 days old, so the L5 bound is 2026-10-15T14:25:18.747Z, and retiring it
    removes the shortcut from the workflow (the designated route is
    `needs-review`, peer resolve, `pr create`). The
    `pr-outcome-source-status` tally persists until that decision.

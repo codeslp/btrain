@@ -1163,7 +1163,7 @@ for (const { name, modes = ["contract", "implementation"], steps, x } of [
 // any write, so model and implementation agree in both modes, the lane stays
 // idle with no records, and it is still claimable afterwards.
 for (const mode of ["contract", "implementation"]) {
-  test(`idle lane: resolve, rescope, and reassign are rejected before any write (${mode} mode)`, { skip: !ENABLED }, async () => {
+  test(`idle lane: rejected resolve, rescope, and reassign preserve lane/event state and registry contents (${mode} mode)`, { skip: !ENABLED }, async () => {
     const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
       { t: "resolve", lane: "x", actorSel: "owner", final: false },
       { t: "resolve", lane: "x", actorSel: "third", final: true },
