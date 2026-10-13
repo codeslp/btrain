@@ -262,3 +262,36 @@ describe("managed hooks in a linked worktree", () => {
     })
   })
 })
+
+describe("doctor on a worktree that shares no main checkout", () => {
+  beforeEach(() => clearStateRootCache())
+
+  it("warns that lane state stays per checkout for a bare repository's worktree", async () => {
+    await withTmp(async (root) => {
+      const home = path.join(root, "home")
+      const bare = path.join(root, "bare.git")
+      await exec("git", ["init", "-q", "--bare", "-b", "main", bare])
+      const checkout = path.join(root, "bare-worktree")
+      await exec("git", ["-C", bare, "worktree", "add", "-q", "--orphan", "-b", "main", checkout])
+      await git(checkout, "config", "user.email", "test@example.com")
+      await git(checkout, "config", "user.name", "Test Bot")
+      await git(checkout, "config", "commit.gpgsign", "false")
+      const init = await btrain(["init", checkout, "--tracked", "--agent", "alpha", "--agent", "beta", "--core-only", "--no-hooks"], { cwd: checkout, home })
+      assert.equal(init.code, 0, init.stderr)
+      assert.equal(resolveStateRoot(checkout), checkout)
+
+      const check = await btrain(["doctor", "--repo", checkout], { cwd: checkout, home })
+      assert.equal(check.code, 0, check.stderr)
+      assert.match(check.stdout, /not a linked worktree of a main checkout/, check.stdout)
+
+      // A linked worktree of an ordinary repository gets no such warning.
+      const repo = await makeRepo(root)
+      const worktree = path.join(root, "linked")
+      await git(repo, "worktree", "add", "-q", "-b", "lane-a", worktree)
+      const initMain = await btrain(["init", repo, "--tracked", "--agent", "alpha", "--agent", "beta", "--core-only", "--no-hooks"], { cwd: repo, home })
+      assert.equal(initMain.code, 0, initMain.stderr)
+      const fromLinked = await btrain(["doctor", "--repo", worktree], { cwd: worktree, home })
+      assert.doesNotMatch(fromLinked.stdout, /not a linked worktree of a main checkout/)
+    })
+  })
+})

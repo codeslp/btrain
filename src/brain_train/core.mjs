@@ -7,7 +7,7 @@ import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import { resolveStateRoot } from "./worktree.mjs"
+import { hasUnsharedGitPointer, resolveStateRoot } from "./worktree.mjs"
 import {
   STORAGE_LOCAL,
   STORAGE_TRACKED,
@@ -11131,6 +11131,12 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
       hook.reason === "not-executable"
         ? `\`${hook.filename}\` hook is not executable, so git skips it. Run \`btrain hooks\`.`
         : `\`${hook.filename}\` hook differs from the managed btrain template. Run \`btrain hooks\`.`,
+    )
+  }
+
+  if (hasUnsharedGitPointer(repoRoot)) {
+    warnings.push(
+      "This checkout's `.git` is a pointer file, but it is not a linked worktree of a main checkout (a worktree of a bare repository or of a submodule). Lane state stays in this checkout alone and is not shared with other worktrees of the same repository.",
     )
   }
 

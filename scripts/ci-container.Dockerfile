@@ -1,10 +1,13 @@
 # The Linux image scripts/ci-container.sh runs btrain's CI in. Starts from
 # btrain-git255 (Ubuntu 24.04, Node 22, git 2.55, the git that exposed the
-# auto-maintenance teardown race) and adds the two tools the hosted runner has
-# that the base image lacks: jq, which .claude/scripts/unblocked-context.sh
-# needs, python3-venv for the Python test step, and ast-grep 0.45.3 (spec 020's pin), which the decomposition
-# inventory runs. ast-grep comes from npm rather than a release zip so the
-# build needs no curl and works on arm64 and x86_64 alike.
+# auto-maintenance teardown race) and adds what the hosted runner has that the
+# base image lacks: jq, which .claude/scripts/unblocked-context.sh needs,
+# python3-venv for the Python test step, and ast-grep 0.45.3 (spec 020's pin),
+# which the decomposition inventory runs. ast-grep comes from npm rather than
+# a release zip so the build needs no curl and works on arm64 and x86_64
+# alike. The base image was built by hand on this Mac on 2026-10-07 and has no
+# Dockerfile in the repo; on another machine, build an equivalent from
+# ubuntu:24.04 with the git-core PPA and NodeSource 22 before using this.
 FROM btrain-git255:latest
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y -qq jq python3-venv python3-pip >/dev/null && rm -rf /var/lib/apt/lists/* \

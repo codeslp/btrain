@@ -60,11 +60,20 @@ LOG_HOST="$CACHE_HOST/container-logs"
 HOME_HOST="$CACHE_HOST/container-home"
 mkdir -p "$LOG_HOST" "$HOME_HOST"
 echo "ci-container: step logs under $LOG_HOST" >&2
+# A linked worktree outside the main checkout (the sibling layout) needs its
+# own mount; one under it (.claude/worktrees/) is already inside $MAIN.
+ROOT_MOUNT=()
+case "$ROOT/" in
+  "$MAIN"/*) ;;
+  *) ROOT_MOUNT=(-v "$ROOT:$ROOT") ;;
+esac
+# ci-local.sh arguments travel as positional parameters, never re-split.
 exec docker run --rm \
   --user "$(id -u):$(id -g)" \
   -v "$MAIN:$MAIN" \
+  "${ROOT_MOUNT[@]}" \
   -v "$LOG_HOST:/ci-logs" \
   -v "$HOME_HOST:/ci-home" \
   -w "$ROOT" \
   -e HOME=/ci-home -e CI=true -e BTRAIN_NO_REVIEW_DISPATCH=1 -e BTRAIN_CI_LOG_DIR=/ci-logs \
-  "$IMAGE" bash -lc "git config --global --add safe.directory '*' && exec scripts/ci-local.sh $*"
+  "$IMAGE" bash -lc 'git config --global --get-all safe.directory 2>/dev/null | grep -qx "\*" || git config --global --add safe.directory "*"; exec scripts/ci-local.sh "$@"' _ "$@"

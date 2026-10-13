@@ -33,6 +33,20 @@ export function isLinkedWorktree(repoRoot) {
   return resolveStateRoot(repoRoot) !== path.resolve(repoRoot)
 }
 
+// A checkout whose `.git` is a pointer file yet resolves to itself: a worktree
+// of a bare repository, or a worktree of a submodule. Lane state stays per
+// checkout there, which is the split the state root exists to remove, so
+// doctor names it instead of letting it happen quietly.
+export function hasUnsharedGitPointer(repoRoot) {
+  const root = path.resolve(repoRoot)
+  try {
+    if (fs.statSync(path.join(root, ".git")).isDirectory()) return false
+  } catch {
+    return false
+  }
+  return resolveStateRoot(root) === root
+}
+
 // Tests create and delete worktrees under one process; let them drop entries.
 export function clearStateRootCache() {
   cache.clear()

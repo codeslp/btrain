@@ -117,6 +117,10 @@ main checkout's branch is the live configuration for every lane (a branch that
 edits the file changes nothing until it merges; `btrain init`, `agents set`
 and `features` edit the main checkout's copy).
 
+Known limits: the resolver reads the `.git` pointer file only, so a worktree of
+a bare repository or of a submodule keeps per-checkout state (doctor warns),
+and `GIT_DIR` / `GIT_WORK_TREE` are ignored even though git honors them.
+
 ### 2. agentchattr Server (FastAPI + Python)
 
 **Entry point:** `agentchattr/run.py` -> `app.py`
