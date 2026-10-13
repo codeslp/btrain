@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -15,12 +15,15 @@ async function makeTmpDir() {
 
 async function runHelper(args, options = {}) {
   try {
-    const result = await execFileAsync("/bin/bash", [HELPER_PATH, ...args], {
+    const execution = execFileAsync("/bin/bash", [HELPER_PATH, ...args], {
       cwd: options.cwd,
       env: options.env,
       maxBuffer: 1024 * 1024,
       timeout: options.timeout,
+      killSignal: options.killSignal,
     })
+    options.onSpawn?.(execution.child)
+    const result = await execution
     return { code: 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
   } catch (error) {
     return {
@@ -31,10 +34,20 @@ async function runHelper(args, options = {}) {
   }
 }
 
-async function writeFakeZg(binDir) {
+async function writeFakeZg(binDir, { withNode = true } = {}) {
+  if (withNode) await fs.symlink(process.execPath, path.join(binDir, "node"))
   const fakePath = path.join(binDir, "zg")
   await fs.writeFile(fakePath, `#!/usr/bin/env bash
 set -u
+if [ -n "\${ZVEC_TEST_PID_LOG:-}" ]; then
+  printf '%s\\n' "$$" >> "$ZVEC_TEST_PID_LOG"
+fi
+if [ -n "\${ZVEC_TEST_READY_RECORD:-}" ]; then
+  for capture in "$TMPDIR"/zvec-context.*; do
+    case "$capture" in *.ready|*.timeout|*.cancel) continue ;; esac
+    [ -f "$capture" ] && printf '%s\\n' "$ZVEC_TEST_READY_RECORD" > "$capture.ready"
+  done
+fi
 printf 'CALL\\n' >> "$ZVEC_TEST_LOG"
 printf '%s\\n' "$@" >> "$ZVEC_TEST_LOG"
 if [ "\${1:-}" = "status" ]; then
@@ -73,6 +86,221 @@ printf 'freshness: fresh\\nspecs/example.md:10-14\\n'
 }
 
 describe("optional zvec-grep context helper", () => {
+  it("soft-skips before launching zg when the existing Node runtime is unavailable", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir, { withNode: false })
+    try {
+      const result = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, env: { ...process.env, PATH: binDir, ZVEC_TEST_LOG: path.join(tmpDir, "zg.log") },
+      })
+      assert.equal(result.code, 0)
+      assert.match(result.stdout, /node CLI is not installed/)
+      assert.equal(result.stderr, "")
+      await assert.rejects(fs.access(path.join(tmpDir, "zg.log")), { code: "ENOENT" })
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+  it("leaves no capture or cancellation artifact when signalled before mktemp", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    await fs.writeFile(bashEnv, `set -T
+before_capture() {
+  if [ "$BASH_SUBSHELL" -eq 0 ] && [[ "$1" == 'out=$(mktemp '* ]]; then
+    trap - DEBUG
+    on_signal 2
+  fi
+}
+trap 'before_capture "$BASH_COMMAND"' DEBUG
+`)
+    const before = (await fs.readdir(tmpDir)).sort()
+    try {
+      const result = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, BASH_ENV: bashEnv, TMPDIR: tmpDir,
+          ZVEC_TEST_LOG: path.join(tmpDir, "zg.log") },
+      })
+      assert.equal(result.code, 130)
+      assert.deepEqual((await fs.readdir(tmpDir)).sort(), before)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+  it("keeps capture evidence until a cancelled executor has actually exited", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const running = path.join(tmpDir, "running")
+    const exiting = path.join(tmpDir, "exiting")
+    const release = path.join(tmpDir, "release")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    await fs.unlink(path.join(binDir, "node"))
+    // A controlled executor delays its exit after TERM. The helper must
+    // await that exit rather than deleting evidence as soon as it signals.
+    await fs.writeFile(path.join(binDir, "node"), `#!/bin/bash
+trap ': > "$ZVEC_TEST_EXITING"; while [ ! -e "$ZVEC_TEST_RELEASE" ]; do /bin/sleep 0.01; done; exit 143' TERM
+printf '%s\\n' "$$" > "$ZVEC_TEST_RUNNING"
+while :; do /bin/sleep 0.01; done
+`, { mode: 0o755 })
+    let helper
+    let completed = false
+    const resultPromise = runHelper(["search", "query", "--root", tmpDir], {
+      cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL", onSpawn: (process) => { helper = process },
+      env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch,
+        ZVEC_TEST_RUNNING: running, ZVEC_TEST_EXITING: exiting, ZVEC_TEST_RELEASE: release,
+        ZVEC_TEST_LOG: path.join(tmpDir, "zg.log") },
+    }).then((result) => { completed = true; return result })
+    async function waitForFile(file) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (await fs.access(file).then(() => true, () => false)) return
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      assert.fail(`executor never reached ${path.basename(file)}`)
+    }
+    try {
+      await waitForFile(running)
+      helper.kill("SIGINT")
+      await waitForFile(exiting)
+      assert.equal(completed, false, "helper must not exit before its executor")
+      assert.ok((await fs.readdir(scratch)).some((file) => /^zvec-context\.[^.]+$/.test(file)), "capture must remain until executor exit")
+      await fs.writeFile(release, "")
+      const result = await resultPromise
+      assert.equal(result.code, 130)
+      assert.deepEqual(await fs.readdir(scratch), [])
+    } finally {
+      await fs.writeFile(release, "")
+      const executorPid = Number(await fs.readFile(running, "utf8").catch(() => ""))
+      if (executorPid) {
+        const command = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(executorPid)]).catch(() => ({ stdout: "" }))
+        if (command.stdout.includes(path.join(binDir, "node"))) {
+          try { process.kill(executorPid, "SIGTERM") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      await resultPromise
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+  it("ignores stale and malformed PID records without signalling unrelated processes", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    const unrelated = spawn("/bin/sleep", ["30"], { stdio: "ignore" })
+    const exited = new Promise((resolve) => unrelated.once("exit", resolve))
+    try {
+      for (const record of [String(unrelated.pid), "0", "-1", "not-a-pid"]) {
+        const result = await runHelper(["search", "failing query", "--root", tmpDir], {
+          cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+          env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch,
+            ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_TEST_QUERY_RC: "7", ZVEC_TEST_READY_RECORD: record },
+        })
+        assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
+        assert.match(result.stderr, /query failed safely/)
+        assert.equal(unrelated.signalCode, null, "ready-file data must never become a signal target")
+        assert.equal(unrelated.exitCode, null)
+        assert.deepEqual(await fs.readdir(scratch), [])
+      }
+    } finally {
+      unrelated.kill("SIGKILL")
+      await exited
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+  it("reaps its executor when signalled before the PID assignment", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const event = path.join(tmpDir, "watchdog-pid")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    const marker = String(7000 + process.pid % 2000)
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    await fs.writeFile(bashEnv, `set -T
+early_interrupt() {
+  if [ "$BASH_SUBSHELL" -eq 0 ] && [ "$1" = 'pid=$!' ]; then
+    trap - DEBUG
+    printf '%s\\n' "$!" > "$ZVEC_TEST_EVENTS"
+    on_signal 2
+  fi
+}
+trap 'early_interrupt "$BASH_COMMAND"' DEBUG
+`)
+    let watchdogPid
+    try {
+      const result = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch, BASH_ENV: bashEnv,
+          ZVEC_TEST_EVENTS: event, ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_CONTEXT_TIMEOUT: marker,
+          ZVEC_TEST_STATUS_SLEEP: "30" },
+      })
+      watchdogPid = Number(await fs.readFile(event, "utf8"))
+      assert.equal(result.code, 130)
+      const state = await execFileAsync("/bin/ps", ["-o", "stat=", "-p", String(watchdogPid)]).catch(() => ({ stdout: "" }))
+      assert.equal(state.stdout.trim(), "", "early interruption must reap the already-forked executor")
+      assert.deepEqual(await fs.readdir(scratch), [], "early interruption must leave no late ready/timeout files")
+    } finally {
+      if (watchdogPid) {
+        const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,ppid=,args="])
+        for (const line of ps.stdout.split("\n")) {
+          const child = line.trim().match(new RegExp(`^(\\d+)\\s+${watchdogPid}\\s+sleep (?:${marker}|30)$`))
+          if (child) { try { process.kill(Number(child[1]), "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error } }
+        }
+        try { process.kill(watchdogPid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+      }
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+  it("waits for the owned command to exit when the helper is cancelled", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const pidLog = path.join(tmpDir, "command-pid")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    let helper
+    let commandPid
+    const resultPromise = runHelper(["status", "--root", tmpDir], {
+      cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL", onSpawn: (process) => { helper = process },
+      env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch,
+        ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_TEST_PID_LOG: pidLog,
+        ZVEC_TEST_STATUS_SLEEP: "30", ZVEC_CONTEXT_TIMEOUT: "60" },
+    })
+    try {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const pid = await fs.readFile(pidLog, "utf8").catch(() => "")
+        if (pid.trim()) { commandPid = Number(pid.trim()); break }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      assert.ok(commandPid, "the command must be alive before cancellation")
+      helper.kill("SIGINT")
+      const result = await resultPromise
+      assert.equal(result.code, 130)
+      const state = await execFileAsync("/bin/ps", ["-o", "stat=", "-p", String(commandPid)]).catch(() => ({ stdout: "" }))
+      assert.equal(state.stdout.trim(), "", "the executor must reap its command before returning")
+      assert.deepEqual(await fs.readdir(scratch), [])
+    } finally {
+      if (commandPid) {
+        const command = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(commandPid)]).catch(() => ({ stdout: "" }))
+        if (/^(?:\/bin\/)?sleep 30$/.test(command.stdout.trim())) {
+          try { process.kill(commandPid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      helper?.kill("SIGTERM")
+      await resultPromise
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
   it("returns success for an explicit help request", async () => {
     const result = await runHelper(["--help"], {
       env: { ...process.env, PATH: "/usr/bin:/bin" },
@@ -252,136 +480,56 @@ describe("optional zvec-grep context helper", () => {
     }
   })
 
-  it("preserves query output when a child runs the inherited signal handler", async () => {
-    const tmpDir = await makeTmpDir()
-    const binDir = path.join(tmpDir, "bin")
-    const logPath = path.join(tmpDir, "zg.log")
-    const bashEnv = path.join(tmpDir, "bash-env")
-    await fs.mkdir(binDir)
-    await writeFakeZg(binDir)
-    // Dispatch the inherited parent handler in a real watchdog child. This
-    // models TERM before Bash resets traps without relying on OS scheduling.
-    await fs.writeFile(bashEnv, `set -T
-dispatch_inherited_signal() {
-  if [ "$BASH_SUBSHELL" -gt 0 ] && { [ "$1" = 'cancelled=0' ] || [ "$1" = 'sleep "$secs"' ]; }; then
+  for (const mode of ["legacy", "modern-before-counter"]) {
+    for (const handler of ["signal", "exit"]) {
+      it(`keeps capture ownership during inherited ${handler} cleanup (${mode})`, async (t) => {
+        if (mode === "modern-before-counter") {
+          const capability = await execFileAsync("/bin/bash", ["-c", 'printf "%s" "${BASHPID:-}"'])
+          if (!capability.stdout) { t.skip("Bash 3.2 uses the legacy subshell guard"); return }
+        }
+        const tmpDir = await makeTmpDir()
+        const binDir = path.join(tmpDir, "bin")
+        const scratch = path.join(tmpDir, "scratch")
+        const bashEnv = path.join(tmpDir, "bash-env")
+        await fs.mkdir(binDir)
+        await fs.mkdir(scratch)
+        await writeFakeZg(binDir)
+        // M1/M2/M3: isolate the pre-counter PID guard, Bash 3.2 fallback,
+        // and inherited EXIT cleanup instead of letting them mask each other.
+        await fs.writeFile(bashEnv, `set -T
+inherited_cleanup() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && [[ "$1" == 'exec node '* ]]; then
     trap - DEBUG
-    on_signal 15
+    ${mode === "legacy" ? "unset BASHPID" : "BASH_SUBSHELL=0"}
+    ${handler === "signal" ? "on_signal 15" : "cleanup_tmp"}
   fi
 }
-trap 'dispatch_inherited_signal "$BASH_COMMAND"' DEBUG
+trap 'inherited_cleanup "$BASH_COMMAND"' DEBUG
 `)
-    try {
-      const result = await runHelper(["search", "failing query", "--root", tmpDir], {
-        cwd: tmpDir,
-        timeout: 5000,
-        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, BASH_ENV: bashEnv, ZVEC_TEST_LOG: logPath, ZVEC_TEST_QUERY_RC: "7" },
+        try {
+          const result = await runHelper(["search", "failing query", "--root", tmpDir], {
+            cwd: tmpDir, timeout: 5000, killSignal: "SIGKILL",
+            env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, BASH_ENV: bashEnv, TMPDIR: scratch,
+              ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_TEST_QUERY_RC: "7" },
+          })
+          if (handler === "signal") {
+            assert.equal(result.code, 0)
+            assert.match(result.stdout, /zvec-context: skipped/)
+            assert.equal(result.stderr, "", "a child signal must not delete its parent's capture")
+          } else {
+            assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
+            assert.match(result.stderr, /query failed safely/)
+            assert.doesNotMatch(result.stderr, /No such file/)
+          }
+          assert.deepEqual(await fs.readdir(scratch), [])
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true })
+        }
       })
-      assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
-      assert.match(result.stderr, /query failed safely/)
-      assert.doesNotMatch(result.stderr, /No such file/)
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true })
     }
-  })
+  }
 
-  it("preserves query errors and reaps watchdog sleepers paused during startup", async () => {
-    const tmpDir = await makeTmpDir()
-    const binDir = path.join(tmpDir, "bin")
-    const logPath = path.join(tmpDir, "zg.log")
-    const pauseLog = path.join(tmpDir, "paused.log")
-    const bashEnv = path.join(tmpDir, "bash-env")
-    const marker = String(7000 + process.pid % 2000)
-    await fs.mkdir(binDir)
-    await writeFakeZg(binDir)
-    // Hold the watchdog after it forks sleep, before it assigns the PID.
-    // BASH_ENV/DEBUG supplies synchronization without a production test hook.
-    await fs.writeFile(bashEnv, `set -T
-pause_watchdog() {
-  if [ "$BASH_SUBSHELL" -gt 0 ] && [ "$1" = 'sleeper=$!' ]; then
-    trap - DEBUG
-    local watchdog_pid sleep_pid="$!"
-    watchdog_pid=$(exec /bin/sh -c 'echo "$PPID"')
-    printf '%s %s\\n' "$watchdog_pid" "$sleep_pid" >> "$ZVEC_TEST_PAUSE_LOG"
-    kill -STOP "$watchdog_pid"
-  fi
-}
-trap 'pause_watchdog "$BASH_COMMAND"' DEBUG
-if [ "\${0##*/}" = "zg" ]; then
-  phase=2
-  [ "\${1:-}" = "status" ] && phase=1
-  count=0
-  while [ "$count" -lt "$phase" ]; do
-    count=0
-    if [ -f "$ZVEC_TEST_PAUSE_LOG" ]; then
-      while IFS= read -r entry; do count=$((count + 1)); done < "$ZVEC_TEST_PAUSE_LOG"
-    fi
-    [ "$count" -ge "$phase" ] || sleep 0.01
-  done
-fi
-`)
-    const paused = []
-    const resultPromise = runHelper(["search", "failing query", "--root", tmpDir], {
-      cwd: tmpDir,
-      timeout: 5000,
-      env: {
-        ...process.env,
-        PATH: `${binDir}:/usr/bin:/bin`,
-        BASH_ENV: bashEnv,
-        ZVEC_TEST_PAUSE_LOG: pauseLog,
-        ZVEC_TEST_LOG: logPath,
-        ZVEC_TEST_QUERY_RC: "7",
-        ZVEC_CONTEXT_TIMEOUT: marker,
-      },
-    })
-    try {
-      // The helper starts one watchdog for readiness and one for the query.
-      for (let call = 0; call < 2; call += 1) {
-        let entry
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          const entries = (await fs.readFile(pauseLog, "utf8").catch((error) => {
-            if (error.code !== "ENOENT") throw error
-            return ""
-          })).trim().split("\n").filter(Boolean)
-          if (entries[call]) { entry = entries[call].split(" ").map(Number); break }
-          await new Promise((resolve) => setTimeout(resolve, 10))
-        }
-        assert.ok(entry, "the watchdog must reach the synchronized startup window")
-        paused.push(entry)
-        const [watchdogPid] = entry
-        let stopped = false
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          const state = await execFileAsync("/bin/ps", ["-o", "stat=", "-p", String(watchdogPid)]).catch(() => ({ stdout: "" }))
-          if (!state.stdout.trim()) break
-          if (state.stdout.includes("T")) { stopped = true; break }
-          await new Promise((resolve) => setTimeout(resolve, 10))
-        }
-        // A broken helper can kill the watchdog before STOP takes effect.
-        // Its published sleep PID still lets the assertion detect the leak.
-        if (stopped) process.kill(watchdogPid, "SIGCONT")
-      }
-      const result = await resultPromise
-      assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
-      assert.match(result.stderr, /query failed safely/)
-      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
-      for (const [, sleeperPid] of paused) {
-        assert.equal(new RegExp(`^\\s*${sleeperPid}\\s+sleep ${marker}$`, "m").test(ps.stdout), false, "startup cancellation must reap its sleeper")
-      }
-    } finally {
-      for (const [watchdogPid] of paused) {
-        try { process.kill(watchdogPid, "SIGCONT") } catch (error) { if (error.code !== "ESRCH") throw error }
-      }
-      await resultPromise
-      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
-      for (const [, sleeperPid] of paused) {
-        if (new RegExp(`^\\s*${sleeperPid}\\s+sleep ${marker}$`, "m").test(ps.stdout)) {
-          try { process.kill(sleeperPid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
-        }
-      }
-      await fs.rm(tmpDir, { recursive: true, force: true })
-    }
-  })
-
-  it("preserves query errors while fast watchdogs are stopped repeatedly", { skip: process.env.BTRAIN_ZVEC_STRESS !== "1" }, async () => {
+  it("preserves query errors across repeated bounded calls", { skip: process.env.BTRAIN_ZVEC_STRESS !== "1" }, async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
     const logPath = path.join(tmpDir, "zg.log")
