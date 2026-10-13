@@ -242,7 +242,7 @@ export class TransitionRejection extends Error {
   }
 }
 
-export function legacyRowEnforced(row, status) {
+function legacyRowEnforced(row, status) {
   if (!row || row.kind !== "legacy" || !row.enforced) return false
   if (row.enforced === "$all") return true
   return asArray(row.enforced).includes(status)
