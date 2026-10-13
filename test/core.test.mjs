@@ -5145,9 +5145,10 @@ describe("managed pre-push hook scoped to lane locks", () => {
 
   it("allows updating a pushed branch with main even when main gained a locked-file commit", async () => {
     // Commits the remote base branch already has are not this push's lane work.
-    // The remote's HEAD is unborn after `git init --bare`, so this also covers
-    // the fallback to its main. The final push goes by URL: the base comes from
-    // the destination's live refs, so no remote name is needed.
+    // `git init --bare` points HEAD at init.defaultBranch; when that is master
+    // nobody pushed it, so this also covers the fallback to the remote's main.
+    // The final push goes by URL: the base comes from the destination's live
+    // refs, so no remote name is needed.
     await runGit(["checkout", "-b", "side-b", "main"], tmpDir)
     await commitChange("src/scoring/score.ts", "export const sideB = 5", "Side branch scoring change")
     const first = await push(["side-b"])
@@ -5204,12 +5205,16 @@ describe("managed pre-push hook scoped to lane locks", () => {
     const otherClone = await makeTmpDir()
     const pushedMain = await runGit(["rev-parse", "main"], tmpDir)
     try {
-      const clone = await runGit(["clone", "-q", remoteDir, otherClone], tmpDir)
+      // The bare remote's HEAD names init.defaultBranch, which nobody pushed
+      // when that is master (the CI default), so ask for main by name.
+      const clone = await runGit(["clone", "-q", "--branch", "main", remoteDir, otherClone], tmpDir)
       assert.equal(clone.code, 0, clone.stderr)
       await configureGitIdentity(otherClone)
       await fs.appendFile(path.join(otherClone, "README.md"), "moved on\n", "utf8")
-      await runGit(["add", "README.md"], otherClone)
-      await runGit(["commit", "-q", "-m", "Advance main from another clone"], otherClone)
+      const added = await runGit(["add", "README.md"], otherClone)
+      assert.equal(added.code, 0, added.stderr)
+      const committed = await runGit(["commit", "-q", "-m", "Advance main from another clone"], otherClone)
+      assert.equal(committed.code, 0, `${committed.stdout}\n${committed.stderr}`)
       const advance = await runGit(["push", "-q", "origin", "main"], otherClone)
       assert.equal(advance.code, 0, advance.stderr)
 
