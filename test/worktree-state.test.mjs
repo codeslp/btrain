@@ -28,7 +28,9 @@ async function makeRepo(root) {
 }
 
 async function withTmp(fn) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-worktree-state-")))
+  // The directory name carries a space on purpose: an unquoted state-root
+  // prefix in the hook glob once word-split on it and silently skipped the gate.
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain worktree state-")))
   try {
     await fn(root)
   } finally {

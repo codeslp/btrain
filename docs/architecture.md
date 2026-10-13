@@ -110,7 +110,12 @@ and the handoff files resolve against the state root. Tracked files
 so a lane's diff gate, branch name and pushes come from the worktree doing the
 work. The managed hooks apply the same rule in shell with
 `git rev-parse --git-common-dir`. The registry records the state root, so a
-worktree never registers as a repository of its own.
+worktree never registers as a repository of its own. `.btrain/project.toml`
+is tracked but is read from the state root on purpose: lane ids, agents and
+handoff paths in it must describe the handoff files that live there, and the
+main checkout's branch is the live configuration for every lane (a branch that
+edits the file changes nothing until it merges; `btrain init`, `agents set`
+and `features` edit the main checkout's copy).
 
 ### 2. agentchattr Server (FastAPI + Python)
 

@@ -16,7 +16,9 @@ active = ["codex", "codex-reviewer", "claude", "claude-reviewer"]
 "codex" = "codex -m gpt-6-astra"
 "codex-reviewer" = "codex -m gpt-5.6-sol -c model_reasoning_effort=medium"
 # The Claude pair shares one runtime; claude-reviewer is the stand-in review
-# identity used when gh-codex is out of quota (see PR #68).
+# identity used when gh-codex is out of quota (see PR #68). As a cli runner it
+# is dispatched on needs-review like codex-reviewer; pass --no-dispatch to a
+# handoff update to skip that.
 "claude" = "claude -p"
 "claude-reviewer" = "claude -p"
 

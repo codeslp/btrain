@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 import { fileURLToPath } from "node:url"
 import {
   HARNESS_TRACE_FAILURE_CATEGORIES,
@@ -158,7 +159,7 @@ async function pathExists(target) {
 }
 
 function getRepoHarnessDir(repoRoot) {
-  return path.join(repoRoot, ".btrain", "harness")
+  return path.join(resolveStateRoot(repoRoot), ".btrain", "harness")
 }
 
 function getRepoBenchmarksDir(repoRoot) {

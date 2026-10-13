@@ -807,7 +807,9 @@ function renderPreCommitHook(mode = STORAGE_TRACKED) {
     ...PATH_MATCHES_LOCK_SH,
     "",
     ...HOOK_STATE_ROOT_SH,
-    `for HANDOFF in \${STATE_ROOT:+$STATE_ROOT/}${getHookHandoffGlob(mode)}; do`,
+    // The prefix is quoted so a main checkout path with spaces cannot split
+    // the word; the glob tail stays unquoted so it still expands.
+    `for HANDOFF in "\${STATE_ROOT:+$STATE_ROOT/}"${getHookHandoffGlob(mode)}; do`,
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '    if [ "$STATUS" = "needs-review" ]; then',
@@ -953,7 +955,9 @@ function renderPrePushHook(mode = STORAGE_TRACKED) {
     'ACTIVE_HANDOFFS=""',
     'BLOCKED_FILES=""',
     ...HOOK_STATE_ROOT_SH,
-    `for HANDOFF in \${STATE_ROOT:+$STATE_ROOT/}${getHookHandoffGlob(mode)}; do`,
+    // The prefix is quoted so a main checkout path with spaces cannot split
+    // the word; the glob tail stays unquoted so it still expands.
+    `for HANDOFF in "\${STATE_ROOT:+$STATE_ROOT/}"${getHookHandoffGlob(mode)}; do`,
     '  [ -f "$HANDOFF" ] || continue',
     '  STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
     '  BLOCKING=""',

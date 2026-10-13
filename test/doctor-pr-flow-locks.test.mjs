@@ -68,9 +68,17 @@ async function withLaneAt(status, fn) {
       const approve = await btrain(["handoff", "resolve", "--lane", "a", "--summary", "approved locally", "--actor", "beta"], { cwd: repo, home, agent: "beta" })
       assert.equal(approve.code, 0, `${approve.stdout}\n${approve.stderr}`)
       assert.match(approve.stdout, /ready-for-pr/)
-      if (status === "pr-review") {
+      if (status !== "ready-for-pr") {
         const link = await btrain(["handoff", "update", "--lane", "a", "--status", "pr-review", "--pr", "7", "--actor", "alpha"], { cwd: repo, home })
         assert.equal(link.code, 0, `${link.stdout}\n${link.stderr}`)
+      }
+      if (status === "ready-to-merge") {
+        const clear = await btrain(["handoff", "update", "--lane", "a", "--status", "ready-to-merge", "--actor", "alpha"], { cwd: repo, home })
+        assert.equal(clear.code, 0, `${clear.stdout}\n${clear.stderr}`)
+      }
+      if (status === "changes-requested") {
+        const round = await btrain(["handoff", "update", "--lane", "a", "--status", "changes-requested", "--reason-code", "pr-review-feedback", "--pr", "7", "--actor", "alpha"], { cwd: repo, home })
+        assert.equal(round.code, 0, `${round.stdout}\n${round.stderr}`)
       }
     }
 
@@ -103,6 +111,22 @@ describe("doctor and lock TTL on PR-flow lanes", () => {
     await withLaneAt("ready-for-pr", async ({ repo, home }) => {
       const check = await btrain(["doctor", "--repo", repo], { cwd: repo, home })
       assert.doesNotMatch(check.stdout, /older than 24h TTL/, check.stdout)
+    })
+  })
+
+  it("keeps ready-to-merge locks past the TTL", async () => {
+    await withLaneAt("ready-to-merge", async ({ repo, home }) => {
+      const check = await btrain(["doctor", "--repo", repo], { cwd: repo, home })
+      assert.doesNotMatch(check.stdout, /older than 24h TTL/, check.stdout)
+    })
+  })
+
+  it("keeps the locks of a PR-linked changes-requested round past the TTL", async () => {
+    await withLaneAt("changes-requested", async ({ repo, home, locksPath }) => {
+      const repair = await btrain(["doctor", "--repo", repo, "--repair"], { cwd: repo, home })
+      assert.doesNotMatch(repair.stdout, /released \d+ expired lock/, repair.stdout)
+      const registry = JSON.parse(await fs.readFile(locksPath, "utf8"))
+      assert.ok(registry.locks.some((lock) => lock.lane === "a"), "the fix round keeps its locks")
     })
   })
 
