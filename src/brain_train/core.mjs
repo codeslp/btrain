@@ -745,6 +745,15 @@ function getHookStateFilePattern(mode) {
 }
 
 // Shared by both hooks: does a repo path fall under one Locked Files entry?
+// Shared by both hooks: where the repository's handoff files live. A linked
+// worktree reads its main checkout's; git names the shared .git dir. Empty in
+// a primary checkout so the glob (and the paths the hooks print) stay relative.
+const HOOK_STATE_ROOT_SH = [
+  'COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || echo .git)',
+  'STATE_ROOT=$(dirname "$COMMON_DIR")',
+  '[ "$STATE_ROOT" = "." ] && STATE_ROOT=""',
+]
+
 const PATH_MATCHES_LOCK_SH = [
   'path_matches_lock() {',
   '  file_path="$1"',
@@ -797,11 +806,7 @@ function renderPreCommitHook(mode = STORAGE_TRACKED) {
     "",
     ...PATH_MATCHES_LOCK_SH,
     "",
-    "# Lane state lives with the repository, not the checkout: a linked worktree",
-    "# reads its main checkout's handoff files. git names the shared .git dir.",
-    'COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || echo .git)',
-    'STATE_ROOT=$(dirname "$COMMON_DIR")',
-    '[ "$STATE_ROOT" = "." ] && STATE_ROOT=""',
+    ...HOOK_STATE_ROOT_SH,
     `for HANDOFF in \${STATE_ROOT:+$STATE_ROOT/}${getHookHandoffGlob(mode)}; do`,
     '  if [ -f "$HANDOFF" ]; then',
     '    STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
@@ -947,11 +952,7 @@ function renderPrePushHook(mode = STORAGE_TRACKED) {
     "",
     'ACTIVE_HANDOFFS=""',
     'BLOCKED_FILES=""',
-    "# Lane state lives with the repository, not the checkout: a linked worktree",
-    "# reads its main checkout's handoff files. git names the shared .git dir.",
-    'COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || echo .git)',
-    'STATE_ROOT=$(dirname "$COMMON_DIR")',
-    '[ "$STATE_ROOT" = "." ] && STATE_ROOT=""',
+    ...HOOK_STATE_ROOT_SH,
     `for HANDOFF in \${STATE_ROOT:+$STATE_ROOT/}${getHookHandoffGlob(mode)}; do`,
     '  [ -f "$HANDOFF" ] || continue',
     '  STATUS=$(grep -m1 "^Status:" "$HANDOFF" | sed \'s/^Status:[[:space:]]*//\' | sed \'s/[[:space:]]*$//\')',
