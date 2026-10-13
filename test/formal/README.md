@@ -207,19 +207,25 @@ enforcement):
     `in-progress`, `needs-review`, or `changes-requested` lanes. So the
     implementation violated the contract, inside its advisory window, and
     the fix is the FR-5 second step. FR-5 quiescence was checked against the
-    `transition-advisory` events of both registered repositories (btrain and
-    ai_sales): no L2 event exists anywhere, and no L6 or L10 event ever had
-    an idle source (every live L6 was a rescope in `needs-review` or
-    `pr-review`; every live L10 a reassign on an active lane), so the idle
-    slices retire without disturbing any live path. L5 was recorded on
-    2026-10-08 (finding 9) and stays advisory. Repaired in the transition
+    workflow event logs of every registry entry, including disabled repos
+    and registered test fixtures. The complete audit command below scanned
+    52 entries, 43 with event directories. Of these, 20 are project
+    checkouts, 13 with event directories; the other 32 are temporary test
+    registrations. No idle-source L6 or L10 event exists. One L2 event was
+    emitted by a registered test fixture at 2026-10-13T19:15:31.714Z. The
+    literal FR-5 rule therefore holds this enforcement PR until at least
+    2026-10-20T19:15:31.714Z, followed by a fresh audit. Do not omit that event
+    merely because it came from a test. No L2 event appears in the project
+    checkouts. L5 last appeared in kitchen_vision on 2026-10-08 and stays
+    advisory. The original two-repository audit and its dates were
+    incomplete. Repaired in the transition
     gate rather than in `core.mjs`: `transitions.mjs` rows carry an
     `enforced` field (L2 `"$all"`; L6 and L10 `["idle"]`), `applyTransition`
     throws a `TransitionRejection` (BtrainError's what/why/fix shape, naming
-    the row and the claim command) for a retired match, and every caller
-    already runs the gate before its first write (`resolveHandoff` inside
-    `releaseLocks`'s publish callback, which rolls back the registry on a
-    throw; `patchHandoff` before its inactive-lane release branch; the
+    the row and the claim command) for a retired match, and each entry point
+    runs the gate before publishing lane state (`resolveHandoff` inside
+    `releaseLocks`'s publish callback, which can create `locks.json` before
+    the gate runs but rolls the registry back on a throw; `patchHandoff` before its inactive-lane release branch; the
     doctor resync only on active lanes). The mirror rejects the three in
     both modes with reasons outside the candidate map (`resolve-from-idle`,
     `rescope-from-idle`, `reassign-from-idle`), so a reappearance is an
@@ -228,19 +234,80 @@ enforcement):
     idle-lane witnesses here, and `test/transitions.test.mjs` guard it;
     `test/core.test.mjs`'s L2 witness now asserts the rejection. The
     candidate gate still fails: with the idle paths gone the remaining
-    tallies are the rows still in their windows, and FR-5 quiescence sets
-    their earliest enforcement dates (last event, plus 7 days, across both
-    repositories): L4 2026-10-18, L5 2026-10-16, L6 active slice
-    2026-10-18, L8 2026-10-16, L12 2026-10-16, L14 2026-10-18; L1, L3, L10
-    active slice, and L11 are quiescent (last events 2026-09-24,
-    2026-09-09, 2026-10-01, 2026-09-28); L7, L9, L13, L15 were never
-    recorded. Each remaining row is live usage (L4 and L8 twenty-plus times
+    tallies are the rows still in their windows. The table below gives
+    each row's latest event and the exact UTC timestamp seven days later.
+    A new event resets that bound. The advisory minimum of 14 days also
+    applies. L7, L9, L13, and L15 have no recorded events. Each remaining
+    row has a separate retirement decision; L4 and L8 were used twenty-plus
+    times
     in October), so each retirement is a workflow decision, not only a
     harness fix. Follow-up: `TransitionRejection` is a separate class
     because `transitions.mjs` is a leaf module and `BtrainError` lives in
     `core.mjs`; once `core.mjs` is free, move `BtrainError` to a leaf module
     and derive `TransitionRejection` from it so `instanceof BtrainError`
-    covers gate rejections too.
+    covers gate rejections too. Two compatibility gaps remain: a blank
+    Status line can bypass `legacyRowEnforced` because the core passes an
+    empty status, and an idle update that bundles `--status in-progress`
+    with `--owner` now rejects the idle L10 reassignment. Use `handoff claim`
+    for that operation. The blank-status normalization needs a separate
+    core.mjs fix and regression test.
+
+
+Complete registry audit, 2026-10-13 (UTC; re-run immediately before merge):
+
+| Row | Last event (UTC) | Seven-day bound (UTC) | Source |
+| --- | --- | --- | --- |
+| L1 | 2026-10-09T03:21:19.441Z | 2026-10-16T03:21:19.441Z | kitchen_vision |
+| L2 | 2026-10-13T19:15:31.714Z | 2026-10-20T19:15:31.714Z | registered test fixture |
+| L3 | 2026-10-09T19:12:42.760Z | 2026-10-16T19:12:42.760Z | kitchen_vision |
+| L4 | 2026-10-13T17:08:06.665Z | 2026-10-20T17:08:06.665Z | zo_cal |
+| L5 | 2026-10-08T14:25:18.747Z | 2026-10-15T14:25:18.747Z | kitchen_vision |
+| L6 | 2026-10-10T03:34:35.716Z | 2026-10-17T03:34:35.716Z | ai_sales (no idle source) |
+| L8 | 2026-10-13T20:06:14.429Z | 2026-10-20T20:06:14.429Z | btrain |
+| L10 | 2026-10-13T20:19:54.268Z | 2026-10-20T20:19:54.268Z | btrain (no idle source) |
+| L11 | 2026-10-08T21:35:39.357Z | 2026-10-15T21:35:39.357Z | kitchen_vision |
+| L12 | 2026-10-09T01:37:05.757Z | 2026-10-16T01:37:05.757Z | kitchen_vision |
+| L14 | 2026-10-10T04:17:13.765Z | 2026-10-17T04:17:13.765Z | ai_sales |
+
+Run from any checkout. This command reads the registry and event logs only.
+It includes disabled repositories and test registrations. Missing event
+directories have no events to inspect; missing checkouts or malformed logs
+are explicit gaps and cannot establish quiescence.
+
+```sh
+node --input-type=module <<'JS'
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+const home = process.env.BRAIN_TRAIN_HOME || path.join(os.homedir(), ".btrain")
+const { repos } = JSON.parse(fs.readFileSync(path.join(home, "repos.json"), "utf8"))
+const rows = {}, gaps = []
+let withEvents = 0
+for (const repo of repos) {
+  if (!fs.existsSync(repo.path)) { gaps.push(`Missing checkout: ${repo.path}`); continue }
+  const dir = path.join(repo.path, ".btrain", "events")
+  if (!fs.existsSync(dir)) continue
+  withEvents += 1
+  for (const file of fs.readdirSync(dir).filter(file => file.endsWith(".jsonl"))) {
+    for (const line of fs.readFileSync(path.join(dir, file), "utf8").split("\n").filter(Boolean)) {
+      let event
+      try { event = JSON.parse(line) } catch { gaps.push(`Malformed event: ${dir}/${file}`); continue }
+      const id = event.details?.["transition-advisory"]
+      if (!id) continue
+      const row = rows[id] ??= { count: 0, idle: 0, last: "", repository: "" }
+      row.count += 1
+      if (event.before?.status === "idle") row.idle += 1
+      if (event.recordedAt > row.last) {
+        row.last = event.recordedAt
+        row.repository = repo.path
+        row.bound = new Date(Date.parse(row.last) + 7 * 86400000).toISOString()
+      }
+    }
+  }
+}
+console.log(JSON.stringify({ registered: repos.length, withEvents, rows, gaps }, null, 2))
+JS
+```
 
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a

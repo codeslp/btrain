@@ -58,8 +58,9 @@ export const TRANSITION_ROWS = Object.freeze([
   // claimed has no owner, reviewer, or locks, so spec 002 (resolve authority),
   // spec 014 (rescope on an active lane), and spec 005 FR-5 (reassign in
   // in-progress, needs-review, or changes-requested) leave it nothing to act
-  // on. No registered repository recorded any of the three in its advisory
-  // window. The active-status slices of L6 and L10 stay advisory.
+  // on. The complete registry audit and FR-5 merge bounds are recorded in
+  // ledger entry 13. Recheck them before merging this enforcement change.
+  // The active-status slices of L6 and L10 stay advisory.
   row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "enforced", "legacy", "$all"),
   row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy"),
   row("L4", "legacy", "handoff update --status", "$any", "$any", "any", "valid status", "per target", "forbidden by 002 and 014", "advisory", "legacy"),
