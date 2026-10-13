@@ -52,7 +52,7 @@ agent or provider credentials.
 | Test | Meaning | Expected today |
 | --- | --- | --- |
 | contract mode (ledger gated) | Real behavior vs the designated contract; candidate findings are tallied, each divergent lane is adopted so the rest of the sequence stays checked | Must pass; a divergence outside the candidate ledger fails as `validation_mismatch`. No designated drift remains — a reappearance fails |
-| candidate findings absent | Asserts the candidate tally is empty | FAILS while ledger candidates 4-11 sit in their spec 015 FR-5 advisory windows (6 and 11 since spec 016 WS3 on 2026-09-08; 4, 5, 7, 9, 10 since WS4 on 2026-09-09): the implementation still accepts the legacy paths with a `transition-advisory` record, contract mode still rejects them, so the tally persists by design until the enforcement lanes land. The formal verdict is `validation_mismatch` and the suite exits non-zero (spec 014 blocks on it) |
+| candidate findings absent | Asserts the candidate tally is empty | FAILS while ledger candidates 4, 6, 7, 9, 10 (active-status slice), and 11 sit in their spec 015 FR-5 advisory windows (6 and 11 since spec 016 WS3 on 2026-09-08; 4, 7, 9, 10 since WS4 on 2026-09-09): the implementation still accepts those legacy paths with a `transition-advisory` record, contract mode still rejects them, so the tally persists by design until the enforcement lanes land. The formal verdict is `validation_mismatch` and the suite exits non-zero (spec 014 blocks on it). Since 2026-10-13 (entry 13) the idle-lane paths (finding 5, and the idle source of 10 and of reassignment) are enforced and no longer tally; FR-5 quiescence (no advisory event in 7 days across the registered repositories) blocks the next retirements until the dates listed in entry 13 |
 | implementation mode | Real behavior vs the implementation mirror | Must pass; a failure means a new, unknown divergence |
 | closed-chain check | Deterministic close-without-merge chain | Must pass with zero tallies: the chain conforms end to end |
 | FR-18 witness | Same-reason repair re-entry | Must pass: the implementation escalates to a human (verified working) |
@@ -87,8 +87,12 @@ spec 005 FR-5 reassignment, spec 006 FR-18 and FR-2, spec 014 rescope/resync
 split). The implementation accepts each legacy path with a `transition-advisory`
 record during the spec 015 FR-5 window; contract mode rejects it, so every
 label below keeps tallying until the enforcement lanes retire the rows, when
-the labels become regressions. Label notes: `pr-outcome-source-status` also
-covers a non-terminal outcome on a `changes-requested` reached by a local
+the labels become regressions. The first retirement is entry 13 (2026-10-13):
+`resolve-from-idle` is no longer a candidate label, and an idle source no
+longer reaches `rescope-authorization` or `reassign-authorization`; a
+reappearance of any of the three fails contract mode as an unknown
+divergence. Label notes: `pr-outcome-source-status` also covers a
+non-terminal outcome on a `changes-requested` reached by a local
 `request-changes` (not PR-flow feedback); `rescope-authorization` also covers a
 resync by a non-owner (`resync-requires-owner`).
 
@@ -100,7 +104,10 @@ resync by a non-owner (`resync-requires-owner`).
 5. `resolveHandoff` resolves an idle, never-claimed lane. When the lane's
    handoff file is absent it also falls back to repo-level state and writes a
    `Previous Handoffs` entry into a newly created lane file using another
-   lane's task text (reproduced 2026-09-01).
+   lane's task text (reproduced 2026-09-01). **Enforced 2026-10-13 (entry
+   13):** spec 015 L2 is retired; the transition gate rejects a resolve on an
+   idle lane before any write, in lane and single-handoff mode. The
+   missing-file half was closed by finding 8.
 6. When the reviewer (not the owner) moves a lane to `needs-review`,
    `inferPeerReviewer` reassigns the reviewer to the owner. The lane then
    waits for review with reviewer == owner, which breaks owner/reviewer
@@ -121,11 +128,25 @@ resync by a non-owner (`resync-requires-owner`).
    outcomes (`waiting`, `feedback`, `ready-to-merge`) from any lane status,
    so an `in-progress` lane can enter `pr-review` without peer approval.
    The terminal half (merged or closed from a non-PR-flow lane) was repaired
-   in PR #33 and is now rejected.
+   in PR #33 and is now rejected. **Still advisory on 2026-10-13 (entry 13):**
+   this is live usage, not only a harness artifact. Lane j linked PR #100 to
+   an `in-progress` lane and polled it straight to `ready-to-merge` on
+   2026-10-08 (`transition-advisory: L5` in `.btrain/events/lane-j.jsonl`),
+   which is exactly the harness's `pr-outcome-from-invalid-status` case.
+   Spec 015 FR-5 forbids merging the enforcement while an L5 event is less
+   than 7 days old, so L5 cannot retire before 2026-10-16, and retiring it
+   removes the shortcut from the workflow (the designated route is
+   `needs-review`, peer resolve, `pr create`). The
+   `pr-outcome-source-status` tally persists until that decision.
 10. `patchHandoff --files` (the designated rescope path) enforces no actor
     or source-status restrictions: any agent can rescope any active lane,
     including during `needs-review` and PR-flow retention, against the
-    spec 014 rescope designation.
+    spec 014 rescope designation. **Idle source enforced 2026-10-13 (entry
+    13):** `--files` on an idle lane is rejected by the gate. The
+    active-status slice (rescope in review or the PR flow, by any agent) is
+    still advisory and still tallies `rescope-authorization`; both
+    registered repositories used it in the last 7 days (ai_sales lanes b, c,
+    d on 2026-10-07 and 2026-10-10).
 11. `resolveHandoff` resolves a `repair-needed` lane before the FR-18
     escalation, releasing contained locks early. Spec 014 designates repair
     exit-to-resolved only as a terminal disposition after escalation.
@@ -166,6 +187,60 @@ Harness-found implementation defect, repaired 2026-09-30:
     leave stale entries on an inactive lane); and `LaneLock.tla` has no
     metadata action, so the `lastActor` effect is mirror-only and belongs in
     the `specs/tla/README.md` known-differences list.
+
+Harness-found advisory paths retired, 2026-10-13 (first spec 015 FR-5
+enforcement):
+
+13. On a clean `main` (72e51a8) the candidate gate reported
+    `pr-outcome-source-status=2, reassign-authorization=5,
+    rescope-authorization=6, resolve-from-idle=9` with
+    `BTRAIN_FORMAL_SEED=1167269621 BTRAIN_FORMAL_RUNS=15`. Every tallied step
+    was one of four cases: `handoff resolve` on an idle lane (L2),
+    `handoff update --files` on an idle lane (the idle source of L6),
+    `handoff update --owner/--reviewer` on an idle lane (the idle source of
+    L10), and a `pr poll` non-terminal outcome with `--pr` on an
+    `in-progress` lane (L5). Across six random seeds the three idle cases
+    were 99 of 118 tallies. The model matched the designated prose in all
+    four: spec 002 (Resolve, update, and claim authority) rejects resolving
+    an idle lane and an explicit `--pr` outside the PR flow; spec 014
+    defines a rescope on an active lane; spec 005 FR-5 reassigns only
+    `in-progress`, `needs-review`, or `changes-requested` lanes. So the
+    implementation violated the contract, inside its advisory window, and
+    the fix is the FR-5 second step. FR-5 quiescence was checked against the
+    `transition-advisory` events of both registered repositories (btrain and
+    ai_sales): no L2 event exists anywhere, and no L6 or L10 event ever had
+    an idle source (every live L6 was a rescope in `needs-review` or
+    `pr-review`; every live L10 a reassign on an active lane), so the idle
+    slices retire without disturbing any live path. L5 was recorded on
+    2026-10-08 (finding 9) and stays advisory. Repaired in the transition
+    gate rather than in `core.mjs`: `transitions.mjs` rows carry an
+    `enforced` field (L2 `"$all"`; L6 and L10 `["idle"]`), `applyTransition`
+    throws a `TransitionRejection` (BtrainError's what/why/fix shape, naming
+    the row and the claim command) for a retired match, and every caller
+    already runs the gate before its first write (`resolveHandoff` inside
+    `releaseLocks`'s publish callback, which rolls back the registry on a
+    throw; `patchHandoff` before its inactive-lane release branch; the
+    doctor resync only on active lanes). The mirror rejects the three in
+    both modes with reasons outside the candidate map (`resolve-from-idle`,
+    `rescope-from-idle`, `reassign-from-idle`), so a reappearance is an
+    unknown divergence. `test/handoff-idle-lane.test.mjs` (real entry
+    points and the CLI), `test/formal/lane-lock-model-idle.test.mjs`, the
+    idle-lane witnesses here, and `test/transitions.test.mjs` guard it;
+    `test/core.test.mjs`'s L2 witness now asserts the rejection. The
+    candidate gate still fails: with the idle paths gone the remaining
+    tallies are the rows still in their windows, and FR-5 quiescence sets
+    their earliest enforcement dates (last event, plus 7 days, across both
+    repositories): L4 2026-10-18, L5 2026-10-16, L6 active slice
+    2026-10-18, L8 2026-10-16, L12 2026-10-16, L14 2026-10-18; L1, L3, L10
+    active slice, and L11 are quiescent (last events 2026-09-24,
+    2026-09-09, 2026-10-01, 2026-09-28); L7, L9, L13, L15 were never
+    recorded. Each remaining row is live usage (L4 and L8 twenty-plus times
+    in October), so each retirement is a workflow decision, not only a
+    harness fix. Follow-up: `TransitionRejection` is a separate class
+    because `transitions.mjs` is a leaf module and `BtrainError` lives in
+    `core.mjs`; once `core.mjs` is free, move `BtrainError` to a leaf module
+    and derive `TransitionRejection` from it so `instanceof BtrainError`
+    covers gate rejections too.
 
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a
@@ -244,9 +319,11 @@ that only carry another lane's reviewed work.
   the model accepted a lane agent's repeat resolve, so L14 never tallied, and
   a third agent's repeat resolve tallied as `resolve-actor-unchecked`.
 - Reassignment (spec 015 row 20, Q8) is generated (`reassign` command; mirror
-  `reassign` with the author history); every contract rejection maps to the
-  candidate label `reassign-authorization`, which persists during the spec
-  015 FR-5 advisory window like the other legacy labels.
+  `reassign` with the author history); every contract rejection on an active
+  lane maps to the candidate label `reassign-authorization`, which persists
+  during the spec 015 FR-5 advisory window like the other legacy labels. An
+  idle source is `reassign-from-idle`, enforced since 2026-10-13 (entry 13)
+  and not a candidate: both sides reject it.
 - Metadata-only updates (spec 015 row 19) are generated as `metadata` (a
   reassign draw with neither role). A non-lane agent's update maps to the
   candidate label `metadata-actor-unchecked` (L12), which persists during the

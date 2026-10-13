@@ -2832,15 +2832,20 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     await rmDir(tmpDir)
   })
 
-  it("resolves an idle lane with the L2 advisory during the FR-5 window", async () => {
+  it("rejects resolving an idle lane now that L2 is enforced (spec 002 resolve authority)", async () => {
+    // Until 2026-10-13 this resolve was accepted with a `transition-advisory:
+    // L2` record (spec 015 FR-5 window). test/handoff-idle-lane.test.mjs
+    // covers the full idle-lane retirement; this keeps the CLI-level witness.
     const result = await runBtrain(
       ["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "nothing here", "--actor", "writer"],
       tmpDir,
     )
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /warning: transition-advisory L2: handoff resolve `idle -> resolved`/)
-    const events = await readLaneEvents(tmpDir, "b")
-    assert.equal(lastEventOfType(events, "resolve").details["transition-advisory"], "L2")
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /is idle/)
+    assert.match(result.stderr, /spec 015 L2/)
+    assert.doesNotMatch(result.stdout + result.stderr, /transition-advisory L2/)
+    const status = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
+    assert.match(status.stdout, /status: idle/)
   })
 
   it("scopes the FR-18 repair budget to the current task (Q4)", async () => {
