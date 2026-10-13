@@ -63,11 +63,13 @@ Block bad review handoffs before they reach the reviewer.
    btrain review code --lane <id> --base <Base>
    ```
    - Use the lane id from `btrain handoff` and the same `Base` value you will put in the handoff packet. If no explicit base is recorded, use the repo default review base (usually `main`).
-   - Exit **2** (hard violations) is a **hard block**. Hard rules: `hardcoded-secret`, `cors-wildcard`. Fix the violation in the same lane, then re-run; do not flip to `needs-review` until the gate exits 0.
-   - Exit **0** with `warn > 0` (e.g., `unprotected-route`, `env-var-required`, `new-dependency`) is informational. Record each warn as a `--gap` bullet in the handoff packet, or address inline before handoff if appropriate.
+   - Hard findings block. Exit **2** means a hard rule fired: `hardcoded-secret`, `cors-wildcard`, or `focused-test` (a committed `.only`, `fit` or `fdescribe` makes the runner skip every other test). Fix the violation in the same lane, then re-run; do not flip to `needs-review` until the gate exits 0.
+   - Warnings do not block, but each one needs an answer. Fix it, or record it as one `--gap` bullet that names the rule and `file:line` and gives a one-line justification, for example `--gap "removed-assertion test/cache.test.mjs:42: the size check moved to test/cache-eviction.test.mjs"`.
+     - General warn rules: `unprotected-route`, `env-var-required`, `new-dependency`.
+     - Weakened-test warn rules: `deleted-test-file`, `removed-assertion`, `skipped-test`, `loosened-assertion`, `lowered-threshold`, `test-ignore-added`. Each one means the diff deletes, skips, relaxes, or excludes test coverage. The justification must say why that coverage is safe to lose or where it moved.
    - Exit **0** with `0 hard, 0 warn` — record `btrain review code passed` as a `--verification` bullet.
    - If the subcommand is unavailable (older btrain install), note it as a `--gap` (`btrain review code not available — install latest`) and proceed; do not block on tooling drift.
-   - For legitimate exceptions (test fixtures, intentional config), suppress on the violating line with `// btrain-allow: <rule-id>` (or `# btrain-allow: ...` for shells/Python). Document any allow-marker addition in the handoff packet so the reviewer can audit it.
+   - For legitimate exceptions (test fixtures, intentional config), suppress on the violating line with `// btrain-allow: <rule-id>` (or `# btrain-allow: ...` for shells/Python). For a finding about removed lines, put the marker on the line where the removal happened. A `deleted-test-file` finding has no surviving line, so justify it with a `--gap` bullet instead. Document any allow-marker addition in the handoff packet so the reviewer can audit it.
 7. Scan the handoff context you are about to submit. Block the handoff if it still contains placeholders like:
    - `Fill this in before handoff`
    - `None yet`
@@ -96,7 +98,8 @@ Block bad review handoffs before they reach the reviewer.
 - Do not read or edit `HANDOFF_*.md` files directly.
 - Do not move a lane to review with placeholder text.
 - Do not move a lane to review with an empty or no-op diff.
-- Do not move a lane to review when `btrain review code --lane <id>` reports hard violations (`hardcoded-secret`, `cors-wildcard`). Fix the violation in the same lane or add a documented `// btrain-allow: <rule-id>` marker first.
+- Do not move a lane to review when `btrain review code --lane <id>` reports hard violations (`hardcoded-secret`, `cors-wildcard`, `focused-test`). Fix the violation in the same lane or add a documented `// btrain-allow: <rule-id>` marker first.
+- Do not leave a `btrain review code` warning unanswered. Fix it, or record a `--gap` bullet with a one-line justification.
 - Do not omit `Base` or `Specific review asks`.
 - Do not omit a required context receipt or an explicit provider/context gap.
 - Do not omit or soften a stale pin, TLC counterexample, or validation mismatch.
