@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { listFiles, parseFrontmatter } from "./helpers/skill-files.mjs"
 
 // Reverse-engineering skills that btrain bundles. `btrain init` and
 // `btrain sync-skills` copy both surfaces, so a skill that differs between
@@ -15,9 +16,13 @@ const SURFACES = [".claude/skills", ".agents/skills"]
 // Git blob SHA-1 of each vendored file in morluto/rea at c9aecde (the tree
 // object, fetched from the GitHub API). VENDORED.md says not to edit these
 // files; a matching edit on both surfaces would pass the surface check, so
-// pin them to upstream directly.
+// pin them to upstream directly. Upstream's SKILL.md ships verbatim as
+// references/upstream-SKILL.md behind a btrain-owned SKILL.md that excludes
+// rebuilds, so an agent that asks to "reverse engineer X and rebuild it"
+// reaches clean-room-rebuild's legal gate instead of this skill.
+const UPSTREAM_SKILL = "references/upstream-SKILL.md"
 const VENDORED_BLOBS = {
-  "SKILL.md": "63f16b9780979e9ecf4beae4b5de510d355e23a1",
+  [UPSTREAM_SKILL]: "63f16b9780979e9ecf4beae4b5de510d355e23a1",
   "LICENSE": "2d476d24fa5a9ae2ab35e5fd121494049eb2ee5d",
   "references/android-applications.md": "896f15f85efaa03503eacfd598bed7db6bf791ea",
   "references/connection-and-recovery.md": "ed8393bd9a020f7a31adfa050e47b3d673db7580",
@@ -27,42 +32,11 @@ const VENDORED_BLOBS = {
   "references/runtime-observation.md": "3e16a3e19e0957a5c4cf3660e2bca96f78062290",
 }
 
+// Files btrain writes itself inside the vendored directory.
+const BTRAIN_OWNED = ["SKILL.md", "VENDORED.md"]
+
 const gitBlobSha = (content) =>
   createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex")
-
-// Explicit walk: readdir's `recursive` option needs Node 18.17, and the
-// README advertises Node.js 18+.
-async function listFiles(dir) {
-  const files = []
-  async function walk(current, relative) {
-    for (const entry of await fs.readdir(current, { withFileTypes: true })) {
-      const entryRelative = path.join(relative, entry.name)
-      if (entry.isDirectory()) await walk(path.join(current, entry.name), entryRelative)
-      else if (entry.isFile()) files.push(entryRelative)
-    }
-  }
-  await walk(dir, "")
-  return files.sort()
-}
-
-// Enough of YAML frontmatter for `key: value` lines, plus indented
-// continuation lines for folded (`>`) values.
-function frontmatter(text) {
-  const match = /^---\n([\s\S]*?)\n---\n/.exec(text)
-  if (!match) return null
-  const fields = {}
-  let key = null
-  for (const line of match[1].split("\n")) {
-    const field = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line)
-    if (field) {
-      key = field[1]
-      fields[key] = { raw: field[2], value: /^[>|]-?$/.test(field[2]) ? "" : field[2] }
-    } else if (key && /^\s+\S/.test(line)) {
-      fields[key].value = `${fields[key].value} ${line.trim()}`.trim()
-    }
-  }
-  return fields
-}
 
 const read = (name, file = "SKILL.md") => fs.readFile(path.resolve(SURFACES[0], name, file), "utf8")
 
@@ -83,7 +57,7 @@ describe("bundled reverse-engineering skills", () => {
     })
 
     it(`${name} frontmatter has its name and a parseable description`, async () => {
-      const fields = frontmatter(await read(name))
+      const fields = parseFrontmatter(await read(name))
       assert.ok(fields, "SKILL.md must open with a --- frontmatter block")
       assert.equal(fields.name?.value, name, "name must match the skill directory")
       assert.ok(fields.description?.value, "description must not be empty")
@@ -99,9 +73,11 @@ describe("bundled reverse-engineering skills", () => {
       assert.ok(skillLinks.length > 0, `${name}/SKILL.md must link its references`)
       for (const file of (await listFiles(dir)).filter((f) => f.endsWith(".md"))) {
         const text = await fs.readFile(path.join(dir, file), "utf8")
-        // Relative links only; skip URLs and in-page anchors.
+        // Relative links only; skip URLs and in-page anchors. The verbatim
+        // upstream SKILL.md keeps its links relative to the skill root.
+        const base = file === UPSTREAM_SKILL ? dir : path.dirname(path.join(dir, file))
         for (const [, target] of text.matchAll(/\]\((?!https?:|#|mailto:)([^)#\s]+)\)/g)) {
-          const resolved = path.resolve(path.dirname(path.join(dir, file)), target)
+          const resolved = path.resolve(base, target)
           await assert.doesNotReject(fs.access(resolved), `${name}/${file} links to missing ${target}`)
         }
       }
@@ -111,7 +87,7 @@ describe("bundled reverse-engineering skills", () => {
   // MIT requires the copyright and permission notice to travel with every copy.
   it("reverse-engineer-anything matches upstream rea at the pinned commit", async () => {
     const dir = path.resolve(SURFACES[0], "reverse-engineer-anything")
-    const shipped = (await listFiles(dir)).filter((file) => file !== "VENDORED.md")
+    const shipped = (await listFiles(dir)).filter((file) => !BTRAIN_OWNED.includes(file))
     assert.deepEqual(shipped, Object.keys(VENDORED_BLOBS).sort(), "vendored file set changed")
     for (const [file, sha] of Object.entries(VENDORED_BLOBS)) {
       assert.equal(gitBlobSha(await fs.readFile(path.join(dir, file))), sha, `${file} differs from rea@c9aecde; do not edit vendored files`)
@@ -120,7 +96,37 @@ describe("bundled reverse-engineering skills", () => {
 
   it("reverse-engineer-anything keeps the upstream MIT notice and pinned commit", async () => {
     assert.match(await read("reverse-engineer-anything", "LICENSE"), /^MIT License\n\nCopyright \(c\) 2026 morluto/)
-    assert.match(await read("reverse-engineer-anything", "VENDORED.md"), /commit\s+`[0-9a-f]{40}`/)
+    const vendored = await read("reverse-engineer-anything", "VENDORED.md")
+    assert.match(vendored, /commit\s+`[0-9a-f]{40}`/)
+    assert.match(vendored, /`references\/upstream-SKILL\.md`/, "VENDORED.md must say where the upstream SKILL.md now lives")
+    assert.match(vendored, /rea-agents@\d+\.\d+\.\d+/, "pin the npm version; @latest runs whatever npm serves")
+    assert.doesNotMatch(vendored, /rea-agents@latest/)
+    assert.match(vendored, /btrain sync-skills --force --skill reverse-engineer-anything/)
+  })
+
+  // Review P2: the upstream description triggers on "guide a reconstruction"
+  // and its close-out says to build with normal coding tools, so an ungated
+  // "reverse engineer X and rebuild it" could skip clean-room-rebuild's legal
+  // gate. The btrain-owned SKILL.md is what the harness reads when it picks a
+  // skill, so the exclusion has to live in its frontmatter.
+  describe("reverse-engineer-anything is study-only", () => {
+    it("excludes rebuilding in its description and points at clean-room-rebuild", async () => {
+      const fields = parseFrontmatter(await read("reverse-engineer-anything"))
+      const description = fields.description.value
+      assert.match(description, /\bNot for\b.*\b(rebuild|reimplement)/i, "description must exclude rebuilding or reimplementing")
+      assert.match(description, /clean-room-rebuild/, "description must send rebuild requests to clean-room-rebuild")
+      assert.doesNotMatch(description, /guide a reconstruction/)
+    })
+
+    it("states the authorization scope before deferring to the upstream text", async () => {
+      const text = await read("reverse-engineer-anything")
+      const scope = text.search(/authorized to (study|analyze)/)
+      const upstream = text.indexOf(`](${UPSTREAM_SKILL})`)
+      assert.ok(scope !== -1, "SKILL.md must say the skill is for software you are authorized to analyze")
+      assert.ok(upstream !== -1, "SKILL.md must link the pinned upstream text")
+      assert.ok(scope < upstream, "the authorization scope must come before the upstream link")
+      assert.match(text, /clean-room-rebuild/)
+    })
   })
 
   describe("clean-room-rebuild keeps the wall", () => {

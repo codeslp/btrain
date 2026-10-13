@@ -100,9 +100,13 @@ running them.
 
 ## Decision
 
-1. **Vendor `reverse-engineer-anything` unchanged** on both skill surfaces, with the MIT
-   `LICENSE` and a `VENDORED.md` that pins the upstream commit and says btrain does not
-   install the REA MCP server.
+1. **Vendor `reverse-engineer-anything`** on both skill surfaces, with the MIT `LICENSE`
+   and a `VENDORED.md` that pins the upstream commit and says btrain does not install the
+   REA MCP server. Upstream's `SKILL.md` ships verbatim as `references/upstream-SKILL.md`
+   behind a short btrain-owned `SKILL.md` whose description excludes rebuilds and
+   reimplementations (those go to `clean-room-rebuild`), because upstream's description
+   triggers on "guide a reconstruction" and its close-out says to build with normal coding
+   tools, which would let "reverse engineer X and rebuild it" skip the legal gate.
 2. **Add `clean-room-rebuild`**, btrain's own skill:
    - Phase 0: intake, integration-first check, legal gate, provenance log.
    - Phase 1: study side observes through our own account; Playwright scenarios with step IDs; value-free HAR reduction; a behavior spec with every claim labeled; keep/drop decision for each quirk.

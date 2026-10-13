@@ -77,6 +77,7 @@ The build session must not see the target. Deny it the target's domain and the s
 ```
 
 Use the equivalent setting for other agents (a browser blocklist, a sandbox path rule).
+This deny pattern is advisory: the build agent can edit its own `settings.local.json`, so the wall holds only because the build session never receives the study folder's path or contents and the spec firewall review (Phase 1.5) and the parity reviewer check what crossed it.
 
 For each module in build order:
 
