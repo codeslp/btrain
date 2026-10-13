@@ -412,6 +412,7 @@
       "getLocksLockfilePath",
       "getLocksPath",
       "isLaneActiveStatus",
+      "laneWaitsOnPr",
       "isLockExpired",
       "listLocks",
       "readAllLaneStates",

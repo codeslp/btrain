@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { performance } from "node:perf_hooks"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 import { sourceSnapshotHashFor, validCodeRevision } from "./manifest.mjs"
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
@@ -173,7 +174,7 @@ export async function appendDecisionTrace(root, trace, family, sourceProof) {
     inputTokens: nonnegative(trace.inputTokens),
     cost: nonnegative(trace.cost),
   }
-  const file = path.join(root, ".btrain", "jev", "decision-traces.jsonl")
+  const file = path.join(resolveStateRoot(root), ".btrain", "jev", "decision-traces.jsonl")
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.appendFile(file, `${JSON.stringify(record)}\n`, "utf8")
   return record

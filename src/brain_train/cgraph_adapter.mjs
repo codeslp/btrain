@@ -15,6 +15,7 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "./worktree.mjs"
 import net from "node:net"
 
 const execFileAsync = promisify(execFile)
@@ -23,7 +24,11 @@ const execFileAsync = promisify(execFile)
 // Timeout budgets (ms) — tuned for interactive lane workflows
 // ---------------------------------------------------------------------------
 const TIMEOUTS = {
-  manifest:       3_000,
+  // A cold `cgc manifest` on this adapter's reference machine took 8.4 s
+  // (Python import cache empty); warm runs take under 1 s. 3 s made doctor
+  // report "manifest probe failed" after any idle period and silently turned
+  // every advisory off, so the budget covers a cold start.
+  manifest:      15_000,
   blast_radius:   2_000,
   review_packet:  5_000,
   audit:        180_000,
@@ -523,7 +528,7 @@ class CgraphAdapter {
     }
 
     // Check artifact directory is writable
-    const artifactRoot = path.join(this.repoRoot, ".btrain", "artifacts", "cgraph")
+    const artifactRoot = path.join(resolveStateRoot(this.repoRoot), ".btrain", "artifacts", "cgraph")
     try {
       await fs.mkdir(artifactRoot, { recursive: true })
       info.push("artifact dir: writable")
@@ -612,7 +617,7 @@ class CgraphAdapter {
     try {
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)
       const dir = path.join(
-        this.repoRoot, ".btrain", "artifacts", "cgraph",
+        resolveStateRoot(this.repoRoot), ".btrain", "artifacts", "cgraph",
         category, `lane-${laneId}`,
       )
       await fs.mkdir(dir, { recursive: true })

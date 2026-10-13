@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 import { fileURLToPath } from "node:url"
 
 const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -120,7 +121,7 @@ async function readHarnessProfile(profilePath, fallbackId) {
 }
 
 function getRepoHarnessDir(repoRoot) {
-  return path.join(repoRoot, ".btrain", "harness")
+  return path.join(resolveStateRoot(repoRoot), ".btrain", "harness")
 }
 
 function getRepoHarnessProfilesDir(repoRoot) {

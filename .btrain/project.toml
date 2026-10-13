@@ -4,14 +4,23 @@ name = "btrain"
 [agents]
 reviewer_default = "codex-reviewer"
 writer_default = "codex"
-active = ["codex", "codex-reviewer"]
+# PR #70 (2026-09-22) made this list Codex-only. Every lane since PR #92 has
+# been owned by claude and reviewed by claude-reviewer, so doctor reported the
+# repo unhealthy on each of them. The list now names the agents that work here.
+active = ["codex", "codex-reviewer", "claude", "claude-reviewer"]
 
 [agents.runners]
-# Keep both collaborators on Codex while pinning different model versions.
-# The reviewer also has a fixed reasoning level so review dispatches match the
-# repository's independent-review policy and the requested review profile.
+# Both Codex collaborators pin different model versions. The reviewer also has
+# a fixed reasoning level so review dispatches match the repository's
+# independent-review policy and the requested review profile.
 "codex" = "codex -m gpt-6-astra"
 "codex-reviewer" = "codex -m gpt-5.6-sol -c model_reasoning_effort=medium"
+# The Claude pair shares one runtime; claude-reviewer is the stand-in review
+# identity used when gh-codex is out of quota (see PR #68). As a cli runner it
+# is dispatched on needs-review like codex-reviewer; pass --no-dispatch to a
+# handoff update to skip that.
+"claude" = "claude -p"
+"claude-reviewer" = "claude -p"
 
 [lanes]
 per_agent = 3

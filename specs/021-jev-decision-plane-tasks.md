@@ -2,6 +2,8 @@
 
 The numbered workstreams in the [implementation plan](021-jev-decision-plane-implementation-plan.md) are independent release gates. Completing a code task does not promote a family. Data policy, labels, shadow runs, and a human promotion record remain separate prerequisites.
 
+**Status 2026-10-13:** the code for every open task below is merged or dropped. What remains is data collection: each open task needs a frozen, independently labeled corpus of 50 to 200 real cases before any family can leave assist mode. That is not active engineering work. Reopen this list when a corpus exists.
+
 ## Phase 1: Offline foundation (WS0–2)
 
 - [x] T001 [US1] Record prospective PR source snapshots and pending outcomes in `src/brain_train/handoff/pr-comments.mjs` and `src/brain_train/jev/evidence.mjs`; mark polling-time heads separately from event-time heads.
@@ -39,7 +41,7 @@ The numbered workstreams in the [implementation plan](021-jev-decision-plane-imp
 
 ## Phase 4: Optional expansions and promotion (WS9–11)
 
-- [ ] T015 [US5] Add supervisor signals only after durable cursor, acknowledgement, retry, and restart recovery exist in the owning supervisor implementation.
+- [ ] ~~T015 [US5] Add supervisor signals only after durable cursor, acknowledgement, retry, and restart recovery exist in the owning supervisor implementation.~~ Dropped 2026-10-13: no supervisor is planned (the July 2026 reassessment is shelved; see `research/bth-supervisor-agentchattr-reassessment.md`).
 - [ ] T016 [US5] Add authorized local history prefilter and read-only typed rerank in `src/brain_train/jev/` and `test/jev/`.
   - [x] Offline principal/source ACL and lexical prefilter, typed relevance rerank, redacted traces and paired query accounting in `history.mjs`, its tests, and `experiments/jev-btrain/history-search.mjs`.
   - [ ] Freeze 50 independently judged real queries with source-access roles and evaluate G10; a live reader must enforce authoritative access before exposing any search results.

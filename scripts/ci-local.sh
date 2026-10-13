@@ -11,6 +11,10 @@
 #   --no-formal   skip the formal advisory check
 #   --install     run `npm ci` even when node_modules exists
 #
+# For the Linux image hosted CI uses (Node 22, git 2.55, ast-grep), run this
+# through scripts/ci-container.sh, which bind-mounts the repo into the
+# btrain-git255 docker image under OrbStack.
+#
 # Required steps: npm test, experiment tests, Python tests, compat runs.
 # Advisory steps (spec 014, never fail the run): formal witnesses and the
 # formal advisory check. Exit status is 1 when any required step failed.
@@ -36,7 +40,8 @@ done
 ROOT="$(git rev-parse --show-toplevel)" || exit 2
 cd "$ROOT" || exit 2
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/btrain-ci"
-LOGS="$(mktemp -d "${TMPDIR:-/tmp}/btrain-ci-local.XXXXXX")"
+# BTRAIN_CI_LOG_DIR lets a container run keep its logs on the host.
+LOGS="$(mktemp -d "${BTRAIN_CI_LOG_DIR:-${TMPDIR:-/tmp}}/btrain-ci-local.XXXXXX")"
 mkdir -p "$CACHE"
 
 # Match the hosted runner: CI=true keeps the dashboard from auto-starting,

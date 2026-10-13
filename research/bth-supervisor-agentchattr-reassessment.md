@@ -1,7 +1,7 @@
 # BTH Supervisor and AgentChatTR Reassessment
 
 **Date:** 2026-07-10
-**Status:** Recommended implementation plan
+**Status:** Shelved 2026-10-13. Phase 0 and phase 1 landed (`handoff wait`, `--since`, doctor runner warnings). Phases 2 to 4 (durable supervisor, service, AgentChatTR adapter, agent-deck trial) were never built and are not planned: `btrain loop`, `handoff wait`, and needs-review reviewer dispatch cover the practical need. Treat the rest of this document as history. Any future supervisor work starts from a new spec against current code, not from this plan.
 **Constraint:** Model execution must use authenticated consumer/team CLI subscriptions, not metered model APIs.
 
 ## Decision
