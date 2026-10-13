@@ -993,9 +993,64 @@ describe("skipped-test rule", () => {
     }
   })
 
+  it("flags an unconditional t.skip() or this.skip() inside a test body", () => {
+    const node = makeHunkDiff("test/upload.test.mjs", [
+      '   it("uploads", async (t) => {',
+      `+    t.${T.skip}("upstream outage")`,
+      "     assert.ok(await upload())",
+      "   })",
+    ])
+    const mocha = makeHunkDiff("test/download.test.mjs", [
+      '   it("downloads", function () {',
+      `+    this.${T.skip}()`,
+      "     assert.ok(download())",
+      "   })",
+    ])
+    const findings = findingsFor(scanDiff(node + mocha), "skipped-test")
+    assert.deepEqual(
+      findings.map((finding) => [finding.file, finding.line, finding.preview]),
+      [["test/download.test.mjs", 2, `this.${T.skip}()`], ["test/upload.test.mjs", 2, `t.${T.skip}("upstream outage")`]],
+    )
+    assert.match(findings[0].detail, /unconditional skip `this\.skip\(\)`/)
+    assert.match(findings[1].detail, /unconditional skip `t\.skip\(\)`/)
+  })
+
+  it("does not flag a t.skip() guarded by a condition", () => {
+    const diff = makeHunkDiff("test/upload.test.mjs", [
+      '   it("uploads", async (t) => {',
+      "+    if (process.getuid() === 0) {",
+      `+      t.${T.skip}("running as root")`,
+      "+      return",
+      "+    }",
+      `+    if (!ENABLED) t.${T.skip}()`,
+      `+    ENABLED || t.${T.skip}()`,
+      "+    if (",
+      "+      platform === \"win32\" &&",
+      "+      !process.env.FORCE",
+      "+    ) {",
+      `+      t.${T.skip}("posix only")`,
+      "+    }",
+      "+    try { connect() } catch (error) {",
+      `+      t.${T.skip}(error.message)`,
+      "+    }",
+      "+    if (fast) {",
+      "+      run()",
+      "+    } else {",
+      `+      t.${T.skip}("slow")`,
+      "+    }",
+      "+    switch (platform) {",
+      '+      case "win32":',
+      `+        t.${T.skip}("posix only")`,
+      "+    }",
+      "     assert.ok(await upload())",
+      "   })",
+    ])
+    assert.deepEqual(scanDiff(diff).violations, [])
+  })
+
   it("does not flag conditional skips, skips in strings or comments, or non-test files", () => {
     const lines = [
-      "t.skip()",
+      `const note = "t.${T.skip}() disables the test"`,
       `test("gated", { ${T.skip}: !ENABLED }, () => {})`,
       `test("gated", { ${T.skip}: ENABLED ? false : "set BTRAIN_FORMAL=1" }, () => {})`,
       `const options = { ${T.skip}: true }`,
@@ -2218,12 +2273,73 @@ describe("test-ignore-added runner filter flags", () => {
       [".github/workflows/ci.yml", "      - run: pytest --ignore=tests/slow"],
       [".github/workflows/ci.yml", "      - run: python -m pytest --ignore-glob='*_slow.py'"],
       [".github/workflows/ci.yml", "      - run: pytest -k \"not network\""],
+      [".github/workflows/ci.yml", "      - run: pytest -m \"not slow\""],
+      [".github/workflows/ci.yml", "      - run: python -m pytest -m 'not slow' tests"],
+      ["pytest.ini", "addopts = -m \"not slow\""],
     ]
     for (const [file, line] of added) {
       const findings = findingsFor(scanDiff(makeDiff(file, [line])), "test-ignore-added")
       assert.equal(findings.length, 1, `${file}: ${line}`)
       assert.equal(findings[0].severity, "warn", line)
     }
+  })
+
+  it("does not read a -m after the pytest command ends as a marker filter", () => {
+    const script = makeHunkDiff("Makefile", [
+      " test:",
+      "+\tpython -m pytest tests && git commit -m \"tests pass\"",
+      "+\tpytest tests | grep -m 1 passed",
+      "+\tpytest tests; git log -m",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(script), "test-ignore-added"), [])
+  })
+
+  it("respects btrain-allow: test-ignore-added on a command flag line or the line above", () => {
+    const sameLine = makeDiff(".github/workflows/ci.yml", ['      - run: pytest -k "not slow" # btrain-allow: test-ignore-added'])
+    const lineAbove = makeHunkDiff("Makefile", [
+      " test:",
+      "+\t# btrain-allow: test-ignore-added",
+      '+\tpytest -k "not slow"',
+    ])
+    const bare = makeHunkDiff("Makefile", [" test:", '+\tpytest -k "not slow"'])
+    assert.deepEqual(findingsFor(scanDiff(sameLine + lineAbove), "test-ignore-added"), [])
+    assert.deepEqual(findingsFor(scanDiff(bare), "test-ignore-added").map((finding) => finding.line), [2])
+  })
+
+  it("scans filter flags in a test config file that carries no commands", () => {
+    const lines = [" def pytest_load_initial_conftests(args):", '+    args[:] = ["--deselect=tests/test_slow.py::test_big"] + args']
+    const conftest = makeHunkDiff("conftest.py", lines)
+    const plugin = makeHunkDiff("src/plugin.py", lines)
+    assert.deepEqual(findingsFor(scanDiff(conftest + plugin), "test-ignore-added").map((finding) => [finding.file, finding.line]), [
+      ["conftest.py", 2],
+    ])
+  })
+})
+
+describe("filter flags moved across hunks", () => {
+  const moved = (added) =>
+    [
+      "diff --git a/package.json b/package.json",
+      "--- a/package.json",
+      "+++ b/package.json",
+      "@@ -5,3 +5,2 @@",
+      '   "scripts": {',
+      '-    "test": "node --test --test-only test/",',
+      '     "lint": "eslint .",',
+      `@@ -20,2 +19,${1 + added.length} @@`,
+      '     "build": "tsc",',
+      ...added,
+      "   }",
+    ].join("\n") + "\n"
+
+  it("does not flag a filter flag that moved to another hunk of the same file", () => {
+    const diff = moved(['+    "test:ci": "node --test --test-only test/",'])
+    assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added"), [])
+  })
+
+  it("flags a second copy of a moved flag", () => {
+    const diff = moved(['+    "test:ci": "node --test --test-only test/",', '+    "test:fast": "node --test --test-only test/",'])
+    assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added").map((finding) => finding.line), [21])
   })
 
   it("flags a pytest ignore added to an addopts list", () => {

@@ -190,6 +190,12 @@ const RUNNER_MARKER_CALL =
   /(?<![\w$.])(it|test|describe|suite|context|specify)(?:\.(?:concurrent|serial|parallel|sequential|describe))*\.(only|skip|todo|fixme)(\.each)?\s*[(`]/g
 const PREFIXED_MARKER_CALL = /(?<![\w$.])(f(?:it|describe)|x(?:it|test|describe|context|specify))(\.each)?\s*[(`]/g
 const PREFIXED_MARKER_NAMES = ["fit", "fdescribe", "xit", "xtest", "xdescribe", "xcontext", "xspecify"]
+// An imperative skip that starts a statement: node:test's t.skip() and
+// mocha's this.skip(). One inside an if, else, switch or catch block, or
+// after a same-line condition (`if (x) t.skip()`, `x || t.skip()`), is a
+// conditional skip and does not count.
+const IMPERATIVE_SKIP_CALL = /^\s*(t|this)\s*\.\s*skip\s*\(/
+const CONDITIONAL_BLOCK_HEAD = /(?:^|[^\w$.])(?:if|else|switch|catch)\s*$/
 const TITLE_RECEIVERS = new Set(["it", "test", "describe", "fdescribe", "xdescribe", "xtest"])
 // A fit or xit that the file defines, or imports from a non-test module, is a helper.
 const TEST_FRAMEWORK_MODULES = new Set(["@jest/globals", "vitest", "bun:test", "jasmine", "jasmine-core", "mocha", "@playwright/test"])
@@ -272,8 +278,10 @@ const IGNORE_FLAG = new RegExp(
   "g",
 )
 const VALUELESS_FLAGS = new Set(["--test-only"])
-const PYTEST_IGNORE_FLAG = new RegExp(`(?:^|[\\s"'\`=,[(])(--ignore-glob|--ignore|-k)(?![\\w-])${FLAG_VALUE}`, "g")
-const PYTEST_COMMAND = /(?<![\w-])(?:py\.?test|addopts)(?![\w-])/
+const PYTEST_IGNORE_FLAG = new RegExp(`(?:^|[\\s"'\`=,[(])(--ignore-glob|--ignore|-k|-m)(?![\\w-])${FLAG_VALUE}`, "g")
+// The pytest command (or addopts value) on a line, up to a shell operator
+// that starts another command: `pytest && git commit -m` is not pytest -m.
+const PYTEST_COMMAND = /(?<![\w-])(?:py\.?test|addopts)(?![\w-])(?:(?![|;&]).)*$/
 // A config line that starts a new key or section ends an addopts value.
 const CONFIG_KEY_OR_SECTION = /^\s*(?:\[[^\]]*\]\s*$|["']?[\w.-]+["']?\s*[=:])/
 // Lines walked up from a flag to find its addopts key or pytest command.
@@ -1448,6 +1456,35 @@ function isSkipValue(masked) {
   return masked === "true" || (/^["'`]/.test(masked) && masked.length > 2)
 }
 
+// Whether offset `start` of a run sits inside an if, else, switch or catch
+// block. The block's `{` is found by walking back over balanced braces, and
+// a `(...)` head before it (an if condition) is skipped to read the keyword:
+// `} else if `, `} catch `, `it("x", async (t) => `. A head whose `(` lies
+// before the run (hunk-by-hunk masking cut a multi-line condition) counts
+// as conditional, since a test callback's own head never spans lines that
+// way. No enclosing `{` in the run reads as unconditional.
+function inConditionalBlock(run, start) {
+  const masked = run.masked
+  let depth = 0
+  for (let i = start - 1; i >= 0; i--) {
+    if (masked[i] === "}") depth++
+    else if (masked[i] === "{" && depth-- === 0) {
+      let end = i
+      while (end > 0 && /\s/.test(masked[end - 1])) end--
+      if (masked[end - 1] === ")") {
+        let parens = 0
+        for (end--; end >= 0; end--) {
+          if (masked[end] === ")") parens++
+          else if (masked[end] === "(" && --parens === 0) break
+        }
+        if (end < 0) return true
+      }
+      return CONDITIONAL_BLOCK_HEAD.test(masked.slice(masked.lastIndexOf("\n", end - 1) + 1, end))
+    }
+  }
+  return false
+}
+
 // Focus and skip markers on one line of a side. `id` identifies a marker for
 // matching against removed lines; `label` names it in the finding.
 function markersOnLine(side, line, optionsByLine, isShadowed, file) {
@@ -1477,6 +1514,8 @@ function markersOnLine(side, line, optionsByLine, isShadowed, file) {
     if (property.key === "only" && property.masked === "true") add("focus", "only: true")
     if ((property.key === "skip" || property.key === "todo") && isSkipValue(property.masked)) add("skip", `${property.key}:`)
   }
+  const imperative = IMPERATIVE_SKIP_CALL.exec(row.masked)
+  if (imperative && !inConditionalBlock(place.run, place.start)) add("skip", `${imperative[1]}.skip()`)
   if (PYTHON_FILE.test(file)) {
     if (/\bpytest\.mark\.skip\b/.test(row.masked)) add("skip", "@pytest.mark.skip")
     if (/@unittest\.skip\s*\(/.test(row.masked)) add("skip", "@unittest.skip")
@@ -2137,29 +2176,43 @@ function pytestContext(entry, newSide, index) {
   }
 }
 
-// Filter-flag occurrences that no removed line of the same hunk already had.
+// Filter-flag occurrences on added lines that no removed line already had.
+// Removed occurrences cancel added ones first within a hunk, then anywhere
+// in the file, count by count, so a script that only moved is not a new
+// flag. A second copy is still reported.
 function scanIgnoreFlags(entry) {
-  const out = []
-  for (const hunk of entry.hunks) {
-    if (hunk.added.length === 0) continue
+  const hunks = entry.hunks.map((hunk) => {
     const existing = hunk.removed.flatMap((removed) => flagOccurrences(removed.text, entry.file))
     const newSide = hunk.entries.filter((e) => e.kind !== "removed")
+    const lines = []
     for (const [index, e] of newSide.entries()) {
       if (e.kind !== "added") continue
-      const added = { line: e.newLine, text: e.text }
       const fresh = []
-      for (const occurrence of flagOccurrences(added.text, entry.file, pytestContext(entry, newSide, index))) {
-        const index = existing.indexOf(occurrence)
-        if (index >= 0) existing.splice(index, 1)
+      for (const occurrence of flagOccurrences(e.text, entry.file, pytestContext(entry, newSide, index))) {
+        const seen = existing.indexOf(occurrence)
+        if (seen >= 0) existing.splice(seen, 1)
         else fresh.push(occurrence)
       }
-      if (fresh.length === 0 || lineIsAllowed(added.text, added.line, entry.lines, "test-ignore-added")) continue
+      if (fresh.length > 0) lines.push({ line: e.newLine, text: e.text, fresh })
+    }
+    return { existing, lines }
+  })
+  const pool = hunks.flatMap(({ existing }) => existing)
+  const out = []
+  for (const { lines } of hunks) {
+    for (const { line, text, fresh: candidates } of lines) {
+      const fresh = candidates.filter((occurrence) => {
+        const seen = pool.indexOf(occurrence)
+        if (seen >= 0) pool.splice(seen, 1)
+        return seen < 0
+      })
+      if (fresh.length === 0 || lineIsAllowed(text, line, entry.lines, "test-ignore-added")) continue
       out.push({
         rule: "test-ignore-added",
         severity: "warn",
         file: entry.file,
-        line: added.line,
-        preview: added.text.trim().slice(0, 200),
+        line,
+        preview: text.trim().slice(0, 200),
         detail: `Adds \`${fresh.join("`, `")}\` to a test command.`,
       })
     }
