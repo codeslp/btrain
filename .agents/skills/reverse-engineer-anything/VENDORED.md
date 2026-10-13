@@ -52,19 +52,25 @@ four of the six guides. The vendored text is what btrain's agents follow; the
 release only supplies the MCP server. When upstream publishes a release that
 contains `c9aecde`, move the pin to it.
 
-**`rea setup` overwrites this skill.** `rea setup --client claude_code` performs a
-bundled-skill replacement (see `references/connection-and-recovery.md`): it writes
-the npm release's copy of the skill over `.claude/skills/reverse-engineer-anything/`
-and leaves `.agents/skills/` untouched, which desyncs the two surfaces, drops
-btrain's `SKILL.md` exclusion, and fails the blob-pin test. After running it in a
-repo, restore btrain's copy on both surfaces:
+**`rea setup` installs a second, ungated copy of this skill.** `rea setup --client
+claude_code` does not touch the repo: upstream `docs/installation.md` at `c9aecde`
+("Skill destinations") installs the bundled skill to the personal directory
+`~/.claude/skills/reverse-engineer-anything/` (or `$CLAUDE_CONFIG_DIR/skills/`) and
+leaves other copies untouched, so the two repo surfaces stay in sync and the blob-pin
+test still passes. The problem is the personal copy itself: it carries the 6.4.0
+release's upstream `SKILL.md`, whose description triggers on "guide a reconstruction"
+and whose close-out says to build with normal coding tools, under the same skill name
+as this project copy. The harness may list both or prefer the personal one, which
+reopens the rebuild path that btrain's `SKILL.md` closes. After setup, remove the
+personal copy, or run setup without the skill:
 
 ```bash
-btrain sync-skills --force --skill reverse-engineer-anything
+rm -r ~/.claude/skills/reverse-engineer-anything      # or $CLAUDE_CONFIG_DIR/skills/...
+npx -y rea-agents@6.4.0 setup --client claude_code --skill=false
 ```
 
-In the btrain repo itself, restore with `git checkout -- .claude/skills/reverse-engineer-anything`
-instead, because `sync-skills` copies from that directory.
+The MCP registration is unaffected either way; only the project copy should supply
+the instructions.
 
 Without REA, the skill's evidence rules (observation, inference, unknown; a question
 checklist that is revisited before finishing) still apply, and `clean-room-rebuild`

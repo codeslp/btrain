@@ -101,7 +101,12 @@ describe("bundled reverse-engineering skills", () => {
     assert.match(vendored, /`references\/upstream-SKILL\.md`/, "VENDORED.md must say where the upstream SKILL.md now lives")
     assert.match(vendored, /rea-agents@\d+\.\d+\.\d+/, "pin the npm version; @latest runs whatever npm serves")
     assert.doesNotMatch(vendored, /rea-agents@latest/)
-    assert.match(vendored, /btrain sync-skills --force --skill reverse-engineer-anything/)
+    // `rea setup` installs a same-named personal copy with upstream's ungated
+    // description beside the project copy; the warning must say to remove it
+    // or skip it, not to re-sync the repo (which it never touched).
+    assert.match(vendored, /rm -r ~\/\.claude\/skills\/reverse-engineer-anything/)
+    assert.match(vendored, /--skill=false/)
+    assert.doesNotMatch(vendored, /sync-skills/)
   })
 
   // Review P2: the upstream description triggers on "guide a reconstruction"
