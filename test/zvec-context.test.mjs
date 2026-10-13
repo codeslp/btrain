@@ -251,6 +251,38 @@ describe("optional zvec-grep context helper", () => {
     }
   })
 
+  it("preserves query errors while fast watchdogs are stopped repeatedly", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    try {
+      // Short calls repeatedly stop the watchdog during its startup window.
+      // Run small parallel batches to expose that window under CI scheduling.
+      for (let batch = 0; batch < 50; batch += 1) {
+        const results = await Promise.all(Array.from({ length: 10 }, () => runHelper(
+          ["search", "failing query", "--root", tmpDir], {
+            cwd: tmpDir,
+            env: {
+              ...process.env,
+              PATH: `${binDir}:/usr/bin:/bin`,
+              ZVEC_TEST_LOG: logPath,
+              ZVEC_TEST_QUERY_RC: "7",
+            },
+          },
+        )))
+        for (const result of results) {
+          assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
+          assert.match(result.stderr, /query failed safely/)
+          assert.doesNotMatch(result.stderr, /No such file/)
+        }
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("rejects invalid limits and freshness policies before invoking zg", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")

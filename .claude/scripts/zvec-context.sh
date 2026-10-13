@@ -56,13 +56,19 @@ require_value() {
 }
 
 # Temp files owned by the run_bounded call in progress, removed on exit or on a
-# signal so a killed helper leaves nothing behind. Set per shell: a run_bounded
-# inside $(...) registers its own traps in that subshell.
+# signal so a killed helper leaves nothing behind. A freshly forked child can
+# receive TERM before Bash resets inherited traps. Only the helper owns these
+# files and child PIDs. BASHPID distinguishes that window on newer Bash; the
+# subshell level also covers Bash 3.2, which has no BASHPID.
 ZVEC_TMP_OUT=""
 ZVEC_TMP_PID=""
 ZVEC_TMP_WATCHDOG=""
 ZVEC_BOUNDED_OUTPUT=""
+is_helper_shell() {
+  [ "${BASHPID:-$$}" = "$$" ] && [ "$BASH_SUBSHELL" -eq 0 ]
+}
 cleanup_tmp() {
+  is_helper_shell || return 0
   if [ -n "$ZVEC_TMP_OUT" ]; then
     rm -f "$ZVEC_TMP_OUT" "$ZVEC_TMP_OUT.timeout"
   fi
@@ -70,6 +76,10 @@ cleanup_tmp() {
 }
 # $1 is the signal number, so the exit status follows the 128+n convention.
 on_signal() {
+  # A child must not delete the helper's capture or signal its siblings.
+  if ! is_helper_shell; then
+    exit $((128 + $1))
+  fi
   if [ -n "$ZVEC_TMP_PID" ]; then
     kill -TERM "$ZVEC_TMP_PID" 2>/dev/null
   fi
