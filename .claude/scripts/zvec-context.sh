@@ -70,8 +70,30 @@ is_helper_shell() {
 cleanup_tmp() {
   is_helper_shell || return 0
   if [ -n "$ZVEC_TMP_OUT" ]; then
-    rm -f "$ZVEC_TMP_OUT" "$ZVEC_TMP_OUT.timeout"
+    rm -f "$ZVEC_TMP_OUT" "$ZVEC_TMP_OUT.timeout" "$ZVEC_TMP_OUT.ready" "$ZVEC_TMP_OUT.cancel"
   fi
+  return 0
+}
+stop_watchdog() {
+  [ -z "$ZVEC_TMP_WATCHDOG" ] && return 0
+  local sleep_pid=""
+  # Persist cancellation and stop the published sleeper directly. Bash 3.2
+  # can miss TERM during a fork; a killed sleeper still wakes its wait.
+  : >"$ZVEC_TMP_OUT.cancel"
+  while [ ! -s "$ZVEC_TMP_OUT.ready" ] && kill -0 "$ZVEC_TMP_WATCHDOG" 2>/dev/null; do
+    sleep 0.01
+  done
+  if [ -s "$ZVEC_TMP_OUT.ready" ]; then
+    read -r sleep_pid <"$ZVEC_TMP_OUT.ready"
+    case "$sleep_pid" in
+      ''|*[!0-9]*) ;;
+      *) kill -KILL "$sleep_pid" 2>/dev/null ;;
+    esac
+  fi
+  kill -TERM "$ZVEC_TMP_WATCHDOG" 2>/dev/null
+  # Keep cancellation evidence until the watchdog exits, including when the
+  # helper itself was signalled, so it cannot publish a late timeout file.
+  wait "$ZVEC_TMP_WATCHDOG" 2>/dev/null
   return 0
 }
 # $1 is the signal number, so the exit status follows the 128+n convention.
@@ -83,9 +105,7 @@ on_signal() {
   if [ -n "$ZVEC_TMP_PID" ]; then
     kill -TERM "$ZVEC_TMP_PID" 2>/dev/null
   fi
-  if [ -n "$ZVEC_TMP_WATCHDOG" ]; then
-    kill -TERM "$ZVEC_TMP_WATCHDOG" 2>/dev/null
-  fi
+  stop_watchdog
   cleanup_tmp
   exit $((128 + $1))
 }
@@ -115,7 +135,7 @@ validate_timeout() {
 run_bounded() {
   local secs="$1"
   shift
-  local out sentinel pid watchdog rc
+  local out sentinel ready pid watchdog rc
   ZVEC_BOUNDED_OUTPUT=""
   # Traps first, so no window exists between creating the temp file and
   # owning its cleanup. The handlers no-op while ZVEC_TMP_OUT is empty.
@@ -125,27 +145,50 @@ run_bounded() {
   trap 'on_signal 1' HUP
   out=$(mktemp "${TMPDIR:-/tmp}/zvec-context.XXXXXX" 2>/dev/null) || return 125
   sentinel="$out.timeout"
+  ready="$out.ready"
   ZVEC_TMP_OUT="$out"
   "$@" >"$out" 2>&1 </dev/null &
   pid=$!
   ZVEC_TMP_PID="$pid"
   (
-    sleep "$secs" &
-    sleeper=$!
-    trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
-    wait "$sleeper"
+    cancelled=0
+    sleeper=""
+    # Record cancellation even if it arrives between fork and $! assignment.
+    # The main body reaps the sleeper instead of exiting from the trap.
+    # KILL is safe for our own sleep and cannot be swallowed by a just-forked
+    # child that has not reset its inherited signal handlers yet.
+    trap 'cancelled=1; [ -z "$sleeper" ] || kill -KILL "$sleeper" 2>/dev/null' TERM INT HUP
+    watchdog_sleep() {
+      sleeper=""
+      sleep "$1" &
+      sleeper=$!
+      # Publish readiness only after the fork and PID assignment. Bash 3.2
+      # can lose a cancellation delivered while it is forking the sleeper.
+      printf '%s\n' "$sleeper" >"$ready"
+      if [ "$cancelled" -eq 1 ] || [ -e "$out.cancel" ]; then
+        kill -KILL "$sleeper" 2>/dev/null
+      fi
+      wait "$sleeper" 2>/dev/null
+      if [ "$cancelled" -eq 1 ] || [ -e "$out.cancel" ]; then
+        wait "$sleeper" 2>/dev/null
+        return 1
+      fi
+      sleeper=""
+      return 0
+    }
+    [ "$cancelled" -eq 1 ] && exit 0
+    watchdog_sleep "$secs" || exit 0
     : >"$sentinel"
     kill -TERM "$pid" 2>/dev/null
     # A child that ignores TERM must not outlive the bound.
-    sleep 2
+    watchdog_sleep 2 || exit 0
     kill -KILL "$pid" 2>/dev/null
   ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   ZVEC_TMP_WATCHDOG="$watchdog"
   wait "$pid" 2>/dev/null
   rc=$?
-  kill -TERM "$watchdog" 2>/dev/null
-  wait "$watchdog" 2>/dev/null
+  stop_watchdog
   ZVEC_TMP_WATCHDOG=""
   ZVEC_BOUNDED_OUTPUT=$(cat "$out")
   # Only a child that died by signal after the sentinel appeared counts as a
@@ -153,7 +196,7 @@ run_bounded() {
   if [ -e "$sentinel" ] && [ "$rc" -ge 128 ]; then
     rc=124
   fi
-  rm -f "$out" "$sentinel"
+  rm -f "$out" "$sentinel" "$ready" "$out.cancel"
   ZVEC_TMP_OUT=""
   ZVEC_TMP_PID=""
   return "$rc"

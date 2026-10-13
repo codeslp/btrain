@@ -19,6 +19,7 @@ async function runHelper(args, options = {}) {
       cwd: options.cwd,
       env: options.env,
       maxBuffer: 1024 * 1024,
+      timeout: options.timeout,
     })
     return { code: 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
   } catch (error) {
@@ -257,6 +258,15 @@ describe("optional zvec-grep context helper", () => {
     const logPath = path.join(tmpDir, "zg.log")
     await fs.mkdir(binDir)
     await writeFakeZg(binDir)
+    const marker = String(7000 + process.pid % 2000)
+    async function watchdogSleeps() {
+      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
+      return ps.stdout.split("\n").flatMap((line) => {
+        const match = line.trim().match(new RegExp(`^(\\d+)\\s+sleep ${marker}$`))
+        return match ? [Number(match[1])] : []
+      })
+    }
+    const previousSleeps = new Set(await watchdogSleeps())
     try {
       // Short calls repeatedly stop the watchdog during its startup window.
       // Run small parallel batches to expose that window under CI scheduling.
@@ -269,7 +279,9 @@ describe("optional zvec-grep context helper", () => {
               PATH: `${binDir}:/usr/bin:/bin`,
               ZVEC_TEST_LOG: logPath,
               ZVEC_TEST_QUERY_RC: "7",
+              ZVEC_CONTEXT_TIMEOUT: marker,
             },
+            timeout: 5000,
           },
         )))
         for (const result of results) {
@@ -278,7 +290,11 @@ describe("optional zvec-grep context helper", () => {
           assert.doesNotMatch(result.stderr, /No such file/)
         }
       }
+      assert.deepEqual((await watchdogSleeps()).filter((pid) => !previousSleeps.has(pid)), [], "stopped watchdogs must reap their sleepers")
     } finally {
+      for (const pid of (await watchdogSleeps()).filter((pid) => !previousSleeps.has(pid))) {
+        try { process.kill(pid, "SIGTERM") } catch (error) { if (error.code !== "ESRCH") throw error }
+      }
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
   })
