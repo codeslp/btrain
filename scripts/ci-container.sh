@@ -67,11 +67,13 @@ case "$ROOT/" in
   "$MAIN"/*) ;;
   *) ROOT_MOUNT=(-v "$ROOT:$ROOT") ;;
 esac
+# The ${arr[@]+"${arr[@]}"} form expands an empty array under set -u on
+# macOS bash 3.2, which errors on "${arr[@]}" alone.
 # ci-local.sh arguments travel as positional parameters, never re-split.
 exec docker run --rm \
   --user "$(id -u):$(id -g)" \
   -v "$MAIN:$MAIN" \
-  "${ROOT_MOUNT[@]}" \
+  ${ROOT_MOUNT[@]+"${ROOT_MOUNT[@]}"} \
   -v "$LOG_HOST:/ci-logs" \
   -v "$HOME_HOST:/ci-home" \
   -w "$ROOT" \
