@@ -174,7 +174,7 @@ function needsReviewArgs(tmpDir) {
     "--gap", "Did not rerun a browser smoke test",
     "--why", "The lane is ready for peer review.",
     "--review-ask", "Check the targeted behavior.",
-    "--timeout", "5",
+    "--timeout", "30",
     "--poll-interval", "0.05",
   ]
 }

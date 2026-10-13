@@ -34,6 +34,8 @@ What already exists that these features extend or interact with:
 ## 3. Candidate Feature: `claude-code-action@v1` as a btrain Reviewer
 
 ### What it is
+> **Status 2026-10-13:** `claude.yml` and `claude-btrain-review.yml` shipped in July, failed on every run (the action needs an API key the repo does not fund), were disabled on GitHub, and were deleted from the tree. The description below is the original proposal; nothing in it is installed.
+
 Install `claude-code-action@v1` and ship workflows that invoke btrain's review semantics on PRs and lane transitions:
 
 1. **`claude.yml`** — interactive `@claude` mention bot for ad-hoc PR/issue questions.

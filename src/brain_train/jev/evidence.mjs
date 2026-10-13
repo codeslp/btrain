@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 
 const SHA = /^[a-f0-9]{40}$/i
 const hash = (value) => createHash("sha256").update(value).digest("hex")
@@ -19,7 +20,8 @@ function safeSourceRef(value) {
   url.hash = ""
   return url.toString()
 }
-const evidenceDir = (root) => path.join(root, ".btrain", "jev", "evidence")
+// Evidence is lane state: a linked worktree reads and writes its main checkout's copy.
+const evidenceDir = (root) => path.join(resolveStateRoot(root), ".btrain", "jev", "evidence")
 const snapshotsPath = (root) => path.join(evidenceDir(root), "source-snapshots.jsonl")
 const snapshotFilesDir = (root) => path.join(evidenceDir(root), "source-snapshots")
 const outcomesPath = (root) => path.join(evidenceDir(root), "source-outcomes.jsonl")

@@ -1,6 +1,7 @@
 import crypto from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 import {
   buildTaskArtifactEnvelope,
   createEmptyTaskArtifactEnvelope,
@@ -93,7 +94,7 @@ function getHarnessDir(repoRoot) {
       fix: "Pass { repoRoot } pointing at the target btrain repo root.",
     })
   }
-  return path.join(repoRoot, ".btrain", "harness")
+  return path.join(resolveStateRoot(repoRoot), ".btrain", "harness")
 }
 
 function getRunsDir(repoRoot) {

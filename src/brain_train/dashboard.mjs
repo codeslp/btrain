@@ -3,6 +3,7 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
+import { resolveStateRoot } from "./worktree.mjs"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 
@@ -23,7 +24,7 @@ function statePath(env) {
 }
 
 function legacyStatePath(repoRoot) {
-  return path.join(repoRoot, ".btrain", DASHBOARD_STATE_FILENAME)
+  return path.join(resolveStateRoot(repoRoot), ".btrain", DASHBOARD_STATE_FILENAME)
 }
 
 function dashboardUrl(port) {

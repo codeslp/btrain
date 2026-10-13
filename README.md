@@ -2,7 +2,7 @@
 
 **A Kanban board with mandatory peer review gates and mechanical integrity enforcement, designed for concurrent AI agents.**
 
-btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. Lanes are WIP-limited work items moving through status columns (`idle` -> `in-progress` -> `needs-review` -> `ready-for-pr` -> `pr-review` -> `ready-to-merge` -> `resolved`), with feedback loops (`changes-requested`, `repair-needed`) that route work back to the writer or escalate to a human. Work is pulled, not pushed — agents claim lanes when capacity opens. File locks provide branch-level isolation without actual git branches, because AI agents share a single worktree. A watchdog auto-detects invalid state transitions, every active lane carries a structured delegation packet, and every handoff requires structured reviewer context (files changed, verification run, review asks) — essentially a PR description plus a worker contract built into the workflow.
+btrain coordinates Claude Code, Codex, Gemini, and other AI agents working in the same repo. Lanes are WIP-limited work items moving through status columns (`idle` -> `in-progress` -> `needs-review` -> `ready-for-pr` -> `pr-review` -> `ready-to-merge` -> `resolved`), with feedback loops (`changes-requested`, `repair-needed`) that route work back to the writer or escalate to a human. Work is pulled, not pushed — agents claim lanes when capacity opens. File locks provide branch-level isolation whether agents share one worktree or each work in a linked worktree; lane state is shared across every worktree of a repository. A watchdog auto-detects invalid state transitions, every active lane carries a structured delegation packet, and every handoff requires structured reviewer context (files changed, verification run, review asks) — essentially a PR description plus a worker contract built into the workflow.
 
 The closest human equivalent: a team using a Kanban board where every card requires a PR approval before moving to "done", with automated integrity enforcement that a human board can't provide.
 
@@ -302,6 +302,18 @@ btrain agents add --repo . --agent "Gemini"
 ```
 
 Reviewer selection: `--reviewer any-other` picks any configured peer except the owner.
+
+### Linked git worktrees
+
+Lane state belongs to the repository, not to one checkout. When btrain runs
+inside a linked worktree (`git worktree add`, or a Claude Code worktree under
+`.claude/worktrees/`), it reads and writes the main checkout's `.btrain/` and
+handoff files, so every worktree sees one lane set and one lock registry. Git
+operations stay on the worktree you point btrain at: the needs-review diff
+gate reads that worktree's branch, `btrain pr create` pushes it, and the
+managed hooks read the main checkout's handoff files. Run btrain from the
+worktree that holds the lane's branch; `--repo` is only needed to name a
+different repository.
 
 ---
 

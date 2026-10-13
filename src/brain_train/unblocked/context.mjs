@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
@@ -91,7 +92,7 @@ async function resolveUnblockedHelper(repoRoot, options = {}) {
   const candidates = [
     options.helperPath,
     path.join(repoRoot, ".claude", "scripts", "unblocked-context.sh"),
-    path.join(repoRoot, ".btrain", "tools", ".claude", "scripts", "unblocked-context.sh"),
+    path.join(resolveStateRoot(repoRoot), ".btrain", "tools", ".claude", "scripts", "unblocked-context.sh"),
     path.join(PACKAGE_ROOT, ".claude", "scripts", "unblocked-context.sh"),
   ].filter(Boolean)
 

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { resolveStateRoot } from "../worktree.mjs"
 
 import { readTraceBundleSummary } from "./trace-bundle.mjs"
 
@@ -32,7 +33,7 @@ function getPaths(repoRoot) {
       fix: "Pass { repoRoot } pointing at the target btrain repo root.",
     })
   }
-  const root = path.join(repoRoot, ".btrain")
+  const root = path.join(resolveStateRoot(repoRoot), ".btrain")
   return {
     repoRoot,
     eventsDir: path.join(root, "events"),
