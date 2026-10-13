@@ -646,7 +646,7 @@ btrain-chat status</code></pre>
             </thead>
             <tbody>
               <tr><td>pre-commit</td><td>The commit touches files locked by a lane that is waiting for review</td></tr>
-              <tr><td>pre-push</td><td>Any unresolved handoff state exists</td></tr>
+              <tr><td>pre-push</td><td>The new commits being pushed touch files locked by a lane that is still in progress, in review, or waiting to merge</td></tr>
             </tbody>
           </table>
           <p style="margin-top:0.5rem"><code>btrain override grant</code> creates a single-use human-confirmed bypass when needed.</p>
