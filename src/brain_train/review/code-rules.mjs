@@ -196,6 +196,7 @@ const PREFIXED_MARKER_NAMES = ["fit", "fdescribe", "xit", "xtest", "xdescribe", 
 // conditional skip and does not count.
 const IMPERATIVE_SKIP_CALL = /^\s*(t|this)\s*\.\s*skip\s*\(/
 const CONDITIONAL_BLOCK_HEAD = /(?:^|[^\w$.])(?:if|else|switch|catch)\s*$/
+const BRACELESS_CONDITION = /^\s*(?:\}\s*)?(?:(?:else\s+)?if\s*\(.*\)|else)\s*$/
 const TITLE_RECEIVERS = new Set(["it", "test", "describe", "fdescribe", "xdescribe", "xtest"])
 // A fit or xit that the file defines, or imports from a non-test module, is a helper.
 const TEST_FRAMEWORK_MODULES = new Set(["@jest/globals", "vitest", "bun:test", "jasmine", "jasmine-core", "mocha", "@playwright/test"])
@@ -279,9 +280,11 @@ const IGNORE_FLAG = new RegExp(
 )
 const VALUELESS_FLAGS = new Set(["--test-only"])
 const PYTEST_IGNORE_FLAG = new RegExp(`(?:^|[\\s"'\`=,[(])(--ignore-glob|--ignore|-k|-m)(?![\\w-])${FLAG_VALUE}`, "g")
-// The pytest command (or addopts value) on a line, up to a shell operator
-// that starts another command: `pytest && git commit -m` is not pytest -m.
-const PYTEST_COMMAND = /(?<![\w-])(?:py\.?test|addopts)(?![\w-])(?:(?![|;&]).)*$/
+// The pytest command (or addopts value, or a PYTEST_ADDOPTS env entry, or a
+// $(PYTEST) make variable) on a line, up to a shell operator that starts
+// another command: `pytest && git commit -m` is not pytest -m.
+const PYTEST_COMMAND = /(?<![\w-])(?:py\.?test|addopts|pytest_addopts)(?![\w-])(?:(?![|;&]).)*$/i
+const ADDOPTS_KEY = /\b(?:addopts|PYTEST_ADDOPTS)\b/
 // A config line that starts a new key or section ends an addopts value.
 const CONFIG_KEY_OR_SECTION = /^\s*(?:\[[^\]]*\]\s*$|["']?[\w.-]+["']?\s*[=:])/
 // Lines walked up from a flag to find its addopts key or pytest command.
@@ -1333,6 +1336,26 @@ function assertionKey(code) {
   return code.trim().replace(/\s+/g, " ")
 }
 
+// An assertion line that checks only literals: assert.ok(true),
+// assert.equal(1, 1), expect(true).toBe(true), `assert True`. Swapped in
+// for a real check it keeps the line count, so it counts as no assertion on
+// either side. Only a statement complete on its line is judged; a call that
+// spans lines is taken as real.
+const LITERAL_WORDS = new Set(["true", "false", "null", "undefined", "NaN", "Infinity", "True", "False", "None"])
+const ASSERTION_HEAD = /^\s*(?:(?:self|this)\s*\.\s*)?(?:assert[\w.]*!?|expect(?:\.\w+)?)\s*\(/
+function assertsOnlyLiterals(row, file) {
+  if (bracketDelta(row.masked) !== 0) return false
+  // Each strip leaves a space so neighbouring tokens do not fuse.
+  const body = row.masked
+    .replace(/"[^"\n]*"|'[^'\n]*'|`[^`]*`/g, " ")
+    .replace(ASSERTION_HEAD, " ")
+    .replace(PYTHON_FILE.test(file) ? /^\s*assert\b/ : /^$/, " ")
+    .replace(/\)\s*(?:\.\s*[\w$]+\s*)+\(/g, " ")
+    .replace(/\)\s*(?:\.\s*[\w$]+\s*)+;?\s*$/, " ")
+  const words = body.match(/[A-Za-z_$][\w$]*/g) ?? []
+  return words.every((word) => LITERAL_WORDS.has(word))
+}
+
 // Removed (or added) matcher lines of a multi-line assertion whose first
 // line survives as context: `expect(value)` kept while `  .toBe(1)` below it
 // goes. A chain joined onto or split from its expect line is left out, since
@@ -1363,12 +1386,17 @@ function scanRemovedAssertion(entry, view) {
     for (const e of hunk.entries) {
       if (e.kind !== "removed") continue
       const row = view.old.row(e.oldLine)
-      if (row && isAssertionCode(row.masked, entry.file)) removed.push({ entry: e, key: assertionKey(row.code), moved: false })
+      if (row && isAssertionCode(row.masked, entry.file) && !assertsOnlyLiterals(row, entry.file)) {
+        removed.push({ entry: e, key: assertionKey(row.code), moved: false })
+      }
     }
     const added = []
+    let literal = 0
     for (const { line } of hunk.added) {
       const row = view.new.row(line)
-      if (row && isAssertionCode(row.masked, entry.file)) added.push({ key: assertionKey(row.code), used: false })
+      if (!row || !isAssertionCode(row.masked, entry.file)) continue
+      if (assertsOnlyLiterals(row, entry.file)) literal++
+      else added.push({ key: assertionKey(row.code), used: false })
     }
     for (const { e, row } of chainedMatcherEntries(hunk, view, "old", entry.file)) {
       removed.push({ entry: e, key: assertionKey(row.code), moved: false })
@@ -1377,7 +1405,7 @@ function scanRemovedAssertion(entry, view) {
       added.push({ key: assertionKey(row.code), used: false })
     }
     removed.sort((a, b) => a.entry.oldLine - b.entry.oldLine)
-    return { removed, added }
+    return { removed, added, literal }
   })
   const cancel = (removed, candidates) => {
     const twin = candidates.find((added) => !added.used && added.key === removed.key)
@@ -1393,19 +1421,20 @@ function scanRemovedAssertion(entry, view) {
     for (const r of removed) if (!r.moved) cancel(r, allAdded)
   }
   const out = []
-  for (const { removed, added } of hunks) {
+  for (const { removed, added, literal } of hunks) {
     const lost = removed.filter((r) => !r.moved)
     const gained = added.filter((a) => !a.used).length
     if (lost.length <= gained) continue
     const first = lost[0].entry
     if (lineIsAllowed(textAtNewLine(entry, first.newLine), first.newLine, entry.lines, "removed-assertion")) continue
+    const literalNote = literal > 0 ? ` (${plural(literal, "added line")} assert${literal === 1 ? "s" : ""} only literals)` : ""
     out.push({
       rule: "removed-assertion",
       severity: "warn",
       file: entry.file,
       line: first.newLine,
       preview: first.text.trim().slice(0, 200),
-      detail: `Hunk removes ${plural(lost.length, "assertion line")} and adds ${gained} (old line ${first.oldLine}).`,
+      detail: `Hunk removes ${plural(lost.length, "assertion line")} and adds ${gained}${literalNote} (old line ${first.oldLine}).`,
     })
   }
   return out
@@ -1465,6 +1494,16 @@ function isSkipValue(masked) {
 // way. No enclosing `{` in the run reads as unconditional.
 function inConditionalBlock(run, start) {
   const masked = run.masked
+  // A braceless `if (cond)` or `else` on the previous non-blank line.
+  for (let end = start - 1; end > 0; ) {
+    const lineStart = masked.lastIndexOf("\n", end - 1) + 1
+    const line = masked.slice(lineStart, end)
+    if (line.trim()) {
+      if (BRACELESS_CONDITION.test(line)) return true
+      break
+    }
+    end = lineStart - 1
+  }
   let depth = 0
   for (let i = start - 1; i >= 0; i--) {
     if (masked[i] === "}") depth++
@@ -1492,23 +1531,32 @@ function markersOnLine(side, line, optionsByLine, isShadowed, file) {
   const place = side.place(line)
   if (!row || !place) return []
   const markers = []
-  const add = (kind, label) => markers.push({ kind, label, id: `${kind}:${label.replace(/\s+/g, "")}` })
+  // The id carries the test title, so a marker that moves with its test
+  // cancels while one that moves onto another test or suite is new.
+  const add = (kind, label, title = "") => markers.push({ kind, label, id: `${kind}:${label.replace(/\s+/g, "")}:${title}` })
   // Argument heads of the call a match opens, from the run's one-pass parse.
   const argsOf = (match) => {
     if (!match[0].endsWith("(")) return []
     const open = place.start + match.index + match[0].length - 1
     return argHeads(place.run, analyzeRun(place.run).calls.get(open))
   }
+  const titleOf = (args) => {
+    const head = args[0]?.code.trim() ?? ""
+    const literal = /^(["'`])([\s\S]*)\1$/.exec(head)
+    return (literal ? literal[2] : head).replace(/\s+/g, " ")
+  }
   for (const match of row.masked.matchAll(RUNNER_MARKER_CALL)) {
     const [, receiver, verb, each] = match
-    if (!each && !qualifiesAsTestCall(place.run, argsOf(match), TITLE_RECEIVERS.has(receiver))) continue
-    add(verb === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+    const args = argsOf(match)
+    if (!each && !qualifiesAsTestCall(place.run, args, TITLE_RECEIVERS.has(receiver))) continue
+    add(verb === "only" ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""), titleOf(args))
   }
   for (const match of row.masked.matchAll(PREFIXED_MARKER_CALL)) {
     const [, name, each] = match
     if (isShadowed(name)) continue
-    if (!each && !qualifiesAsTestCall(place.run, argsOf(match), TITLE_RECEIVERS.has(name))) continue
-    add(name.startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""))
+    const args = argsOf(match)
+    if (!each && !qualifiesAsTestCall(place.run, args, TITLE_RECEIVERS.has(name))) continue
+    add(name.startsWith("f") ? "focus" : "skip", match[0].replace(/\s*[(`]$/, ""), titleOf(args))
   }
   for (const property of optionsByLine.get(line) ?? []) {
     if (property.key === "only" && property.masked === "true") add("focus", "only: true")
@@ -2169,51 +2217,88 @@ function pytestContext(entry, newSide, index) {
     if (PYTEST_COMMAND.test(before)) return true
     for (let i = index - 1; i >= Math.max(0, index - MAX_OPTION_LINES); i--) {
       const { code } = maskLine(newSide[i].text, createMaskState(entry.file))
-      if (/\baddopts\b/.test(code) || (PYTEST_COMMAND.test(code) && /\\\s*$/.test(code))) return true
+      if (ADDOPTS_KEY.test(code) || (PYTEST_COMMAND.test(code) && /\\\s*$/.test(code))) return true
       if (!code.trim() || CONFIG_KEY_OR_SECTION.test(code)) return false
     }
     return false
   }
 }
 
-// Filter-flag occurrences on added lines that no removed line already had.
-// Removed occurrences cancel added ones first within a hunk, then anywhere
-// in the file, count by count, so a script that only moved is not a new
-// flag. A second copy is still reported.
+const CONFIG_SECTION_FILE = /\.(?:toml|ini|cfg)$/
+const SECTION_HEADER = /^\s*\[([^\]]+)\]\s*$/
+const COMMAND_KEY = /^\s*(?:"([^"]+)"\s*:|-?\s*([\w.-]+)\s*[=:])/
+
+// The script or config key a command line belongs to: package.json "test",
+// tox.ini [testenv:quick] commands, a YAML run:. Null for a bare shell or
+// Makefile line. `side` is one side of a hunk and `index` the line's place
+// in it, for the section header above an ini or toml key.
+function commandKey(file, side, index) {
+  const match = COMMAND_KEY.exec(side[index].text)
+  if (!match) return null
+  const key = match[1] ?? match[2]
+  if (!CONFIG_SECTION_FILE.test(file)) return key
+  for (let i = index - 1; i >= 0; i--) {
+    const section = SECTION_HEADER.exec(side[i].text)
+    if (section) return `${section[1]} ${key}`
+  }
+  return key
+}
+
+// Remove and report one removed twin of an occurrence under the same key.
+function takeTwin(twins, occurrence, key) {
+  const index = twins.findIndex((twin) => twin.occurrence === occurrence && twin.key === key)
+  if (index < 0) return false
+  twins.splice(index, 1)
+  return true
+}
+
+// Filter-flag occurrences on added lines that no removed line of the same
+// command already had. Removed occurrences cancel added ones under the same
+// key first within a hunk, then anywhere in the file, count by count, so a
+// script that only moved is not a new flag. A flag that moved from one
+// script or command into another is reported, naming where it came from,
+// since the other command now runs tests it did not before. Keyless lines
+// (shell, Makefile recipes, continuation lines) pair within their hunk only.
 function scanIgnoreFlags(entry) {
   const hunks = entry.hunks.map((hunk) => {
-    const existing = hunk.removed.flatMap((removed) => flagOccurrences(removed.text, entry.file))
+    const oldSide = hunk.entries.filter((e) => e.kind !== "added")
+    const existing = []
+    for (const [index, e] of oldSide.entries()) {
+      if (e.kind !== "removed") continue
+      const key = commandKey(entry.file, oldSide, index)
+      for (const occurrence of flagOccurrences(e.text, entry.file, pytestContext(entry, oldSide, index))) existing.push({ occurrence, key })
+    }
     const newSide = hunk.entries.filter((e) => e.kind !== "removed")
     const lines = []
     for (const [index, e] of newSide.entries()) {
       if (e.kind !== "added") continue
+      const key = commandKey(entry.file, newSide, index)
       const fresh = []
       for (const occurrence of flagOccurrences(e.text, entry.file, pytestContext(entry, newSide, index))) {
-        const seen = existing.indexOf(occurrence)
-        if (seen >= 0) existing.splice(seen, 1)
-        else fresh.push(occurrence)
+        if (!takeTwin(existing, occurrence, key)) fresh.push(occurrence)
       }
-      if (fresh.length > 0) lines.push({ line: e.newLine, text: e.text, fresh })
+      if (fresh.length > 0) lines.push({ line: e.newLine, text: e.text, key, fresh })
     }
     return { existing, lines }
   })
   const pool = hunks.flatMap(({ existing }) => existing)
   const out = []
   for (const { lines } of hunks) {
-    for (const { line, text, fresh: candidates } of lines) {
-      const fresh = candidates.filter((occurrence) => {
-        const seen = pool.indexOf(occurrence)
-        if (seen >= 0) pool.splice(seen, 1)
-        return seen < 0
-      })
+    for (const { line, text, key, fresh: candidates } of lines) {
+      const fresh = candidates.filter((occurrence) => key === null || !takeTwin(pool, occurrence, key))
       if (fresh.length === 0 || lineIsAllowed(text, line, entry.lines, "test-ignore-added")) continue
+      const origins = new Set()
+      for (const twin of pool) {
+        if (fresh.includes(twin.occurrence)) origins.add(twin.key === null ? "another command" : `\`${twin.key}\``)
+      }
+      const moved = origins.size > 0 ? ` (moved from ${[...origins].join(", ")})` : ""
       out.push({
         rule: "test-ignore-added",
         severity: "warn",
         file: entry.file,
         line,
         preview: text.trim().slice(0, 200),
-        detail: `Adds \`${fresh.join("`, `")}\` to a test command.`,
+        detail: `Adds \`${fresh.join("`, `")}\` to a test command${moved}.`,
       })
     }
   }

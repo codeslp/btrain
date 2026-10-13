@@ -957,6 +957,46 @@ describe("removed-assertion rule", () => {
     assert.deepEqual(scanDiff(rewritten + source).violations, [])
   })
 
+  it("flags an assertion replaced by one that checks only literals", () => {
+    const js = [
+      "assert.ok(true)",
+      "assert(true)",
+      "assert.equal(1, 1)",
+      'assert.strictEqual("a", "a")',
+      "expect(true).toBe(true)",
+      "expect(1).toBeTruthy()",
+      "expect(true).not.toBe(false)",
+      "assert.ok(null === null, \"never fails\")",
+    ]
+    for (const line of js) {
+      const diff = makeHunkDiff("test/cache.test.mjs", ['   it("reads", () => {', "-    assert.equal(result, 42)", `+    ${line}`, "   })"])
+      const [finding, ...rest] = findingsFor(scanDiff(diff), "removed-assertion")
+      assert.ok(finding, line)
+      assert.deepEqual(rest, [], line)
+      assert.match(finding.detail, /removes 1 assertion line and adds 0 \(1 added line asserts only literals\)/, line)
+    }
+    const python = ["assert True", "self.assertTrue(True)", "self.assertEqual(1, 1)", "assert 1 == 1, 'always'"]
+    for (const line of python) {
+      const diff = makeHunkDiff("tests/test_cache.py", ["     def test_reads(self):", "-        assert result == 42", `+        ${line}`])
+      assert.equal(findingsFor(scanDiff(diff), "removed-assertion").length, 1, line)
+    }
+  })
+
+  it("counts a replacement that checks a value, a call, or spans lines as a real assertion", () => {
+    const js = [
+      ["+    assert.ok(result)"],
+      ["+    assert.ok(compute())"],
+      ["+    expect(result).toBeTruthy()"],
+      ["+    assert.equal(result.value, 42, \"keeps the answer\")"],
+      ["+    assert.deepEqual(", "+      result,", "+      { answer: 42 },", "+    )"],
+      ["+    expect(true).toBe(result)"],
+    ]
+    for (const lines of js) {
+      const diff = makeHunkDiff("test/cache.test.mjs", ['   it("reads", () => {', "-    assert.equal(result, 42)", ...lines, "   })"])
+      assert.deepEqual(findingsFor(scanDiff(diff), "removed-assertion"), [], lines.join("\n"))
+    }
+  })
+
   it("respects an allow marker left where the assertions were removed", () => {
     const diff = makeHunkDiff("test/cache.test.mjs", [
       '     cache.set("a", 1)',
@@ -1042,6 +1082,12 @@ describe("skipped-test rule", () => {
       '+      case "win32":',
       `+        t.${T.skip}("posix only")`,
       "+    }",
+      "+    if (!process.env.NETWORK)",
+      `+      t.${T.skip}("offline")`,
+      "+    else if (process.env.CI)",
+      `+      t.${T.skip}("no network in CI")`,
+      "+    else",
+      `+      t.${T.skip}("still gated")`,
       "     assert.ok(await upload())",
       "   })",
     ])
@@ -2275,6 +2321,8 @@ describe("test-ignore-added runner filter flags", () => {
       [".github/workflows/ci.yml", "      - run: pytest -k \"not network\""],
       [".github/workflows/ci.yml", "      - run: pytest -m \"not slow\""],
       [".github/workflows/ci.yml", "      - run: python -m pytest -m 'not slow' tests"],
+      [".github/workflows/ci.yml", "      PYTEST_ADDOPTS: -m \"not slow\""],
+      ["Makefile", "\t$(PYTEST) -m \"not slow\" tests"],
       ["pytest.ini", "addopts = -m \"not slow\""],
     ]
     for (const [file, line] of added) {
@@ -2332,14 +2380,77 @@ describe("filter flags moved across hunks", () => {
       "   }",
     ].join("\n") + "\n"
 
-  it("does not flag a filter flag that moved to another hunk of the same file", () => {
-    const diff = moved(['+    "test:ci": "node --test --test-only test/",'])
+  it("does not flag a filter flag whose script moved to another hunk of the same file", () => {
+    const diff = moved(['+    "test": "node --test --test-only test/",'])
     assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added"), [])
   })
 
   it("flags a second copy of a moved flag", () => {
-    const diff = moved(['+    "test:ci": "node --test --test-only test/",', '+    "test:fast": "node --test --test-only test/",'])
+    const diff = moved(['+    "test": "node --test --test-only test/",', '+    "test:fast": "node --test --test-only test/",'])
     assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added").map((finding) => finding.line), [21])
+  })
+
+  it("flags a filter flag that moved from one script into another", () => {
+    const adjacent = makeHunkDiff("package.json", [
+      '   "scripts": {',
+      '-    "test": "node --test test/",',
+      "+    \"test\": \"node --test --test-skip-pattern='conformance|candidate findings' test/\",",
+      "-    \"test:formal:witnesses\": \"node --test --test-skip-pattern='conformance|candidate findings' test/witnesses/\",",
+      '+    "test:formal:witnesses": "node --test test/witnesses/",',
+    ])
+    const [finding, ...rest] = findingsFor(scanDiff(adjacent), "test-ignore-added")
+    assert.deepEqual(rest, [])
+    assert.equal(finding.line, 2)
+    assert.match(finding.detail, /moved from `test:formal:witnesses`/)
+    const distant = moved(['+    "test:ci": "node --test --test-only test/",'])
+    assert.deepEqual(findingsFor(scanDiff(distant), "test-ignore-added").map((v) => [v.line, v.detail]), [
+      [20, "Adds `--test-only` to a test command (moved from `test`)."],
+    ])
+  })
+
+  it("flags a pytest flag that moved from one tox environment into another", () => {
+    const diff = makeHunkDiff("tox.ini", [
+      " [testenv]",
+      "-commands = pytest tests",
+      "+commands = pytest -k \"not slow\" tests",
+      " [testenv:quick]",
+      "-commands = pytest -k \"not slow\" tests",
+      "+commands = pytest tests",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(diff), "test-ignore-added").map((v) => v.line), [2])
+  })
+})
+
+describe("focus and skip markers moved onto another suite", () => {
+  it("flags a marker that moved from one test or suite title to another", () => {
+    const diff = makeHunkDiff("test/sample.test.mjs", [
+      `-describe.${T.only}("one case", () => {`,
+      '+describe("one case", () => {',
+      '   it("a", () => {})',
+      " })",
+      '-describe("everything", () => {',
+      `+describe.${T.only}("everything", () => {`,
+      '   it("b", () => {})',
+      " })",
+    ])
+    assert.deepEqual(findingsFor(scanDiff(diff), "focused-test").map((v) => v.line), [4])
+    const skip = makeHunkDiff("test/other.test.mjs", [
+      `-it.${T.skip}("flaky one", () => {})`,
+      '+it("flaky one", () => {})',
+      '-it("core path", () => {})',
+      `+it.${T.skip}("core path", () => {})`,
+    ])
+    assert.deepEqual(findingsFor(scanDiff(skip), "skipped-test").map((v) => v.line), [2])
+  })
+
+  it("still cancels a moved marker whose title is unchanged but re-indented or re-quoted", () => {
+    const diff = makeHunkDiff("test/sample.test.mjs", [
+      `-it.${T.only}("legacy", () => {})`,
+      " describe(\"group\", () => {",
+      `+  it.${T.only}('legacy', () => {})`,
+      " })",
+    ])
+    assert.deepEqual(scanDiff(diff).violations, [])
   })
 
   it("flags a pytest ignore added to an addopts list", () => {
