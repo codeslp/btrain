@@ -252,7 +252,136 @@ describe("optional zvec-grep context helper", () => {
     }
   })
 
-  it("preserves query errors while fast watchdogs are stopped repeatedly", async () => {
+  it("preserves query output when a child runs the inherited signal handler", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    // Dispatch the inherited parent handler in a real watchdog child. This
+    // models TERM before Bash resets traps without relying on OS scheduling.
+    await fs.writeFile(bashEnv, `set -T
+dispatch_inherited_signal() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && { [ "$1" = 'cancelled=0' ] || [ "$1" = 'sleep "$secs"' ]; }; then
+    trap - DEBUG
+    on_signal 15
+  fi
+}
+trap 'dispatch_inherited_signal "$BASH_COMMAND"' DEBUG
+`)
+    try {
+      const result = await runHelper(["search", "failing query", "--root", tmpDir], {
+        cwd: tmpDir,
+        timeout: 5000,
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, BASH_ENV: bashEnv, ZVEC_TEST_LOG: logPath, ZVEC_TEST_QUERY_RC: "7" },
+      })
+      assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stderr, /query failed safely/)
+      assert.doesNotMatch(result.stderr, /No such file/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("preserves query errors and reaps watchdog sleepers paused during startup", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const logPath = path.join(tmpDir, "zg.log")
+    const pauseLog = path.join(tmpDir, "paused.log")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    const marker = String(7000 + process.pid % 2000)
+    await fs.mkdir(binDir)
+    await writeFakeZg(binDir)
+    // Hold the watchdog after it forks sleep, before it assigns the PID.
+    // BASH_ENV/DEBUG supplies synchronization without a production test hook.
+    await fs.writeFile(bashEnv, `set -T
+pause_watchdog() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && [ "$1" = 'sleeper=$!' ]; then
+    trap - DEBUG
+    local watchdog_pid sleep_pid="$!"
+    watchdog_pid=$(exec /bin/sh -c 'echo "$PPID"')
+    printf '%s %s\\n' "$watchdog_pid" "$sleep_pid" >> "$ZVEC_TEST_PAUSE_LOG"
+    kill -STOP "$watchdog_pid"
+  fi
+}
+trap 'pause_watchdog "$BASH_COMMAND"' DEBUG
+if [ "\${0##*/}" = "zg" ]; then
+  phase=2
+  [ "\${1:-}" = "status" ] && phase=1
+  count=0
+  while [ "$count" -lt "$phase" ]; do
+    count=0
+    if [ -f "$ZVEC_TEST_PAUSE_LOG" ]; then
+      while IFS= read -r entry; do count=$((count + 1)); done < "$ZVEC_TEST_PAUSE_LOG"
+    fi
+    [ "$count" -ge "$phase" ] || sleep 0.01
+  done
+fi
+`)
+    const paused = []
+    const resultPromise = runHelper(["search", "failing query", "--root", tmpDir], {
+      cwd: tmpDir,
+      timeout: 5000,
+      env: {
+        ...process.env,
+        PATH: `${binDir}:/usr/bin:/bin`,
+        BASH_ENV: bashEnv,
+        ZVEC_TEST_PAUSE_LOG: pauseLog,
+        ZVEC_TEST_LOG: logPath,
+        ZVEC_TEST_QUERY_RC: "7",
+        ZVEC_CONTEXT_TIMEOUT: marker,
+      },
+    })
+    try {
+      // The helper starts one watchdog for readiness and one for the query.
+      for (let call = 0; call < 2; call += 1) {
+        let entry
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const entries = (await fs.readFile(pauseLog, "utf8").catch((error) => {
+            if (error.code !== "ENOENT") throw error
+            return ""
+          })).trim().split("\n").filter(Boolean)
+          if (entries[call]) { entry = entries[call].split(" ").map(Number); break }
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        assert.ok(entry, "the watchdog must reach the synchronized startup window")
+        paused.push(entry)
+        const [watchdogPid] = entry
+        let stopped = false
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const state = await execFileAsync("/bin/ps", ["-o", "stat=", "-p", String(watchdogPid)]).catch(() => ({ stdout: "" }))
+          if (!state.stdout.trim()) break
+          if (state.stdout.includes("T")) { stopped = true; break }
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        // A broken helper can kill the watchdog before STOP takes effect.
+        // Its published sleep PID still lets the assertion detect the leak.
+        if (stopped) process.kill(watchdogPid, "SIGCONT")
+      }
+      const result = await resultPromise
+      assert.equal(result.code, 7, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stderr, /query failed safely/)
+      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
+      for (const [, sleeperPid] of paused) {
+        assert.equal(new RegExp(`^\\s*${sleeperPid}\\s+sleep ${marker}$`, "m").test(ps.stdout), false, "startup cancellation must reap its sleeper")
+      }
+    } finally {
+      for (const [watchdogPid] of paused) {
+        try { process.kill(watchdogPid, "SIGCONT") } catch (error) { if (error.code !== "ESRCH") throw error }
+      }
+      await resultPromise
+      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
+      for (const [, sleeperPid] of paused) {
+        if (new RegExp(`^\\s*${sleeperPid}\\s+sleep ${marker}$`, "m").test(ps.stdout)) {
+          try { process.kill(sleeperPid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("preserves query errors while fast watchdogs are stopped repeatedly", { skip: process.env.BTRAIN_ZVEC_STRESS !== "1" }, async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
     const logPath = path.join(tmpDir, "zg.log")
@@ -270,7 +399,7 @@ describe("optional zvec-grep context helper", () => {
     try {
       // Short calls repeatedly stop the watchdog during its startup window.
       // Run small parallel batches to expose that window under CI scheduling.
-      for (let batch = 0; batch < 50; batch += 1) {
+      for (let batch = 0; batch < 10; batch += 1) {
         const results = await Promise.all(Array.from({ length: 10 }, () => runHelper(
           ["search", "failing query", "--root", tmpDir], {
             cwd: tmpDir,
