@@ -11136,7 +11136,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
 
   if (hasUnsharedGitPointer(repoRoot)) {
     warnings.push(
-      "This checkout's `.git` is a pointer file, but it is not a linked worktree of a main checkout (a worktree of a bare repository or of a submodule). Lane state stays in this checkout alone and is not shared with other worktrees of the same repository.",
+      "This checkout is a worktree of a bare repository or of a submodule, not a linked worktree of a main checkout. Lane state stays in this checkout alone and is not shared with other worktrees of the same repository.",
     )
   }
 

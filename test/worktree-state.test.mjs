@@ -6,7 +6,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
-import { resolveStateRoot, isLinkedWorktree, clearStateRootCache } from "../src/brain_train/worktree.mjs"
+import { resolveStateRoot, isLinkedWorktree, hasUnsharedGitPointer, clearStateRootCache } from "../src/brain_train/worktree.mjs"
 
 const exec = promisify(execFile)
 
@@ -72,6 +72,7 @@ describe("resolveStateRoot", () => {
       await fs.mkdir(inner)
       await fs.writeFile(path.join(inner, ".git"), `gitdir: ${path.join(outer, ".git", "modules", "inner")}\n`)
       assert.equal(resolveStateRoot(inner), inner)
+      assert.equal(hasUnsharedGitPointer(inner), false, "a submodule checkout is a repository of its own")
     })
   })
 
@@ -93,6 +94,7 @@ describe("resolveStateRoot", () => {
       await fs.mkdir(fake)
       await fs.writeFile(path.join(fake, ".git"), `gitdir: ${path.join(bare, "worktrees", "fake")}\n`)
       assert.equal(resolveStateRoot(fake), fake)
+      assert.equal(hasUnsharedGitPointer(fake), true, "a bare repository's worktree shares no main checkout")
     })
   })
 })
@@ -269,10 +271,13 @@ describe("doctor on a worktree that shares no main checkout", () => {
   it("warns that lane state stays per checkout for a bare repository's worktree", async () => {
     await withTmp(async (root) => {
       const home = path.join(root, "home")
+      // A bare clone of a normal repository, then a worktree of it. (No
+      // `worktree add --orphan`: that needs git 2.42.)
+      const source = await makeRepo(root)
       const bare = path.join(root, "bare.git")
-      await exec("git", ["init", "-q", "--bare", "-b", "main", bare])
+      await exec("git", ["clone", "-q", "--bare", source, bare])
       const checkout = path.join(root, "bare-worktree")
-      await exec("git", ["-C", bare, "worktree", "add", "-q", "--orphan", "-b", "main", checkout])
+      await exec("git", ["-C", bare, "worktree", "add", "-q", checkout, "main"])
       await git(checkout, "config", "user.email", "test@example.com")
       await git(checkout, "config", "user.name", "Test Bot")
       await git(checkout, "config", "commit.gpgsign", "false")
@@ -282,16 +287,16 @@ describe("doctor on a worktree that shares no main checkout", () => {
 
       const check = await btrain(["doctor", "--repo", checkout], { cwd: checkout, home })
       assert.equal(check.code, 0, check.stderr)
-      assert.match(check.stdout, /not a linked worktree of a main checkout/, check.stdout)
+      assert.match(check.stdout, /worktree of a bare repository or of a submodule/, check.stdout)
 
       // A linked worktree of an ordinary repository gets no such warning.
-      const repo = await makeRepo(root)
+      const repo = source
       const worktree = path.join(root, "linked")
       await git(repo, "worktree", "add", "-q", "-b", "lane-a", worktree)
       const initMain = await btrain(["init", repo, "--tracked", "--agent", "alpha", "--agent", "beta", "--core-only", "--no-hooks"], { cwd: repo, home })
       assert.equal(initMain.code, 0, initMain.stderr)
       const fromLinked = await btrain(["doctor", "--repo", worktree], { cwd: worktree, home })
-      assert.doesNotMatch(fromLinked.stdout, /not a linked worktree of a main checkout/)
+      assert.doesNotMatch(fromLinked.stdout, /worktree of a bare repository or of a submodule/)
     })
   })
 })

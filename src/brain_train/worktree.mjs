@@ -33,18 +33,14 @@ export function isLinkedWorktree(repoRoot) {
   return resolveStateRoot(repoRoot) !== path.resolve(repoRoot)
 }
 
-// A checkout whose `.git` is a pointer file yet resolves to itself: a worktree
-// of a bare repository, or a worktree of a submodule. Lane state stays per
-// checkout there, which is the split the state root exists to remove, so
-// doctor names it instead of letting it happen quietly.
+// A checkout whose `.git` pointer names a worktree gitdir (it has a
+// `commondir`) that is not a main checkout's `.git`: a worktree of a bare
+// repository, or a worktree of a submodule. Lane state stays per checkout
+// there, which is the split the state root exists to remove, so doctor names
+// it instead of letting it happen quietly. A plain submodule checkout (pointer
+// without `commondir`) is a repository of its own and is not reported.
 export function hasUnsharedGitPointer(repoRoot) {
-  const root = path.resolve(repoRoot)
-  try {
-    if (fs.statSync(path.join(root, ".git")).isDirectory()) return false
-  } catch {
-    return false
-  }
-  return resolveStateRoot(root) === root
+  return classifyGitEntry(path.resolve(repoRoot)).kind === "unshared-worktree"
 }
 
 // Tests create and delete worktrees under one process; let them drop entries.
@@ -53,39 +49,50 @@ export function clearStateRootCache() {
 }
 
 function computeStateRoot(root) {
+  const entry = classifyGitEntry(root)
+  return entry.kind === "linked-worktree" ? entry.mainRoot : root
+}
+
+// What `<root>/.git` is:
+//   "directory"          a primary checkout (or no .git at all: "none")
+//   "pointer"            a gitdir pointer without commondir: a submodule checkout
+//   "linked-worktree"    a pointer whose commondir is a main checkout's .git
+//   "unshared-worktree"  a pointer whose commondir is not a working tree's .git
+//                        (bare repository or submodule worktree)
+function classifyGitEntry(root) {
   const gitEntry = path.join(root, ".git")
   let stats
   try {
     stats = fs.statSync(gitEntry)
   } catch {
-    return root
+    return { kind: "none" }
   }
-  if (stats.isDirectory()) return root
+  if (stats.isDirectory()) return { kind: "directory" }
 
   let pointer
   try {
     pointer = fs.readFileSync(gitEntry, "utf8")
   } catch {
-    return root
+    return { kind: "none" }
   }
   const match = /^gitdir:\s*(.+)$/m.exec(pointer)
-  if (!match) return root
+  if (!match) return { kind: "none" }
 
   const gitDir = path.resolve(root, match[1].trim())
   let commonDir
   try {
     commonDir = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim())
   } catch {
-    return root
+    return { kind: "pointer" }
   }
   // A linked worktree's common dir is the primary checkout's `.git`. Anything
   // else (a bare repository) has no working tree whose state could be shared.
-  if (path.basename(commonDir) !== ".git") return root
+  if (path.basename(commonDir) !== ".git") return { kind: "unshared-worktree" }
   const mainRoot = path.dirname(commonDir)
   try {
-    if (!fs.statSync(mainRoot).isDirectory()) return root
+    if (!fs.statSync(mainRoot).isDirectory()) return { kind: "unshared-worktree" }
   } catch {
-    return root
+    return { kind: "unshared-worktree" }
   }
-  return mainRoot
+  return { kind: "linked-worktree", mainRoot }
 }
