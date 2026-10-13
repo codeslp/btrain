@@ -61,6 +61,9 @@ if [ "\${1:-}" = "status" ]; then
   printf 'Workspace index is ready\\n'
   exit 0
 fi
+if [ -n "\${ZVEC_TEST_CWD_LOG:-}" ]; then
+  printf '%s\\n' "$PWD" > "$ZVEC_TEST_CWD_LOG"
+fi
 if [ "\${ZVEC_TEST_QUERY_RC:-0}" -ne 0 ]; then
   printf 'query failed safely\\n' >&2
   exit "$ZVEC_TEST_QUERY_RC"
@@ -249,7 +252,15 @@ while :; do /bin/sleep 0.01; done
       await waitForFile(running)
       helper.kill("SIGINT")
       await waitForFile(exiting)
-      assert.equal(completed, false, "helper must not exit before its executor")
+      // Hold the executor barrier while observing the actual helper process.
+      // A single immediate assertion can run before a missing wait lets it exit.
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        assert.equal(helper.exitCode, null, "helper must stay alive until executor exit")
+        assert.equal(helper.signalCode, null, "helper must stay alive until executor exit")
+        assert.doesNotThrow(() => process.kill(helper.pid, 0), "helper must still exist while the executor barrier is held")
+        assert.equal(completed, false, "helper must not exit before its executor")
+      }
       assert.ok((await fs.readdir(scratch)).some((file) => /^zvec-context\.[^.]+$/.test(file)), "capture must remain until executor exit")
       await fs.writeFile(release, "")
       const result = await resultPromise
@@ -498,6 +509,30 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
       assert.match(log, /--glob\nsrc\/\*\*/)
       assert.match(log, /--glob\nspecs\/\*\*/)
       assert.doesNotMatch(log, /--allow-remote/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs the query from --root when the caller directory differs", async () => {
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const caller = path.join(tmpDir, "caller directory")
+    const root = path.join(tmpDir, "indexed workspace")
+    const cwdLog = path.join(tmpDir, "query.cwd")
+    await fs.mkdir(binDir)
+    await fs.mkdir(caller)
+    await fs.mkdir(root)
+    await writeFakeZg(binDir)
+    try {
+      const result = await runHelper(["search", "query", "--root", root], {
+        cwd: caller, timeout: 5000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`,
+          ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_TEST_CWD_LOG: cwdLog },
+      })
+      assert.equal(result.code, 0, result.stderr)
+      assert.match(result.stdout, /^zvec-context: ok/m)
+      assert.equal((await fs.readFile(cwdLog, "utf8")).trim(), await fs.realpath(root))
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
