@@ -1725,3 +1725,17 @@ describe("cgraph degradation a later event says nothing about", () => {
     assert.match(later.stdout, /audit/)
   })
 })
+
+describe("cgraph manifest probe budget", () => {
+  it("covers a cold Python start so an idle machine does not lose every advisory", async () => {
+    // A cold `cgc manifest --json` took 8.4 s on the reference machine; warm
+    // runs take under 1 s. With a 3 s budget `btrain doctor` reported
+    // "cgraph manifest probe failed" after any idle period and createAdapter
+    // returned null, which turned every advisory off without saying so.
+    const { TIMEOUTS } = await import("../src/brain_train/cgraph_adapter.mjs")
+    assert.ok(
+      TIMEOUTS.manifest >= 10_000,
+      `manifest probe budget ${TIMEOUTS.manifest} ms is below a cold start`,
+    )
+  })
+})
