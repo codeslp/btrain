@@ -33,7 +33,7 @@ Environment:
 
 The helper performs at most one semantic query. Use native rg for exact or
 exhaustive lookup. Create indexes explicitly with zg; this helper never does it.
-Soft skips (exit 0, "zvec-context: skipped"): zg is not installed, no ready
+Soft skips (exit 0, "zvec-context: skipped"): zg or node is not installed, no ready
 index, the time bound expired, or no temp file could be created under TMPDIR.
 Usage errors exit 64.
 EOF
@@ -55,37 +55,82 @@ require_value() {
   fi
 }
 
-# Temp files owned by the run_bounded call in progress, removed on exit or on a
-# signal so a killed helper leaves nothing behind. Set per shell: a run_bounded
-# inside $(...) registers its own traps in that subshell.
+# Only this shell owns its capture files. A fork can receive a signal before
+# Bash resets inherited traps; BASHPID handles that window on modern Bash,
+# and BASH_SUBSHELL handles Bash 3.2, which has no BASHPID.
 ZVEC_TMP_OUT=""
-ZVEC_TMP_PID=""
-ZVEC_TMP_WATCHDOG=""
 ZVEC_BOUNDED_OUTPUT=""
+is_helper_shell() {
+  [ "${BASHPID:-$$}" = "$$" ] && [ "$BASH_SUBSHELL" -eq 0 ]
+}
 cleanup_tmp() {
+  is_helper_shell || return 0
   if [ -n "$ZVEC_TMP_OUT" ]; then
-    rm -f "$ZVEC_TMP_OUT" "$ZVEC_TMP_OUT.timeout"
+    rm -f "$ZVEC_TMP_OUT" "$ZVEC_TMP_OUT.ready" "$ZVEC_TMP_OUT.timeout" "$ZVEC_TMP_OUT.cancel"
   fi
   return 0
 }
-# $1 is the signal number, so the exit status follows the 128+n convention.
 on_signal() {
-  if [ -n "$ZVEC_TMP_PID" ]; then
-    kill -TERM "$ZVEC_TMP_PID" 2>/dev/null
+  if ! is_helper_shell; then
+    exit $((128 + $1))
   fi
-  if [ -n "$ZVEC_TMP_WATCHDOG" ]; then
-    kill -TERM "$ZVEC_TMP_WATCHDOG" 2>/dev/null
-  fi
+  # The job table owns the executor even before its following $! assignment.
+  # Running jobs have not been reaped, so their PIDs cannot be recycled.
+  local job_pid
+  for job_pid in $(jobs -pr); do
+    kill -TERM "$job_pid" 2>/dev/null
+    wait "$job_pid" 2>/dev/null
+  done
   cleanup_tmp
   exit $((128 + $1))
 }
 
-# Change directory, then become the command (used as the bounded child so the
-# helper's own shell never changes directory).
-run_in_dir() {
-  cd "$1" || exit 1
-  shift
-  exec "$@"
+# Use the existing btrain Node runtime to own the command and its timers.
+# No timer subprocess or PID file is needed. The child-process handle closes
+# on exit, so a late timer cannot signal a recycled PID.
+run_node_bound() {
+  local secs="$1" command_cwd="$2"
+  shift 2
+  if [ -n "$command_cwd" ]; then
+    cd "$command_cwd" || return 1
+  fi
+  exec node - "$secs" "$@" <<'NODE'
+const { spawn } = require("node:child_process")
+const { constants } = require("node:os")
+const [seconds, command, ...args] = process.argv.slice(2)
+let child
+let outcome
+let grace
+let deadline
+function finish(code) {
+  clearTimeout(deadline)
+  clearTimeout(grace)
+  process.exit(code)
+}
+function cancel(code) {
+  if (outcome === undefined) outcome = code
+  if (!child || grace) return
+  child.kill("SIGTERM")
+  grace = setTimeout(() => child.kill("SIGKILL"), 2000)
+}
+// Install signal handlers before spawning; callbacks run after the synchronous
+// spawn has assigned the handle, including a signal received during startup.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => cancel(128 + constants.signals[signal]))
+}
+child = spawn(command, args, { stdio: ["ignore", 1, 2] })
+child.once("error", (error) => {
+  process.stderr.write(`${error.message}\n`)
+  finish(error.code === "ENOENT" ? 127 : 126)
+})
+child.once("exit", (code, signal) => {
+  if (outcome !== undefined) return finish(outcome)
+  if (code !== null) return finish(code)
+  finish(128 + constants.signals[signal])
+})
+deadline = setTimeout(() => cancel(124), Number(seconds) * 1000)
+if (outcome !== undefined) cancel(outcome)
+NODE
 }
 
 validate_timeout() {
@@ -94,58 +139,31 @@ validate_timeout() {
   fi
 }
 
-# Run one command with a wall-clock bound, in the calling shell (never inside
-# $(...): a signal to the helper must reach the child and the temp files). The
-# command's stdout and stderr go to a temp file, not to a pipe: a descendant
-# that keeps an inherited pipe open would otherwise hold a capture past the
-# bound. Leaves the captured output in ZVEC_BOUNDED_OUTPUT and returns the
-# command's own status; 124 when the bound expired (a sentinel file plus a
-# signal exit status marks the timeout, so a command that really exits 143 is
-# reported as its own failure); 125 when no temp file could be created.
+# Capture into a file: a descendant holding stdout open cannot delay the
+# executor's exit. Node preserves a real exit 143 and reports an elapsed bound
+# as 124; a failed mktemp is 125. Signal cleanup also waits for the executor.
 run_bounded() {
   local secs="$1"
   shift
-  local out sentinel pid watchdog rc
+  local out pid rc command_cwd=""
   ZVEC_BOUNDED_OUTPUT=""
-  # Traps first, so no window exists between creating the temp file and
-  # owning its cleanup. The handlers no-op while ZVEC_TMP_OUT is empty.
   trap cleanup_tmp EXIT
   trap 'on_signal 15' TERM
   trap 'on_signal 2' INT
   trap 'on_signal 1' HUP
   out=$(mktemp "${TMPDIR:-/tmp}/zvec-context.XXXXXX" 2>/dev/null) || return 125
-  sentinel="$out.timeout"
   ZVEC_TMP_OUT="$out"
-  "$@" >"$out" 2>&1 </dev/null &
+  if [ "$1" = "run_in_dir" ]; then
+    command_cwd="$2"
+    shift 2
+  fi
+  run_node_bound "$secs" "$command_cwd" "$@" >"$out" 2>&1 </dev/null &
   pid=$!
-  ZVEC_TMP_PID="$pid"
-  (
-    sleep "$secs" &
-    sleeper=$!
-    trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
-    wait "$sleeper"
-    : >"$sentinel"
-    kill -TERM "$pid" 2>/dev/null
-    # A child that ignores TERM must not outlive the bound.
-    sleep 2
-    kill -KILL "$pid" 2>/dev/null
-  ) >/dev/null 2>&1 </dev/null &
-  watchdog=$!
-  ZVEC_TMP_WATCHDOG="$watchdog"
   wait "$pid" 2>/dev/null
   rc=$?
-  kill -TERM "$watchdog" 2>/dev/null
-  wait "$watchdog" 2>/dev/null
-  ZVEC_TMP_WATCHDOG=""
   ZVEC_BOUNDED_OUTPUT=$(cat "$out")
-  # Only a child that died by signal after the sentinel appeared counts as a
-  # timeout; a sentinel written in the instant after a normal exit does not.
-  if [ -e "$sentinel" ] && [ "$rc" -ge 128 ]; then
-    rc=124
-  fi
-  rm -f "$out" "$sentinel"
+  cleanup_tmp
   ZVEC_TMP_OUT=""
-  ZVEC_TMP_PID=""
   return "$rc"
 }
 
@@ -162,9 +180,13 @@ resolve_root() {
   printf '%s\n' "$resolved"
 }
 
-require_zg() {
+require_tools() {
   if ! command -v zg >/dev/null 2>&1; then
     emit_skip "zg CLI is not installed; btrain does not install it or create an index"
+    return 1
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    emit_skip "node CLI is not installed; bounded execution uses btrain's existing Node runtime"
     return 1
   fi
   return 0
@@ -241,7 +263,7 @@ case "$subcommand" in
     esac
 
     root=$(resolve_root "$root") || exit $?
-    require_zg || exit 0
+    require_tools || exit 0
     require_ready_index "$root" || exit 0
 
     args=(
@@ -293,7 +315,7 @@ case "$subcommand" in
     done
     validate_timeout
     root=$(resolve_root "$root") || exit $?
-    require_zg || exit 0
+    require_tools || exit 0
     run_bounded "$ZVEC_CONTEXT_TIMEOUT" zg status "$root" --mode direct --check-ready
     rc=$?
     output="$ZVEC_BOUNDED_OUTPUT"
