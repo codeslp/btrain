@@ -112,6 +112,9 @@ describe("registry guard for scratch repositories", () => {
       assert.equal(register.code, 0, register.stderr)
       assert.match(register.stdout, /^Not registered /m)
       assert.match(register.stdout, /^registry: skipped \(.*temporary directory/m)
+      // The hint names both ways out: a scratch home, or the real one on purpose.
+      assert.match(register.stdout, /BRAIN_TRAIN_HOME=<scratch>\/home/)
+      assert.match(register.stdout, /BRAIN_TRAIN_HOME=~\/\.btrain btrain register/)
       assert.deepEqual((await readRegistry(defaultHome)) ?? [], [], "register leaves the default registry empty too")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
@@ -150,6 +153,8 @@ describe("registry guard for scratch repositories", () => {
       const init = await btrain(["init", repo, "--tracked"], env)
       assert.equal(init.code, 0, init.stderr)
       assert.match(init.stdout, /^registry: skipped \(BTRAIN_NO_REGISTER=1\)/m)
+      assert.match(init.stdout, /Unset BTRAIN_NO_REGISTER to register/)
+      assert.doesNotMatch(init.stdout, /scratch home/, "the scratch-home hint does not apply to an explicit opt-out")
       const register = await btrain(["register", repo], env)
       assert.equal(register.code, 0, register.stderr)
       assert.match(register.stdout, /^registry: skipped \(BTRAIN_NO_REGISTER=1\)/m)

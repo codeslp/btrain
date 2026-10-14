@@ -72,6 +72,12 @@ if (!chosenHome || process.env[TEST_DEFAULT_HOME_MARKER] === chosenHome) {
   process.env.BRAIN_TRAIN_HOME = scratchHome
   process.env[TEST_DEFAULT_HOME_MARKER] = scratchHome
   process.on("exit", () => {
-    fs.rmSync(scratchHome, { recursive: true, force: true })
+    // Best effort: a late writer (a detached child) must not fail a test file
+    // whose tests passed. The directory is under the OS temp root either way.
+    try {
+      fs.rmSync(scratchHome, { recursive: true, force: true, maxRetries: 3 })
+    } catch {
+      // left for the OS temp cleaner
+    }
   })
 }

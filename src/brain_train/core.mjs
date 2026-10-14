@@ -1890,11 +1890,12 @@ function registrationSkipReason(repoRoot) {
 }
 
 function skippedRegistration(reason) {
-  return {
-    registered: false,
-    reason,
-    hint: "To register a scratch repository, point btrain at a scratch home first: export BRAIN_TRAIN_HOME=<scratch>/home",
-  }
+  const hint = process.env.BTRAIN_NO_REGISTER === "1"
+    ? "Unset BTRAIN_NO_REGISTER to register this repository."
+    : "To register a scratch repository, point btrain at a scratch home first: export BRAIN_TRAIN_HOME=<scratch>/home. "
+      + "To put a repository that lives under a temporary directory in your real registry on purpose: "
+      + "BRAIN_TRAIN_HOME=~/.btrain btrain register <path>"
+  return { registered: false, reason, hint }
 }
 
 // Two roots. `repoRoot` is the checkout btrain was pointed at: tracked files

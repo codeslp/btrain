@@ -230,7 +230,8 @@ Handoff/Lane Options:
   --no-dispatch     For \`handoff update --status needs-review\`, write the lane but do not spawn the reviewer runner.
 
 Environment:
-  BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
+  BRAIN_TRAIN_HOME overrides the default global directory (~/.btrain). When it is unset, \`init\` and \`register\` leave a repository under a temporary directory (/tmp, /var/folders, $TMPDIR) out of the registry.
+  BTRAIN_NO_REGISTER=1 makes \`init\` and \`register\` skip the registry entirely.
   BTRAIN_INIT_STORAGE=local|tracked sets the storage default for new repos (default: local).
   BTRAIN_AGENT or BRAIN_TRAIN_AGENT can pin the current agent identity for handoff verification.
 
