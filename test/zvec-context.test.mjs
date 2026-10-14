@@ -393,6 +393,60 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
   })
+  // The executor's first cancellation cause wins and arms exactly one TERM.
+  // A later signal or the deadline must neither re-send TERM nor replace the
+  // recorded outcome. Signalling the helper shell cannot show this (its trap
+  // exits 128 + signal itself), so each case signals the Node executor
+  // directly; search passes the executor's exit code through.
+  for (const [name, timeout, second] of [
+    ["a second signal", "60", "SIGTERM"],
+    ["the deadline", "1", null],
+  ]) {
+    it(`keeps the first cancellation when ${name} arrives during the grace period`, async () => {
+      const tmpDir = await makeTmpDir()
+      const binDir = path.join(tmpDir, "bin")
+      const executorLog = path.join(tmpDir, "executor-pid")
+      const termLog = path.join(tmpDir, "term")
+      await fs.mkdir(binDir)
+      await writeFakeZg(binDir)
+      await fs.writeFile(path.join(binDir, "zg"), `#!/bin/bash
+if [ "$1" = "status" ]; then exit 0; fi
+trap 'printf "TERM\\n" >> "$ZVEC_TEST_TERM_LOG"' TERM
+printf '%s\\n' "$PPID" > "$ZVEC_TEST_EXECUTOR_LOG"
+while :; do /bin/sleep 0.01; done
+`, { mode: 0o755 })
+      const readLines = async (file) => (await fs.readFile(file, "utf8").catch(() => "")).split("\n").filter(Boolean)
+      const waitFor = async (predicate, what) => {
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const value = await predicate()
+          if (value) return value
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        assert.fail(`timed out waiting for ${what}`)
+      }
+      const resultPromise = runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 10000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ZVEC_CONTEXT_TIMEOUT: timeout,
+          ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"), ZVEC_TEST_TERM_LOG: termLog, ZVEC_TEST_EXECUTOR_LOG: executorLog },
+      })
+      try {
+        const executor = Number(await waitFor(async () => (await readLines(executorLog))[0], "the query to start"))
+        const command = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(executor)])
+        assert.match(command.stdout, /node/, "the recorded parent must be the Node executor")
+        process.kill(executor, "SIGINT")
+        await waitFor(async () => (await readLines(termLog)).length > 0, "the first TERM")
+        if (second) process.kill(executor, second)
+        const result = await resultPromise
+        assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
+        assert.doesNotMatch(result.stdout, /did not finish within/)
+        assert.deepEqual(await readLines(termLog), ["TERM"], "the command receives exactly one TERM")
+      } finally {
+        await resultPromise
+        await fs.rm(tmpDir, { recursive: true, force: true })
+      }
+    })
+  }
+
   it("returns success for an explicit help request", async () => {
     const result = await runHelper(["--help"], {
       env: { ...process.env, PATH: "/usr/bin:/bin" },
