@@ -366,9 +366,9 @@
       "loadRegistry",
       "normalizeRepoName",
       "realPathOrSelf",
-      "registrationSkipHint",
       "registrationSkipReason",
       "saveRegistry",
+      "skippedRegistration",
       "temporaryRoots",
       "upsertRepoEntry"
     ],

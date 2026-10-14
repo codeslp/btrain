@@ -1889,8 +1889,12 @@ function registrationSkipReason(repoRoot) {
   return temporary ? `${repoRoot} is under a temporary directory and BRAIN_TRAIN_HOME is not set` : ""
 }
 
-function registrationSkipHint() {
-  return "To register a scratch repository, point btrain at a scratch home first: export BRAIN_TRAIN_HOME=<scratch>/home"
+function skippedRegistration(reason) {
+  return {
+    registered: false,
+    reason,
+    hint: "To register a scratch repository, point btrain at a scratch home first: export BRAIN_TRAIN_HOME=<scratch>/home",
+  }
 }
 
 // Two roots. `repoRoot` is the checkout btrain was pointed at: tracked files
@@ -3267,9 +3271,7 @@ async function initRepo(repoPathInput, options = {}) {
     repoRoot,
     homeDir,
     registryPath,
-    registration: registrationSkipped
-      ? { registered: false, reason: registrationSkipped, hint: registrationSkipHint() }
-      : { registered: true },
+    registration: registrationSkipped ? skippedRegistration(registrationSkipped) : { registered: true },
     repoPaths: { ...repoPaths, handoffPath: configuredHandoffPath },
     storageMode,
     storageDetected: storage.detected,
@@ -10573,7 +10575,7 @@ async function registerRepo(repoPathInput) {
       repoRoot,
       homeDir: "",
       registryPath: "",
-      registration: { registered: false, reason: registrationSkipped, hint: registrationSkipHint() },
+      registration: skippedRegistration(registrationSkipped),
       warnings,
     }
   }
