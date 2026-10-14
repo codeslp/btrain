@@ -230,7 +230,8 @@ Handoff/Lane Options:
   --no-dispatch     For \`handoff update --status needs-review\`, write the lane but do not spawn the reviewer runner.
 
 Environment:
-  BRAIN_TRAIN_HOME overrides the default global directory (~/.brain_train).
+  BRAIN_TRAIN_HOME overrides the default global directory (~/.btrain). When it is unset, \`init\` and \`register\` leave a repository under a temporary directory (/tmp, /var/folders, $TMPDIR) out of the registry.
+  BTRAIN_NO_REGISTER=1 makes \`init\` and \`register\` skip the registry entirely.
   BTRAIN_INIT_STORAGE=local|tracked sets the storage default for new repos (default: local).
   BTRAIN_AGENT or BRAIN_TRAIN_AGENT can pin the current agent identity for handoff verification.
 
@@ -1704,7 +1705,11 @@ async function run() {
     })
     console.log(`Initialized ${result.repoName}`)
     console.log(`repo: ${result.repoRoot}`)
-    console.log(`home: ${result.homeDir}`)
+    if (result.registration?.registered === false) {
+      console.log(`registry: skipped (${result.registration.reason}). ${result.registration.hint}`)
+    } else {
+      console.log(`home: ${result.homeDir}`)
+    }
     console.log(`handoff: ${result.repoPaths.handoffPath}`)
     if (result.storageMode === "local") {
       const ignoreLabel = result.ignoreResult
@@ -2238,9 +2243,15 @@ async function run() {
     }
 
     const result = await registerRepo(targetPath)
-    console.log(`Registered ${result.repoName}`)
-    console.log(`repo: ${result.repoRoot}`)
-    console.log(`home: ${result.homeDir}`)
+    if (result.registration?.registered === false) {
+      console.log(`Not registered ${result.repoName}`)
+      console.log(`repo: ${result.repoRoot}`)
+      console.log(`registry: skipped (${result.registration.reason}). ${result.registration.hint}`)
+    } else {
+      console.log(`Registered ${result.repoName}`)
+      console.log(`repo: ${result.repoRoot}`)
+      console.log(`home: ${result.homeDir}`)
+    }
     if (result.warnings.length > 0) {
       console.log("warnings:")
       for (const warning of result.warnings) {

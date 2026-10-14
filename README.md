@@ -635,7 +635,8 @@ The original lane-less form remains available for single-lane repositories.
 | `BRAIN_TRAIN_AGENT` | Alternate variable for pinning agent identity |
 | `BTRAIN_LANE` | Default lane for child btrain commands |
 | `BTRAIN_LANE_LOCKED` | Reject commands that try to leave `BTRAIN_LANE` when set to `1` |
-| `BRAIN_TRAIN_HOME` | Override the global btrain home directory |
+| `BRAIN_TRAIN_HOME` | Override the global btrain home directory. When it is unset, `btrain init` and `btrain register` do not add a repository under a temporary directory (`/tmp`, `/var/folders`, `$TMPDIR`) to the registry. The test preload gives each test process its own scratch home. |
+| `BTRAIN_NO_REGISTER` | Set to `1` to make `btrain init` and `btrain register` skip the registry entirely |
 | `HANDOFF_HISTORY_PATH` | Output file for the handoff history watcher |
 
 ---

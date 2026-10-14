@@ -365,7 +365,11 @@
       "getRegisteredRepos",
       "loadRegistry",
       "normalizeRepoName",
+      "realPathOrSelf",
+      "registrationSkipReason",
       "saveRegistry",
+      "skippedRegistration",
+      "temporaryRoots",
       "upsertRepoEntry"
     ],
     "lane-identity": [

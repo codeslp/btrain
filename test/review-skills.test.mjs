@@ -88,6 +88,14 @@ describe("bundled review skills", () => {
       assert.match(text, /Never write untracked files into the author's tree/)
     })
 
+    // Scratch `btrain init` runs without an isolated home put 33 throwaway
+    // repositories in the user's real registry by 2026-10-14.
+    for (const name of REVIEW_SKILLS) {
+      it(`${name} isolates the btrain home before any scratch btrain init`, async () => {
+        assert.match(await read(name), /export BRAIN_TRAIN_HOME="\$\{TMPDIR:-\/tmp\}\/[^"]+-home"/)
+      })
+    }
+
     for (const name of REVIEW_SKILLS) {
       it(`${name} commands run as written`, async () => {
         const text = await read(name)
