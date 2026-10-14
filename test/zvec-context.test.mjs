@@ -397,13 +397,14 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
   // A later signal or the deadline must neither re-send TERM nor replace the
   // recorded outcome. Signalling the helper shell cannot show this (its trap
   // exits 128 + signal itself), so the command signals its own parent, the
-  // Node executor. A parent cannot exit before its child, so the PID cannot
-  // be reused, and no test-side latency eats into the deadline. If the
-  // deadline still wins (a TERM already logged before SIGINT, or a stall
+  // Node executor. The executor exits only after this command does, so the
+  // PID cannot be reused, and no test-side latency eats into the deadline. If
+  // the deadline still wins (a TERM already logged before SIGINT, or a stall
   // between that check and the kill that ends in a timeout skip), the attempt
   // is retried; the last attempt must pass every assertion. The deadline case
-  // therefore pins M16 always, and M17 unless every attempt stalls about a
-  // second; the second-signal case pins M17 without any timing dependence.
+  // therefore pins M16 always, and M17 unless some attempt stalls about a
+  // second (a stalled M17 attempt looks like correct code); the second-signal
+  // case pins M17 without any timing dependence.
   for (const [name, timeout, second] of [
     ["a second signal", "60", "TERM"],
     ["the deadline", "1", ""],
