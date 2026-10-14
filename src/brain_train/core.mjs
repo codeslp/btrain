@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
+import { realpathSync } from "node:fs"
 import fs from "node:fs/promises"
 import { open } from "node:fs/promises"
 import os from "node:os"
@@ -1862,6 +1863,36 @@ function getBrainTrainHome() {
   return path.resolve(process.env.BRAIN_TRAIN_HOME || path.join(os.homedir(), ".btrain"))
 }
 
+function realPathOrSelf(target) {
+  try {
+    return realpathSync(target)
+  } catch {
+    return path.resolve(target)
+  }
+}
+
+// Throwaway repositories (red-team repros, mutation rounds, probe scripts)
+// live under a temporary root. Registering them in the user's default home
+// filled ~/.btrain/repos.json with dead entries, and their advisory events
+// leaked into registry-wide audits (spec 015 FR-5). An explicit
+// BRAIN_TRAIN_HOME is a deliberate choice and still registers anything.
+function temporaryRoots() {
+  const roots = [os.tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
+  return [...new Set(roots.flatMap((root) => [path.resolve(root), realPathOrSelf(root)]))]
+}
+
+function registrationSkipReason(repoRoot) {
+  if (process.env.BTRAIN_NO_REGISTER === "1") return "BTRAIN_NO_REGISTER=1"
+  if (process.env.BRAIN_TRAIN_HOME) return ""
+  const real = realPathOrSelf(repoRoot)
+  const temporary = temporaryRoots().some((root) => real === root || real.startsWith(`${root}${path.sep}`))
+  return temporary ? `${repoRoot} is under a temporary directory and BRAIN_TRAIN_HOME is not set` : ""
+}
+
+function registrationSkipHint() {
+  return "To register a scratch repository, point btrain at a scratch home first: export BRAIN_TRAIN_HOME=<scratch>/home"
+}
+
 // Two roots. `repoRoot` is the checkout btrain was pointed at: tracked files
 // (AGENTS.md, skills, FEEDBACK_LOG.md) and every git command use it, so a
 // lane's diff gate and branch name come from the worktree doing the work.
@@ -2933,7 +2964,13 @@ async function saveRegistry(registryPath, registry) {
 }
 
 function upsertRepoEntry(registry, entry) {
-  const existingIndex = registry.repos.findIndex((repo) => repo.path === entry.path)
+  // Match by real path too: macOS spells one temp directory /var/folders/...
+  // and /private/var/folders/..., and git records a worktree's main checkout
+  // by its real path, so a plain string match registered one repo twice.
+  const entryRealPath = realPathOrSelf(entry.path)
+  const existingIndex = registry.repos.findIndex(
+    (repo) => repo.path === entry.path || realPathOrSelf(repo.path) === entryRealPath,
+  )
   if (existingIndex === -1) {
     registry.repos.push(entry)
   } else {
@@ -2982,7 +3019,13 @@ async function initRepo(repoPathInput, options = {}) {
   const storageMode = storage.mode
   const isLocal = storageMode === STORAGE_LOCAL
   const repoPaths = getRepoPaths(repoRoot, storageMode)
-  const { registryPath, registry, homeDir } = await loadRegistry()
+  // The registry records the repository, never one of its linked worktrees
+  // (registerRepo does the same). A skipped registration leaves repos.json
+  // alone; templates still come from the btrain home, as before.
+  const registrationSkipped = registrationSkipReason(repoPaths.stateRoot)
+  const { registryPath, registry, homeDir } = registrationSkipped
+    ? { registryPath: "", registry: null, homeDir: "" }
+    : await loadRegistry()
 
   // Feature map (spec 022). null means "legacy": every feature on, and no
   // [features] table is written, so pre-022 repos see no change.
@@ -3192,17 +3235,19 @@ async function initRepo(repoPathInput, options = {}) {
     })
     : null
 
-  upsertRepoEntry(registry, {
-    name: repoName,
-    path: repoRoot,
-    enabled: true,
-    project_config_path: repoPaths.projectTomlPath,
-    handoff_path: configuredHandoffPath,
-    ...(isLocal ? { storage: STORAGE_LOCAL } : {}),
-    registered_at: now,
-    updated_at: now,
-  })
-  await saveRegistry(registryPath, registry)
+  if (!registrationSkipped) {
+    upsertRepoEntry(registry, {
+      name: repoName,
+      path: repoPaths.stateRoot,
+      enabled: true,
+      project_config_path: repoPaths.projectTomlPath,
+      handoff_path: configuredHandoffPath,
+      ...(isLocal ? { storage: STORAGE_LOCAL } : {}),
+      registered_at: now,
+      updated_at: now,
+    })
+    await saveRegistry(registryPath, registry)
+  }
 
   let hookResult = null
   let removedHooks = []
@@ -3222,6 +3267,9 @@ async function initRepo(repoPathInput, options = {}) {
     repoRoot,
     homeDir,
     registryPath,
+    registration: registrationSkipped
+      ? { registered: false, reason: registrationSkipped, hint: registrationSkipHint() }
+      : { registered: true },
     repoPaths: { ...repoPaths, handoffPath: configuredHandoffPath },
     storageMode,
     storageDetected: storage.detected,
@@ -10518,6 +10566,18 @@ async function registerRepo(repoPathInput) {
     warnings.push("Missing `CLAUDE.md`.")
   }
 
+  const registrationSkipped = registrationSkipReason(repoRoot)
+  if (registrationSkipped) {
+    return {
+      repoName,
+      repoRoot,
+      homeDir: "",
+      registryPath: "",
+      registration: { registered: false, reason: registrationSkipped, hint: registrationSkipHint() },
+      warnings,
+    }
+  }
+
   const { registryPath, registry, homeDir } = await loadRegistry()
   const now = formatIsoTimestamp()
   upsertRepoEntry(registry, {
@@ -10536,6 +10596,7 @@ async function registerRepo(repoPathInput) {
     repoRoot,
     homeDir,
     registryPath,
+    registration: { registered: true },
     warnings,
   }
 }

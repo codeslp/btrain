@@ -6,7 +6,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import { withGitAutoMaintenanceOff } from "./helpers/git-test-env.mjs"
+import { TEST_DEFAULT_HOME_MARKER, withGitAutoMaintenanceOff } from "./helpers/git-test-env.mjs"
 
 const exec = promisify(execFile)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -71,5 +71,56 @@ describe("git test env preload", () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
+  })
+
+  // A test or ad hoc probe that runs `btrain init` without BRAIN_TRAIN_HOME
+  // used to register its throwaway repo in the user's real ~/.btrain registry.
+  // The preload now gives each process its own scratch home unless the caller
+  // chose one.
+  describe("default btrain home", () => {
+    const PRINT_HOME =
+      `console.log(JSON.stringify({ home: process.env.BRAIN_TRAIN_HOME || null, marker: process.env.${TEST_DEFAULT_HOME_MARKER} || null }))`
+
+    async function preloaded(envOverrides) {
+      const env = { ...process.env }
+      delete env.BRAIN_TRAIN_HOME
+      delete env[TEST_DEFAULT_HOME_MARKER]
+      const { stdout } = await exec(process.execPath, ["--import", "./test/helpers/git-test-env.mjs", "-e", PRINT_HOME], {
+        cwd: repoRoot,
+        env: { ...env, ...envOverrides },
+      })
+      return JSON.parse(stdout)
+    }
+
+    it("is set for the current test process, and is never ~/.btrain", () => {
+      const home = process.env.BRAIN_TRAIN_HOME
+      assert.ok(home, "BRAIN_TRAIN_HOME is set")
+      assert.notEqual(path.resolve(home), path.join(os.homedir(), ".btrain"))
+    })
+
+    it("creates a per-process scratch home under the temp directory when none is set, and removes it on exit", async () => {
+      const { home, marker } = await preloaded({})
+      assert.ok(home, "a home is assigned")
+      assert.equal(marker, home, "the marker records that the preload chose it")
+      const tmp = await fs.realpath(os.tmpdir())
+      assert.ok(home.startsWith(`${tmp}${path.sep}`) || home.startsWith(`${os.tmpdir()}${path.sep}`), `${home} is under the temp directory`)
+      await assert.rejects(fs.stat(home), { code: "ENOENT" }, "the scratch home is removed when the process exits")
+    })
+
+    it("keeps an explicit BRAIN_TRAIN_HOME", async () => {
+      const chosen = path.join(os.tmpdir(), "btrain-explicit-home-not-created")
+      const { home, marker } = await preloaded({ BRAIN_TRAIN_HOME: chosen })
+      assert.equal(home, chosen)
+      assert.equal(marker, null)
+    })
+
+    it("gives each process its own home instead of sharing one inherited from an ancestor preload", async () => {
+      // node --test hands its env to every test file process, and files run
+      // in parallel, so a shared default home would race on repos.json.
+      const inherited = path.join(os.tmpdir(), "btrain-ancestor-default-home")
+      const { home, marker } = await preloaded({ BRAIN_TRAIN_HOME: inherited, [TEST_DEFAULT_HOME_MARKER]: inherited })
+      assert.notEqual(home, inherited)
+      assert.equal(marker, home)
+    })
   })
 })

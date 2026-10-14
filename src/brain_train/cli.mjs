@@ -1704,7 +1704,11 @@ async function run() {
     })
     console.log(`Initialized ${result.repoName}`)
     console.log(`repo: ${result.repoRoot}`)
-    console.log(`home: ${result.homeDir}`)
+    if (result.registration?.registered === false) {
+      console.log(`registry: skipped (${result.registration.reason}). ${result.registration.hint}`)
+    } else {
+      console.log(`home: ${result.homeDir}`)
+    }
     console.log(`handoff: ${result.repoPaths.handoffPath}`)
     if (result.storageMode === "local") {
       const ignoreLabel = result.ignoreResult
@@ -2238,9 +2242,15 @@ async function run() {
     }
 
     const result = await registerRepo(targetPath)
-    console.log(`Registered ${result.repoName}`)
-    console.log(`repo: ${result.repoRoot}`)
-    console.log(`home: ${result.homeDir}`)
+    if (result.registration?.registered === false) {
+      console.log(`Not registered ${result.repoName}`)
+      console.log(`repo: ${result.repoRoot}`)
+      console.log(`registry: skipped (${result.registration.reason}). ${result.registration.hint}`)
+    } else {
+      console.log(`Registered ${result.repoName}`)
+      console.log(`repo: ${result.repoRoot}`)
+      console.log(`home: ${result.homeDir}`)
+    }
     if (result.warnings.length > 0) {
       console.log("warnings:")
       for (const warning of result.warnings) {

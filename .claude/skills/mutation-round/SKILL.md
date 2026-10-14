@@ -13,6 +13,7 @@ Show that the tests fail when the code is wrong. Change one thing at a time in t
 
 - Mutate the source under review, not the tests.
 - Work in a throwaway worktree at the lane head. Never stash, reset, check out, or edit files in the author's tree.
+- Isolate the btrain home in the throwaway worktree: `export BRAIN_TRAIN_HOME="${TMPDIR:-/tmp}/mut-<lane>-home"`. Do this before any command that can run `btrain init` or `btrain register` outside the test preload. Otherwise a scratch repository can enter the user's real registry in `~/.btrain/repos.json`.
 - Make one change per mutant, and run each mutant alone.
 - Start from a green baseline. If the baseline fails, stop. A red baseline makes every result meaningless.
 
