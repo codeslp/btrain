@@ -271,10 +271,37 @@ Complete registry audit, 2026-10-13 (UTC; re-run immediately before merge):
 | L12 | 2026-10-09T01:37:05.757Z | 2026-10-16T01:37:05.757Z | kitchen_vision |
 | L14 | 2026-10-10T04:17:13.765Z | 2026-10-17T04:17:13.765Z | ai_sales |
 
-Run from any checkout. This command reads the registry and event logs only.
-It includes disabled repositories and test registrations. Missing event
-directories have no events to inspect; missing checkouts or malformed logs
-are explicit gaps and cannot establish quiescence.
+Registry cleanup, 2026-10-14 (lane c): the 33 temporary registrations,
+throwaway repositories that unisolated scratch `btrain init` runs had added,
+were removed from `~/.btrain/repos.json` after a backup
+(`~/.btrain/repos.json.bak-2026-10-14-before-temp-prune`). Their advisory
+events are preserved in `~/.btrain/audit/pruned-temp-registrations-2026-10-14.json`.
+That snapshot holds exactly one advisory event, the L2 fixture event at
+2026-10-13T19:15:31.714Z above, so the bound for this PR is unchanged. The
+command below reads every snapshot in `~/.btrain/audit/` as well as the
+registry, so the pruned evidence keeps counting.
+
+The missing registered checkout (`btrain-g-red-team-5VPmpf`) is explained,
+not silently dropped. It was the Codex reviewer's red-team test of this PR's
+own gate code. That test asserted that the idle resolve, `--files`, and
+`--owner` paths each exit 1 with "is idle", and a rejected write records no
+workflow event, so the checkout could not have held an L2 or idle-source
+L6/L10 event. The re-audit on 2026-10-14 (54 registrations, 43 with event
+directories) found no newer L2 event and still no idle-source L6 or L10
+event. It also checked the `role-advisory` field and blank or `Idle`
+statuses. Rows this PR does not retire have moved since the table above: L4
+last 2026-10-13T23:15:41.026Z, L10 2026-10-14T01:43:51.039Z (a pr-review
+reassign, not idle), and L11 2026-10-13T23:16:31.297Z. The 2026-10-20 audit
+refreshes the table. If FR-5 is read as the whole row rather than the
+retired idle slice, L10 moves this PR's bound to 2026-10-21T01:43:51.039Z
+and keeps moving while active-lane reassignments continue; that reading is
+an open decision for the maintainer.
+
+Run from any checkout. This command reads the registry, the pruned-evidence
+snapshots, and event logs only. It includes disabled repositories and test
+registrations. Missing event directories have no events to inspect; missing
+checkouts or malformed logs are explicit gaps and cannot establish
+quiescence unless the ledger explains them.
 
 ```sh
 node --input-type=module <<'JS'
@@ -284,7 +311,19 @@ import path from "node:path"
 const home = process.env.BRAIN_TRAIN_HOME || path.join(os.homedir(), ".btrain")
 const { repos } = JSON.parse(fs.readFileSync(path.join(home, "repos.json"), "utf8"))
 const rows = {}, gaps = []
-let withEvents = 0
+let withEvents = 0, snapshotEvents = 0
+const tally = (event, repository) => {
+  const id = event.details?.["transition-advisory"]
+  if (!id) return
+  const row = rows[id] ??= { count: 0, idle: 0, last: "", repository: "" }
+  row.count += 1
+  if (event.before?.status === "idle") row.idle += 1
+  if (event.recordedAt > row.last) {
+    row.last = event.recordedAt
+    row.repository = repository
+    row.bound = new Date(Date.parse(row.last) + 7 * 86400000).toISOString()
+  }
+}
 for (const repo of repos) {
   if (!fs.existsSync(repo.path)) { gaps.push(`Missing checkout: ${repo.path}`); continue }
   const dir = path.join(repo.path, ".btrain", "events")
@@ -294,20 +333,20 @@ for (const repo of repos) {
     for (const line of fs.readFileSync(path.join(dir, file), "utf8").split("\n").filter(Boolean)) {
       let event
       try { event = JSON.parse(line) } catch { gaps.push(`Malformed event: ${dir}/${file}`); continue }
-      const id = event.details?.["transition-advisory"]
-      if (!id) continue
-      const row = rows[id] ??= { count: 0, idle: 0, last: "", repository: "" }
-      row.count += 1
-      if (event.before?.status === "idle") row.idle += 1
-      if (event.recordedAt > row.last) {
-        row.last = event.recordedAt
-        row.repository = repo.path
-        row.bound = new Date(Date.parse(row.last) + 7 * 86400000).toISOString()
-      }
+      tally(event, repo.path)
     }
   }
 }
-console.log(JSON.stringify({ registered: repos.length, withEvents, rows, gaps }, null, 2))
+// Pruned registrations keep counting through their evidence snapshots.
+const auditDir = path.join(home, "audit")
+for (const file of fs.existsSync(auditDir) ? fs.readdirSync(auditDir).filter(file => file.endsWith(".json")) : []) {
+  const snapshot = JSON.parse(fs.readFileSync(path.join(auditDir, file), "utf8"))
+  for (const { entry, advisoryEvents = [], gaps: entryGaps = [] } of snapshot.entries || []) {
+    for (const { event } of advisoryEvents) { tally(event, `${entry.path} (pruned; ${file})`); snapshotEvents += 1 }
+    for (const gap of entryGaps) gaps.push(`Pruned ${entry.path}: ${gap}`)
+  }
+}
+console.log(JSON.stringify({ registered: repos.length, withEvents, snapshotEvents, rows, gaps }, null, 2))
 JS
 ```
 
