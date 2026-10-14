@@ -398,9 +398,12 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
   // recorded outcome. Signalling the helper shell cannot show this (its trap
   // exits 128 + signal itself), so the command signals its own parent, the
   // Node executor. A parent cannot exit before its child, so the PID cannot
-  // be reused, and no test-side latency eats into the deadline. The command
-  // records whether a TERM had already arrived when it sent SIGINT; that
-  // attempt is retried because the deadline, not SIGINT, was the first cause.
+  // be reused, and no test-side latency eats into the deadline. If the
+  // deadline still wins (a TERM already logged before SIGINT, or a stall
+  // between that check and the kill that ends in a timeout skip), the attempt
+  // is retried; the last attempt must pass every assertion. The deadline case
+  // therefore pins M16 always, and M17 unless every attempt stalls about a
+  // second; the second-signal case pins M17 without any timing dependence.
   for (const [name, timeout, second] of [
     ["a second signal", "60", "TERM"],
     ["the deadline", "1", ""],
@@ -433,7 +436,8 @@ for _ in $(seq 1000); do /bin/sleep 0.01; done
               ZVEC_TEST_ORDER: orderLog, ZVEC_TEST_SECOND: second },
           })
           const [order = ""] = await readLines(orderLog)
-          if (order.startsWith("late ") && attempt < 3) continue
+          const deadlineWon = order.startsWith("late ") || /did not finish within/.test(result.stdout)
+          if (deadlineWon && attempt < 3) continue
           assert.match(order, /^first .*node/, "SIGINT must reach the Node executor as the first cause")
           assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
           assert.doesNotMatch(result.stdout, /did not finish within/)
