@@ -25,8 +25,12 @@ const BOT_REVIEW_READY_STATUSES = new Set(["ready-for-pr", "pr-review"])
 const APPROVAL_SURVIVES_STATUSES = new Set(["ready-for-pr", "pr-review", "ready-to-merge"])
 const APPROVAL_WITHDRAWN_BY_TYPES = new Set(["claim", "request-changes", "watchdog-repair"])
 
-const REVIEWED_HEAD_PATTERN = /^[ \t]*Reviewed-Head[ \t]*:[ \t]*([0-9a-fA-F]{7,40})[ \t]*$/im
-const ABBREVIATED_SHA_PATTERN = /^[0-9a-f]{7,40}$/
+// Only a full object ID is accepted. An abbreviation can name two different
+// commits — git itself only guarantees uniqueness at the moment it abbreviates
+// — and an approval that matches the wrong commit is exactly the failure this
+// gate exists to prevent. 40 hex is sha1, 64 is sha256.
+const REVIEWED_HEAD_PATTERN = /^[ \t]*Reviewed-Head[ \t]*:[ \t]*([0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?)[ \t]*$/im
+const FULL_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
 function laneEventLogPath(repoRoot, laneId = "") {
   const { eventsDir } = getRepoPaths(repoRoot)
@@ -60,13 +64,13 @@ export function parseReviewedHead(summary) {
   return match ? match[1].toLowerCase() : ""
 }
 
-// Git abbreviates, so an approval recorded as `9f8bbe4` must still match a
-// full target SHA. Only a prefix relationship counts, never a substring.
+// Full object IDs, compared whole. No prefix matching: two commits can share a
+// short prefix, and a gate that accepts a prefix can authorize the wrong one.
 export function shaMatches(left, right) {
-  const a = String(left || "").toLowerCase()
-  const b = String(right || "").toLowerCase()
-  if (!ABBREVIATED_SHA_PATTERN.test(a) || !ABBREVIATED_SHA_PATTERN.test(b)) return false
-  return a.length <= b.length ? b.startsWith(a) : a.startsWith(b)
+  const a = String(left || "").trim().toLowerCase()
+  const b = String(right || "").trim().toLowerCase()
+  if (!FULL_OBJECT_ID_PATTERN.test(a) || !FULL_OBJECT_ID_PATTERN.test(b)) return false
+  return a === b
 }
 
 // The live approval is the last `handoff resolve` that reached ready-for-pr
@@ -155,7 +159,7 @@ export async function findLocalReviewProblem(repoRoot, { lane = {}, laneId = "",
 
   const reviewedHead = parseReviewedHead(approval.details?.summary)
   if (!reviewedHead) {
-    return `the local peer approval of lane ${label} does not name the revision it covers (no \`Reviewed-Head:\` trailer in the resolve summary)`
+    return `the local peer approval of lane ${label} does not name the revision it covers (the resolve summary has no \`Reviewed-Head:\` trailer carrying a full 40-character object ID)`
   }
   if (!targetSha) {
     if (!requireHead) return ""
@@ -167,12 +171,18 @@ export async function findLocalReviewProblem(repoRoot, { lane = {}, laneId = "",
   return ""
 }
 
+// The remediation is meant to be pasted into a shell, so the resolve command
+// builds its multi-line summary with printf. A literal "\n" inside double
+// quotes would reach btrain as two characters and the trailer would not parse.
 function refusalText(problem, laneId, stage) {
   const label = laneLabelFor(laneId)
-  return `${stage} needs a current local peer review first: ${problem}. `
-    + `Hand the revision to the reviewer with \`btrain handoff update --lane ${label} --status needs-review\`. `
-    + `The reviewer approves it with \`btrain handoff resolve --lane ${label} --summary "<verdict>\\n\\nReviewed-Head: <sha>"\`, where <sha> is the revision they reviewed. `
-    + "An approval made before this gate existed, or one that no longer covers the current revision, is refreshed the same way: back to needs-review, then a resolve whose summary carries the current `Reviewed-Head`. "
+  return `${stage} needs a current local peer review first: ${problem}.\n`
+    + `  1. Hand the revision to the reviewer:\n`
+    + `       btrain handoff update --lane ${label} --status needs-review\n`
+    + `  2. The reviewer approves the exact revision they read:\n`
+    + `       btrain handoff resolve --lane ${label} --summary "$(printf '<verdict>\\n\\nReviewed-Head: %s' "$(git rev-parse HEAD)")"\n`
+    + `     Reviewed-Head must be the full 40-character object ID; an abbreviation is rejected.\n`
+    + `An approval made before this gate existed, or one overtaken by a new commit, is refreshed by those same two steps.\n`
     + `If the local reviewer cannot run (out of tokens), turn this gate off with \`btrain features disable local_review\` and back on with \`btrain features enable local_review\`.`
 }
 

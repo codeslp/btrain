@@ -1015,6 +1015,28 @@ export async function resolvePushedHeadSha(repoRoot, branchName, expectedHeadTar
   return ""
 }
 
+// The live revision of a branch on the remote itself, not the local tracking
+// cache. `git ls-remote` talks to the remote every time; `refs/remotes/...`
+// is only as fresh as the last fetch.
+export async function fetchRemoteBranchSha(repoRoot, remote, branch) {
+  if (!remote || !branch) return ""
+  const output = await gitText(["ls-remote", remote, `refs/heads/${branch}`], repoRoot).catch(() => "")
+  const match = /^([0-9a-f]{40,64})\s/m.exec(output)
+  return match ? match[1].toLowerCase() : ""
+}
+
+// GitHub's own answer for where the PR head is right now. `fetchPrHeadSha`
+// may substitute the local head when it believes the branch is pushed, which
+// is a judgement made from local state; authorizing a bot request needs the
+// remote truth instead.
+export async function fetchAuthoritativePrHead(repoRoot, prNumber) {
+  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid,headRefName"], repoRoot)
+  return {
+    headRefOid: String(pr?.headRefOid || "").toLowerCase(),
+    headRefName: String(pr?.headRefName || ""),
+  }
+}
+
 async function fetchPrHeadSha(repoRoot, prNumber) {
   const pr = await ghJson(
     ["pr", "view", prNumber, "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner,url"],
@@ -1047,20 +1069,43 @@ async function fetchPrHeadSha(repoRoot, prNumber) {
 }
 
 // Every bot review request (pr create, pr request-review, pr poll
-// --request-review) posts through here, so the gate lives here: it re-reads
-// the lane, which `pr poll --apply` may just have moved, and checks the
-// approval against `context.headSha` — the revision the bots will actually
-// see. A commit made after the approval changes that SHA and is refused even
-// though the lane never left `pr-review`.
+// --request-review) posts through here, so the gate lives here. It asks
+// GitHub where the PR head is right now and authorizes against that answer:
+// a caller-supplied or locally-cached SHA can be stale, and the bots review
+// whatever GitHub has. It also re-reads the lane, which `pr poll --apply` may
+// just have moved. A commit made after the approval changes the head and is
+// refused even though the lane never left `pr-review`.
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
   const laneId = context.laneId || ""
   const lane = findLane(await checkHandoff(repoRoot), laneId) || {}
+  const { headRefOid, headRefName } = await fetchAuthoritativePrHead(repoRoot, prNumber)
+  if (!headRefOid) {
+    throw new Error(`GitHub did not report a head revision for PR #${prNumber}, so no bot review can be authorized.`)
+  }
+
+  // If the owner's checkout is on the PR's head branch but sits on a different
+  // revision, the two have diverged: either the push has not landed or
+  // propagated, or there are unpushed commits. Posting now would ask the bots
+  // to review something other than what is in front of the owner.
+  const localBranch = await gitText(["branch", "--show-current"], repoRoot).catch(() => "")
+  if (localBranch && headRefName && localBranch === headRefName) {
+    const localHead = await gitText(["rev-parse", "HEAD"], repoRoot).catch(() => "")
+    if (localHead && localHead.toLowerCase() !== headRefOid) {
+      throw new Error(
+        `GitHub has PR #${prNumber} at ${headRefOid} but this checkout is on ${localHead.toLowerCase()} (branch ${headRefName}).\n`
+          + "Push the revision you want reviewed and re-run, or wait for GitHub to catch up with a push that has just landed. "
+          + "Bot review is authorized against GitHub's head, so btrain will not post while the two disagree.",
+      )
+    }
+  }
+
   await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), {
     lane,
     laneId,
-    targetSha: context.headSha || "",
+    targetSha: headRefOid,
     stage: "Posting a bot review request",
   })
+  context = { ...context, headSha: headRefOid }
   const posted = []
   for (const botId of botIds) {
     const bot = prFlowConfig.bots[botId]
@@ -1416,11 +1461,42 @@ export async function runPrCreate(repoRoot, options = {}) {
   const base = options.base
     ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote, strict: true })
     : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote })
+  // `headSha` is the revision local peer review approved, checked above. Push
+  // that object by name rather than the branch tip: a `git push origin
+  // <branch>` would publish whatever HEAD has become since the gate ran.
+  const headRemote = "origin"
   if (!options["no-push"]) {
-    await execFileAsync("git", ["push", "-u", "origin", branch], {
+    await execFileAsync("git", ["push", headRemote, `${headSha}:refs/heads/${branch}`], {
       cwd: repoRoot,
       maxBuffer: GH_MAX_BUFFER,
     })
+    // Keep the convenience `git push -u` used to provide, without letting a
+    // failure here block a PR whose branch is already published correctly.
+    await execFileAsync("git", ["branch", `--set-upstream-to=${headRemote}/${branch}`, branch], {
+      cwd: repoRoot,
+      maxBuffer: GH_MAX_BUFFER,
+    }).catch(() => {})
+  }
+
+  // Ask the remote itself what the branch points at, including under
+  // --no-push where btrain published nothing and the branch may be absent,
+  // behind, or someone else's work. `gh pr create` opens against whatever is
+  // on the remote, so this is the last point where a mismatch is catchable.
+  const publishedSha = await fetchRemoteBranchSha(repoRoot, headRemote, branch)
+  if (!publishedSha) {
+    throw new Error(
+      `\`${headRemote}/${branch}\` does not exist on the remote, so there is nothing for \`gh pr create\` to open.\n`
+        + (options["no-push"]
+          ? `Push the approved revision yourself with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or re-run without --no-push.`
+          : `The push reported success but the remote does not show the branch; check \`git ls-remote ${headRemote} refs/heads/${branch}\`.`),
+    )
+  }
+  if (publishedSha !== headSha.toLowerCase()) {
+    throw new Error(
+      `\`${headRemote}/${branch}\` is at ${publishedSha}, but local peer review approved ${headSha.toLowerCase()}.\n`
+        + `\`gh pr create\` would open a PR on the published revision, which no reviewer has approved. `
+        + `Push the approved revision with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or hand the published revision through local review first.`,
+    )
   }
 
   const title = typeof options.title === "string" && options.title.trim() ? options.title.trim() : lane.task || branch

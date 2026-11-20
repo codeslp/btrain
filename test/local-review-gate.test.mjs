@@ -117,22 +117,29 @@ async function problemFor(repo, targetSha) {
 }
 
 describe("local-review gate: trailer parsing and SHA equality", () => {
-  it("reads the Reviewed-Head trailer out of a resolve summary", () => {
-    assert.equal(parseReviewedHead("looks good\n\nReviewed-Head: 9F8BBE4\n"), "9f8bbe4")
-    assert.equal(parseReviewedHead("Reviewed-Head:\t0123456789abcdef0123456789abcdef01234567"), "0123456789abcdef0123456789abcdef01234567")
-    assert.equal(parseReviewedHead("approved, reviewed head 9f8bbe4"), "")
+  it("accepts only a full object ID in the Reviewed-Head trailer", () => {
+    const full = "0123456789abcdef0123456789abcdef01234567"
+    assert.equal(parseReviewedHead(`looks good\n\nReviewed-Head: ${full.toUpperCase()}\n`), full)
+    assert.equal(parseReviewedHead(`Reviewed-Head:\t${full}`), full)
+    assert.equal(parseReviewedHead(`Reviewed-Head: ${"a".repeat(64)}`), "a".repeat(64), "sha256 object IDs are accepted")
+    assert.equal(parseReviewedHead(`approved, reviewed head ${full}`), "")
     assert.equal(parseReviewedHead("Reviewed-Head: nothex0"), "")
-    assert.equal(parseReviewedHead("Reviewed-Head: 9f8bb"), "", "too short to identify a commit")
+    assert.equal(parseReviewedHead("Reviewed-Head: 9f8bbe4"), "", "an abbreviation is rejected")
+    assert.equal(parseReviewedHead(`Reviewed-Head: ${full.slice(0, 39)}`), "", "39 hex is still an abbreviation")
     assert.equal(parseReviewedHead(""), "")
   })
 
-  it("matches an abbreviated approval against a full SHA, by prefix only", () => {
+  it("compares object IDs whole, so a shared short prefix is not a match", () => {
     const full = "9f8bbe431660e1e8899d0bd56ea4b78f452e86b6"
-    assert.equal(shaMatches("9f8bbe4", full), true)
-    assert.equal(shaMatches(full, "9f8bbe4"), true)
+    // Same seven-character prefix, different commits. Prefix matching would
+    // have authorized either one against an approval of the other.
+    const sibling = "9f8bbe4ffffffffffffffffffffffffffffffffff".slice(0, 40)
+    assert.equal(full.slice(0, 7), sibling.slice(0, 7))
     assert.equal(shaMatches(full, full), true)
-    assert.equal(shaMatches("1660e1e", full), false, "a substring in the middle is not a match")
-    assert.equal(shaMatches("b18b938", full), false)
+    assert.equal(shaMatches(full, sibling), false)
+    assert.equal(shaMatches("9f8bbe4", full), false, "an abbreviation never matches")
+    assert.equal(shaMatches(full, "9f8bbe4"), false)
+    assert.equal(shaMatches(full.toUpperCase(), full), true, "case is normalized")
     assert.equal(shaMatches("", full), false)
   })
 })
@@ -143,7 +150,7 @@ describe("local-review gate: which approval is live", () => {
     actor: "beta",
     before: { owner: "alpha", reviewer: "beta" },
     after: { status: "ready-for-pr" },
-    details: { localReviewApproved: true, summary: "ok\n\nReviewed-Head: aaaaaaa" },
+    details: { localReviewApproved: true, summary: `ok\n\nReviewed-Head: ${"a".repeat(40)}` },
   }
 
   it("ignores an approval made before the current claim", () => {
@@ -206,8 +213,8 @@ describe("local-review gate: real approvals over real events", () => {
       assert.equal(approval.details.localReviewApproved, true)
 
       assert.equal(await problemFor(repo, headA), "", "same-head peer approval should pass")
-      // An abbreviated trailer covers the same commit.
-      assert.equal(await problemFor(repo, headA.slice(0, 7)), "")
+      // An abbreviation of the same commit is not accepted as the target.
+      assert.match(await problemFor(repo, headA.slice(0, 7)), /but the revision bound for GitHub is/)
     })
   })
 
@@ -290,8 +297,11 @@ describe("local-review gate: real approvals over real events", () => {
       await assert.rejects(
         enforceLocalReview(repo, {}, { lane: await laneA(repo), laneId: "a", targetSha: headA, stage: "`btrain pr create`" }),
         (error) => {
-          assert.match(error.message, /Reviewed-Head: <sha>/)
-          assert.match(error.message, /refreshed the same way/)
+          // The remediation must be copyable: a real printf, not a literal
+          // backslash-n that a shell would pass through as two characters.
+          assert.match(error.message, /--summary "\$\(printf '<verdict>\\n\\nReviewed-Head: %s' "\$\(git rev-parse HEAD\)"\)"/)
+          assert.match(error.message, /full 40-character object ID/)
+          assert.match(error.message, /refreshed by those same two steps/)
           return true
         },
       )
@@ -384,6 +394,192 @@ describe("local-review gate: command paths", () => {
       assert.equal(warnings.length, 1)
       assert.match(warnings[0], /local_review is disabled/)
       assert.match(warnings[0], /btrain features enable local_review/)
+    })
+  })
+})
+
+// The findings below are about what is really on the remote and really on
+// GitHub, so these tests give the repo a real bare remote and a fake `gh` on
+// PATH rather than asserting against local state.
+
+// A `gh` shim that answers `pr view --json headRefOid,headRefName` from a
+// JSON file the test controls, records every `pr comment` it is asked to
+// post, and refuses anything else.
+async function installFakeGh(root, { headRefOid, headRefName }) {
+  const binDir = path.join(root, "fakebin")
+  const statePath = path.join(root, "gh-head.json")
+  const postedPath = path.join(root, "gh-posted.log")
+  await fs.mkdir(binDir, { recursive: true })
+  await fs.writeFile(statePath, JSON.stringify({ headRefOid, headRefName }))
+  await fs.writeFile(
+    path.join(binDir, "gh"),
+    `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  cat ${JSON.stringify(statePath)}
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "comment" ]; then
+  echo "$@" >> ${JSON.stringify(postedPath)}
+  echo "https://github.com/o/r/pull/7#issuecomment-1"
+  exit 0
+fi
+echo "fake gh: unsupported: $@" >&2
+exit 1
+`,
+    { mode: 0o755 },
+  )
+  return {
+    binDir,
+    async setHead(next) {
+      await fs.writeFile(statePath, JSON.stringify({ headRefOid: next.headRefOid, headRefName: next.headRefName }))
+    },
+    async posted() {
+      return fs.readFile(postedPath, "utf8").catch(() => "")
+    },
+  }
+}
+
+async function withPath(binDir, fn) {
+  const previous = process.env.PATH
+  process.env.PATH = `${binDir}${path.delimiter}${previous}`
+  try {
+    return await fn()
+  } finally {
+    process.env.PATH = previous
+  }
+}
+
+// Adds a real bare remote at `origin` to the lane repo.
+async function addBareRemote(repo) {
+  const bare = path.join(path.dirname(repo), "remote.git")
+  await exec("git", ["init", "-q", "--bare", bare])
+  await git(repo, "remote", "add", "origin", bare)
+  return bare
+}
+
+describe("local-review gate: the published revision, not the local one", () => {
+  it("refuses --no-push when the branch is absent from the remote", async () => {
+    await withRepo(async ({ repo, home, headA }) => {
+      await addBareRemote(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA })).code, 0)
+
+      await assert.rejects(
+        runPrCreate(repo, { lane: "a", bots: "all", actor: "alpha", "no-push": true }),
+        (error) => {
+          assert.match(error.message, /does not exist on the remote/)
+          assert.match(error.message, /git push origin [0-9a-f]{40}:refs\/heads\/feat\/gate/)
+          return true
+        },
+      )
+    })
+  })
+
+  it("refuses --no-push when the published revision is not the approved one", async () => {
+    await withRepo(async ({ repo, home, headA }) => {
+      await addBareRemote(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA })).code, 0)
+      // Someone publishes a different revision on the branch.
+      const headB = await commit(repo, "export const feature = 6\n")
+      await git(repo, "push", "-q", "origin", `${headB}:refs/heads/feat/gate`)
+      await git(repo, "reset", "-q", "--hard", headA)
+
+      await assert.rejects(
+        runPrCreate(repo, { lane: "a", bots: "all", actor: "alpha", "no-push": true }),
+        (error) => {
+          assert.match(error.message, new RegExp(`is at ${headB}`))
+          assert.match(error.message, new RegExp(`approved ${headA}`))
+          assert.match(error.message, /no reviewer has approved/)
+          return true
+        },
+      )
+    })
+  })
+
+  it("pushes the approved object by name rather than the branch tip", async () => {
+    await withRepo(async ({ repo, home, headA }) => {
+      const bare = await addBareRemote(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA })).code, 0)
+
+      // runPrCreate reaches `gh pr create` with no gh installed; the push and
+      // the remote check have already happened by then.
+      await assert.rejects(runPrCreate(repo, { lane: "a", bots: "all", actor: "alpha" }))
+
+      const published = await git(bare, "rev-parse", "refs/heads/feat/gate")
+      assert.equal(published, headA, "the approved object is what reached the remote")
+    })
+  })
+})
+
+describe("local-review gate: GitHub's head authorizes each bot request", () => {
+  it("refuses to post when GitHub's head is not the approved revision", async () => {
+    await withRepo(async ({ repo, home, headA }) => {
+      const root = path.dirname(repo)
+      await addBareRemote(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA })).code, 0)
+      const link = await btrain(["handoff", "update", "--lane", "a", "--status", "pr-review", "--pr", "7", "--actor", "alpha"], { cwd: repo, home })
+      assert.equal(link.code, 0, `${link.stdout}\n${link.stderr}`)
+
+      // GitHub is on some other revision. The local checkout and the local
+      // tracking cache know nothing about it.
+      const other = "b".repeat(40)
+      const gh = await installFakeGh(root, { headRefOid: other, headRefName: "feat/gate" })
+      await withPath(gh.binDir, async () => {
+        await assert.rejects(
+          runPrRequestReview(repo, { lane: "a", bots: "all" }),
+          (error) => {
+            assert.match(error.message, new RegExp(`GitHub has PR #7 at ${other}`))
+            assert.match(error.message, new RegExp(`this checkout is on ${headA}`))
+            return true
+          },
+        )
+      })
+      assert.equal(await gh.posted(), "", "nothing may be posted while the two disagree")
+    })
+  })
+
+  it("posts against GitHub's head, not a stale local tracking ref", async () => {
+    await withRepo(async ({ repo, home, headA }) => {
+      const root = path.dirname(repo)
+      await addBareRemote(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA })).code, 0)
+      const link = await btrain(["handoff", "update", "--lane", "a", "--status", "pr-review", "--pr", "7", "--actor", "alpha"], { cwd: repo, home })
+      assert.equal(link.code, 0, `${link.stdout}\n${link.stderr}`)
+
+      // Push A, so the tracking cache says A, then move GitHub to B. A gate
+      // that trusted the tracking ref would authorize A and post about it.
+      await git(repo, "push", "-q", "-u", "origin", "feat/gate")
+      const headB = await commit(repo, "export const feature = 7\n")
+      await git(repo, "reset", "-q", "--hard", headA)
+      assert.equal(await git(repo, "rev-parse", "refs/remotes/origin/feat/gate"), headA)
+
+      const gh = await installFakeGh(root, { headRefOid: headB, headRefName: "feat/gate" })
+      await withPath(gh.binDir, async () => {
+        await assert.rejects(
+          runPrRequestReview(repo, { lane: "a", bots: "all" }),
+          /GitHub has PR #7 at /,
+          "the stale tracking ref must not authorize the post",
+        )
+      })
+      assert.equal(await gh.posted(), "")
+
+      // Approve what GitHub actually has, and move the checkout onto it.
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headB })).code, 0)
+      await btrain(["handoff", "update", "--lane", "a", "--status", "pr-review", "--pr", "7", "--actor", "alpha"], { cwd: repo, home })
+      await git(repo, "reset", "-q", "--hard", headB)
+
+      await withPath(gh.binDir, async () => {
+        const posted = await runPrRequestReview(repo, { lane: "a", bots: "all" })
+        assert.ok(posted.length > 0, "a current approval of GitHub's head posts")
+      })
+      const log = await gh.posted()
+      assert.match(log, new RegExp(`head=${headB}`), "the marker records GitHub's head")
+      assert.doesNotMatch(log, new RegExp(`head=${headA}`))
     })
   })
 })

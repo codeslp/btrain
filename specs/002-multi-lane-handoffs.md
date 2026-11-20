@@ -91,21 +91,24 @@ A revision may go to GitHub only when all of the following hold:
 1. The lane is in `ready-for-pr` or `pr-review`.
 2. The canonical event log (`.btrain/events/lane-<id>.jsonl`, or `repo.jsonl` when lanes are off) records a `handoff resolve` with `details.localReviewApproved` that reached `ready-for-pr` **since the current claim**. A later `claim`, `request-changes` or `watchdog-repair` event withdraws it, as does any later move to a status outside the PR flow. Bot feedback therefore withdraws the approval, and relinking the lane to `pr-review` does not revive it.
 3. The approver is a real peer: not the lane owner, equal to the recorded reviewer, and not an advisory resolve (L8 is exactly "actor is not the recorded reviewer"; L9 is an uncovered lane).
-4. The approval names the revision it covers, and that revision is the one bound for GitHub — the local `HEAD` for `pr create`, the PR head for a bot request. An abbreviation of seven characters or more matches by prefix.
+4. The approval names the revision it covers, and that revision is the one bound for GitHub. Object IDs are compared whole: the trailer must carry a full 40-character (sha1) or 64-character (sha256) ID, and an abbreviation is rejected rather than prefix-matched, because two commits can share a short prefix and a gate that accepts a prefix can authorize the wrong commit.
 
 The reviewer names the revision with one extra line in the summary they already pass:
 
 ```
-btrain handoff resolve --lane a --summary "approved: the gate reads clean
-
-Reviewed-Head: 9f8bbe4"
+btrain handoff resolve --lane a --summary "$(printf 'approved: the gate reads clean\n\nReviewed-Head: %s' "$(git rev-parse HEAD)")"
 ```
 
-There is no new flag. `Reviewed-Head:` is a trailer inside `--summary`, and `handoff resolve` stores the summary verbatim in the resolve event, so the binding is recorded by the existing command.
+There is no new flag. `Reviewed-Head:` is a trailer inside `--summary`, and `handoff resolve` stores the summary verbatim in the resolve event, so the binding is recorded by the existing command. The `printf` form matters when the command is pasted into a shell: a literal `\n` inside double quotes reaches btrain as two characters and the trailer does not parse.
+
+**Which revision counts as "bound for GitHub".** Never a local cache.
+
+- `btrain pr create` approves the local `HEAD`, then pushes *that object by name* (`git push origin <approved>:refs/heads/<branch>`) rather than the branch tip, so a commit made between the check and the push cannot be published. It then reads the branch back off the remote with `git ls-remote` and refuses unless the published revision is the approved one. Under `--no-push` btrain publishes nothing, so that same read is the only thing standing between an unpublished or foreign branch revision and `gh pr create`; a missing or mismatched branch is refused there.
+- Every bot review request asks GitHub for the PR's current `headRefOid` at posting time and authorizes against that. A local tracking ref such as `refs/remotes/origin/<branch>` is only as fresh as the last fetch and must not authorize a post. If the checkout is on the PR's head branch at a different revision, the request is refused and the owner is told to push or wait for propagation, rather than having the bots review something other than what is in front of them.
 
 **Refreshing an approval.** An approval made before this gate existed has no trailer, and an approval overtaken by a new commit no longer covers the current revision. Both are refreshed the same way, through the normal lane lifecycle: the owner runs `btrain handoff update --lane <id> --status needs-review`, and the reviewer resolves again with a summary carrying the current `Reviewed-Head`. No override and no administrative command is involved.
 
-The gate runs before any side effect. `btrain pr create` checks it before `git push` and before `gh pr create`, so a refusal leaves nothing on the remote. `btrain pr request-review` settles everything except the revision comparison before its first `gh` call, then compares against the PR head at post time. An explicit `--pr` that is not the lane's linked PR is refused, so one lane's approval cannot be carried onto another PR's head.
+The gate runs before any side effect. `btrain pr create` checks it before `git push` and before `gh pr create`, so a refusal leaves nothing on the remote. `btrain pr request-review` settles everything except the revision comparison before its first `gh` call, then compares against GitHub's head at post time. An explicit `--pr` that is not the lane's linked PR is refused, so one lane's approval cannot be carried onto another PR's head.
 
 `btrain pr create` additionally requires `ready-for-pr` because row 7 opens a PR from that status only. That requirement is structural and the `local_review` feature does not lift it.
 
