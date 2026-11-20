@@ -6,6 +6,8 @@
 
 import { execFile } from "node:child_process"
 import crypto from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { promisify } from "node:util"
 import {
   BtrainError,
@@ -17,15 +19,17 @@ import {
   resolveHandoff,
 } from "./core.mjs"
 import { applyTransition } from "./transitions.mjs"
-import { canonicalRepoIdentity, enforceLocalReview, normalizeReviewTarget } from "./local_review.mjs"
+import { canonicalRepoIdentity, enforceLocalReview, normalizeReviewTarget, readLaneEvents } from "./local_review.mjs"
 import {
   appendComments,
   fetchAllComments,
   getRepoIdentity,
+  ghHostArgs,
   isGhAvailable,
   parseConcatenatedJsonArrays,
   shapeComments,
 } from "./handoff/pr-comments.mjs"
+import { resolveStateRoot } from "./worktree.mjs"
 import {
   createSystemOneClient,
   loadSystemOneRuntimeConfig,
@@ -781,10 +785,10 @@ async function ghJson(args, cwd) {
   return JSON.parse(stdout)
 }
 
-async function ghApiPaginated(endpoint, cwd) {
+async function ghApiPaginated(endpoint, cwd, host = "") {
   const { stdout } = await execFileAsync(
     "gh",
-    ["api", endpoint, "--paginate", "-H", "Accept: application/vnd.github+json"],
+    ["api", endpoint, ...ghHostArgs(host), "--paginate", "-H", "Accept: application/vnd.github+json"],
     { cwd, maxBuffer: GH_MAX_BUFFER },
   )
   return parseConcatenatedJsonArrays(stdout)
@@ -846,10 +850,20 @@ async function resolveLaneAndPr(repoRoot, options) {
   if (!prNumber) {
     throw new Error("No PR linked. Pass --pr <number> or run `btrain pr create --lane <id>` first.")
   }
-  return { laneId, lane, prNumber }
+  // One resolution per command, shared by every GitHub call it makes, so a
+  // lane cannot view one repository's PR and comment on another's. Only the
+  // lane's own PR is pinned; an explicit `--pr` on a lane with none linked is
+  // a look at someone else's PR, not an adoption of it.
+  const prRepo = await resolvePrRepository(repoRoot, {
+    laneId,
+    prNumber,
+    url: String(options.pr ?? ""),
+    linked: prNumber === linkedPr,
+  })
+  return { laneId, lane, prNumber, prRepo }
 }
 
-async function fetchMarkedIssueCommentReactions({ owner, repo, issueComments = [], cwd }) {
+async function fetchMarkedIssueCommentReactions({ host = "", owner, repo, issueComments = [], cwd }) {
   const marked = (issueComments || []).filter((comment) => parseBtrainReviewMarker(comment.body))
   if (marked.length === 0) return {}
 
@@ -859,6 +873,7 @@ async function fetchMarkedIssueCommentReactions({ owner, repo, issueComments = [
       out[String(comment.id)] = await ghApiPaginated(
         `repos/${owner}/${repo}/issues/comments/${comment.id}/reactions`,
         cwd,
+        host,
       )
     } catch {
       out[String(comment.id)] = []
@@ -867,14 +882,15 @@ async function fetchMarkedIssueCommentReactions({ owner, repo, issueComments = [
   return out
 }
 
-export async function fetchPrMergeState(repoRoot, prNumber) {
-  return ghJson(["pr", "view", prNumber, "--json", "url,mergeable,mergeStateStatus"], repoRoot)
+export async function fetchPrMergeState(repoRoot, prNumber, prRepo = null) {
+  const repo = prRepo === null ? await resolvePrRepository(repoRoot) : prRepo
+  return ghJson(["pr", "view", prNumber, ...ghRepoArgs(repo), "--json", "url,mergeable,mergeStateStatus"], repoRoot)
 }
 
 export async function fetchPrReviewStatus(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
-  const { prNumber } = await resolveLaneAndPr(repoRoot, options)
+  const { prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
 
   if (!(await isGhAvailable())) {
     throw new Error("gh CLI is not installed; PR review flow requires gh.")
@@ -884,10 +900,11 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
     "pr",
     "view",
     prNumber,
+    ...ghRepoArgs(prRepo),
     "--json",
     "number,title,url,state,isDraft,mergedAt,headRefOid,headRefName,baseRefName",
   ], repoRoot)
-  const identity = await getRepoIdentity(repoRoot)
+  const identity = await prRestIdentity(repoRoot, prRepo)
   const rawComments = await fetchAllComments({ ...identity, prNumber, cwd: repoRoot })
   rawComments.issueCommentReactions = await fetchMarkedIssueCommentReactions({
     ...identity,
@@ -1096,6 +1113,194 @@ export function ghRepoFlagFor(identity) {
   return value.split("/").length === 3 ? value : ""
 }
 
+// Every `gh` call about a lane's PR names the repository that PR lives in.
+// Left off, gh picks one from `GH_REPO` or the working directory's default
+// remote, and either can be a repository the lane never opened a PR on: the
+// call then reports another PR of the same number, or none at all. An empty
+// list is the old behavior and is reached only when no identity is known —
+// a local remote, or a checkout with no usable remote.
+export function ghRepoArgs(identity) {
+  const flag = ghRepoFlagFor(identity)
+  return flag ? ["--repo", flag] : []
+}
+
+// The REST API addresses a repository as `owner/repo`, but the host decides
+// which GitHub the request reaches, so it travels with the pair: an
+// enterprise repository addressed by name alone is fetched from github.com.
+export function restIdentityFor(identity) {
+  const value = String(identity || "")
+  const parts = value.split("/")
+  if (value.startsWith("path:") || parts.length !== 3) return null
+  return { host: parts[0], owner: parts[1], repo: parts[2] }
+}
+
+// `fetchAllComments` and the reaction lookups need an addressable repository.
+// The lane's own repository answers it; `gh repo view` is the fallback for a
+// checkout whose remote names no GitHub repository, which is what every
+// caller used before.
+async function prRestIdentity(repoRoot, prRepo) {
+  return restIdentityFor(prRepo) || (await getRepoIdentity(repoRoot))
+}
+
+// ---------------------------------------------------------------------------
+// The lane's PR association
+// ---------------------------------------------------------------------------
+//
+// A PR number alone does not say which repository it is a number in, and
+// every repository has a #7. The association below pins the repository the
+// moment a lane acquires a PR — `pr create` from the URL gh printed, adoption
+// from the first resolution — and every later `status`, `poll` and
+// `request-review` reads it back rather than re-deriving it. Re-derivation
+// answers from the checkout's current remote and `GH_REPO`, both of which can
+// be changed after the fact by anyone who can edit a git config or export an
+// environment variable; a lane that polls `--apply` acts on what it reads, so
+// a redirected read can resolve a lane against another repository's merge.
+//
+// One record is one file, named for the lane, the PR and the claim, and
+// written once: lanes run concurrently and share a state root, so a single
+// document holding every lane's association would lose one lane's write to
+// another's read-modify-rename. Nothing ever updates a record in place, so
+// there is no update to lose, and the name carries the lifecycle — a fresh
+// claim looks for a file that does not exist yet, and a record left over from
+// an earlier claim is never read.
+const PR_ASSOCIATION_VERSION = 1
+
+function prAssociationPath(repoRoot, laneId, prNumber, claim) {
+  const safe = (value) => String(value || "").replace(/[^A-Za-z0-9._-]/g, "_")
+  const claimKey = crypto.createHash("sha256").update(String(claim || "")).digest("hex").slice(0, 12)
+  // Lane state: a linked worktree shares its main checkout's records.
+  return path.join(
+    resolveStateRoot(repoRoot),
+    ".btrain",
+    "pr-flow",
+    `lane-${safe(laneId) || "single"}-pr${safe(prNumber)}-${claimKey}.json`,
+  )
+}
+
+// The claim a lane is living in right now, as the timestamp of its last
+// `claim` event. An association made under a previous claim describes work
+// that has already been resolved.
+async function currentClaimStamp(repoRoot, laneId) {
+  const events = await readLaneEvents(repoRoot, laneId)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.type === "claim") return String(events[index].recordedAt || "")
+  }
+  return ""
+}
+
+// An unreadable record is not an absent one. Absent means "this lane has
+// never pinned a PR", which is the ordinary state of every lane that existed
+// before these records did, and the one case that may fall through to
+// re-deriving the repository. Anything present but unreadable is reported:
+// silently re-deriving it would hand back exactly the answer the record
+// exists to overrule.
+function corruptAssociation(file, detail) {
+  return new BtrainError({
+    message: `The PR association at ${file} cannot be read (${detail}).`,
+    reason: "btrain pins the repository a lane's PR lives in; an unreadable record cannot authorize a GitHub call.",
+    fix: `Delete ${file} to let btrain pin the repository again from the lane's remote, or upgrade btrain if a newer version wrote it.`,
+  })
+}
+
+// The association for this lane, PR and claim, or null when none was written.
+async function readPrAssociation(repoRoot, laneId, prNumber, claim) {
+  const file = prAssociationPath(repoRoot, laneId, prNumber, claim)
+  let raw
+  try {
+    raw = await fs.readFile(file, "utf8")
+  } catch (error) {
+    if (error?.code === "ENOENT") return null
+    throw error
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    throw corruptAssociation(file, error?.message || "invalid JSON")
+  }
+  if (parsed?.version !== PR_ASSOCIATION_VERSION) {
+    throw corruptAssociation(file, `unsupported record version ${JSON.stringify(parsed?.version)}`)
+  }
+  const repo = canonicalRepoIdentity(parsed?.repo)
+  if (!repo) throw corruptAssociation(file, `no repository in ${JSON.stringify(parsed?.repo)}`)
+  return { ...parsed, repo }
+}
+
+// Create-if-absent, never overwrite. Two first commands on one lane can each
+// derive a repository before either has written one; the exclusive create
+// decides which of them the lane keeps, and the loser adopts that answer
+// rather than acting on its own.
+async function pinPrRepository(repoRoot, laneId, prNumber, claim, repo) {
+  const file = prAssociationPath(repoRoot, laneId, prNumber, claim)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  const record = {
+    version: PR_ASSOCIATION_VERSION,
+    lane: laneId || "",
+    pr: String(prNumber),
+    claim: String(claim || ""),
+    repo,
+    associatedAt: new Date().toISOString(),
+  }
+  try {
+    await fs.writeFile(file, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" })
+    return repo
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error
+    const winner = await readPrAssociation(repoRoot, laneId, prNumber, claim)
+    return winner ? winner.repo : repo
+  }
+}
+
+// The repository a lane's PR lives in, resolved once per command and used for
+// every GitHub call it makes: views, comments, the REST comment fetch, and
+// the bot-review gate.
+//
+// A recorded association wins outright. Without one — a lane that adopted a
+// PR before this record existed, or one that has just been handed a number —
+// the repository comes from a URL the caller named outright (`--pr <url>`, or
+// the URL `gh pr create` printed), else from the repository btrain opens PRs
+// on for this checkout, which is the base remote `pr create` authorized the
+// approval against. `GH_REPO` is never consulted: it describes the shell, not
+// the lane. The resolution is pinned so the next command reads it back.
+// `laneId` is null for the few read-only probes that are not run on a lane's
+// behalf; they derive the repository and read nothing. `linked` says the PR
+// is the one this lane is linked to, which is what may be pinned: a `--pr`
+// aimed at some other number is a look, not an association, and pinning it
+// would bind the lane to a PR it never adopted.
+export async function resolvePrRepository(
+  repoRoot,
+  { laneId = null, prNumber = "", url = "", linked = false } = {},
+) {
+  const laneScoped = laneId !== null && Boolean(prNumber)
+  const named = canonicalRepoIdentity(prRepoIdentityFromUrl(url))
+  const claim = laneScoped ? await currentClaimStamp(repoRoot, laneId) : ""
+  const pinned = laneScoped ? await readPrAssociation(repoRoot, laneId, prNumber, claim) : null
+  if (pinned) {
+    // An explicit URL for the lane's PR number in a different repository is
+    // not a correction, it is a redirect: the lane's evidence, approval and
+    // locks all belong to the PR it is associated with.
+    if (named && named !== pinned.repo) {
+      throw new BtrainError({
+        message: `Lane ${laneId || "(single)"} is associated with PR #${prNumber} in \`${pinned.repo}\`; refusing to act on \`${named}\`.`,
+        reason: "A PR number means nothing without its repository, and this lane's approval, comment log and locks all belong to the associated one.",
+        fix: `Drop the repository from --pr, or claim a fresh lane for the PR in \`${named}\`.`,
+      })
+    }
+    return pinned.repo
+  }
+  // A checkout with no remotes — or no git repository at all — names no
+  // repository, and gh keeps its own default, exactly as before.
+  const remote = await resolveBaseRemote(repoRoot).catch(() => "")
+  const resolved = named
+    || canonicalRepoIdentity(
+      remote ? await gitText(["remote", "get-url", remote], repoRoot).catch(() => "") : "",
+    )
+  if (resolved && laneScoped && linked) {
+    return pinPrRepository(repoRoot, laneId, prNumber, claim, resolved)
+  }
+  return resolved
+}
+
 // gh picks the repository a PR opens on from its own defaults — a
 // `gh-resolved` remote marker, `GH_REPO`, a fork's parent — none of which has
 // to be the repository the gate just authorized. So the repository is named
@@ -1116,9 +1321,9 @@ export function prCreateHeadSpec(branch, headIdentity, baseIdentity) {
 // state; authorizing a bot request needs the remote truth instead. A PR
 // retargeted or rebased after the approval is visible only here, and asking
 // costs nothing extra — these fields come back in one `pr view`.
-export async function fetchAuthoritativePrHead(repoRoot, prNumber) {
+export async function fetchAuthoritativePrHead(repoRoot, prNumber, prRepo = "") {
   const pr = await ghJson(
-    ["pr", "view", prNumber, "--json", "headRefOid,headRefName,baseRefName,baseRefOid,url"],
+    ["pr", "view", prNumber, ...ghRepoArgs(prRepo), "--json", "headRefOid,headRefName,baseRefName,baseRefOid,url"],
     repoRoot,
   )
   return {
@@ -1137,9 +1342,9 @@ function prRepoIdentityFromUrl(url) {
   return match ? match[1] : ""
 }
 
-async function fetchPrHeadSha(repoRoot, prNumber) {
+async function fetchPrHeadSha(repoRoot, prNumber, prRepo = "") {
   const pr = await ghJson(
-    ["pr", "view", prNumber, "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner,url"],
+    ["pr", "view", prNumber, ...ghRepoArgs(prRepo), "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner,url"],
     repoRoot,
   )
   const headOwner = pr?.headRepositoryOwner?.login || ""
@@ -1178,7 +1383,8 @@ async function fetchPrHeadSha(repoRoot, prNumber) {
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
   const laneId = context.laneId || ""
   const lane = findLane(await checkHandoff(repoRoot), laneId) || {}
-  const { headRefOid, headRefName, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber)
+  const target = context.prRepo || ""
+  const { headRefOid, headRefName, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber, target)
   if (!headRefOid) {
     throw new Error(`GitHub did not report a head revision for PR #${prNumber}, so no bot review can be authorized.`)
   }
@@ -1222,7 +1428,7 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
     const bot = prFlowConfig.bots[botId]
     if (!bot) continue
     const body = buildReviewRequestBody(bot, context)
-    await ghText(["pr", "comment", prNumber, "--body", body], repoRoot)
+    await ghText(["pr", "comment", prNumber, ...ghRepoArgs(target), "--body", body], repoRoot)
     posted.push({ bot: botId, body: bot.requestBody })
   }
   return posted
@@ -1323,8 +1529,8 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
 export async function runPrPoll(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
-  const { laneId, prNumber } = await resolveLaneAndPr(repoRoot, options)
-  const identity = await getRepoIdentity(repoRoot)
+  const { laneId, prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
+  const identity = await prRestIdentity(repoRoot, prRepo)
   const rawComments = await fetchAllComments({ ...identity, prNumber, cwd: repoRoot })
   const shaped = shapeComments(rawComments)
   const appended = await appendComments(repoRoot, laneId, prNumber, shaped)
@@ -1346,6 +1552,7 @@ export async function runPrPoll(repoRoot, options = {}) {
     const botIds = botsOptionToIds(options.bots, prFlowConfig)
     const posted = await requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, {
       laneId,
+      prRepo,
       headSha: status.pr.headSha,
     })
     for (const item of posted) {
@@ -1359,7 +1566,7 @@ export async function runPrPoll(repoRoot, options = {}) {
 export async function runPrRequestReview(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
-  const { laneId, lane, prNumber } = await resolveLaneAndPr(repoRoot, options)
+  const { laneId, lane, prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
   // Refuse a hopeless request before spending a `gh` round trip: everything
   // but the revision comparison can be settled from the lane and its events.
   // The no-op onWarn leaves the toggle-off warning to the post-time check in
@@ -1370,10 +1577,11 @@ export async function runPrRequestReview(repoRoot, options = {}) {
     requireHead: false,
     stage: "`btrain pr request-review`",
   }, () => {})
-  const headSha = await fetchPrHeadSha(repoRoot, prNumber)
+  const headSha = await fetchPrHeadSha(repoRoot, prNumber, prRepo)
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
   const posted = await requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, {
     laneId,
+    prRepo,
     headSha,
   })
 
@@ -1653,8 +1861,14 @@ export async function runPrCreate(repoRoot, options = {}) {
 
   console.log(url)
 
+  // The URL gh printed says where the PR really landed, and the lane is now
+  // linked to it. Pinning it here is what lets the bot requests below, and
+  // every status, poll and request-review that follows in a later command,
+  // speak to the same repository without deriving it again.
+  const prRepo = await resolvePrRepository(repoRoot, { laneId, prNumber: number, url, linked: true })
+
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
-  const posted = await requestReviewComments(repoRoot, number, botIds, prFlowConfig, { laneId, headSha })
+  const posted = await requestReviewComments(repoRoot, number, botIds, prFlowConfig, { laneId, prRepo, headSha })
   for (const item of posted) {
     console.log(`requested ${item.bot}: ${item.body}`)
   }

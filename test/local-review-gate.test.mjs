@@ -24,10 +24,14 @@ import {
 } from "../src/brain_train/local_review.mjs"
 import { checkHandoff } from "../src/brain_train/core.mjs"
 import {
+  ghRepoArgs,
   ghRepoFlagFor,
   prCreateHeadSpec,
   redactRemoteUrl,
+  resolvePrRepository,
+  restIdentityFor,
   runPrCreate,
+  runPrPoll,
   runPrRequestReview,
 } from "../src/brain_train/pr-flow.mjs"
 
@@ -569,23 +573,65 @@ describe("local-review gate: command paths", () => {
 // A `gh` shim that answers `pr view --json ...` from a JSON file the test
 // controls, records every `pr comment` it is asked to post, and refuses
 // anything else.
-async function installFakeGh(root, pr) {
+//
+// It resolves the repository a `pr` subcommand is about the way gh does: the
+// `--repo` on the command when there is one, otherwise `GH_REPO`, otherwise
+// the checkout's default. REST reads carry their repository in the endpoint
+// instead. Only the one repository below holds PR #7, so a call that lands on
+// another fails the way the real gh does rather than quietly answering about
+// something else.
+//
+// Every invocation is logged as one line: the subcommand plus the `--repo`
+// and `--hostname` it carried. Bodies are left out — they are multi-line, and
+// what these tests assert on is where a call went.
+async function installFakeGh(root, pr, { host = "github.com/o/r" } = {}) {
   const binDir = path.join(root, "fakebin")
   const statePath = path.join(root, "gh-head.json")
   const postedPath = path.join(root, "gh-posted.log")
+  const invokedPath = path.join(root, "gh-invoked.log")
   await fs.mkdir(binDir, { recursive: true })
-  const write = (next) => fs.writeFile(statePath, JSON.stringify({ url: "https://github.com/o/r/pull/7", ...next }))
+  const write = (next) => fs.writeFile(statePath, JSON.stringify({ url: `https://${host}/pull/7`, ...next }))
   await write(pr)
+  const q = (value) => JSON.stringify(value)
   await fs.writeFile(
     path.join(binDir, "gh"),
     `#!/bin/sh
+repo=""
+line="$1 $2"
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    --repo) repo="$arg"; line="$line --repo $arg" ;;
+    --hostname) line="$line --hostname $arg" ;;
+  esac
+  prev="$arg"
+done
+echo "$line" >> ${q(invokedPath)}
+if [ "$1" = "--version" ]; then echo "gh version 2.0.0 (fake)"; exit 0; fi
+# A REST read names its repository in the endpoint, never with --repo.
+if [ "$1" = "api" ]; then
+  case "$2" in
+    repos/${host.split("/").slice(1).join("/")}/*) echo "[]"; exit 0 ;;
+    *) echo "fake gh: no such repository: $2" >&2; exit 1 ;;
+  esac
+fi
+[ -n "$repo" ] || repo="\${GH_REPO:-${host}}"
+# A PR is opened wherever gh resolved, and its URL says where that was.
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo "https://$repo/pull/7"
+  exit 0
+fi
+if [ "$repo" != ${q(host)} ]; then
+  echo "fake gh: no such pull request in $repo" >&2
+  exit 1
+fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  cat ${JSON.stringify(statePath)}
+  cat ${q(statePath)}
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "comment" ]; then
-  echo "$@" >> ${JSON.stringify(postedPath)}
-  echo "https://github.com/o/r/pull/7#issuecomment-1"
+  echo "$@" >> ${q(postedPath)}
+  echo "https://${host}/pull/7#issuecomment-1"
   exit 0
 fi
 echo "fake gh: unsupported: $@" >&2
@@ -599,7 +645,59 @@ exit 1
     async posted() {
       return fs.readFile(postedPath, "utf8").catch(() => "")
     },
+    async invocations() {
+      const log = await fs.readFile(invokedPath, "utf8").catch(() => "")
+      return log.split("\n").filter(Boolean)
+    },
   }
+}
+
+// `gh pr create` opens the PR on the repository the gate authorized, but
+// nothing afterwards knows which one that was unless it is carried: the
+// alternate default below is what the plain `gh pr view <number>` of the old
+// code would have asked about.
+const OTHER_DEFAULT_REPO = "github.com/other/elsewhere"
+
+async function withEnv(vars, fn) {
+  const previous = {}
+  for (const [key, value] of Object.entries(vars)) {
+    previous[key] = process.env[key]
+    process.env[key] = value
+  }
+  try {
+    return await fn()
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+// A remote that names a GitHub repository rather than the test's bare path,
+// so the lane resolves a repository `gh --repo` can be pointed at. The bot
+// paths never contact it: they read its URL and ask GitHub everything else.
+async function addGitHubBaseRemote(repo, url = "https://github.com/o/r.git") {
+  await git(repo, "remote", "add", "upstream", url)
+}
+
+// One file per lane, PR and claim, so counting them is how a test sees
+// whether an association was written and how many times.
+async function prAssociationFiles(repo) {
+  const dir = path.join(repo, ".btrain", "pr-flow")
+  const names = await fs.readdir(dir).catch(() => [])
+  return names.sort().map((name) => path.join(dir, name))
+}
+
+// A lane sitting at `pr-review` on PR #7, approved for GitHub's own target.
+async function linkApprovedPr(repo, home, { headA, base }) {
+  await handOff(repo, home)
+  assert.equal((await approve(repo, home, { sha: headA, base: ghBase(base) })).code, 0)
+  const link = await btrain(
+    ["handoff", "update", "--lane", "a", "--status", "pr-review", "--pr", "7", "--actor", "alpha"],
+    { cwd: repo, home },
+  )
+  assert.equal(link.code, 0, `${link.stdout}\n${link.stderr}`)
 }
 
 async function withPath(binDir, fn) {
@@ -951,6 +1049,183 @@ describe("local-review gate: GitHub's target authorizes each bot request", () =>
       const log = await gh.posted()
       assert.match(log, new RegExp(`head=${headB}`), "the marker records GitHub's head")
       assert.doesNotMatch(log, new RegExp(`head=${headA}`))
+    })
+  })
+})
+
+describe("the lane's PR repository is pinned, not re-derived", () => {
+  it("resolves a repository from a PR URL and addresses it for REST", () => {
+    assert.deepEqual(restIdentityFor("github.com/o/r"), { host: "github.com", owner: "o", repo: "r" })
+    assert.deepEqual(restIdentityFor("ghe.corp/o/r"), { host: "ghe.corp", owner: "o", repo: "r" })
+    assert.equal(restIdentityFor("path:/srv/git/btrain"), null, "a local remote is no GitHub repository")
+    assert.equal(restIdentityFor("o/r"), null, "an identity without a host cannot be addressed")
+    assert.deepEqual(ghRepoArgs("github.com/o/r"), ["--repo", "github.com/o/r"])
+    assert.deepEqual(ghRepoArgs("path:/srv/git/btrain"), [], "gh keeps its own default when there is nothing to name")
+  })
+
+  it("pins the repository gh opened the PR on, and asks that one afterwards", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      const root = path.dirname(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA, base })).code, 0)
+      const gh = await installFakeGh(root, prOn(base, headA))
+
+      // This repo's base remote is a local path, so nothing names a GitHub
+      // repository until gh prints the URL of the PR it opened. The create
+      // succeeds and the bot-review gate then refuses, because the approval
+      // was read in the local path remote rather than in `github.com/o/r` —
+      // and that refusal is the proof the view reached the created PR.
+      await withPath(gh.binDir, async () => {
+        await assert.rejects(
+          runPrCreate(repo, { lane: "a", bots: "all", actor: "alpha" }),
+          /was read in `path:.*`, but the revision is bound for `github.com\/o\/r`/,
+        )
+      })
+
+      const views = (await gh.invocations()).filter((line) => line.startsWith("pr view"))
+      assert.deepEqual(views, ["pr view --repo github.com/o/r"], "the view followed the URL gh printed")
+
+      const [file] = await prAssociationFiles(repo)
+      const record = JSON.parse(await fs.readFile(file, "utf8"))
+      assert.equal(record.repo, "github.com/o/r")
+      assert.equal(record.pr, "7")
+      assert.equal(record.lane, "a")
+    })
+  })
+
+  it("pins once when two commands race, and both act on the same repository", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      await addGitHubBaseRemote(repo)
+      await linkApprovedPr(repo, home, { headA, base })
+
+      // Both derive a repository before either has written one. Exactly one
+      // record may result, and the loser must adopt the winner's answer
+      // rather than carrying its own into the calls it is about to make.
+      const racers = { laneId: "a", prNumber: "7", linked: true }
+      const [first, second] = await Promise.all([
+        resolvePrRepository(repo, racers),
+        resolvePrRepository(repo, racers),
+      ])
+      assert.equal(first, "github.com/o/r")
+      assert.equal(second, first)
+      assert.equal((await prAssociationFiles(repo)).length, 1, "one lane, one claim, one PR, one record")
+    })
+  })
+
+  it("reports an unreadable association instead of quietly re-deriving one", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      await addGitHubBaseRemote(repo)
+      await linkApprovedPr(repo, home, { headA, base })
+      await resolvePrRepository(repo, { laneId: "a", prNumber: "7", linked: true })
+
+      const [file] = await prAssociationFiles(repo)
+      await fs.writeFile(file, "{ this is not json")
+      await assert.rejects(
+        resolvePrRepository(repo, { laneId: "a", prNumber: "7", linked: true }),
+        (error) => {
+          assert.match(error.message, /cannot be read/)
+          assert.match(error.message, new RegExp(`Delete ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`))
+          return true
+        },
+      )
+    })
+  })
+
+  it("does not pin a --pr the lane never linked", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      const root = path.dirname(repo)
+      await addGitHubBaseRemote(repo)
+      await handOff(repo, home)
+      assert.equal((await approve(repo, home, { sha: headA, base: ghBase(base) })).code, 0)
+      const gh = await installFakeGh(root, prOn(base, headA))
+
+      // The lane has no PR of its own, so looking at #7 is a look. Pinning it
+      // would bind the lane to a PR nobody adopted for it.
+      await withPath(gh.binDir, async () => {
+        await runPrRequestReview(repo, { lane: "a", bots: "all", pr: "7" })
+      })
+      assert.deepEqual(await prAssociationFiles(repo), [])
+    })
+  })
+
+  it("keeps the association when the remote and the shell both move to another repository", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      const root = path.dirname(repo)
+      await addGitHubBaseRemote(repo)
+      await linkApprovedPr(repo, home, { headA, base })
+      const gh = await installFakeGh(root, prOn(base, headA))
+
+      await withEnv({ GH_REPO: OTHER_DEFAULT_REPO }, async () => {
+        await withPath(gh.binDir, async () => {
+          assert.ok((await runPrRequestReview(repo, { lane: "a", bots: "all" })).length > 0)
+
+          // `other/elsewhere` has a #7 too. Repointing the remote at it used
+          // to be enough to make the next command act on it instead.
+          await git(repo, "remote", "set-url", "upstream", `https://${OTHER_DEFAULT_REPO}.git`)
+          assert.ok((await runPrRequestReview(repo, { lane: "a", bots: "all" })).length > 0)
+        })
+      })
+
+      const invocations = await gh.invocations()
+      assert.ok(invocations.length >= 4, invocations.join("\n"))
+      for (const line of invocations) {
+        assert.match(line, /--repo github\.com\/o\/r/, `a call left the lane's repository:\n${line}`)
+      }
+      assert.match(await gh.posted(), new RegExp(`head=${headA}`))
+    })
+  })
+
+  it("refuses an explicit --pr that is this number in another repository", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      const root = path.dirname(repo)
+      await addGitHubBaseRemote(repo)
+      await linkApprovedPr(repo, home, { headA, base })
+      const gh = await installFakeGh(root, prOn(base, headA))
+
+      await withPath(gh.binDir, async () => {
+        assert.ok((await runPrRequestReview(repo, { lane: "a", bots: "all" })).length > 0)
+        await assert.rejects(
+          runPrRequestReview(repo, { lane: "a", bots: "all", pr: `https://${OTHER_DEFAULT_REPO}/pull/7` }),
+          (error) => {
+            assert.match(error.message, /associated with PR #7 in `github\.com\/o\/r`/)
+            assert.match(error.message, new RegExp(`refusing to act on \`${OTHER_DEFAULT_REPO}\``))
+            return true
+          },
+        )
+      })
+      assert.ok(
+        !(await gh.invocations()).some((line) => line.includes(OTHER_DEFAULT_REPO)),
+        "the redirect was refused before any gh call",
+      )
+    })
+  })
+
+  it("sends REST reads to the repository's own host", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      const root = path.dirname(repo)
+      await addGitHubBaseRemote(repo, "https://ghe.corp/o/r.git")
+      await linkApprovedPr(repo, home, { headA, base })
+      const gh = await installFakeGh(root, {
+        ...prOn(base, headA),
+        number: 7,
+        title: "lane a",
+        state: "OPEN",
+        isDraft: false,
+        mergedAt: null,
+      }, { host: "ghe.corp/o/r" })
+
+      await withEnv({ GH_REPO: OTHER_DEFAULT_REPO }, async () => {
+        await withPath(gh.binDir, async () => {
+          await runPrPoll(repo, { lane: "a" })
+        })
+      })
+
+      const api = (await gh.invocations()).filter((line) => line.startsWith("api "))
+      assert.ok(api.length > 0, "the REST comment fetch ran")
+      for (const line of api) {
+        assert.match(line, /^api repos\/o\/r\//, `a REST read left the lane's repository:\n${line}`)
+        assert.match(line, /--hostname ghe\.corp/, `a REST read went to the wrong GitHub:\n${line}`)
+      }
     })
   })
 })
