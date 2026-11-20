@@ -107,21 +107,43 @@ export async function isGhAvailable() {
 export async function getRepoIdentity(repoRoot) {
   const { stdout } = await execFileAsync(
     "gh",
-    ["repo", "view", "--json", "owner,name", "-q", '.owner.login + "/" + .name'],
+    ["repo", "view", "--json", "owner,name,url", "-q", '.url + " " + .owner.login + "/" + .name'],
     { cwd: repoRoot, maxBuffer: GH_MAX_BUFFER },
   )
-  const slug = stdout.trim()
-  if (!slug.includes("/")) {
-    throw new Error(`Could not parse repo identity from gh: "${slug}"`)
+  // The URL is asked for so the host can travel with the pair, but it is not
+  // required: an answer carrying only `owner/repo` is read the way it always
+  // was, and the request simply goes to gh's own host.
+  const fields = stdout.trim().split(/\s+/).filter(Boolean)
+  const isUrl = (value) => /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+  const slug = fields.find((field) => !isUrl(field) && field.includes("/"))
+  if (!slug) {
+    throw new Error(`Could not parse repo identity from gh: "${stdout.trim()}"`)
   }
   const [owner, repo] = slug.split("/")
-  return { owner, repo }
+  return { host: hostFromUrl(fields.find(isUrl)), owner, repo }
 }
 
-async function ghApiPaginated(endpoint, cwd) {
+function hostFromUrl(url) {
+  try {
+    return new URL(String(url || "")).host
+  } catch {
+    return ""
+  }
+}
+
+// `gh api` sends to the host gh last authenticated against unless it is told
+// otherwise, so a repository on an enterprise host is addressed by name
+// alone and the request goes to github.com. The host travels with the
+// repository everywhere below.
+export function ghHostArgs(host) {
+  const value = String(host || "").trim()
+  return value ? ["--hostname", value] : []
+}
+
+async function ghApiPaginated(endpoint, cwd, host = "") {
   const { stdout } = await execFileAsync(
     "gh",
-    ["api", endpoint, "--paginate"],
+    ["api", endpoint, ...ghHostArgs(host), "--paginate"],
     { cwd, maxBuffer: GH_MAX_BUFFER },
   )
   // --paginate concatenates JSON arrays as adjacent arrays; gh joins with no
@@ -165,25 +187,28 @@ export function parseConcatenatedJsonArrays(text) {
   return out
 }
 
-export async function fetchAllComments({ owner, repo, prNumber, cwd }) {
+export async function fetchAllComments({ owner, repo, prNumber, cwd, host = "" }) {
   const issueComments = await ghApiPaginated(
     `repos/${owner}/${repo}/issues/${prNumber}/comments`,
     cwd,
+    host,
   )
   const reviewComments = await ghApiPaginated(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
     cwd,
+    host,
   )
   const reviews = await ghApiPaginated(
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
     cwd,
+    host,
   )
   return { issueComments, reviewComments, reviews }
 }
 
-export async function fetchCaptureHead({ owner, repo, prNumber, cwd }) {
+export async function fetchCaptureHead({ owner, repo, prNumber, cwd, host = "" }) {
   try {
-    const { stdout } = await execFileAsync("gh", ["api", `repos/${owner}/${repo}/pulls/${prNumber}`, "--jq", ".head.sha"], { cwd, maxBuffer: GH_MAX_BUFFER })
+    const { stdout } = await execFileAsync("gh", ["api", `repos/${owner}/${repo}/pulls/${prNumber}`, ...ghHostArgs(host), "--jq", ".head.sha"], { cwd, maxBuffer: GH_MAX_BUFFER })
     const head = stdout.trim()
     return /^[a-f0-9]{40}$/i.test(head) ? { head, observedAt: new Date().toISOString() } : { head: null, observedAt: null }
   } catch {
