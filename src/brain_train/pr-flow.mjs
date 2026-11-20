@@ -17,6 +17,7 @@ import {
   resolveHandoff,
 } from "./core.mjs"
 import { applyTransition } from "./transitions.mjs"
+import { isFeatureEnabled } from "./repo_mode.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -1035,7 +1036,16 @@ async function fetchPrHeadSha(repoRoot, prNumber) {
   })
 }
 
+// Every bot review request (pr create, pr request-review, pr poll
+// --request-review) goes through here, so the local-review gate lives here:
+// it re-reads the lane, which `pr poll --apply` may just have moved. The
+// re-read is what covers a change committed after local approval: the repair
+// for bot feedback leaves the lane in `changes-requested`, which this refuses
+// until the reviewer approves the fix and the owner relinks the PR.
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
+  const laneId = context.laneId || ""
+  const lane = findLane(await checkHandoff(repoRoot), laneId) || {}
+  enforceLocalReview(await readProjectConfig(repoRoot), lane, laneId)
   const posted = []
   for (const botId of botIds) {
     const bot = prFlowConfig.bots[botId]
@@ -1111,7 +1121,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
       transitionEvent: "pr-poll",
-      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actorLabel}"\`.`,
+      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, commit and push, then hand the fix back for local review with \`btrain handoff update --lane ${laneId} --status needs-review\`. After the reviewer resolves it, relink with \`btrain handoff update --lane ${laneId} --status pr-review --pr ${prNumber} --actor "${actorLabel}"\` and run \`btrain pr request-review --lane ${laneId} --bots all\`.`,
     })
     return "changes-requested"
   }
@@ -1175,10 +1185,37 @@ export async function runPrPoll(repoRoot, options = {}) {
   return status
 }
 
+// A lane reaches these statuses only through local peer review: `handoff
+// resolve` (ready-for-pr), or a PR link made from it (pr-review).
+const BOT_REVIEW_READY_STATUSES = new Set(["ready-for-pr", "pr-review"])
+
+// The one policy every bot-review path shares: refuse an unapproved lane while
+// `local_review` is on, warn instead of refusing while it is off (the local
+// reviewer is out of tokens). `onWarn` defaults to stderr; pass a no-op to run
+// the gate as a pre-flight that leaves the warning to the post-time check.
+export function enforceLocalReview(config, lane, laneId, onWarn) {
+  if (BOT_REVIEW_READY_STATUSES.has(lane.status)) return
+  const laneLabel = laneId || "(single)"
+  if (isFeatureEnabled(config, "local_review")) {
+    throw new Error(
+      `Bot review needs local peer review first: lane ${laneLabel} must be \`ready-for-pr\` or \`pr-review\`. Current status: \`${lane.status}\`. `
+        + `Hand the change to the reviewer with \`btrain handoff update --lane ${laneLabel} --status needs-review\`; after \`btrain handoff resolve\`, link the PR with \`btrain handoff update --lane ${laneLabel} --status pr-review --pr <number>\` and request bot review. `
+        + `If the local reviewer cannot run (out of tokens), turn this gate off with \`btrain features disable local_review\` and back on with \`btrain features enable local_review\`.`,
+    )
+  }
+  const warning = `warning: local_review is disabled, so bot review is requested for lane ${laneLabel} (status \`${lane.status}\`) without local peer review. `
+    + "Re-enable it with `btrain features enable local_review` once the local reviewer can run."
+  if (typeof onWarn === "function") onWarn(warning)
+  else console.error(warning)
+}
+
 export async function runPrRequestReview(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
-  const { laneId, prNumber } = await resolveLaneAndPr(repoRoot, options)
+  const { laneId, lane, prNumber } = await resolveLaneAndPr(repoRoot, options)
+  // Fail before any gh call. The no-op onWarn keeps the toggle-off warning for
+  // the post-time check in requestReviewComments, which prints it once.
+  enforceLocalReview(config, lane, laneId, () => {})
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
   const posted = await requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, {
     laneId,
@@ -1339,12 +1376,18 @@ export async function runPrCreate(repoRoot, options = {}) {
   if (!lane) {
     throw new Error(`Unknown lane: ${laneId}`)
   }
+  // `ready-for-pr` is structural, not part of the local_review gate: spec 002
+  // row 7 opens a PR from `ready-for-pr` only, so `btrain features disable
+  // local_review` does not lift this. With the gate off, the owner reaches
+  // `ready-for-pr` through an advisory self-resolve instead, and the bot
+  // review that `pr create` posts below warns rather than refusing.
   if (lane.status !== "ready-for-pr") {
     const laneLabel = laneId || "(single)"
     const reviewerHint = lane.reviewer ? ` --actor "${lane.reviewer}"` : ""
     throw new Error(
       `\`btrain pr create\` requires lane ${laneLabel} to be in \`ready-for-pr\` (local peer review approved). Current status: \`${lane.status}\`. `
         + `Run \`btrain handoff resolve --lane ${laneLabel}${reviewerHint}\` after the local review passes; PR-flow repos route that to ready-for-pr. `
+        + "`btrain features disable local_review` does not lift this requirement; it only downgrades the bot-review request that follows to a warning. "
         + `To relink an existing PR without re-running create, use \`btrain handoff update --lane ${laneLabel} --status pr-review --pr <number> --actor "${lane.owner || "owner"}"\`.`,
     )
   }

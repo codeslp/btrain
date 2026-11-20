@@ -76,7 +76,7 @@ When the user or a workflow signal (handoff, lane status, delegation packet, rev
 
 - **needs-review, you are reviewer** → do the review now, then `btrain handoff resolve --lane <id> --summary "..." --actor "..."`. In PR-flow repos this local approval moves to `ready-for-pr`, not final `resolved`.
 - **ready-for-pr, you are owner** → run `btrain pr create --lane <id> --bots all` or link an existing PR and move to `pr-review`.
-- **pr-review** → run `btrain pr poll --lane <id> --apply`; address bot feedback, push, and run `btrain pr request-review --lane <id> --bots all` until clear.
+- **pr-review** → run `btrain pr poll --lane <id> --apply`; address bot feedback, push, hand the fix back through `needs-review` for local review, relink as `pr-review` after it resolves, and only then run `btrain pr request-review --lane <id> --bots all`; repeat until clear. If the local reviewer is out of tokens, `btrain features disable local_review` lifts the gate until `btrain features enable local_review`.
 - **ready-to-merge** → merge the PR, then run `btrain pr poll --lane <id> --apply` so btrain final-resolves and releases locks.
 - **in-progress, you are owner** → keep working on the task. Only flip to `needs-review` after real completed work exists, reviewer context is filled in, and the `pre-handoff` skill has run.
 - **resolved or idle** → `btrain handoff claim --lane <id> --task "..." --owner "..." --reviewer "..."` and start working immediately.

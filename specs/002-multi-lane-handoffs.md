@@ -82,6 +82,16 @@ Close without merge is a **terminal lock-release** event. It is not `repair-need
 
 Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-needed` (`src/brain_train/pr-flow.mjs`) is implementation drift and a candidate counterexample. The model must pin this designated contract, not the current branch.
 
+### GitHub bot review comes after local review
+
+Every path that posts a GitHub bot review request — `btrain pr create`, `btrain pr request-review`, and `btrain pr poll --request-review` — shares one gate: the lane must be in `ready-for-pr` or `pr-review`. The gate is re-read at post time, not only at command entry, so a `pr poll --apply` that has just moved the lane to `changes-requested` on bot feedback refuses the request that follows it in the same run. The fix for that feedback therefore goes back through local review (`handoff update --status needs-review`, the reviewer's `handoff resolve`, then relinking the PR as `pr-review`) before the bots see it.
+
+`btrain pr create` additionally requires `ready-for-pr` because row 7 opens a PR from that status only. That requirement is structural and the `local_review` feature does not lift it.
+
+`btrain features disable local_review` turns the gate into a warning for when the local reviewer cannot run (out of tokens, rate limited); `btrain features enable local_review` restores it. The feature defaults to on.
+
+Scope, as of 2026-11-19: this gate lives in the PR-flow commands. It does not yet constrain the transition rows themselves, so the row 12 return (`handoff update --status pr-review` from PR-flow `changes-requested`, spec 015 Q1 Option A) and the advisory L8 self-approval still reach a gate-passing status without a local review of the new commits. Closing those is a transitions-layer change (spec 015 Q1 Option B) and is not part of this contract yet.
+
 ### `handoff resolve --final`
 
 `--final` marks a resolve as terminal: the lane becomes `resolved` and locks release. It does not enter `ready-for-pr`.
