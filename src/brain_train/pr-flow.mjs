@@ -17,7 +17,7 @@ import {
   resolveHandoff,
 } from "./core.mjs"
 import { applyTransition } from "./transitions.mjs"
-import { enforceLocalReview } from "./local_review.mjs"
+import { canonicalRepoIdentity, enforceLocalReview, normalizeReviewTarget } from "./local_review.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -1025,16 +1025,116 @@ export async function fetchRemoteBranchSha(repoRoot, remote, branch) {
   return match ? match[1].toLowerCase() : ""
 }
 
-// GitHub's own answer for where the PR head is right now. `fetchPrHeadSha`
-// may substitute the local head when it believes the branch is pushed, which
-// is a judgement made from local state; authorizing a bot request needs the
-// remote truth instead.
+// A remote URL can carry credentials (https://user:token@host/owner/repo).
+// Diagnostics are printed, logged and pasted into reviews, so only the
+// host and path of a push destination are ever shown.
+export function redactRemoteUrl(url) {
+  const raw = String(url || "").trim()
+  if (!raw) return ""
+  const scpLike = /^([^@/\s]+)@([^:/\s]+):(.+)$/.exec(raw)
+  if (scpLike) return `${scpLike[2]}:${scpLike[3]}`
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return "(unparseable remote URL)"
+  }
+  const credentials = parsed.username || parsed.password ? "***@" : ""
+  return `${parsed.protocol}//${credentials}${parsed.host}${parsed.pathname}`
+}
+
+// `git push <remote>` writes to the remote's push URLs, which are not its
+// fetch URL when `remote.<name>.pushurl` is set — and a remote may have
+// several, every one of which receives the push. Verifying the publish
+// against the fetch URL can both miss a branch that was published and accept
+// one that was not, so verification follows the push.
+export async function resolvePushDestinations(repoRoot, remote) {
+  if (!remote) return []
+  const output = await gitText(["remote", "get-url", "--push", "--all", remote], repoRoot).catch(() => "")
+  const urls = output.split("\n").map((line) => line.trim()).filter(Boolean)
+  // No configured push URL means the fetch URL is the push destination, and
+  // the remote name resolves to it.
+  return urls.length > 0 ? urls : [remote]
+}
+
+// What every push destination of `remote` currently has on `branch`.
+export async function fetchPublishedBranchShas(repoRoot, remote, branch) {
+  const destinations = await resolvePushDestinations(repoRoot, remote)
+  const published = []
+  for (const destination of destinations) {
+    published.push({
+      destination,
+      label: destination === remote ? remote : redactRemoteUrl(destination),
+      sha: await fetchRemoteBranchSha(repoRoot, destination, branch),
+    })
+  }
+  return published
+}
+
+// What a PR *would* be opened against, for the one path where no PR exists
+// yet: the canonical identity of the repository that will receive it, the
+// base ref, and the object that ref points at on that repository right now.
+// Always the remote's answer, never a local tracking ref. Once the PR
+// exists, GitHub reports the same three facts itself and
+// `fetchAuthoritativePrHead` is used instead — same meaning, better source.
+export async function resolveTargetBase(repoRoot, remote, baseRef) {
+  if (!remote || !baseRef) return null
+  const [url, baseSha] = await Promise.all([
+    gitText(["remote", "get-url", remote], repoRoot).catch(() => ""),
+    fetchRemoteBranchSha(repoRoot, remote, baseRef),
+  ])
+  return normalizeReviewTarget({ repo: canonicalRepoIdentity(url || remote), ref: baseRef, sha: baseSha })
+}
+
+// `host/owner/repo` is what `gh --repo` accepts. A `path:` identity is a
+// local remote with no GitHub repository behind it, and anything else is not
+// a repository gh can be pointed at.
+export function ghRepoFlagFor(identity) {
+  const value = String(identity || "")
+  if (value.startsWith("path:")) return ""
+  return value.split("/").length === 3 ? value : ""
+}
+
+// gh picks the repository a PR opens on from its own defaults — a
+// `gh-resolved` remote marker, `GH_REPO`, a fork's parent — none of which has
+// to be the repository the gate just authorized. So the repository is named
+// explicitly on the command. That makes the head cross-repository whenever it
+// lives elsewhere (the ordinary fork layout), and gh needs those qualified as
+// `owner:branch`; a same-repository head must stay bare.
+export function prCreateHeadSpec(branch, headIdentity, baseIdentity) {
+  const head = String(headIdentity || "")
+  if (!head || !baseIdentity || head === baseIdentity) return branch
+  const owner = head.split("/")[1] || ""
+  return owner ? `${owner}:${branch}` : branch
+}
+
+// GitHub's own answer for the whole target of a PR, not just its head: the
+// repository it lives in, the base it is open against, the object that base
+// is at, and the head. `fetchPrHeadSha` may substitute the local head when
+// it believes the branch is pushed, which is a judgement made from local
+// state; authorizing a bot request needs the remote truth instead. A PR
+// retargeted or rebased after the approval is visible only here, and asking
+// costs nothing extra — these fields come back in one `pr view`.
 export async function fetchAuthoritativePrHead(repoRoot, prNumber) {
-  const pr = await ghJson(["pr", "view", prNumber, "--json", "headRefOid,headRefName"], repoRoot)
+  const pr = await ghJson(
+    ["pr", "view", prNumber, "--json", "headRefOid,headRefName,baseRefName,baseRefOid,url"],
+    repoRoot,
+  )
   return {
     headRefOid: String(pr?.headRefOid || "").toLowerCase(),
     headRefName: String(pr?.headRefName || ""),
+    baseRefName: String(pr?.baseRefName || ""),
+    baseRefOid: String(pr?.baseRefOid || "").toLowerCase(),
+    repo: canonicalRepoIdentity(prRepoIdentityFromUrl(pr?.url)),
   }
+}
+
+// "https://github.com/owner/repo/pull/7" names the repository the PR lives
+// in, which is the base repository of that PR.
+function prRepoIdentityFromUrl(url) {
+  const match = /^(https?:\/\/[^/]+\/[^/]+\/[^/]+)\/pull\/\d+/i.exec(String(url || "").trim())
+  return match ? match[1] : ""
 }
 
 async function fetchPrHeadSha(repoRoot, prNumber) {
@@ -1078,9 +1178,14 @@ async function fetchPrHeadSha(repoRoot, prNumber) {
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
   const laneId = context.laneId || ""
   const lane = findLane(await checkHandoff(repoRoot), laneId) || {}
-  const { headRefOid, headRefName } = await fetchAuthoritativePrHead(repoRoot, prNumber)
+  const { headRefOid, headRefName, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber)
   if (!headRefOid) {
     throw new Error(`GitHub did not report a head revision for PR #${prNumber}, so no bot review can be authorized.`)
+  }
+  if (!baseRefName || !baseRefOid || !prRepo) {
+    throw new Error(
+      `GitHub did not report the full target of PR #${prNumber} (repository, base branch and base revision), so no bot review can be authorized.`,
+    )
   }
 
   // If the owner's checkout is on the PR's head branch but sits on a different
@@ -1099,10 +1204,16 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
     }
   }
 
+  // GitHub's own repository, base ref and base revision for this PR. No
+  // local remote is consulted: the bots review what GitHub has, and a
+  // checkout's remotes can point somewhere else entirely.
+  const targetBase = normalizeReviewTarget({ repo: prRepo, ref: baseRefName, sha: baseRefOid })
+
   await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), {
     lane,
     laneId,
     targetSha: headRefOid,
+    targetBase,
     stage: "Posting a bot review request",
   })
   context = { ...context, headSha: headRefOid }
@@ -1444,23 +1555,29 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
 
-  // Before the push and before `gh pr create`: the local HEAD is what would
-  // become the PR head, so the peer approval must name that exact revision.
-  // Nothing has left this machine yet when this throws.
-  await enforceLocalReview(repoRoot, config, {
-    lane,
-    laneId,
-    targetSha: headSha,
-    stage: "`btrain pr create`",
-  })
-
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
-  // `gh pr create --base` only accepts a branch name on the remote.
+  // `gh pr create --base` only accepts a branch name on the remote. The base
+  // is resolved before the gate because `--base` can replace the base the
+  // lane was reviewed against, and the gate authorizes the whole target.
   const baseRemote = await resolveBaseRemote(repoRoot)
   const isRemoteBranch = (name) => remoteBranchExists(repoRoot, name, baseRemote)
   const base = options.base
     ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote, strict: true })
     : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote })
+  const targetBase = await resolveTargetBase(repoRoot, baseRemote, base)
+
+  // Before the push and before `gh pr create`: the local HEAD is what would
+  // become the PR head and `base` is what the diff would be taken against,
+  // so the peer approval must name that exact target. Nothing has left this
+  // machine yet when this throws.
+  await enforceLocalReview(repoRoot, config, {
+    lane,
+    laneId,
+    targetSha: headSha,
+    targetBase,
+    stage: "`btrain pr create`",
+  })
+
   // `headSha` is the revision local peer review approved, checked above. Push
   // that object by name rather than the branch tip: a `git push origin
   // <branch>` would publish whatever HEAD has become since the gate ran.
@@ -1478,30 +1595,45 @@ export async function runPrCreate(repoRoot, options = {}) {
     }).catch(() => {})
   }
 
-  // Ask the remote itself what the branch points at, including under
-  // --no-push where btrain published nothing and the branch may be absent,
-  // behind, or someone else's work. `gh pr create` opens against whatever is
-  // on the remote, so this is the last point where a mismatch is catchable.
-  const publishedSha = await fetchRemoteBranchSha(repoRoot, headRemote, branch)
-  if (!publishedSha) {
-    throw new Error(
-      `\`${headRemote}/${branch}\` does not exist on the remote, so there is nothing for \`gh pr create\` to open.\n`
-        + (options["no-push"]
-          ? `Push the approved revision yourself with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or re-run without --no-push.`
-          : `The push reported success but the remote does not show the branch; check \`git ls-remote ${headRemote} refs/heads/${branch}\`.`),
-    )
-  }
-  if (publishedSha !== headSha.toLowerCase()) {
-    throw new Error(
-      `\`${headRemote}/${branch}\` is at ${publishedSha}, but local peer review approved ${headSha.toLowerCase()}.\n`
-        + `\`gh pr create\` would open a PR on the published revision, which no reviewer has approved. `
-        + `Push the approved revision with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or hand the published revision through local review first.`,
-    )
+  // Ask the destinations the push actually writes to what the branch points
+  // at, including under --no-push where btrain published nothing and the
+  // branch may be absent, behind, or someone else's work. `gh pr create`
+  // opens against what is published, so this is the last catchable mismatch.
+  for (const published of await fetchPublishedBranchShas(repoRoot, headRemote, branch)) {
+    const where = `\`${published.label}\` (${branch})`
+    if (!published.sha) {
+      throw new Error(
+        `${where} does not have the branch, so there is nothing for \`gh pr create\` to open.\n`
+          + (options["no-push"]
+            ? `Push the approved revision yourself with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or re-run without --no-push.`
+            : `The push reported success but the destination does not show the branch; check \`git ls-remote --get-url --push ${headRemote}\`.`),
+      )
+    }
+    if (published.sha !== headSha.toLowerCase()) {
+      throw new Error(
+        `${where} is at ${published.sha}, but local peer review approved ${headSha.toLowerCase()}.\n`
+          + `\`gh pr create\` would open a PR on the published revision, which no reviewer has approved. `
+          + `Push the approved revision with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or hand the published revision through local review first.`,
+      )
+    }
   }
 
   const title = typeof options.title === "string" && options.title.trim() ? options.title.trim() : lane.task || branch
   const body = typeof options.body === "string" && options.body.trim() ? options.body.trim() : buildPrBody(lane)
-  const args = ["pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body]
+  // Open the PR on the repository the approval was checked against, not on
+  // whichever one gh would have defaulted to. The head is qualified when it
+  // lives in another repository, which is the normal fork layout.
+  const repoFlag = ghRepoFlagFor(targetBase?.repo)
+  // Where the branch was actually published: `--push` yields the push URL
+  // when one is configured and the fetch URL otherwise.
+  const headIdentity = canonicalRepoIdentity(
+    await gitText(["remote", "get-url", "--push", headRemote], repoRoot).catch(() => ""),
+  )
+  const head = repoFlag ? prCreateHeadSpec(branch, headIdentity, targetBase?.repo) : branch
+  const args = ["pr", "create", "--base", base, "--head", head, "--title", title, "--body", body]
+  if (repoFlag) {
+    args.push("--repo", repoFlag)
+  }
   if (options.draft) {
     args.push("--draft")
   }
