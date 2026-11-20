@@ -44,3 +44,21 @@ The review-gate branch is the first correctness priority. Compact handoff output
 Compare like-sized lanes before and after each change. Measure bytes displayed per participant, elapsed time from code-ready to first local verdict, manual reassignments and returns for missing evidence. Track stale or premature approvals as correctness failures. Bytes and one-off wall times do not establish billed tokens or end-to-end savings.
 
 Evidence included btrain CLI lane state, local code and specs, live GitHub reviews and checks, and vendor documentation. The focused reviewer-dispatch and PR-flow tests passed 82/82 on main. The organizational history helper returned no results. The full suite and lane A's unmerged branch were outside this research run.
+
+## When a PR needs a shepherd
+
+Today the loop assigns ready-for-pr, pr-review and ready-to-merge to the owner. Handoff prints the next command, and handoff wait observes local lane changes. GitHub can change while that lane stays unchanged. The PR classifier can also say ready-to-merge when required bots clear, while CI or branch protection still blocks merge. The missing input is whether a specific next action is possible now. [Loop and wait logic](../src/brain_train/core.mjs) · [PR classifier](../src/brain_train/pr-flow.mjs)
+
+Start with a read-only command that answers “what needs my attention?” across the agent's lanes. Reuse that same decision in handoff output and the running loop. A cheap process can reconcile linked PRs on a bounded, backed-off timer while the loop runs. An optional GitHub event receiver can trigger the same reconciliation later. A stopped local process needs an explicitly configured host to wake an agent. Recording a reminder in a prompt cannot do that.
+
+| Observed change | Who wakes and what they do |
+| --- | --- |
+| Current local head approved, ready-for-pr | Wake the owner once to open or link the PR and request the configured bots. |
+| New actionable finding or failed required CI check on the current head | Wake the owner with the finding or failing job link. Route a code repair back through local review before requesting bot review again. |
+| Checks or bot reviews still pending, an old head reports, or an unchanged draft is on hold | Continue lightweight reconciliation. A draft with an explicit hold date can wake the owner once the date arrives to reassess the hold. |
+| Required reviews clear, required checks pass, and GitHub permits merge | Wake the authorized owner to merge under repo policy. Report an actionable conflict or required human decision to its responsible party once. |
+| GitHub reports merged or closed | Reconcile with pr poll --apply and release locks through the normal transition. Routine bookkeeping can complete without a model turn. |
+
+Show the lane, PR, observed head, responsible actor, reason, evidence link and next command in one short entry. Persist the observed event and its acknowledgement. Claim work atomically so concurrent Claude and Codex sessions cannot both act. Recheck eligibility before acting and retry an unacknowledged claim after expiry. Scope deduplication to the head, action and relevant finding or check run so a genuinely new failure on the same commit still wakes the owner. An unavailable owner can transfer shepherding through established lane authority. Reviewer fallback cannot grant merge permission.
+
+Pilot on the three open PR patterns. A green CI result on #109 still leaves its bot-policy question. Current-head feedback on #110 calls for the owner. A pending draft hold on #108 needs one reassessment and no repeated prompts. Verify duplicate events, a missed event followed by reconciliation, a restart, stale-head notifications and a merge performed outside btrain. Measure actionable wakes, duplicate wakes and elapsed time from an actionable GitHub change to owner acknowledgement.
