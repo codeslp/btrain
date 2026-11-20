@@ -248,17 +248,18 @@ export async function findLocalReviewProblem(
 
   const { approval, reason } = findLocalReviewApproval(await readLaneEvents(repoRoot, laneId))
   if (!approval) return `lane ${label} has no live local peer approval (${reason})`
+  const theApproval = `the local peer approval of lane ${label}`
 
   const identity = approvalIdentityProblem(approval, lane)
-  if (identity) return `the local peer approval of lane ${label} does not count: ${identity}`
+  if (identity) return `${theApproval} does not count: ${identity}`
 
   const reviewedHead = parseReviewedHead(approval.details?.summary)
   if (!reviewedHead) {
-    return `the local peer approval of lane ${label} does not name the revision it covers (the resolve summary has no \`Reviewed-Head:\` trailer carrying a full 40-character object ID)`
+    return `${theApproval} does not name the revision it covers (the resolve summary has no \`Reviewed-Head:\` trailer carrying a full 40-character object ID)`
   }
   const reviewedBase = parseReviewedBase(approval.details?.summary)
   if (!reviewedBase) {
-    return `the local peer approval of lane ${label} does not name the base it was read against (the resolve summary has no \`Reviewed-Base: <repository> <base ref> <base object ID>\` trailer)`
+    return `${theApproval} does not name the base it was read against (the resolve summary has no \`Reviewed-Base: <repository> <base ref> <base object ID>\` trailer)`
   }
 
   if (!targetSha) {
@@ -266,7 +267,7 @@ export async function findLocalReviewProblem(
     return `the revision bound for GitHub could not be determined, so the approval of \`${reviewedHead}\` cannot be checked against it`
   }
   if (!shaMatches(reviewedHead, targetSha)) {
-    return `the local peer approval of lane ${label} covers \`${reviewedHead}\`, but the revision bound for GitHub is \`${targetSha}\``
+    return `${theApproval} covers \`${reviewedHead}\`, but the revision bound for GitHub is \`${targetSha}\``
   }
 
   const base = normalizeReviewTarget(targetBase || {})
@@ -275,13 +276,13 @@ export async function findLocalReviewProblem(
     return `the base bound for GitHub could not be determined, so the approval of \`${reviewedBase.ref}\` at \`${reviewedBase.sha}\` cannot be checked against it`
   }
   if (base.repo !== reviewedBase.repo) {
-    return `the local peer approval of lane ${label} was read in \`${reviewedBase.repo}\`, but the revision is bound for \`${base.repo}\``
+    return `${theApproval} was read in \`${reviewedBase.repo}\`, but the revision is bound for \`${base.repo}\``
   }
   if (base.ref !== reviewedBase.ref) {
-    return `the local peer approval of lane ${label} was read against base \`${reviewedBase.ref}\`, but the PR opens against \`${base.ref}\` — a different base is a different diff`
+    return `${theApproval} was read against base \`${reviewedBase.ref}\`, but the PR opens against \`${base.ref}\` — a different base is a different diff`
   }
   if (!shaMatches(reviewedBase.sha, base.sha)) {
-    return `the local peer approval of lane ${label} was read against \`${reviewedBase.ref}\` at \`${reviewedBase.sha}\`, but \`${base.ref}\` is now at \`${base.sha}\``
+    return `${theApproval} was read against \`${reviewedBase.ref}\` at \`${reviewedBase.sha}\`, but \`${base.ref}\` is now at \`${base.sha}\``
   }
   return ""
 }
