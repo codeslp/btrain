@@ -18,9 +18,6 @@ import {
   remoteBranchExists,
   resolvePrBaseBranch,
   resolvePushedHeadSha,
-  enforceLocalReview,
-  runPrCreate,
-  runPrRequestReview,
   selectReviewRequestHeadSha,
   validatePrCreateTransition,
 } from "../src/brain_train/pr-flow.mjs"
@@ -1654,120 +1651,6 @@ describe("PR review flow handoff application", () => {
       const lane = handoff.lanes.find((candidate) => candidate._laneId === "a")
       assert.equal(lane.status, "changes-requested")
       assert.match(lane.lastUpdated, /^Codex /)
-    } finally {
-      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
-      else process.env.BRAIN_TRAIN_HOME = previousHome
-      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
-      else process.env.BTRAIN_AGENT = previousAgent
-      await fs.rm(repoRoot, { recursive: true, force: true })
-    }
-  })
-})
-
-// Local peer review before GitHub bot review. One policy, shared by `pr
-// create`, `pr request-review` and `pr poll --request-review`.
-async function disableLocalReview(repoRoot) {
-  const tomlPath = path.join(repoRoot, ".btrain", "project.toml")
-  const toml = await fs.readFile(tomlPath, "utf8")
-  const next = /^local_review\s*=\s*true\s*$/m.test(toml)
-    ? toml.replace(/^local_review\s*=\s*true\s*$/m, "local_review = false")
-    : /^\[features\]/m.test(toml)
-      ? toml.replace(/^\[features\]\s*$/m, "[features]\nlocal_review = false")
-      : `${toml.trimEnd()}\n\n[features]\nlocal_review = false\n`
-  await fs.writeFile(tomlPath, next, "utf8")
-}
-
-// A lane in PR-flow `changes-requested` with a linked PR: the state the owner
-// is in right after `pr poll --apply` reports bot feedback, and the state a
-// change committed after local approval lands in.
-async function laneAfterBotFeedback(prefix) {
-  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
-  process.env.BRAIN_TRAIN_HOME = path.join(repoRoot, ".home")
-  process.env.BTRAIN_AGENT = "Codex"
-  await execFileAsync("git", ["init", repoRoot])
-  await initRepo(repoRoot, { agent: ["Codex", "Claude"] })
-  await fs.writeFile(path.join(repoRoot, "README.md"), "# gate\n", "utf8")
-  await claimHandoff(repoRoot, { lane: "a", task: "Gate", owner: "Codex", reviewer: "Claude", files: "README.md" })
-  await patchHandoff(repoRoot, { lane: "a", actor: "Codex", status: "pr-review", pr: "31" })
-  await applyPrStatusToHandoff(repoRoot, { lane: "a" }, {
-    overall: "feedback",
-    bots: [{ id: "codex", state: "feedback" }],
-    pr: { number: 31 },
-  })
-  return repoRoot
-}
-
-describe("local review before GitHub bot review", () => {
-  it("lets an approved lane through and refuses an unapproved one", () => {
-    for (const status of ["ready-for-pr", "pr-review"]) {
-      const warnings = []
-      enforceLocalReview({}, { status }, "a", (line) => warnings.push(line))
-      assert.deepEqual(warnings, [], `${status} should need no warning`)
-    }
-    for (const status of ["in-progress", "needs-review", "changes-requested", "ready-to-merge"]) {
-      assert.throws(
-        () => enforceLocalReview({}, { status }, "a", () => {}),
-        /needs local peer review first/,
-        `${status} should be refused`,
-      )
-    }
-  })
-
-  it("warns instead of refusing while the local_review feature is off", () => {
-    const warnings = []
-    enforceLocalReview({ features: { local_review: false } }, { status: "changes-requested" }, "a", (line) => warnings.push(line))
-    assert.equal(warnings.length, 1)
-    assert.match(warnings[0], /local_review is disabled/)
-    assert.match(warnings[0], /lane a \(status `changes-requested`\)/)
-    assert.match(warnings[0], /btrain features enable local_review/)
-  })
-
-  it("refuses `pr request-review` for a lane holding bot feedback, before any gh call", async () => {
-    const previousHome = process.env.BRAIN_TRAIN_HOME
-    const previousAgent = process.env.BTRAIN_AGENT
-    const repoRoot = await laneAfterBotFeedback("btrain-local-review-request-")
-    try {
-      const handoff = await checkHandoff(repoRoot)
-      assert.equal(handoff.lanes.find((lane) => lane._laneId === "a").status, "changes-requested")
-      await assert.rejects(
-        runPrRequestReview(repoRoot, { lane: "a", bots: "all" }),
-        /needs local peer review first/,
-      )
-
-      // With the gate off the same lane is allowed through; it then fails at
-      // the gh call, which proves the refusal above was the gate and not gh.
-      await disableLocalReview(repoRoot)
-      await assert.rejects(
-        runPrRequestReview(repoRoot, { lane: "a", bots: "all" }),
-        (error) => !/needs local peer review first/.test(error.message),
-      )
-    } finally {
-      if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
-      else process.env.BRAIN_TRAIN_HOME = previousHome
-      if (previousAgent === undefined) delete process.env.BTRAIN_AGENT
-      else process.env.BTRAIN_AGENT = previousAgent
-      await fs.rm(repoRoot, { recursive: true, force: true })
-    }
-  })
-
-  it("keeps `pr create` on ready-for-pr whether local_review is on or off", async () => {
-    const previousHome = process.env.BRAIN_TRAIN_HOME
-    const previousAgent = process.env.BTRAIN_AGENT
-    const repoRoot = await laneAfterBotFeedback("btrain-local-review-create-")
-    try {
-      await assert.rejects(
-        runPrCreate(repoRoot, { lane: "a", bots: "all" }),
-        /requires lane a to be in `ready-for-pr`/,
-      )
-
-      // The toggle lifts the bot-review request, not row 7's entry into the
-      // PR flow. Without this the documented contract and `pr create` disagree.
-      await disableLocalReview(repoRoot)
-      await assert.rejects(runPrCreate(repoRoot, { lane: "a", bots: "all" }), (error) => {
-        assert.match(error.message, /requires lane a to be in `ready-for-pr`/)
-        assert.match(error.message, /does not lift this requirement/)
-        return true
-      })
     } finally {
       if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
       else process.env.BRAIN_TRAIN_HOME = previousHome

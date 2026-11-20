@@ -17,7 +17,7 @@ import {
   resolveHandoff,
 } from "./core.mjs"
 import { applyTransition } from "./transitions.mjs"
-import { isFeatureEnabled } from "./repo_mode.mjs"
+import { enforceLocalReview } from "./local_review.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -832,6 +832,16 @@ async function resolveLaneAndPr(repoRoot, options) {
         : `This btrain runner is scoped to lane ${laneId}, which has no linked PR; refusing --pr ${explicitPr}.`,
     )
   }
+  // The lane's approval covers the lane's PR. Aiming an explicit --pr at a
+  // different PR would carry this lane's approval onto another one's head, so
+  // it is refused whenever the lane already has a PR linked. A lane with no
+  // linked PR still accepts --pr, which is how an existing PR gets adopted.
+  if (explicitPr && linkedPr && explicitPr !== linkedPr) {
+    throw new Error(
+      `Lane ${laneId || "(single)"} is linked to PR #${linkedPr}; refusing --pr ${explicitPr}. `
+        + `Relink the lane first with \`btrain handoff update --lane ${laneId || "<id>"} --status pr-review --pr ${explicitPr}\`, or run the command without --pr.`,
+    )
+  }
   const prNumber = explicitPr || linkedPr
   if (!prNumber) {
     throw new Error("No PR linked. Pass --pr <number> or run `btrain pr create --lane <id>` first.")
@@ -1037,15 +1047,20 @@ async function fetchPrHeadSha(repoRoot, prNumber) {
 }
 
 // Every bot review request (pr create, pr request-review, pr poll
-// --request-review) goes through here, so the local-review gate lives here:
-// it re-reads the lane, which `pr poll --apply` may just have moved. The
-// re-read is what covers a change committed after local approval: the repair
-// for bot feedback leaves the lane in `changes-requested`, which this refuses
-// until the reviewer approves the fix and the owner relinks the PR.
+// --request-review) posts through here, so the gate lives here: it re-reads
+// the lane, which `pr poll --apply` may just have moved, and checks the
+// approval against `context.headSha` — the revision the bots will actually
+// see. A commit made after the approval changes that SHA and is refused even
+// though the lane never left `pr-review`.
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
   const laneId = context.laneId || ""
   const lane = findLane(await checkHandoff(repoRoot), laneId) || {}
-  enforceLocalReview(await readProjectConfig(repoRoot), lane, laneId)
+  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), {
+    lane,
+    laneId,
+    targetSha: context.headSha || "",
+    stage: "Posting a bot review request",
+  })
   const posted = []
   for (const botId of botIds) {
     const bot = prFlowConfig.bots[botId]
@@ -1185,41 +1200,25 @@ export async function runPrPoll(repoRoot, options = {}) {
   return status
 }
 
-// A lane reaches these statuses only through local peer review: `handoff
-// resolve` (ready-for-pr), or a PR link made from it (pr-review).
-const BOT_REVIEW_READY_STATUSES = new Set(["ready-for-pr", "pr-review"])
-
-// The one policy every bot-review path shares: refuse an unapproved lane while
-// `local_review` is on, warn instead of refusing while it is off (the local
-// reviewer is out of tokens). `onWarn` defaults to stderr; pass a no-op to run
-// the gate as a pre-flight that leaves the warning to the post-time check.
-export function enforceLocalReview(config, lane, laneId, onWarn) {
-  if (BOT_REVIEW_READY_STATUSES.has(lane.status)) return
-  const laneLabel = laneId || "(single)"
-  if (isFeatureEnabled(config, "local_review")) {
-    throw new Error(
-      `Bot review needs local peer review first: lane ${laneLabel} must be \`ready-for-pr\` or \`pr-review\`. Current status: \`${lane.status}\`. `
-        + `Hand the change to the reviewer with \`btrain handoff update --lane ${laneLabel} --status needs-review\`; after \`btrain handoff resolve\`, link the PR with \`btrain handoff update --lane ${laneLabel} --status pr-review --pr <number>\` and request bot review. `
-        + `If the local reviewer cannot run (out of tokens), turn this gate off with \`btrain features disable local_review\` and back on with \`btrain features enable local_review\`.`,
-    )
-  }
-  const warning = `warning: local_review is disabled, so bot review is requested for lane ${laneLabel} (status \`${lane.status}\`) without local peer review. `
-    + "Re-enable it with `btrain features enable local_review` once the local reviewer can run."
-  if (typeof onWarn === "function") onWarn(warning)
-  else console.error(warning)
-}
-
 export async function runPrRequestReview(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
   const { laneId, lane, prNumber } = await resolveLaneAndPr(repoRoot, options)
-  // Fail before any gh call. The no-op onWarn keeps the toggle-off warning for
-  // the post-time check in requestReviewComments, which prints it once.
-  enforceLocalReview(config, lane, laneId, () => {})
+  // Refuse a hopeless request before spending a `gh` round trip: everything
+  // but the revision comparison can be settled from the lane and its events.
+  // The no-op onWarn leaves the toggle-off warning to the post-time check in
+  // requestReviewComments, which knows the PR head and prints it once.
+  await enforceLocalReview(repoRoot, config, {
+    lane,
+    laneId,
+    requireHead: false,
+    stage: "`btrain pr request-review`",
+  }, () => {})
+  const headSha = await fetchPrHeadSha(repoRoot, prNumber)
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
   const posted = await requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, {
     laneId,
-    headSha: await fetchPrHeadSha(repoRoot, prNumber),
+    headSha,
   })
 
   for (const item of posted) {
@@ -1399,6 +1398,16 @@ export async function runPrCreate(repoRoot, options = {}) {
     throw new Error("Create a feature branch before running `btrain pr create`.")
   }
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
+
+  // Before the push and before `gh pr create`: the local HEAD is what would
+  // become the PR head, so the peer approval must name that exact revision.
+  // Nothing has left this machine yet when this throws.
+  await enforceLocalReview(repoRoot, config, {
+    lane,
+    laneId,
+    targetSha: headSha,
+    stage: "`btrain pr create`",
+  })
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.

@@ -84,13 +84,34 @@ Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-neede
 
 ### GitHub bot review comes after local review
 
-Every path that posts a GitHub bot review request — `btrain pr create`, `btrain pr request-review`, and `btrain pr poll --request-review` — shares one gate: the lane must be in `ready-for-pr` or `pr-review`. The gate is re-read at post time, not only at command entry, so a `pr poll --apply` that has just moved the lane to `changes-requested` on bot feedback refuses the request that follows it in the same run. The fix for that feedback therefore goes back through local review (`handoff update --status needs-review`, the reviewer's `handoff resolve`, then relinking the PR as `pr-review`) before the bots see it.
+Every path that sends a lane's revision to GitHub — `btrain pr create`, `btrain pr request-review`, and `btrain pr poll --request-review` — shares one gate. A lane status is not enough on its own: the owner can be approved at `ready-for-pr`, commit again, and still be at `ready-for-pr`. So the gate binds the approval to one revision.
+
+A revision may go to GitHub only when all of the following hold:
+
+1. The lane is in `ready-for-pr` or `pr-review`.
+2. The canonical event log (`.btrain/events/lane-<id>.jsonl`, or `repo.jsonl` when lanes are off) records a `handoff resolve` with `details.localReviewApproved` that reached `ready-for-pr` **since the current claim**. A later `claim`, `request-changes` or `watchdog-repair` event withdraws it, as does any later move to a status outside the PR flow. Bot feedback therefore withdraws the approval, and relinking the lane to `pr-review` does not revive it.
+3. The approver is a real peer: not the lane owner, equal to the recorded reviewer, and not an advisory resolve (L8 is exactly "actor is not the recorded reviewer"; L9 is an uncovered lane).
+4. The approval names the revision it covers, and that revision is the one bound for GitHub — the local `HEAD` for `pr create`, the PR head for a bot request. An abbreviation of seven characters or more matches by prefix.
+
+The reviewer names the revision with one extra line in the summary they already pass:
+
+```
+btrain handoff resolve --lane a --summary "approved: the gate reads clean
+
+Reviewed-Head: 9f8bbe4"
+```
+
+There is no new flag. `Reviewed-Head:` is a trailer inside `--summary`, and `handoff resolve` stores the summary verbatim in the resolve event, so the binding is recorded by the existing command.
+
+**Refreshing an approval.** An approval made before this gate existed has no trailer, and an approval overtaken by a new commit no longer covers the current revision. Both are refreshed the same way, through the normal lane lifecycle: the owner runs `btrain handoff update --lane <id> --status needs-review`, and the reviewer resolves again with a summary carrying the current `Reviewed-Head`. No override and no administrative command is involved.
+
+The gate runs before any side effect. `btrain pr create` checks it before `git push` and before `gh pr create`, so a refusal leaves nothing on the remote. `btrain pr request-review` settles everything except the revision comparison before its first `gh` call, then compares against the PR head at post time. An explicit `--pr` that is not the lane's linked PR is refused, so one lane's approval cannot be carried onto another PR's head.
 
 `btrain pr create` additionally requires `ready-for-pr` because row 7 opens a PR from that status only. That requirement is structural and the `local_review` feature does not lift it.
 
-`btrain features disable local_review` turns the gate into a warning for when the local reviewer cannot run (out of tokens, rate limited); `btrain features enable local_review` restores it. The feature defaults to on.
+`btrain features disable local_review` turns the whole gate into a warning for when the local reviewer cannot run (out of tokens, rate limited); `btrain features enable local_review` restores it. The feature defaults to on. While it is on, a current peer approval of the exact revision is a hard requirement.
 
-Scope, as of 2026-11-19: this gate lives in the PR-flow commands. It does not yet constrain the transition rows themselves, so the row 12 return (`handoff update --status pr-review` from PR-flow `changes-requested`, spec 015 Q1 Option A) and the advisory L8 self-approval still reach a gate-passing status without a local review of the new commits. Closing those is a transitions-layer change (spec 015 Q1 Option B) and is not part of this contract yet.
+Scope, as of 2026-11-20: this gate lives in the PR-flow commands, not in the transition rows. The row 12 return (`handoff update --status pr-review` from PR-flow `changes-requested`, spec 015 Q1 Option A) and the advisory L8 self-approval still reach a gate-passing *status* without a fresh local review. They no longer reach GitHub: the approval check above refuses both, because bot feedback withdrew the approval and an advisory resolve does not count as a peer act. Moving the refusal into the rows themselves is spec 015 Q1 Option B and is still outstanding.
 
 ### `handoff resolve --final`
 
