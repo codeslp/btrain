@@ -1112,6 +1112,40 @@ describe("the lane's PR repository is pinned, not re-derived", () => {
     })
   })
 
+  it("refuses the loser of a race between two conflicting explicit repositories", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      await addGitHubBaseRemote(repo)
+      await linkApprovedPr(repo, home, { headA, base })
+
+      // Two commands name #7 in two different repositories at once, with no
+      // association yet to tell them apart. One pins; the other must be
+      // refused rather than quietly carrying its own repository forward.
+      const race = (host) => resolvePrRepository(repo, {
+        laneId: "a",
+        prNumber: "7",
+        linked: true,
+        url: `https://${host}/pull/7`,
+      })
+      const settled = await Promise.allSettled([race("github.com/o/r"), race(OTHER_DEFAULT_REPO)])
+
+      const won = settled.filter((result) => result.status === "fulfilled")
+      const lost = settled.filter((result) => result.status === "rejected")
+      assert.equal(won.length, 1, JSON.stringify(settled, null, 2))
+      assert.equal(lost.length, 1)
+      assert.match(lost[0].reason.message, /is associated with PR #7 in/)
+      assert.match(lost[0].reason.message, /refusing to act on/)
+
+      const [file] = await prAssociationFiles(repo)
+      assert.equal((await prAssociationFiles(repo)).length, 1, "one record, not one per racer")
+      const record = JSON.parse(await fs.readFile(file, "utf8"))
+      assert.equal(record.repo, won[0].value, "the winner is what was pinned")
+
+      // Whichever won, the file it published was complete when it appeared.
+      assert.equal(record.version, 1)
+      assert.equal(record.pr, "7")
+    })
+  })
+
   it("reports an unreadable association instead of quietly re-deriving one", async () => {
     await withRepo(async ({ repo, home, headA, base }) => {
       await addGitHubBaseRemote(repo)

@@ -1127,11 +1127,10 @@ export function ghRepoArgs(identity) {
 // The REST API addresses a repository as `owner/repo`, but the host decides
 // which GitHub the request reaches, so it travels with the pair: an
 // enterprise repository addressed by name alone is fetched from github.com.
+// What counts as an addressable repository is decided in one place, above.
 export function restIdentityFor(identity) {
-  const value = String(identity || "")
-  const parts = value.split("/")
-  if (value.startsWith("path:") || parts.length !== 3) return null
-  return { host: parts[0], owner: parts[1], repo: parts[2] }
+  const [host, owner, repo] = ghRepoFlagFor(identity).split("/")
+  return repo ? { host, owner, repo } : null
 }
 
 // `fetchAllComments` and the reaction lookups need an addressable repository.
@@ -1226,11 +1225,31 @@ async function readPrAssociation(repoRoot, laneId, prNumber, claim) {
   return { ...parsed, repo }
 }
 
+// A caller that named a repository outright and a lane that is associated
+// with another one disagree about which PR this is. The lane's evidence,
+// approval and locks all belong to the one it adopted, so the named one is a
+// redirect rather than a correction. Both the already-pinned path and the
+// lost-race path refuse it here, so they cannot drift apart.
+function redirectRefusal(laneId, prNumber, associated, named) {
+  if (!named || named === associated) return null
+  return new BtrainError({
+    message: `Lane ${laneId || "(single)"} is associated with PR #${prNumber} in \`${associated}\`; refusing to act on \`${named}\`.`,
+    reason: "A PR number means nothing without its repository, and this lane's approval, comment log and locks all belong to the associated one.",
+    fix: `Drop the repository from --pr, or claim a fresh lane for the PR in \`${named}\`.`,
+  })
+}
+
 // Create-if-absent, never overwrite. Two first commands on one lane can each
-// derive a repository before either has written one; the exclusive create
+// derive a repository before either has written one; the exclusive publish
 // decides which of them the lane keeps, and the loser adopts that answer
 // rather than acting on its own.
-async function pinPrRepository(repoRoot, laneId, prNumber, claim, repo) {
+//
+// The record is written in full under a private name and then published with
+// a single `link`, whose destination is exclusive. Creating the public
+// pathname first and writing into it afterwards — what an exclusive `open`
+// does — would leave a window in which a concurrent reader, or a crash, finds
+// an empty file where the lane's association should be.
+async function pinPrRepository(repoRoot, { laneId, prNumber, claim, repo, named }) {
   const file = prAssociationPath(repoRoot, laneId, prNumber, claim)
   await fs.mkdir(path.dirname(file), { recursive: true })
   const record = {
@@ -1241,13 +1260,31 @@ async function pinPrRepository(repoRoot, laneId, prNumber, claim, repo) {
     repo,
     associatedAt: new Date().toISOString(),
   }
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
   try {
-    await fs.writeFile(file, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" })
-    return repo
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error
-    const winner = await readPrAssociation(repoRoot, laneId, prNumber, claim)
-    return winner ? winner.repo : repo
+    await fs.writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" })
+    try {
+      await fs.link(temp, file)
+      return repo
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error
+      const winner = await readPrAssociation(repoRoot, laneId, prNumber, claim)
+      // The association existed a moment ago and does not now, so something
+      // outside btrain removed it mid-command. Proceeding would act on this
+      // command's own derived repository with nothing pinning it.
+      if (!winner) {
+        throw new BtrainError({
+          message: `The PR association at ${file} was created and then removed while this command was pinning it.`,
+          reason: "btrain pins the repository a lane's PR lives in before it calls GitHub; an association that disappears mid-command authorizes nothing.",
+          fix: "Re-run the command. If it keeps happening, something outside btrain is deleting .btrain/pr-flow records.",
+        })
+      }
+      const refusal = redirectRefusal(laneId, prNumber, winner.repo, named)
+      if (refusal) throw refusal
+      return winner.repo
+    }
+  } finally {
+    await fs.rm(temp, { force: true })
   }
 }
 
@@ -1276,16 +1313,8 @@ export async function resolvePrRepository(
   const claim = laneScoped ? await currentClaimStamp(repoRoot, laneId) : ""
   const pinned = laneScoped ? await readPrAssociation(repoRoot, laneId, prNumber, claim) : null
   if (pinned) {
-    // An explicit URL for the lane's PR number in a different repository is
-    // not a correction, it is a redirect: the lane's evidence, approval and
-    // locks all belong to the PR it is associated with.
-    if (named && named !== pinned.repo) {
-      throw new BtrainError({
-        message: `Lane ${laneId || "(single)"} is associated with PR #${prNumber} in \`${pinned.repo}\`; refusing to act on \`${named}\`.`,
-        reason: "A PR number means nothing without its repository, and this lane's approval, comment log and locks all belong to the associated one.",
-        fix: `Drop the repository from --pr, or claim a fresh lane for the PR in \`${named}\`.`,
-      })
-    }
+    const refusal = redirectRefusal(laneId, prNumber, pinned.repo, named)
+    if (refusal) throw refusal
     return pinned.repo
   }
   // A checkout with no remotes — or no git repository at all — names no
@@ -1296,7 +1325,7 @@ export async function resolvePrRepository(
       remote ? await gitText(["remote", "get-url", remote], repoRoot).catch(() => "") : "",
     )
   if (resolved && laneScoped && linked) {
-    return pinPrRepository(repoRoot, laneId, prNumber, claim, resolved)
+    return pinPrRepository(repoRoot, { laneId, prNumber, claim, repo: resolved, named })
   }
   return resolved
 }
