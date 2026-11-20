@@ -18,6 +18,7 @@ In an agentchattr code-review session, the red team speaks after the reviewer in
 - Work in a throwaway worktree, never in the author's tree: `git worktree add --detach "${TMPDIR:-/tmp}/red-team-<lane>" <lane-head-sha>`. Hand over each repro as a file or a patch. Never write untracked files into the author's tree.
 - Do not edit the author's locked files. Put each repro in a new test file outside the lane's locks, or put the exact command and input in the review summary.
 - Do not keep a repro under `.btrain/`. That directory is gitignored, so the writer and CI cannot run what is in it.
+- Before a repro script runs `btrain init` or `btrain register` on a scratch repository, run `export BRAIN_TRAIN_HOME="${TMPDIR:-/tmp}/red-team-<lane>-home"`. Without it, the scratch repository can enter the user's real registry in `~/.btrain/repos.json`, and its advisory events then count in registry-wide audits.
 
 ## Workflow
 
