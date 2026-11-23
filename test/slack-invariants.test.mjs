@@ -195,9 +195,10 @@ describe("spec 024 publisher invariants", () => {
     const handoff = await fixture.btrain(["handoff", "--lane", "a"], { script: { defaults: { "*": { network: true } } } })
     assert.match(handoff.stdout, /status: in-progress/, "the state change was written")
 
-    // Queue an entry that cannot be sent, then run a command that fails. The
-    // queued entry is delivered only after the error is printed.
-    const queued = await fixture.btrain(metadataUpdateArgs("a", "Queued while Slack is down"), {
+    // Queue an entry that cannot be sent (a lock change is a `locks-changed`
+    // reply), then run a command that fails. The queued entry is delivered
+    // only after the error is printed.
+    const queued = await fixture.btrain(["handoff", "update", "--lane", "a", "--files", "src/,docs/", "--actor", "claude"], {
       script: { defaults: { "*": { network: true } } },
     })
     assert.equal(queued.code, 0, queued.stderr)
