@@ -135,8 +135,11 @@ max_files = 3
 max_changed_lines = 60
 max_rounds = 2
 
+[pr_flow]
+bot_pending_timeout = "30m"   # new key: wait before asking the next bot
+
 [pr_flow.bots.gh-codex]
-lab = "openai"
+lab = "openai"                # new key
 ```
 
 ## Functional Requirements
@@ -156,9 +159,11 @@ An agent with no lab is never an other-lab reviewer. `btrain doctor` lists
 the resolved lab of every agent and warns for each agent that has none. It is
 a warning, not an error, so existing repositories keep working.
 
-This is spec 017 FR-9 with two changes: the table is named for what is
-compared, and an executable that can run several labs' models never yields a
-default.
+This is spec 017 FR-9 with four changes: the table is named for what is
+compared; an executable that can run several labs' models never yields a
+default; a missing lab is a `btrain doctor` warning where 017 made it an
+error; and a `notify` runner has no lab where 017 gave it the family
+`human`.
 
 #### FR-2: Other-lab reviewer first
 
@@ -295,8 +300,9 @@ today and `btrain doctor` warns.
 
 A silent bot is answered with another bot, never with an exemption. When the
 first outside-lab bot has not reviewed the current head within
-`[pr_flow].bot_pending_timeout` (default 30 minutes), btrain requests the
-next configured outside-lab bot. A clear from any one of them satisfies the
+`[pr_flow].bot_pending_timeout`, btrain requests the next configured
+outside-lab bot. That key is new in this spec, with a default of 30 minutes.
+Spec 017 OQ-1 proposed the name, and it exists nowhere in the code today. A clear from any one of them satisfies the
 requirement. When every outside-lab bot is silent past the window, the lane
 stays `pr-review` and the problem escalates to a person (spec 024 FR-15). A
 repository that wants this protection configures at least two outside-lab
@@ -406,7 +412,7 @@ owner may. The managed pre-commit hook enforces both.
   2026-11-23). This spec takes FR-3 (fresh session), the FR-8 failure
   classes, FR-5 (visibility), and the FR-10 escalation. It replaces the FR-1
   toggle, the FR-8 timings, FR-9's table name, and OQ-1 (FR-9 here). What is
-  left of 017 is listed under "Carried over from spec 017".
+  left of 017 and 019 is listed under "Carried over from specs 017 and 019".
 - **Lane A, local review before bot review** (unmerged): this spec assumes
   its gate, so a bot review cannot stand in for the local cross-lab review.
 - **`CLAUDE.md` Handoff Gate**: "One model writes, the other reviews" becomes
@@ -517,10 +523,17 @@ Rule 2:
   share of lanes reviewed at each tier, the share of reviews closed by
   `handoff fix`, and how often an owner amends a reviewer's fix.
 
-## Carried over from spec 017
+## Carried over from specs 017 and 019
 
-Spec 017 and its implementation plan (spec 019) are superseded by this spec.
-These parts of 017 are not covered above:
+Spec 017 and its implementation plan (spec 019) are superseded by this spec,
+with one exception. These parts are not covered above:
+
+- **Spec 019 Workstream 0 stays in force.** It completes spec 015 row 4
+  enforcement, retires legacy row L8, and adds the regression that rejects
+  an owner's approval from `needs-review`. Spec 015 names it as the work
+  that started L8's advisory period. It is a prerequisite of FR-5 here, and
+  this spec extends it to retire L15 as well. Until both rows are enforced,
+  the attempt binding of FR-5 is advisory.
 
 - **Single-agent repositories.** A repository that configures one agent has
   no distinct same-lab identity. Spec 017's `<runtime>#review` identity (its

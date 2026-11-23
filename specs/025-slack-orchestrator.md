@@ -95,6 +95,36 @@ command and no listener are involved.
 **Commanding directly.** The operator can post a command with no agent
 involved. `btrain> retry-review lane=e` from the operator runs at once.
 
+## Configuration
+
+The IDs and the poll interval live in the developer's `~/.btrain/slack.json`,
+next to the fields of spec 024:
+
+```json
+{
+  "operator": "U0XXXXXXXXX",
+  "orchestrator": "U0ZZZZZZZZZ",
+  "pollSeconds": 10
+}
+```
+
+The toggle and the limits live in `.btrain/project.toml`. The numbers are
+starting values:
+
+```toml
+[features]
+slack = true
+slack_listen = true
+
+[slack.orchestrator]
+auto = ["status", "flush", "poll-pr", "retry-review"]
+approval_minutes = 15
+max_active = 3
+max_rounds = 4
+max_commands_per_hour = 20
+retry_review_per_hour = 3
+```
+
 ## Functional Requirements
 
 ### FR-1: Two toggles
@@ -220,8 +250,8 @@ transition.
 
 - At most `max_active` (default 3) loops started from Slack run at once.
 - At most `max_commands_per_hour` (default 20) commands run per repository.
-- The orchestrator may run `retry-review` at most 3 times an hour for one
-  lane without approval. Each run spends reviewer tokens.
+- The orchestrator may run `retry-review` at most `retry_review_per_hour`
+  (default 3) times an hour for one lane without approval. Each run spends reviewer tokens.
 - A command first seen more than `approval_minutes` after it was posted is
   expired without running. A listener that was down does not run a backlog
   when it comes back.
@@ -230,7 +260,7 @@ transition.
 
 `btrain slack listen` runs in the foreground until stopped.
 
-- **Reading.** Every `poll_seconds` (default 10) it calls
+- **Reading.** Every `pollSeconds` (default 10) it calls
   `conversations.history` for each mapped channel from its saved cursor, and
   `conversations.replies` for threads that hold a pending command or have new
   replies. Claude answers in threads, so thread replies must be read.
@@ -267,10 +297,11 @@ The listener answers every command it acts on with a reply under the command:
 accepted, waiting for approval, ran, rejected with the reason, or expired.
 Those replies are for the operator.
 
-Because Claude may not see another app's replies in a thread, the board of
-spec 024 gains a "recent commands" section: the last five commands with verb,
-requester, outcome, and time. The board is a pinned top-level message, which
-Claude's documentation says it reads.
+Because Claude may not see another app's replies in a thread, each
+developer's board (spec 024 FR-9) gains a "recent commands" section: the
+last five commands that developer's listener handled, with verb, requester,
+outcome, and time. A board is a pinned top-level message, which Claude's
+documentation says it reads.
 
 ### FR-14: What Claude is told
 
@@ -344,12 +375,18 @@ label of spec 024 appears in every reply.
 - **Claude's view can lag.** The board is correct as of btrain's last post.
   Without a listener or a recent btrain command, it can be minutes old. The
   board shows its update time and Claude is told to state it.
-- **Untested Slack behavior.** Three things come from documentation and need
-  a live check during implementation: whether Claude sees the current text of
-  a message that btrain updated in place; whether Claude sees btrain's
-  replies inside its own working thread; and whether `conversations.history`
-  marks a thread parent with its latest reply time. FR-11 and FR-13 are
-  written so the design holds either way.
+- **Slack behavior checked so far.** A live check in `#btrain` on 2026-11-23
+  confirmed that channel history marks a thread parent with its reply count
+  and latest reply time and leaves the replies out, as FR-11 assumes. Two
+  checks are still open because they need a bot posting in the channel:
+  whether Claude sees the current text of a message that btrain updated in
+  place, and whether Claude sees btrain's replies inside its own working
+  thread. FR-11 and FR-13 are written so the design holds either way.
+- **Mentions sent through the Claude connector got no answer.** Two test
+  mentions posted on the operator's behalf through the Claude Slack
+  connector went unanswered, one before and one after Claude joined the
+  channel. Whether Claude answers a mention the operator types has not
+  been confirmed in this workspace, and the orchestrator depends on it.
 - **A model must write an exact format.** A malformed command is rejected
   with a reason, and the operator can always type the command directly.
 

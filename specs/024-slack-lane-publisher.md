@@ -72,9 +72,9 @@ PR #114 clear · ready to merge
 merged · lane resolved after 3h 10m, 2 review rounds
 ```
 
-**The board** is one pinned message for each channel. It lists every active
-lane of every repository mapped to that channel, one line each, and btrain
-updates it in place.
+**The board** is one pinned message for each developer in each channel. It
+lists that developer's active lanes in every repository mapped to the
+channel, one line each, and btrain updates it in place.
 
 **Mentions.** btrain mentions a person in two cases only (FR-15): a problem
 that automatic handling could not clear, and a PR that is being merged,
@@ -111,6 +111,7 @@ slack = true
 [slack]
 task_chars = 300
 summary_chars = 200
+inline_timeout_ms = 2000
 ```
 
 ## Functional Requirements
@@ -233,9 +234,9 @@ cases of FR-15.
 
 ### FR-9: The board
 
-Each channel has one board for each developer. It lists every active lane of
-every repository mapped to that channel, grouped by repository: lane, display
-status, owner, reviewer, PR. A board spans repositories, so its message `ts`
+Each channel has one board for each developer. It lists that developer's
+active lanes in every repository mapped to that channel, grouped by
+repository: lane, display status, owner, reviewer, PR. A board spans repositories, so its message `ts`
 is stored in the developer's global btrain home, not in one repository's
 state. It is updated in place on each change and btrain pins it to the
 channel with `pins.add`. A pinned message stays easy for a person to find,
@@ -460,8 +461,8 @@ All tests inject a fake `fetch`, the way `system-one.mjs` accepts
   human posts with one.
 - `ready-to-merge` posts one message with the PR link and a mention. The
   "merged" reply has none.
-- Two repositories mapped to one channel share one board, grouped by
-  repository, and keep separate threads.
+- Two repositories of one developer mapped to one channel share that
+  developer's board, grouped by repository, and keep separate threads.
 - An unmapped repository posts to `defaultChannel`. With none set it makes
   no network call, and `btrain slack status` says no channel is mapped.
 - With the toggle on and no credential file, every lane command succeeds
