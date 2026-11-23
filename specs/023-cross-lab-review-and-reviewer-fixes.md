@@ -1,7 +1,7 @@
 # 023 — Cross-Lab Review by Default and Reviewer-Applied Fixes
 
 **Status**: Draft
-**Version**: 0.3.1
+**Version**: 0.3.2
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -188,7 +188,9 @@ rejected when the named reviewer is same-lab and at least one other-lab agent
 with a `cli` runner is configured. The error names the other-lab agents and
 the fix: name one of them, pass `--reviewer any-other`, or attach a
 human-confirmed override (`btrain override grant --action same-lab-review
---lane <id>`, a new override action added by this spec). This keeps spec 015
+--lane <id>`, a new override action added by this spec). An agent with no
+declared lab counts as same-lab for this rule, because btrain cannot show
+that it is from another lab. This keeps spec 015
 FR-9 intact: inference still never replaces
 a valid reviewer, and "valid" now includes the lab rule.
 
@@ -260,6 +262,25 @@ from the reviewer of the lane's active attempt, and:
 
 A duplicate verdict changes nothing.
 
+**The lane's head.** The review request records the branch the owner was on
+and its commit. Later checks read that branch, so a reviewer working from
+another checkout of the repository sees the same head. With a detached
+checkout, the head is the commit of the checkout the command runs in.
+
+**An attempt with no dispatch.** A reviewer session started by hand, and a
+reviewer with a `notify` runner, are never dispatched. When the lane's
+recorded reviewer picks up a `needs-review` lane that has no open attempt,
+btrain opens an attempt for it at the request's head. Its tier comes from
+that reviewer's lab, and a reviewer with no lab is recorded as `same-lab`.
+The recorded reviewer got its role through the claim rule (FR-3), a system
+reassignment (FR-7), or an override, so this opens no way around Rule 1. A
+verdict with no open attempt is rejected, and the message tells the reviewer
+to run `btrain handoff --lane <id>` first.
+
+**A reviewer change by a lane agent.** When a lane agent changes the
+reviewer during an open request (row 20), the open attempt ends. The new
+reviewer's attempt starts at its dispatch or its pickup.
+
 **Pickup.** The attempt records a pickup time the first time its reviewer
 runs `btrain handoff --lane <id>` under its own verified identity. A read by
 any other process, such as the Slack listener of spec 025, is not a pickup. Every dispatched
@@ -279,13 +300,15 @@ with no transition to undo.
 The same record applies to a fix confirmation (FR-12): the lane shows as
 `confirming-fix` once the owner picks it up.
 
-This requires three spec 015 legacy rows to be enforced. While L8 and L15
+This requires four spec 015 legacy rows to be enforced. While L8 and L15
 are advisory, a verdict from an actor that is not the recorded reviewer is
-accepted with an advisory. While L4 is advisory, `btrain handoff update
+accepted with an advisory. While L9 is advisory, the reviewer's approval of
+a lane whose lock coverage is suspended still enters `ready-for-pr`, where
+row 4 refuses it. While L4 is advisory, `btrain handoff update
 --status ready-for-pr` moves a lane into the PR flow with no verdict at all;
 the caller rejects only `--status resolved` today. Until L4 stops accepting
-`ready-for-pr`, `pr-review`, and `ready-to-merge` as targets, and L8 and L15
-are retired, the invariant in the Decision does not hold.
+`ready-for-pr`, `pr-review`, and `ready-to-merge` as targets, and L8, L9,
+and L15 are retired, the invariant in the Decision does not hold.
 
 #### FR-6: Late verdicts
 
@@ -506,7 +529,7 @@ Transition-table changes:
 | 1 | Claim | unchanged | unchanged | unchanged | unchanged | adds the lab rule of FR-3 | unchanged |
 | 3, 4, 5 | verdict rows | unchanged | unchanged | unchanged | reviewer of the active attempt | adds attempt and head match (FR-5) | unchanged |
 | 20 | Reassign | unchanged | unchanged | unchanged | adds `system`, for the reviewer only | reason recorded (FR-7); the existing distinct-owner, author-history, and no-PR guards | unchanged |
-| L3, L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, `ready-to-merge`, and `fix-confirmation` as targets; L3 and L4 never take `fix-confirmation` as a source | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
+| L3, L4, L8, L9, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, `ready-to-merge`, and `fix-confirmation` as targets; L3 and L4 never take `fix-confirmation` as a source | unchanged | L8, L9, and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
 
 `fix-confirmation` holds locks like any active status, so rows 17 and 18
 cover it. It is not a source for row 13: spec 006 FR-29 lists the statuses a
@@ -611,6 +634,13 @@ Rule 2:
   never tried, no same-lab reviewer is assigned until the second has had an
   attempt.
 - `handoff update --status fix-confirmation` is rejected for every actor.
+- The reviewer's `handoff resolve` on a lane whose locks were force-released
+  is rejected until coverage is restored.
+- A reviewer started by hand runs `btrain handoff --lane <id>` and then
+  `handoff resolve`: the verdict is accepted and bound to the attempt that
+  pickup opened. The same resolve with no pickup first is rejected.
+- A reviewer that runs the review from another checkout of the repository
+  can resolve when the lane's branch has not moved.
 - When btrain moves a review from one other-lab reviewer to the next, the
   lane's recorded reviewer changes with it and the event carries reason
   `next-other-lab`.
@@ -651,8 +681,8 @@ with one exception. These parts are not covered above:
   enforcement, retires legacy row L8, and adds the regression that rejects
   an owner's approval from `needs-review`. Spec 015 names it as the work
   that started L8's advisory period. It is a prerequisite of FR-5 here, and
-  this spec extends it to retire L15 and to narrow L4 (FR-5). Until all three
-  are enforced, the invariant in the Decision does not hold.
+  this spec extends it to retire L9 and L15 and to narrow L4 (FR-5). Until
+  all four are enforced, the invariant in the Decision does not hold.
 
 - **Single-agent repositories.** A repository that configures one agent has
   no distinct same-lab identity. Spec 017's `<runtime>#review` identity (its

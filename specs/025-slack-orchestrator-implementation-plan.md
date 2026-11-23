@@ -53,14 +53,16 @@ what this plan needs from it. Both lists are below.
 | Surface | Existing state | Planned change |
 | --- | --- | --- |
 | `src/brain_train/slack/` | Does not exist on `main`. The spec 024 plan creates it in its WS1 to WS5 | Twelve new modules. Three spec 024 modules gain exports (see "What the spec 024 plan must provide") |
-| The `slack` block in `cli.mjs` | Planned by spec 024 WS2. It delegates to `slack/cli.mjs` | Pass four more values into it: `listRepos`, `findAvailableLane`, a config reader, and the path of the running CLI file. Add `listen` and `whois` to the help text |
+| The `slack` block in `cli.mjs` | Planned by spec 024 WS2. It hands `slack/cli.mjs` one object of readers, with the `readLanes` function that falls back to the single handoff in a repository without lanes | Add to that object: `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (see `poll-pr`), and the path of the running CLI file. Add `listen` and `whois` to the help text |
+| The `loop` block in `cli.mjs` (line 2363) | Calls `runLoop` for the lane's current status | Add `--expect-status <status>`: read the lane first and exit 1 with no dispatch when its status differs. `runLoop` is not edited |
+| `enteredChangesRequestedViaPrPoll` in `core.mjs` (line 5383) | Tells a PR-flow `changes-requested` from a local one by the event that entered the status. Private, as is `readWorkflowEvents` | Unchanged. `cli.mjs` builds `enteredByPrPoll` from the lane's event log. It uses `readWorkflowEvents` once spec 023 WS2 has exported it, and until then reads the log file through the exported `getRepoPaths` |
 | `claimHandoff` in `core.mjs` (line 5959) | Takes the named `--owner` as the transition's actor and does not check who is calling. With no `--lane` it picks a lane with `findAvailableLane`. Its claim event records `task`, `lockedFiles`, and cgraph data. Not a pinned function | One conditional line in each of its two `eventDetails` objects, to record a `--requested-via` value. No other core change |
-| `findAvailableLane`, `readAllLaneStates`, `readProjectConfig`, `listRepos` in `core.mjs` | All four are exported | Passed to the listener by `cli.mjs`. Not imported by `slack/` |
+| `findAvailableLane`, `readAllLaneStates`, `readProjectConfig`, `listRepos` in `core.mjs` | All four are exported. `readAllLaneStates` returns null in a repository without lanes | Passed to the listener by `cli.mjs`, the lane reader wrapped as spec 024's `readLanes`. Not imported by `slack/` |
 | `parseOptions` in `cli.mjs` (line 288) | An argument that starts with `--` is always read as a flag, even in a value position | Unchanged. The listener rejects any field value that starts with `-` before it builds an argument list |
 | `btrain loop` in `cli.mjs` (line 2363) | Requires the `loop` feature. Runs `runLoop`, which sends each round to the owner or the reviewer by lane status (`getLoopActorForState`). A round's default timeout is 10 minutes. Exit code 1 on `failed`, `timed-out`, or `max-rounds-exceeded` | Unchanged. Started as a child for `start` and `retry-review` |
 | `buildLoopRunnerEnv` in `core.mjs` (line 8982) | Spreads the whole of `process.env` into the agent runner and adds the agent and lane pins | Unchanged. The listener removes the Slack token and every btrain pin from the environment it gives a `btrain` child, so neither reaches a lane agent through the loop |
 | `executeLoopCliRunnerWithStreaming` in `core.mjs` (line 9042) | Starts the runner in its own process group, sends `SIGTERM` to the group on timeout, then `SIGKILL` after one second, and closes its pipes | Not called. `slack/runner.mjs` uses the same pattern for the orchestrator run. Sharing one helper is a follow-up |
-| `runPrPoll` in `pr-flow.mjs` (line 1142) | With `--apply` it writes the PR outcome to the lane through the `pr-poll` event. Legacy row L5 in `transitions.mjs` accepts that event from any status | Unchanged. The listener checks the lane's stored status before it starts the child |
+| `runPrPoll` in `pr-flow.mjs` (line 1142) | With `--apply` it writes the PR outcome to the lane through the `pr-poll` event. Legacy row L5 in `transitions.mjs` accepts that event from any status, and a merged or closed PR resolves a `changes-requested` lane that has a PR number | Unchanged. The listener checks the lane's stored status, and for `changes-requested` its entry event, when the command is checked and again just before the child starts |
 | `LANE_LOCKED_ALLOWED_COMMANDS` in `cli.mjs` (line 1593) | Eight commands. `slack` and `loop` are not among them | Unchanged, and `slack` must stay out. A lane-pinned agent then cannot start, stop, or resume a listener |
 | `FEATURES` in `repo_mode.mjs` | Thirteen toggles. Spec 024 WS2 adds `slack` and the `explicitOnly` flag | Add `slack_listen` with `localDefault: false` and `explicitOnly: true` |
 | `doctorRepo` in `core.mjs` | Spec 024 WS4 appends the findings of `slack/doctor.mjs` | No core change. `slack/doctor.mjs` returns more findings |
@@ -163,34 +165,48 @@ written to a temporary name and renamed, with mode 0600.
              "pid": 12345, "startedAt": "<ISO>", "log": "<path>",
              "channel": "C0FAKE0001", "thread": "1700000000.000100"}],
   "outgoing": [{"channel": "C0FAKE0001", "thread": "1700000000.000100",
-                "text": "...", "attempts": 0, "nextTryAt": "<ISO>"}]
+                "text": "...", "attempts": 0, "nextTryAt": "<ISO>",
+                "proposal": null}]
 }
 ```
 
-- `handled` entries are removed after 24 hours. Each read asks Slack for
+- `handled` entries are removed after 48 hours. Each read asks Slack for
   messages from 60 seconds before the cursor, and the handled set drops the
-  repeats. A message that Slack lists late is then still seen once.
+  repeats. A message that Slack lists late is then still seen once. A cursor
+  is never moved back more than 24 hours, and `approvalMinutes` above 24
+  hours is a configuration error, so no message can be read again after its
+  `ts` was removed.
 - `proposals` states are `pending`, `approved`, `rejected`, `expired`, and
   `cancelled`. Only `pending` can be approved.
 - `results` keeps the last 20 for each repository.
 - `windows` holds the times of the last hour, for the limits of FR-10.
 - `outgoing` holds a reply whose post failed with a transient error. It is
-  tried again for up to 5 attempts and then dropped with a log line.
+  tried again for up to 5 attempts and then dropped with a log line. When
+  the reply is a proposal, the entry's `proposal` holds the whole record
+  that would have been stored: thread, repository, canonical text, source,
+  and expiry. When a retry succeeds, the proposal is stored as pending under
+  the `ts` that post returns. A proposal whose post is dropped never becomes
+  pending, and the thread gets no approval line.
 - No message text from Slack is stored. A model run reads its thread from
   Slack again.
 
 **`listen.lock`**: the lease. It holds a nonce, the process ID, the operator
-ID, and the start time. The listener touches it every cycle. It is the
-delivery lock of spec 024 with another path: under 60 seconds old means live.
+ID, and the start time. It is the delivery lock of spec 024 with another
+path: under 60 seconds old means live. The listener touches it on a
+15-second timer for as long as it runs, so a cycle that waits out a
+`Retry-After` or pages a long history never looks dead. Before every action
+it reads the nonce again. If the nonce is not its own, it stops the cycle,
+starts nothing more, and exits without writing `inbox.json`.
 
 **`listen.stop`**: written by `btrain slack listen --stop`. The listener
 checks for it every cycle, removes it, releases the lease, and exits.
 
 **`listen.paused`**: written by the listener when the operator types
 `btrain> pause`. Removed by `btrain slack listen --resume`. While it exists
-the listener makes no read call. When it goes away, the listener sets every
-channel cursor to the current time, so nothing sent during the pause is
-handled.
+the listener makes no read call. When the listener handles `pause`, it drops
+every message after it in what it has already read. When the flag goes
+away, the listener sets every channel cursor and every open thread's reply
+cursor to the current time, so nothing sent during the pause is handled.
 
 **`runner-check.json`**: the last profile check: the runner string, the
 profile version, the CLI's version string, the verdict, and the reason.
@@ -202,7 +218,8 @@ removed after 7 days. Agent output goes here and is never posted.
 
 Every `pollSeconds`, in this order:
 
-1. Touch the lease. Exit if the stop flag exists.
+1. Check the lease's nonce. Exit if it is not this process's, or if the stop
+   flag exists.
 2. Collect finished children. For each one, record the result, write the
    state, and queue its reply.
 3. If the pause flag is absent: read each served channel and each open
@@ -280,9 +297,12 @@ empty, and the first character is not `-`. The last one matters because
 | `objective`, `deliverable`, `acceptance`, `done-when` | At most 500 characters |
 
 A proposal has one more check. The canonical text is rejected when the scrub
-step, the cut step, or the URL rewrite of spec 024 FR-8 would change it. Only
-the escape step is applied when it is posted, inside a code block, and that
-step changes nothing the operator sees.
+step or the URL rewrite of spec 024 FR-8 would change it, or when the
+proposal with its code block and approval line is over 3,999 characters.
+The shorter cuts that spec 024 applies to a card's task and summary are not
+used here: a `task` may be 2,000 characters. Only the escape step is applied
+when it is posted, inside a code block, and that step changes nothing the
+operator sees.
 
 ### Verb table
 
@@ -294,10 +314,16 @@ directory.
 | --- | --- | --- | --- |
 | `status` | None | `<cli> slack refresh` | Runs when on the `auto` list |
 | `flush` | None | `<cli> slack flush` | Runs when on the `auto` list |
-| `poll-pr lane=<id>` | `pr_flow` feature on. Stored status is `pr-review` or `ready-to-merge`, or `changes-requested` with a PR number | `<cli> pr poll --lane <id> --apply` | Runs when on the `auto` list |
-| `retry-review lane=<id>` | `loop` feature on. Stored status is `needs-review`. Fewer than `max_active` loops alive. For a proposal, fewer than `retry_review_per_hour` unapproved runs for this lane in the last hour | `<cli> loop --lane <id> --max-rounds 1`, detached | Runs when on the `auto` list |
+| `poll-pr lane=<id>` | `pr_flow` feature on. Stored status is `pr-review` or `ready-to-merge`, or `changes-requested` that `enteredByPrPoll` confirms was entered by `pr-poll`. A PR number alone is not enough | `<cli> pr poll --lane <id> --apply` | Runs when on the `auto` list |
+| `retry-review lane=<id>` | `loop` feature on. Stored status is `needs-review`. Fewer than `max_active` loops alive. For a proposal, fewer than `retry_review_per_hour` unapproved runs for this lane in the last hour | `<cli> loop --lane <id> --max-rounds 1 --expect-status needs-review`, detached | Runs when on the `auto` list |
 | `start owner=<agent>` | `loop` feature on. The value checks above. Fewer than `max_active` loops alive. A free lane exists | `<cli> handoff claim --lane <picked> --owner <agent> --task <text> --files <list>`, with `--reviewer`, `--objective`, `--deliverable`, `--acceptance`, and `--done-when` when given, and `--requested-via <text>`. Then `<cli> loop --lane <picked> --max-rounds <max_rounds>`, detached | Waits for `approve` |
 | `pause` | Typed by the operator | None. Writes the pause flag | Never |
+
+The checks for `poll-pr` and `retry-review` run twice: when the command is
+accepted, and again in the same tick as the child's start. For
+`retry-review` the child checks a third time itself, through
+`--expect-status`, so a lane that has left `needs-review` never gets its
+owner dispatched by this verb.
 
 Every verb also counts against `max_commands_per_hour` for its repository.
 `start` and `pause` are refused in `[slack.orchestrator].auto` when the
@@ -338,14 +364,22 @@ found by the basename of the runner's first word. The first version has one:
 | Field | `claude` |
 | --- | --- |
 | Extra words allowed in `orchestrator.runner` | `-p` or `--print`, `--model <name>`, `--effort <level>` |
-| Arguments added | `--tools ""`, `--safe-mode`, `--restricted`, `--strict-mcp-config`, `--no-session-persistence`, `--permission-prompts none` |
+| Arguments added | `--tools ""`, `--safe-mode`, `--restricted`, `--strict-mcp-config`, `--no-session-persistence`, `--permission-prompts none`, `--output-format stream-json`, `--verbose` |
 | Input | Standard input |
-| Output | Standard output as text |
+| Output | A stream of JSON events on standard output. The reply is the text of the final result event |
 | Environment | `PATH`, `HOME`, `TMPDIR`, `TERM`, `LANG`, `SHELL`, `USER`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms, `CLAUDE_CONFIG_DIR` |
 | Platforms | macOS and Linux |
 
-All six flags are in `claude --help` for version 2.1.274, checked on
-2026-11-23. A runner string with a word the profile does not allow has no
+All eight flags are in `claude --help` for version 2.1.274, checked on
+2026-11-23. That shows the flags exist. It does not show what a run with
+them can do. The help text says `--tools ""` disables all tools and that
+`--restricted` ignores user, project, and local settings files. It says
+nothing about a key the CLI has already stored in its configuration
+directory, which the run can reach through `HOME`. So the flags and the
+environment list are not the proof. The proof is what each run reports
+about itself, below.
+
+A runner string with a word the profile does not allow has no
 profile. The listener does not start it and `btrain doctor` reports it. The
 runner string is split on spaces and never passed to a shell.
 
@@ -359,7 +393,7 @@ directory.
 
 | Outcome | How it is known | Reply |
 | --- | --- | --- |
-| Reply | Exit code 0 and output that is not empty | The handled reply |
+| Reply | The first event passed its check, exit code 0, and a result event with text | The handled reply |
 | Timed out | The timer fired | "The orchestrator timed out. Commands still work." |
 | Missing | The executable was not found | "The orchestrator is not installed. Commands still work." |
 | Out of usage or signed out | Non-zero exit and a profile pattern matches the output | "The orchestrator is out of usage or signed out. Commands still work." |
@@ -395,13 +429,22 @@ characters. The prose is posted first. A valid proposal is then posted on its
 own, as canonical text in a code block with the approval line, and it becomes
 pending when that post returns its `ts`.
 
+**Every run is checked.** A run uses the same arguments as the profile
+check, so there is no difference between what was checked and what runs.
+The listener reads the first event of each run's stream. If that event
+lists any tool, lists any MCP server, names an API key as the credential
+source, or cannot be read, the listener stops the run, posts the fixed
+"failed" reply, discards any output, and marks the profile failed. No later
+run starts until a profile check passes again.
+
 **The profile check.** `runProfileCheck` starts the runner once with the
-profile, the input "Reply with OK", and `--output-format stream-json
---verbose`. It reads the first event of the stream. The check fails when that
-event lists any tool, lists any MCP server, or names an API key as the
-credential source. It also fails when the event cannot be read. The verdict is
-saved in `runner-check.json` with the runner string, the profile version,
-and the output of `claude --version`.
+profile and the input "Reply with OK", and applies the same test to its
+first event. The verdict is saved in `runner-check.json` with the runner
+string, the profile version, and the output of `claude --version`.
+
+Both depend on the first event reporting those three things. WS0 step 4
+finds out on a real run. If it does not, the profile has no proof and WS4
+does not start until spec 025 FR-15 is amended.
 
 The check runs when the listener starts and when `btrain doctor` finds no
 saved verdict for the current runner string, profile version, and CLI
@@ -472,6 +515,7 @@ from the shipped manifest and must stay undistributed.
 | `btrain slack whois [--channel <id>]` | For the last ten messages of the channel: `ts`, `user`, `bot_id`, `app_id`, whether `client_msg_id` is present, and `subtype`. No message text | 0, or 1 on a Slack error |
 | `btrain slack status` (spec 024) | Adds: listener running or not, heartbeat age, paused or not, served repositories, pending proposals, live loops, and the runner check verdict | 0 always |
 | `btrain handoff claim --requested-via <text>` | Records the text in the claim event | Unchanged |
+| `btrain loop --lane <id> --expect-status <status>` | Reads the lane and makes no dispatch when its status differs | 1 when the status differs |
 
 `btrain doctor` findings from `slack/doctor.mjs`: `slack_listen` on with
 `slack` off; `slack_listen` on with no `operator`; `start` or `pause` in
@@ -487,13 +531,15 @@ is paused. A listener that is not running is not a finding.
 | 2 Toggle, settings, state, lease | `slack_listen`; `slack/inbox.mjs`, `lease.mjs`; orchestrator settings; `whois`; the listening manifest | `repo_mode.mjs` (lane a), `cli.mjs` (lane c) | WS0, 024 WS2 | State survives a restart; a second lease is refused; invariants 1 and 12 pass |
 | 3 The poll loop | `slack/read-client.mjs`, `listen.mjs`; stop, pause, resume; the age rule; conversations open and close; outbox drain | None | WS1, WS2, 024 WS3 | A listener against the fake hears only the operator, replies "commands only" to a mention, and drains the outbox; invariants 3 and 10 pass |
 | 4 The model run | `slack/runner.mjs`, `snapshot.mjs`; the profile check; doctor findings; turns and their limit | None | WS3, 024 WS1 | A typed mention gets a handled reply from the fake runner; invariants 7, 8, and 9 pass |
-| 5 Typed commands | `slack/commands.mjs`; `status`, `flush`, `poll-pr`, `retry-review`, `pause`; results; command limits | None | WS3, 024 WS4 | Each of the five verbs runs from a typed command with its checks and its result reply; invariant 11 passes |
+| 5 Typed commands | `slack/commands.mjs`; `status`, `flush`, `poll-pr`, `retry-review`, `pause`; results; command limits; `--expect-status` on `btrain loop` | `cli.mjs` (lane c) | WS3, 024 WS4 | Each of the five verbs runs from a typed command with its checks and its result reply; invariant 11 passes |
 | 6 `start`, proposals, approval | `start`; proposals from a reply; `approve` and `reject`; expiry; `--requested-via` | `core.mjs` (lane h), `cli.mjs` (lane c) | WS4, WS5 | A proposal runs only after a typed `approve`, and runs the stored text; invariants 4 and 13 pass |
 | 7 Install and pilot | `--install`; README section; the listener on for the btrain repository only | `README.md` (lane h) | WS6, 024 WS6 | Two weeks of real use with the measures below reported |
 | 8 Spec 023 | `retry-review` starts a review attempt; display states in the snapshot; the pickup test | Depends on spec 023's lanes | Spec 023 | The listener's reads record no pickup, shown against the real pickup code |
 
 WS1 can start as soon as spec 024 WS1 has merged `slack/text.mjs`. WS4 and
-WS5 do not depend on each other and can run at the same time. Run
+WS5 do not depend on each other and can run at the same time, apart from
+`listen.mjs`, which both extend: whichever lands second rebases on the
+first. Run
 `btrain locks` from an unscoped session before claiming each workstream.
 
 ### WS0: harness, captures, invariants
@@ -507,7 +553,9 @@ WS5 do not depend on each other and can run at the same time. Run
    temporary directory. The executable appends its arguments, working
    directory, the listing of that directory, its environment names, and its
    standard input to a file beside it. Its behavior comes from a control file
-   beside it: reply text, exit code, error output, delay, or never exit.
+   beside it: the first stream event, reply text, exit code, error output,
+   delay, or never exit. It writes the same stream of JSON events the real
+   CLI does, in the shape captured in step 4.
    Tests that use it are skipped on Windows.
 3. Live captures, by a person, with the real app in a private test channel.
    Save the raw `conversations.history` and `conversations.replies` bodies
@@ -607,7 +655,10 @@ WS5 do not depend on each other and can run at the same time. Run
    commands are not built yet.
 3. Refuse to start with no `operator`, with no served repository, or with a
    live lease.
-4. `--stop`, `--resume`, and the pause flag. Reset the cursors on resume.
+4. `--stop`, `--resume`, and the pause flag. Drop the rest of the read
+   messages on `pause`. Reset the channel cursors and the thread reply
+   cursors on resume. The lease timer and the nonce check before each
+   action.
 5. Conversations: open on a typed top-level mention, keep the reply cursor,
    close `conversationMinutes` after the operator's last message.
 6. The outbox drain of step 6 of the cycle.
@@ -627,7 +678,16 @@ WS5 do not depend on each other and can run at the same time. Run
    - The stop flag ends the listener within two cycles and releases the
      lease.
    - With the pause flag, no read call is made and the outbox still drains.
-     After resume, a message sent during the pause is not acted on.
+     After resume, a message sent during the pause is not acted on, in a
+     channel or in an open thread.
+   - A command that follows `btrain> pause` in the same read is not run.
+   - A cycle that waits 90 seconds on a `Retry-After` keeps its lease, and a
+     second listener is refused.
+   - A listener whose lease nonce was replaced starts no further action and
+     writes no state.
+   - After 30 hours down, a message handled before the stop is not acted on
+     and gets no second reply. `approvalMinutes` of 1,500 is a
+     configuration error.
    - With six open threads on one channel, no minute has more than 30 read
      calls for the channel, and every thread is still read in turn.
    - A 429 on a read is not retried before `Retry-After`.
@@ -670,6 +730,8 @@ WS5 do not depend on each other and can run at the same time. Run
    - The profile check fails a first event that lists a tool, one that lists
      an MCP server, and one whose credential source is an API key. A failed
      check stops every run, and `btrain doctor` reports it.
+   - An ordinary run whose first event lists a tool is stopped, its output is
+     not posted, and no later run starts.
    - With `runner` set to an empty string, a mention gets the one-line note
      and no process starts.
    - The token does not appear in the input, the fake runner's record, the
@@ -677,9 +739,10 @@ WS5 do not depend on each other and can run at the same time. Run
 
 ### WS5: typed commands
 
-1. `commands.mjs`: the pre-checks, the argument lists, the child environment,
+1. `commands.mjs`: the pre-checks, run when a command is accepted and again
+   just before its child starts, the argument lists, the child environment,
    `execFile` for short children, a detached start for loops, and the loop
-   list.
+   list. `--expect-status` on the `loop` command in `cli.mjs`.
 2. `status`, `flush`, `poll-pr`, `retry-review`, and `pause` from a message
    the operator typed.
 3. Results: a reply for every command the listener acts on, and the last 20
@@ -690,7 +753,12 @@ WS5 do not depend on each other and can run at the same time. Run
      working directory, through an injected `execFile`.
    - `retry-review` for a lane that is not `needs-review` is rejected.
      `poll-pr` for a lane in `needs-review` or `in-progress` is rejected, and
-     for `changes-requested` with no PR number.
+     for a `changes-requested` lane that a reviewer's `request-changes`
+     entered, with or without a PR number.
+   - A lane that leaves `needs-review` between the check and the start gets
+     no child. One that leaves it after the start gets no dispatch:
+     `btrain loop --expect-status needs-review` exits 1.
+   - `start` and the snapshot work in a repository without lanes.
    - A composition test: `retry-review` against the real CLI in a temporary
      repository, with a fake reviewer runner, dispatches the reviewer once.
    - The child's environment has none of the seven removed names.
@@ -713,8 +781,7 @@ WS5 do not depend on each other and can run at the same time. Run
    Reply once when the claim succeeds or fails, and once when the loop ends.
 2. `--requested-via` on `btrain handoff claim`: one conditional line in each
    of the two `eventDetails` objects in `claimHandoff`, and one line in the
-   help text. `test/cli-internal-options.test.mjs` requires that a handoff
-   flag be documented there.
+   help text.
 3. Proposals from a model's reply: post the canonical text in a code block,
    store it under the post's `ts`, cancel an earlier one in the thread.
 4. `approve`, `reject`, and expiry. A proposal for a verb on the `auto` list
@@ -730,6 +797,10 @@ WS5 do not depend on each other and can run at the same time. Run
      thread gets the expiry reply once.
    - A second proposal in a thread cancels the first, and `approve` then
      runs the second.
+   - A proposal whose first post fails and whose retry succeeds is pending
+     under the retry's `ts`, and `approve` runs it.
+   - A `start` proposal with a 2,000-character task is accepted. One whose
+     message would pass 3,999 characters is rejected.
    - A proposal for `retry-review` runs without approval. The fourth one for
      a lane in an hour is refused with a reason.
    - A proposal for `pause` is rejected.
@@ -815,10 +886,11 @@ After spec 023 is implemented:
 | An agent on the machine runs `btrain slack listen --resume` or `--stop` | A lane-pinned agent cannot: `slack` is not in its allowed commands. An unpinned local process can. The spec's boundary is Slack, not the machine |
 | A started owner works in the registered checkout | `btrain loop` starts a runner in the repository path it was given. For the btrain repository that is the live checkout. The README says so, and a `worktree` option is a follow-up |
 | A field value is read as a flag | A value that starts with `-` is rejected, and every value is one argument with no shell |
-| A lane moves between the status check and the child | The window is one process start. The child's own guards still apply. `poll-pr` only writes what GitHub shows |
+| A lane moves between the status check and the child | The check runs again just before the start. `retry-review` passes `--expect-status`, so the loop child refuses a lane that has left `needs-review`. `poll-pr` has no such flag: in the window of one process start, `btrain pr poll --apply` can still write a GitHub outcome to a lane that just left the PR flow, because legacy row L5 accepts `pr-poll` from any status. That is btrain's behavior for the same command typed at the machine, and it ends when spec 015 retires L5 |
 | A crash between recording a message and acting on it | That one action is lost and never repeated. The operator sends it again |
 | A crash between a proposal's post and its record | The proposal is on screen and not pending. `approve` gets "nothing to approve" |
-| The profile check cannot see the credential source | WS0 step 4 finds out before WS4 is built. The environment list still passes no API key, and `--restricted` ignores the settings files that could set one |
+| Two listeners run after a slow cycle | The lease is touched on a timer, not once a cycle, and a listener that finds another nonce stops before its next action |
+| The profile check cannot see the credential source | WS0 step 4 finds out before WS4 is built, and WS4 does not start without it. The flags and the environment list reduce the risk and are not proof: a key stored in the CLI's own configuration directory is reachable through `HOME` |
 | A CLI update renames a profile flag | The check runs again for a new CLI version, and a failed check stops every run |
 | `btrain doctor` starts a model run | Only when no verdict is saved for the current runner and CLI version, never in a lane-pinned session, and never with the toggle off |
 | The read limit is cut to one call a minute | That applies to apps distributed outside Slack's Marketplace. The app stays an internal app of one workspace, and the README says why |
@@ -856,6 +928,20 @@ the spec match what can be built.
 11. **FR-15:** the environment list is for macOS and Linux. Say that Windows
     has no profile in this version.
 12. **FR-15:** a runner string may hold only the words its profile allows.
+
+A second review, of this plan, added four more in version 0.5.2:
+
+13. **FR-3:** `poll-pr` accepts a `changes-requested` lane only when `pr-poll`
+    entered that status. A PR number alone is not enough.
+14. **FR-3:** the status is read again just before the child starts, and
+    `btrain loop` gains `--expect-status`.
+15. **FR-7:** the length limit for a proposal is one 3,999-character message,
+    not the card cuts of spec 024.
+16. **FR-11:** `pause` drops the rest of what was read; resume also moves
+    thread reply cursors; a handled `ts` is kept 48 hours and
+    `approvalMinutes` is capped at 24 hours.
+17. **FR-15:** every run, not only the check, is held to what its first
+    event reports.
 
 ## What the spec 024 plan provides for this one
 

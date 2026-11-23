@@ -75,7 +75,7 @@ Held on 2026-11-23: `README.md` (lane h).
 Starts after spec 023's request loop and fix path have merged.
 
 - [ ] T030 [WS7] Add kinds and templates for a review attempt, a pickup, an unresponsive reviewer, a same-lab fallback, a fix applied, a fix confirmed, and a late review, in `slack/events.mjs` and `slack/render.mjs`. The card shows the display states `in-review` and `confirming-fix`.
-- [ ] T031 [WS7] Implement the spec 023 mention conditions of FR-15, each with a fake-clock test: a late request for changes still unacknowledged after `[review].other_lab_window`; every outside-lab bot silent past its pending window; a reviewer fix the owner has not picked up within the window; a lane that needs repair while in `fix-confirmation`; no reviewer at any tier; a same-lab review that needs escalation. `dispatch-failed` stops mentioning.
+- [ ] T031 [WS7] Implement the spec 023 mention conditions of FR-15, each with a fake-clock test: a late request for changes still unacknowledged after `[review].other_lab_window`; every outside-lab bot silent past its pending window; a reviewer fix the owner has not picked up within the window; a lane that needs repair while in `fix-confirmation`; a reviewer silent on a lane with a linked PR when the window ends; no reviewer at any tier; a same-lab review that needs escalation. `dispatch-failed` stops mentioning.
 
 ## Dependencies
 

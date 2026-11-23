@@ -15,25 +15,30 @@ loop, then the fix path. Each workstream is one lane and one PR, except the
 two with semantic formal impact, which are two PRs each: prose and model
 first, then code.
 
-Six constraints shape the design:
+Seven constraints shape the design:
 
 - **No new function in `core.mjs`.** `scripts/decomposition_inventory.mjs` and
   `specs/020-ws2-module-assignment.json` account for every function in that
   file, and the JSON is locked by another lane.
   `node scripts/decomposition_inventory.mjs --stages` exits non-zero when
   `core.mjs` holds a function the JSON does not assign.
-- **`patchHandoff` is not edited. `runLoop` is edited once.**
+- **`patchHandoff` and `runLoop` are each edited once.**
   `test/decomposition_inventory.test.mjs` pins `patchHandoff` at 585 lines and
   `runLoop` at 422. The test's own comment calls the two numbers anchors for
-  the scanner, not a budget. This plan needs no line in `patchHandoff`. It
-  needs a few lines in `runLoop` (WS5), and that PR changes the 422 and says
-  so in its handoff.
+  the scanner, not a budget. `patchHandoff` builds the gate's input as a
+  fixed object in two places, so a new guard fact cannot reach
+  `btrain handoff update` without a line there. WS4 adds one spread line to
+  each of the two objects, 585 becomes 587, and later facts ride on that
+  spread with no further edit. `runLoop` gains a few lines in WS5. Each PR
+  changes its pinned number and says so in its handoff.
 - **Three functions that already exist in `core.mjs` become exports.**
   `appendWorkflowEvent`, `readWorkflowEvents`, and `updateHandoff` are
   private today. `specs/020-ws2-export-baseline.json` lists the 69 exported
   names and says to regenerate it only when a surface change is intended.
-  This one is: WS2 exports the first two and WS7 the third, each PR
-  regenerates the baseline and says so in its commit.
+  This one is: WS2 exports the first two and WS7 the third. Each PR
+  regenerates the baseline, changes the three count assertions in
+  `test/decomposition_inventory.test.mjs` (69 to 71, then 72), and says so
+  in its commit.
 - **The review record is a fold over the lane's workflow event log.** No new
   state file. Attempts, pickup, fallback, fixes, and late reviews are events
   in `.btrain/events/lane-<id>.jsonl`, the log `appendWorkflowEvent` already
@@ -41,10 +46,17 @@ Six constraints shape the design:
   publisher of spec 024 sees them through its existing hook on
   `appendWorkflowEvent`.
 - **The lane's recorded reviewer is always the reviewer of the active
-  attempt.** Every change of reviewer by the request loop is a row 20
-  reassignment. The transition gate, the pre-commit hook, and the guidance
-  text then keep reading one field, and need no attempt lookup to know who
-  may act.
+  attempt.** The request loop starts an attempt and sets the reviewer in one
+  write. A reviewer change by a lane agent ends the open attempt. The
+  transition gate, the pre-commit hook, and the guidance text then keep
+  reading one field, and need no attempt lookup to know who may act.
+- **Every review event is written under the lane's handoff lock.** That is
+  the lock `updateHandoff` already takes, and `withFileLock` is exported. A
+  verdict command reads the review record again inside that lock, after the
+  point where `resolveHandoff` and `requestChangesHandoff` already read the
+  lane again, and applies only when the attempt it was computed for is still
+  the active one. An attempt cannot end, or a new one start, between that
+  check and the write.
 - **Prose, then model, then code** for every semantic change (spec 015
   FR-10). The lanes that add `fix-confirmation` and the system reassignment
   edit pinned prose, re-pin, change `LaneLock.tla` and its mirror, run TLC,
@@ -79,35 +91,37 @@ target of legacy row L4 (the declaration table).
 | Surface | Existing state | Planned change |
 | --- | --- | --- |
 | `inferPeerReviewer` in `core.mjs` | Returns the first candidate that is not the owner: the named reviewer, the current reviewer, then configured agents in order. Three callers: `claimHandoff` and two in `patchHandoff` | Unchanged. `claimHandoff` passes it the configured agents already ordered by tier |
-| `claimHandoff` in `core.mjs` | Calls `inferPeerReviewer` with `configuredAgents`. Row 1 guard is "files; conflicts; distinct reviewer" | Order the candidates with `review/labs.mjs`. Reject an explicit same-lab reviewer (FR-3) unless a `same-lab-review` override is consumed |
-| `resolveReassignInputs` in `core.mjs` | Computes `ownerChanged`, `reviewerIsPriorAuthor`, `distinctReviewer` and the responsible actor for row 20 | Add the FR-3 check for `--reviewer` |
-| `applyWatchdogRepairs` in `core.mjs` | The pattern for a system event: `applyTransition` with the system actor, then `updateHandoff` with `eventType` and `eventDetails` | Unchanged. The system reassignment of FR-7 copies this pattern |
+| `claimHandoff` in `core.mjs` | Sets a missing reviewer to `any-other`, calls `applyTransition` for row 1, and only then calls `inferPeerReviewer` with `configuredAgents`. Row 1 guard is "files; conflicts; distinct reviewer" | Resolve the reviewer before the gate call, from candidates ordered by `review/labs.mjs`. Reject an explicit same-lab reviewer (FR-3) unless a `same-lab-review` override is consumed. Pass `reviewerLabAllowed` to the gate |
+| `patchHandoff` in `core.mjs` | Builds the gate input as a fixed object at its two `applyTransition` calls, one for a lane and one for a repository without lanes. Pinned at 585 lines. Skips `validateNeedsReviewTransition` when an override ID is given | One spread line in each object, for the gate facts that `resolveReassignInputs` returns |
+| `resolveReassignInputs` in `core.mjs` | Called from both `patchHandoff` paths. Computes `ownerChanged`, `reviewerIsPriorAuthor`, `distinctReviewer` and the responsible actor for row 20 | Add the FR-3 check for `--reviewer`. Return a `gateFacts` object: `reviewerLabAllowed` in WS4, `commitAfterFixHead` in WS7 |
+| `applyWatchdogRepairs` in `core.mjs` | The pattern for a system event: `applyTransition` with the system actor, then `updateHandoff` with `eventType` and `eventDetails`. It does not check which row matched | Unchanged. The system reassignment of FR-7 copies this pattern and adds the check: it writes only when the matched row is 20. Without it a refused row 20 falls to legacy row L10, which accepts any actor |
 | `actorMatches` in `transitions.mjs` | `reassign authority` accepts the owner for an owner change and either lane agent for a reviewer change | Also accept `input.systemEvent === true` when `ownerChanged` is not true |
 | `dispatchNeedsReviewReviewer` in `core.mjs` | Reads the lane's reviewer and runs `runLoop` for one round with a 10-minute default (`DEFAULT_LOOP_TIMEOUT_MS`). Skips a `notify` runner | Call `runReviewRequest` from `review/request.mjs` with the functions it needs passed in |
 | `finishPatchWithReviewerDispatch` in `core.mjs` | Throws when dispatch failed or timed out. The lane stays `needs-review` | Map the request outcome: verdict, same-lab dispatch, or no reviewer at any tier |
 | `executeLoopCliRunnerWithStreaming` in `core.mjs` | Spawns the runner in its own process group with one timeout. The stream observer calls `onEvent` for output | Take an optional `AbortSignal` that stops the process group the way the timeout does |
 | `buildLoopRunnerEnv` in `core.mjs` | Copies `process.env` and sets `BTRAIN_AGENT`, `BRAIN_TRAIN_AGENT`, `BTRAIN_LOOP_ACTIVE`, and the lane variables | Take an optional allowlist, used for a same-lab reviewer (FR-8) |
 | `normalizeLoopCliRunner` in `core.mjs` | Normalizes Claude and Codex runner arguments | For a same-lab attempt, add the fresh-session flags and reject the resume flags from `review/runner-table.mjs` |
-| `runLoop` in `core.mjs` | Each round dispatches `getLoopActorForState(current)`. Pinned at 422 lines | A `needs-review` round calls the request loop instead of dispatching the recorded reviewer directly |
+| `runLoop` in `core.mjs` | Each round dispatches `getLoopActorForState(current)`. Pinned at 422 lines | A `needs-review` round asks the request loop for one attempt instead of dispatching the recorded reviewer directly. One round is still one dispatch |
 | `getLoopActorForState` in `core.mjs` | Hand-written map from status to owner, reviewer, or repair owner | Add `fix-confirmation`, which routes to the owner |
 | `requestChangesHandoff` and `resolveHandoff` in `core.mjs` | Check the actor against the recorded reviewer. L8 and L15 accept another actor with an advisory | Pass `attemptMatches` to the gate. Hand a verdict from an ended attempt to `review/late.mjs`. Reject a resolve over the reviewer's own unconfirmed fix commits |
-| `validateNeedsReviewTransition` in `core.mjs` | Checks reviewer context and that the locked files hold a diff against the base | From `fix-confirmation`, also require a commit after `fixHead` |
-| `checkHandoff` in `core.mjs` | Returns guidance and `agentCheck`. Called by `btrain handoff`, PR flow, review context, and the startup snapshot | Take a `recordPickup` option that only the `btrain handoff` command passes |
+| `checkHandoff` in `core.mjs` | Returns guidance and `agentCheck`. Called by `btrain handoff`, PR flow, review context, and the startup snapshot | Unchanged. The `btrain handoff` command in `cli.mjs` passes the returned `agentCheck` to `review/activity.mjs` |
 | `buildLaneGuidance` in `core.mjs` | One guidance block per stored status | Guidance for `fix-confirmation`; the display states and the review tier line |
 | `renderPreCommitHook` in `core.mjs` | During `needs-review`, blocks a commit to the lane's locked files unless `BTRAIN_AGENT` is the recorded reviewer | During `fix-confirmation`, block unless it is the owner |
 | `managedHookSpecs` in `core.mjs` | Two managed hooks: `pre-commit` and `pre-push` | A third, `commit-msg`, rendered by `review/commit-trailer-hook.mjs` |
 | `VALID_OVERRIDE_ACTIONS` and `grantOverride` in `core.mjs` | Four actions. `needs-review` requires `--lane`; `push` refuses it | Add `same-lab-review`, which requires `--lane` |
 | `VALID_HANDOFF_STATUSES`, `ACTIVE_LANE_STATUSES` in `core.mjs`; `ACTIVE_STATUSES` in `transitions.mjs` | Seven active statuses | Add `fix-confirmation`. Rows 13 and L3 use `ACTIVE_STATUSES` as their source list and must exclude it |
-| `TRANSITION_ROWS` in `transitions.mjs` | Twenty designated rows and sixteen legacy rows, all legacy rows advisory on `main` | Three new rows; rows 3, 4, 5 gain the attempt guard; row 20 gains the system case; L8 and L15 retired; L4 narrowed |
+| `TRANSITION_ROWS` in `transitions.mjs` | Twenty designated rows and sixteen legacy rows, all legacy rows advisory on `main` | Three new rows; rows 3, 4, 5 gain the attempt guard; row 20 gains the system case; L8, L9, and L15 retired; L4 narrowed |
 | `getPrFlowConfig` in `core.mjs` | Loads `[pr_flow.bots.<id>]` for the ids in `required_bots` only | Load every configured bot, with `lab`; read `bot_pending_timeout` |
 | `classifyPrReviewState` in `pr-flow.mjs` | `ready-to-merge` when every required bot is clear on the head | Also require one outside-lab bot to be clear, when one is configured |
 | `buildPrBody` in `pr-flow.mjs` | Lane, owner, reviewer, objective | Add the review tier, the fallback reason, and a fix line |
 | `runPrCreate` in `pr-flow.mjs` | Validates the transition, pushes, and opens the PR | Refuse while a late request for changes is unacknowledged |
 | `doctorRepo` in `core.mjs` | Collects `issues` and `warnings` per repository | Append the findings returned by `review/doctor.mjs` |
-| `dashboard.mjs` | Shows the stored status | Show the display state and the tier |
+| `getStatus` in `core.mjs`; `scripts/serve-dashboard.js` | `dashboard.mjs` only starts and stops the dashboard process. The page is drawn by `scripts/serve-dashboard.js` from the JSON of `btrain status` | `getStatus` adds the display state, the tier, and the fallback reason to each lane. The page shows them |
 | Handoff routing in `cli.mjs` | `claim`, `update`, `resolve`, `request-changes`, `wait`, `show-next`, `pull-pr` | Add `fix` and `confirm-fix`; route `update --ack-late-review` |
-| `INTERNAL_ONLY_OPTIONS` in `internal_options.mjs` | Four options the CLI refuses, `transitionEvent` among them | Unchanged. `confirmFixHandoff` passes `transitionEvent` to `resolveHandoff`, as PR flow does |
-| The export list of `core.mjs` | 69 names, checked against `specs/020-ws2-export-baseline.json` | Add `appendWorkflowEvent`, `readWorkflowEvents`, and `updateHandoff` |
+| `INTERNAL_ONLY_OPTIONS` in `internal_options.mjs` | Four options the CLI refuses, `transitionEvent` among them. PR flow passes `transitionEvent` to `patchHandoff` and `viaPrOutcome` to `resolveHandoff`. `resolveHandoff` does not read `transitionEvent` today | No new option. WS7 makes `resolveHandoff` read `transitionEvent` for its terminal transition, and `confirmFixHandoff` passes it |
+| The export list of `core.mjs` | 69 names, checked against `specs/020-ws2-export-baseline.json`. `test/decomposition_inventory.test.mjs` asserts the count 69 in three places | Add `appendWorkflowEvent`, `readWorkflowEvents`, and `updateHandoff`, and change the three assertions |
+| `appendWorkflowEvent` and `readWorkflowEvents` in `core.mjs` | The append is one `fs.appendFile` with no lock. The read drops a line that does not parse | Unchanged. Review events are appended only while the lane's handoff lock is held |
+| Command entry in `cli.mjs` | Resolves the repository and the lane before each command | One call to `review/activity.mjs` for a lane-scoped command |
 | `specs/tla/LaneLock.tla`, `test/formal/lane-lock-model.mjs` | 14 variables, 16 invariants, 5 properties. `Authors(l)` is the owner and one prior owner; `ASSUME Cardinality(Agents) <= 3` | The changes the spec's Formal-Impact Declaration lists |
 
 ## Architecture and invariants
@@ -122,6 +136,7 @@ All under `src/brain_train/review/`.
 | `review-config.mjs` | `[review]` and `[review.fixes]` with defaults; duration parsing | Yes | No |
 | `runner-table.mjs` | For each runner executable: presence probe, quota and authentication patterns, refusal patterns, fresh-session flags, flags to reject | Yes | No |
 | `record.mjs` | Fold a lane's events since its claim into the review record | Yes | No |
+| `activity.mjs` | Record a pickup or a progress signal for the reviewer of the open attempt; open an attempt for a recorded reviewer that was not dispatched | No | No |
 | `request-lock.mjs` | One heartbeat lock per lane request | No | No |
 | `request.mjs` | The attempt loop | No | No. `core.mjs` passes in what it needs |
 | `late.mjs` | Classify a verdict from an ended attempt; the acknowledgement | No | No |
@@ -134,9 +149,15 @@ All under `src/brain_train/review/`.
 `record.mjs`, `request.mjs`, `late.mjs`, `commit-trailer-hook.mjs`, and
 `doctor.mjs`. None of those imports `core.mjs`, so the import adds no cycle.
 `fixes.mjs` imports `core.mjs` and is imported only by `cli.mjs`.
+`activity.mjs` is called by `cli.mjs`, which passes it the exported core
+functions it needs.
 
-`runReviewRequest` receives `readEvents`, `appendEvent`, `readLane`,
-`reassignReviewer`, `runAttempt`, `now`, and `sleep`. Tests replace all seven.
+`runReviewRequest` receives `readEvents`, `writeEvent`, `readLane`,
+`startAttempt`, `runAttempt`, `now`, and `sleep`. Tests replace all seven.
+`writeEvent` and `startAttempt` go through `updateHandoff`, so each write is
+under the lane's handoff lock. `runAttempt` starts the runner and returns at
+once with a handle: a promise for its exit, its output tail, and the time of
+its last output. The loop keeps polling while the runner is alive.
 
 ### Invariants
 
@@ -168,8 +189,10 @@ pass removes its skip.
     tier.
 11. `handoff fix` is refused, with its own message, for each FR-11 condition
     that fails.
-12. `core.mjs` gains no function and `patchHandoff` stays at 585 lines. The
-    `runLoop` pin changes once, in WS5.
+12. `core.mjs` gains no function. The `patchHandoff` pin changes once, in
+    WS4, and the `runLoop` pin once, in WS5.
+13. A verdict with no open attempt is refused. A recorded reviewer that was
+    not dispatched gets an attempt at its pickup, at the request's head.
 
 ### Data model
 
@@ -178,10 +201,10 @@ pass removes its skip.
 
 | Type | Written when | `details` |
 | --- | --- | --- |
-| `review-request` | The lane enters `needs-review`, or the owner pushes a new head while it is there | `requestId`, `head`, `requestedAt`, `otherLab` and `sameLab` candidate lists |
-| `review-attempt` | Before each dispatch | `attemptId`, `requestId`, `reviewer`, `tier`, `head`, `startedAt` |
+| `review-request` | The lane enters `needs-review`, or the owner moves the lane's branch while it is there | `requestId`, `branch`, `head`, `requestedAt`, `otherLab` and `sameLab` candidate lists |
+| `review-attempt` | Before each dispatch, and at the pickup of a recorded reviewer that was not dispatched. Written by `updateHandoff` in the same write that sets the lane's reviewer | `attemptId`, `requestId`, `reviewer`, `previousReviewer`, `reason`, `tier`, `head`, `startedAt`, `opened` (`dispatch` or `pickup`) |
 | `review-pickup` | The attempt's reviewer first runs `btrain handoff` for the lane | `attemptId`, `at` |
-| `review-progress` | A lane-scoped btrain command by the attempt's reviewer, at most once a minute | `attemptId`, `at` |
+| `review-progress` | Any other lane-scoped btrain command by the attempt's reviewer, at most once a minute | `attemptId`, `at` |
 | `review-attempt-ended` | The attempt stops without a verdict | `attemptId`, `outcome`, `detail` |
 | `review-escalation` | No reviewer at any tier, a second same-lab request for changes, or a linked PR that blocks reassignment | `requestId`, `reason` |
 | `late-review` | A verdict arrives from an ended attempt and is not applied | `attemptId`, `verdict`, `head`, `summary` |
@@ -191,8 +214,14 @@ pass removes its skip.
 
 `outcome` is one of `tool_unavailable`, `policy_blocked`, `unresponsive`,
 `failed`, `stopped-at-max`, or `superseded`. A fallback is not its own event
-type. It is the row 20 `update` event with actor `system`, and its `details`
-carry `reason`, `previousReviewer`, `newReviewer`, and `attempts`.
+type. It is a `review-attempt` whose `reviewer` differs from
+`previousReviewer`: the row 20 reassignment and the new attempt are one
+write. Its `reason` is one of the four FR-7 reasons, and the fold supplies
+the attempts that led to it. A `review-attempt` that keeps the reviewer has
+an empty `reason`.
+
+An `update` event by a lane agent that changes the reviewer during an open
+request ends the open attempt as `superseded` in the fold.
 
 The existing `resolve` and `request-changes` events gain `attemptId` and
 `tier` in their details.
@@ -218,15 +247,25 @@ into:
 empty otherwise.
 
 **Request lock.** `<state root>/.btrain/reviews/lane-<id>.lock`: an exclusive
-create, a random nonce, a touch before each dispatch and each poll, and a
-60-second liveness rule. It is the design of the spec 024 delivery lock. It
-makes one process the dispatcher of a request. It is not lane state: removing
-it loses nothing.
+create, a random nonce, and a 60-second liveness rule. It is the design of
+the spec 024 delivery lock, with the same bounds: a process that finds a
+lock under 60 seconds old does not dispatch; one that finds an older lock
+removes it and creates its own; and the holder reads the nonce again before
+every dispatch and stops if it is not its own. The holder touches the lock
+on a 15-second timer for the whole life of the loop, also while a runner is
+alive, so a long attempt never looks abandoned. It makes one process the
+dispatcher of a request. It is not lane state: removing it loses nothing.
+The handoff lock, not this one, is what orders attempts against verdicts.
 
-**Head.** The head of a lane is `git rev-parse HEAD` in the checkout where the
-command runs. PR #112 already binds an approval to a full object ID through
-the `Reviewed-Head` trailer. The attempt's `head` uses the same full ID, and
-the verdict check compares the two.
+**Head.** `review-request` records the branch the owner's checkout was on,
+as a full ref, and its commit as a full object ID. Later checks resolve that
+ref, which every checkout of the repository shares, so a reviewer that runs
+a verdict from another worktree sees the same head. With a detached
+checkout, `branch` is empty and the head is `HEAD` of the checkout the
+command runs in. PR #112 binds an approval to a full object ID through the
+`Reviewed-Head` trailer. The attempt's `head` uses the same full ID, and the
+verdict check requires the trailer, the attempt's head, and the branch's
+current commit to agree.
 
 ### Review request loop
 
@@ -238,8 +277,8 @@ record and applies these rules in order.
 2. **New head.** If the owner has moved the head, write a new
    `review-request`, end the open attempt as `superseded`, and start again.
    A commit by the active attempt's reviewer is not a new head (FR-4).
-3. **Open attempt.** Watch it. Stream output seen through `onEvent`, the
-   pickup, and a `review-progress` event each reset the silence clock. End
+3. **Open attempt.** Watch it. Stream output reported by the runner handle,
+   the pickup, and a `review-progress` event each reset the silence clock. End
    the attempt as `unresponsive` when it has no pickup within
    `silence_limit` of its start, or no signal for `silence_limit` after
    pickup. End it as `stopped-at-max` at `attempt_max`. Ending an attempt
@@ -249,18 +288,38 @@ record and applies these rules in order.
    `policy_blocked`, any other non-zero exit is `failed`.
 5. **Next other-lab reviewer.** If an other-lab candidate has had no attempt
    in this request, or the last pass over the list ended at least
-   `silence_limit` ago, probe it, reassign the lane's reviewer to it (reason
-   `next-other-lab`, or `other-lab-recovered` when the lane was on a same-lab
-   reviewer), write `review-attempt`, and dispatch.
+   `silence_limit` ago, probe it and call `startAttempt`: one write that
+   sets the lane's reviewer and records `review-attempt` (reason
+   `next-other-lab` when the reviewer changes, or `other-lab-recovered` when
+   the lane was on a same-lab reviewer). Then dispatch. The lane's current
+   reviewer goes first when it is an other-lab candidate.
 6. **Fallback.** If the window has passed, every other-lab candidate has had
    an attempt or failed its probe, and none has shown progress within
-   `silence_limit`: reassign to the first same-lab candidate outside the
-   author history (reason `other-lab-unavailable`), and dispatch it with the
-   fresh-session flags and the environment allowlist.
-7. **No candidate.** With no reviewer at any tier, or with a second same-lab
-   request for changes on the lane, write `review-escalation` and return.
-   The lane stays `needs-review`.
+   `silence_limit`: unless the lane already has two same-lab requests for
+   changes since its claim, start an attempt for the first same-lab
+   candidate outside the author history (reason `other-lab-unavailable`),
+   and dispatch it with the fresh-session flags and the environment
+   allowlist.
+7. **No candidate.** With no reviewer at any tier, or with two same-lab
+   requests for changes already on the lane, write `review-escalation` and
+   return. The lane stays `needs-review`. No third same-lab round starts.
 8. **Wait.** Sleep for the poll interval and repeat.
+
+`startAttempt` copies `applyWatchdogRepairs`: `applyTransition` for row 20
+with actor `btrain-system`, `systemEvent`, the author-history and
+distinct-reviewer facts, and the PR link, then `updateHandoff`. It writes
+only when the matched row is 20. Any other match, which today would be
+legacy row L10, is a refusal: the loop writes `review-escalation` and
+returns. It passes the reviewer and nothing else, so it cannot change the
+owner.
+
+The loop has two callers. `dispatchNeedsReviewReviewer` runs it until a
+verdict, an escalation, or the end of a same-lab dispatch: that is the
+foreground window of FR-4. `runLoop` asks it for one attempt and returns
+when that attempt ends, so `btrain loop --lane <id> --max-rounds 1` is still
+one dispatch, which spec 025's `retry-review` relies on. The one attempt is
+the one the rules above choose, so it can be a same-lab attempt when rule 6
+holds.
 
 Three cases shorten the loop:
 
@@ -271,6 +330,15 @@ Three cases shorten the loop:
   `review-escalation` with reason `pr-linked` when the window ends.
 - **A `notify` runner.** It is never dispatched and never a candidate for a
   tier, as today.
+
+**A reviewer that was not dispatched.** A session started by hand, and a
+`notify` reviewer, get their attempt from `activity.mjs`: when the lane's
+recorded reviewer runs `btrain handoff` for a `needs-review` lane with no
+open attempt, it writes `review-attempt` with `opened: pickup` at the
+request's head, then the pickup. The loop, if one is running, then finds an
+open attempt and watches it. With dispatch off, this is the only way an
+attempt starts, and a verdict with no open attempt is refused with the
+command to run first.
 
 **A request whose process ended.** A later `btrain loop --lane <id>` or
 `handoff update` takes the request lock and continues. Stream output from the
@@ -318,22 +386,37 @@ the Claude ones the same way. No sample, no pattern.
 | 1 | Guard gains `reviewerLabAllowed` |
 | 3, 4, 5 | Guard gains `attemptMatches` |
 | 13 | Source list excludes `fix-confirmation` |
-| 20 | Actor accepts `systemEvent` for a reviewer change; guard gains `reviewerLabAllowed` |
+| 20 | Actor accepts `systemEvent` when the owner does not change; guard gains `reviewerLabAllowed` |
 | L3 | Source list excludes `fix-confirmation` |
 | L4 | Retired for the targets `ready-for-pr`, `pr-review`, `ready-to-merge`, and `fix-confirmation`, and for the source `fix-confirmation` |
-| L8, L15 | Retired whole |
+| L8, L9, L15 | Retired whole |
 
-New guard inputs follow the gate's existing rule for optional facts: a
-caller that does not pass one is not refused for it. The functions that own
-each row always pass them. `fixes.mjs` checks `ReviewerFix` and `ConfirmFix`
-with `applyTransition` itself before it writes, the way
+A fact on a new row is required: `ReviewerFix`, `ConfirmFix`, and `AmendFix`
+match only when each of their facts is passed and true. A fact added to an
+existing row (`reviewerLabAllowed`, `attemptMatches`) follows the gate's
+rule for optional facts, because the formal harness and older callers reach
+those rows without it: a caller that does not pass it is not refused for
+it. The production callers always pass it. `claimHandoff` and
+`resolveReassignInputs` also refuse a same-lab reviewer directly, before
+the gate. `fixes.mjs` checks `ReviewerFix` and `ConfirmFix` with
+`applyTransition` itself before it writes, the way
 `validatePrCreateTransition` does in `pr-flow.mjs`.
+
+`AmendFix` is reached through `patchHandoff`, so `commitAfterFixHead` comes
+from the `gateFacts` spread. `validateNeedsReviewTransition` is not the
+place for it: `patchHandoff` skips that function when an override ID is
+given.
+
+L9 accepts the reviewer's approval of a lane whose lock coverage is
+suspended, with an advisory, after row 4 has refused it. With L9 retired
+that approval is refused until the owner restores coverage (row 17), which
+is what `ConfirmFix` already requires.
 
 PR #108 retires a legacy row by source status. L4 needs retirement by target
 as well. WS3 extends the `enforced` field to hold source and target slices.
 
 Each retirement follows spec 015 FR-5: at least 14 days in advisory, which
-L3, L4, L8, and L15 have had since spec 016 WS3 and WS4 merged, and no
+L3, L4, L8, L9, and L15 have had since spec 016 WS3 and WS4 merged, and no
 `transition-advisory` event for the row in the last 7 days across the
 registered repositories. WS3 runs that audit and records it in the ledger in
 `test/formal/README.md`.
@@ -365,20 +448,26 @@ runners from the runner table.
 
 | WS | First artifact | Files other lanes held on 2026-11-23 | Depends on | Formal impact | Done when |
 | --- | --- | --- | --- | --- | --- |
-| 0 Harness and invariants | A fake runner, a fake clock, and the twelve invariant tests, skipped | None | — | none | The fake runner can pick up, print, go silent, exit with any text, and commit; `npm test` matches `main` |
+| 0 Harness and invariants | A fake runner, a fake clock, and the thirteen invariant tests, skipped | None | — | none | The fake runner can pick up, print, go silent, exit with any text, and commit; `npm test` matches `main` |
 | 1 Labs, config, runner table | `labs.mjs`, `review-config.mjs`, `runner-table.mjs`, `doctor.mjs` | `core.mjs` (lane h) for the doctor call | WS0 | none | `btrain doctor` lists every agent's lab; no lane behaves differently |
-| 2 Review record and display | `record.mjs`; pickup; the display states in `handoff`, `status`, and the dashboard | `core.mjs` (h), `cli.mjs` (c) | WS0 | none | A dispatched reviewer's first `btrain handoff` shows the lane as `in-review` |
-| 3 Legacy-row enforcement | Row 4 enforced; L8 and L15 retired; L4 narrowed | `transitions.mjs`, `test/formal/*`, spec 015 (g) | PR #108 | validation | `handoff update --status ready-for-pr` is refused for every actor |
-| 4 Reviewer choice | Other-lab reviewer at claim; FR-3 rejection; the `same-lab-review` override | `core.mjs` (h) | WS1 | validation | The first Rule 1 acceptance criteria pass |
-| 5 Request loop | `request.mjs`, `request-lock.mjs`; attempts, failure classes, fallback; verdicts bound to attempts; the system reassignment | `core.mjs` (h), `transitions.mjs` and `test/formal/*` (g), spec 005 | WS2, WS3, WS4 | semantic | A silent other-lab reviewer is replaced, and a same-lab reviewer is assigned only under invariant 1 |
+| 2 Review record and display | `record.mjs`, `activity.mjs`; pickup and progress; the display states in `handoff`, `status`, and the dashboard | `core.mjs` (h), `cli.mjs` (c) | WS0, and WS1 for `core.mjs` | none | A dispatched reviewer's first `btrain handoff` shows the lane as `in-review` |
+| 3 Legacy-row enforcement | Row 4 enforced; L8, L9, and L15 retired; L4 narrowed | `transitions.mjs`, `test/formal/*`, spec 015 (g) | PR #108 | semantic | `handoff update --status ready-for-pr` is refused for every actor |
+| 4 Reviewer choice | Other-lab reviewer at claim; FR-3 rejection; the `same-lab-review` override; the gate-facts spread in `patchHandoff` | `core.mjs` (h) | WS1, WS2 | validation | The first Rule 1 acceptance criteria pass |
+| 5 Request loop | `request.mjs`, `request-lock.mjs`; attempts, failure classes, fallback; verdicts bound to attempts; the system reassignment | `core.mjs` (h and d), `transitions.mjs` and `test/formal/*` (g), spec 005 | WS2, WS3, WS4, and the `withFileLock` fix of lane d | semantic | A silent other-lab reviewer is replaced, and a same-lab reviewer is assigned only under invariant 1 |
 | 6 Late verdicts | `late.mjs`; the `pr create` block; `--ack-late-review` | `pr-flow.mjs` (a), `cli.mjs` (c) | WS5, PR #112 | validation | A late request for changes blocks `btrain pr create` until acknowledged |
 | 7 Reviewer fixes | `fix-confirmation`, three rows, `fix-rules.mjs`, `fixes.mjs`, the hooks, the trailer | `core.mjs` (h), `cli.mjs` (c), `transitions.mjs` and `test/formal/*` (g), specs 002 and 005 | WS3, WS5 | semantic | Every Rule 2 acceptance criterion passes and TLC passes with `FixSeparation` |
-| 8 PR bot gate | Bot `lab`; the outside-lab requirement; the second bot after `bot_pending_timeout` | `pr-flow.mjs` (a), `core.mjs` (h) | WS1, PR #112 | validation | A `codex` lane does not reach `ready-to-merge` on `gh-codex` alone when another lab's bot is configured |
+| 8 PR bot gate | Bot `lab`; the outside-lab requirement; the second bot after `bot_pending_timeout` | `pr-flow.mjs` (a), `core.mjs` (h) | WS1, WS6 for `pr-flow.mjs`, PR #112 | validation | A `codex` lane does not reach `ready-to-merge` on `gh-codex` alone when another lab's bot is configured |
 | 9 Visibility, docs, rollout | Tier in PR bodies; the managed block text; this repository's `[agents.labs]` | `CLAUDE.md`, `AGENTS.md` (a), `README.md` (h) | WS5, WS7 | none | Every consuming repository gets the new Handoff Gate text on `btrain sync-templates` |
 
 WS0, and the pure modules of WS1 and WS2, can start today. Everything that
 edits `core.mjs` waits for PR #113. WS3 waits for PR #108. WS6 and WS8 wait
 for PR #112.
+
+Two lanes never hold one file at once. WS1, WS2, WS4, WS5, WS7, and WS8 all
+edit `core.mjs`, and WS6 and WS8 both edit `pr-flow.mjs`, so those edits land
+one workstream at a time in the order of the table. WS8's `core.mjs` edit is
+in `getPrFlowConfig` only, and it can go in after WS4 if WS5 and WS7 are not
+open.
 
 ### WS0: harness and invariants
 
@@ -430,18 +519,24 @@ for PR #112.
 
 1. `record.mjs`: the fold described in the data model. It reads only events
    after the lane's last `claim`.
-2. Export `appendWorkflowEvent` and `readWorkflowEvents` from `core.mjs`
-   and regenerate the export baseline. Then `checkHandoff`: a
-   `recordPickup` option. When it is set, the agent check
-   is `verified`, the lane has an open attempt, and the verified agent is
-   that attempt's reviewer, append `review-pickup` once. The `btrain handoff`
-   command passes the option. PR flow, review context, and the startup
-   snapshot do not.
-3. The same option records the owner's pickup of a `fix-confirmation` lane.
-4. `buildLaneGuidance`, `btrain status`, and `dashboard.mjs`: show the
-   display state, the reviewer, and the time since dispatch or pickup. The
-   stored status is printed unchanged wherever a command takes it as input.
-5. Tests:
+2. Export `appendWorkflowEvent` and `readWorkflowEvents` from `core.mjs`,
+   regenerate the export baseline, and change the three count assertions in
+   `test/decomposition_inventory.test.mjs` from 69 to 71.
+3. `activity.mjs` and one call in `cli.mjs`. For `btrain handoff`, the call
+   passes the `agentCheck` that `checkHandoff` returns: when it is
+   `verified`, the lane has an open attempt, and the agent is that attempt's
+   reviewer, write `review-pickup` once. For any other lane-scoped command
+   by that reviewer, write `review-progress`, at most once a minute. For
+   those commands the agent is the `BTRAIN_AGENT` variable, which a
+   dispatched runner always has, matched against the configured agents.
+   Each write takes the lane's handoff lock with `withFileLock`. PR flow,
+   review context, and the startup snapshot call none of this.
+4. The same call records the owner's pickup of a `fix-confirmation` lane.
+5. `buildLaneGuidance` and `getStatus`: add the display state, the reviewer,
+   the time since dispatch or pickup, the tier, and the fallback reason.
+   `scripts/serve-dashboard.js` shows them. The stored status is printed
+   unchanged wherever a command takes it as input.
+6. Tests:
    - A fold over each event sequence in the data model.
    - `btrain handoff --lane <id>` by the dispatched reviewer writes one
      pickup; a second run writes none.
@@ -451,17 +546,29 @@ for PR #112.
      still holds `needs-review` (invariant 5).
    - After the attempt ends `unresponsive`, the display is `needs-review`.
    - Events from before the last claim are ignored.
+   - `btrain review code --lane <id>` by the attempt's reviewer writes one
+     `review-progress`, and a second run within a minute writes none.
+   - A lane-agent `handoff update --reviewer` during an open request ends
+     the open attempt in the fold.
 
 ### WS3: legacy-row enforcement
 
 This is spec 019 Workstream 0, extended as spec 023 FR-5 requires.
 
-1. Run the spec 015 FR-5 audit for L4, L8, and L15 across the registered
+Spec 015 FR-10 makes the retirement of a legacy row a semantic change, in
+the order prose, model, code. The pinned prose already forbids each of these
+rows, so the prose step is the spec 015 table and the ledger. The order
+inside the PR is the one PR #108 used: spec 015 and the ledger, the mirror
+and the harness with a TLC run, then the gate.
+
+1. Run the spec 015 FR-5 audit for L4, L8, L9, and L15 across the registered
    repositories and record it in the ledger.
 2. Extend the `enforced` field of PR #108 to hold target slices.
 3. Retire L8 and L15. An approval or a request for changes by an actor that
    is not the recorded reviewer is refused, with the fix text
-   `resolveHandoff` and `requestChangesHandoff` already print.
+   `resolveHandoff` and `requestChangesHandoff` already print. Retire L9: an
+   approval of a lane whose coverage is suspended is refused, and the fix
+   text names the owner's resync.
 4. Narrow L4: refuse `handoff update --status` to `ready-for-pr`,
    `pr-review`, and `ready-to-merge`. Row 7 still moves `ready-for-pr` to
    `pr-review` for the owner with a PR number, and row 12 still returns
@@ -475,23 +582,41 @@ This is spec 019 Workstream 0, extended as spec 023 FR-5 requires.
    - `handoff update --status ready-for-pr` is refused for the owner, the
      reviewer, and an unconfigured actor.
    - `btrain pr create`, `btrain pr poll --apply`, and row 12 still work.
-   - The formal harness reports no new candidate finding.
+   - The reviewer's `handoff resolve` on a lane whose locks were
+     force-released is refused, and succeeds after the owner's resync.
+   - TLC passes and the formal harness reports no new candidate finding.
 
 ### WS4: reviewer choice
 
-1. `claimHandoff`: build the candidate order with `orderCandidates` and pass
-   it to `inferPeerReviewer` as the configured list.
+1. `claimHandoff`: resolve the reviewer before the row 1 gate call. Today
+   the gate runs first and inference second. Build the candidate order with
+   `orderCandidates` and pass it to `inferPeerReviewer` as the configured
+   list. That changes the result for a claim with no `--reviewer` and for
+   `--reviewer any-other`, which both skip the named reviewer.
 2. `claimHandoff` and `resolveReassignInputs`: when the named reviewer is
-   same-lab and an other-lab agent with a `cli` runner is configured, refuse
-   with the FR-3 text, unless a `same-lab-review` override for the lane is
-   consumed. `--reviewer any-other` selects by tier.
+   same-lab, or has no lab, and an other-lab agent with a `cli` runner is
+   configured, refuse with the FR-3 text, unless a `same-lab-review`
+   override for the lane is consumed.
 3. Add `same-lab-review` to `VALID_OVERRIDE_ACTIONS`, require `--lane` for
    it in `grantOverride`, and record its consumption on the claim or
    reassignment event.
-4. Rows 1 and 20: the `reviewerLabAllowed` guard input.
-5. Tests:
+4. Rows 1 and 20: the `reviewerLabAllowed` guard input. `claimHandoff`
+   passes it to its own gate call. For `btrain handoff update`,
+   `resolveReassignInputs` returns it in `gateFacts`, and `patchHandoff`
+   gains one spread line, `...reassign.gateFacts`, in each of its two gate
+   inputs. Change the pinned 585 in `test/decomposition_inventory.test.mjs`
+   to 587 and state both numbers in the handoff.
+5. The two `inferPeerReviewer` calls in `patchHandoff` are not changed. They
+   keep the lane's current reviewer, and when a lane has none they may pick
+   a same-lab agent. The request loop of WS5, not inference, decides who is
+   dispatched, so that pick is replaced at the first attempt.
+6. Tests:
    - Owner `claude` with `codex-reviewer` and `claude-reviewer` configured:
      a claim with no `--reviewer` records `codex-reviewer`.
+   - A reviewer with a `notify` runner and no lab needs the override when an
+     other-lab agent is configured.
+   - `handoff update --reviewer <same-lab>` in a repository without lanes is
+     refused too: the second gate input carries the fact.
    - `--reviewer claude-reviewer` is refused with the FR-3 text, and
      succeeds with the override, which is then spent.
    - With no other-lab agent configured, a same-lab reviewer is accepted
@@ -504,37 +629,51 @@ This is spec 019 Workstream 0, extended as spec 023 FR-5 requires.
 ### WS5: request loop
 
 Two PRs. The first is prose and model: spec 005 FR-5 gains the system
-reassignment, the pin is refreshed, `Reassign` in `LaneLock.tla` and the
-mirror gain the system case with `lastActor` set to the owner, and TLC runs.
-The second is code.
+reassignment, the pin is refreshed, and TLC runs. In `LaneLock.tla`, `Next`
+quantifies every action's actor over `Agents`, and the owner can already
+change the reviewer, so a system case inside `Reassign` would add nothing.
+The model gains a separate action with no agent parameter, quantified the
+way `Resync` is for `Doctor`: the owner stays the owner, the reviewer
+changes under the row's guards, and `lastActor` becomes the owner. The
+mirror gets the same action. The second PR is code.
 
 1. `request-lock.mjs` and `request.mjs`, as described above.
 2. `executeLoopCliRunnerWithStreaming`: the optional `AbortSignal`.
    `buildLoopRunnerEnv`: the optional allowlist. `normalizeLoopCliRunner`:
    the fresh-session flags for a same-lab attempt.
 3. `dispatchNeedsReviewReviewer`: call `runReviewRequest`. `runAttempt`
-   resolves the runner, runs it with the signal, and returns its exit and
-   output tail. `reassignReviewer` follows `applyWatchdogRepairs`: it calls
-   `applyTransition` for row 20 with `systemEvent`, the author-history and
-   distinct-reviewer facts, and the PR link, then `updateHandoff` with the
-   new reviewer and the reason in `eventDetails`. It never goes through
-   `patchHandoff`, so no caller option can ask for a system reassignment.
-4. `actorMatches`: `reassign authority` accepts `systemEvent` when the owner
-   does not change. A system reassignment that names a new owner matches no
-   row and is refused. The event records the owner as the canonical actor,
-   as a reviewer that replaces itself does today.
+   resolves the runner, starts it with the signal, and returns the handle.
+   `startAttempt` is described under "Review request loop". It never goes
+   through `patchHandoff`, so no caller option can ask for a system
+   reassignment.
+4. `actorMatches`: `reassign authority` returns true for `systemEvent` only
+   when `ownerChanged` is not true. `startAttempt` checks that the matched
+   row is 20 before it writes, because a refused row 20 otherwise matches
+   legacy row L10. The event records `btrain-system` as the actor and the
+   owner as the responsible actor, as a reviewer that replaces itself does
+   today.
 5. `requestChangesHandoff` and `resolveHandoff`: pass `attemptMatches`, true
-   when the actor is the active attempt's reviewer and the head is the
-   attempt's head. A verdict by a reviewer that has committed since the
-   attempt's head is refused with the two exits the spec names.
-6. A second `request-changes` from a same-lab reviewer on one lane writes
-   `review-escalation` and starts no third same-lab round.
-7. `runLoop`: a `needs-review` round calls the request loop. Update the
-   pinned line count in `test/decomposition_inventory.test.mjs` and state
-   the old and new numbers in the handoff.
-8. `finishPatchWithReviewerDispatch`: the foreground command returns when
+   when an attempt is open, the actor is its reviewer, and the lane's head
+   is the attempt's head. Both functions already read the lane again inside
+   the handoff lock before they publish. Read the review record there too
+   and refuse when the attempt has ended or changed since the first check.
+   A verdict by a reviewer that has committed since the attempt's head is
+   refused with the two exits the spec names. A verdict with no open
+   attempt is refused with the command that opens one.
+6. `activity.mjs`: when the lane's recorded reviewer runs `btrain handoff`
+   for a `needs-review` lane with no open attempt, write `review-attempt`
+   with `opened: pickup` at the request's head, under the handoff lock, and
+   then the pickup. The reviewer does not change, so this is an append and
+   needs no transition.
+7. Two same-lab requests for changes on one lane stop the same-lab tier:
+   rule 6 is skipped, rule 7 writes `review-escalation`, and no third
+   same-lab round starts.
+8. `runLoop`: a `needs-review` round asks the request loop for one attempt.
+   Update the pinned line count in `test/decomposition_inventory.test.mjs`
+   and state the old and new numbers in the handoff.
+9. `finishPatchWithReviewerDispatch`: the foreground command returns when
    there is a verdict, an escalation, or a same-lab dispatch has ended.
-9. Tests, all with the fake runner and the fake clock:
+10. Tests, all with the fake runner and the fake clock:
    - A runner that exits with a quota signal is `tool_unavailable`, and the
      next other-lab reviewer is dispatched at once.
    - With every other-lab reviewer silent, nothing is dispatched to the same
@@ -562,7 +701,23 @@ The second is code.
    - A same-lab attempt's command has the fresh-session flags and its
      environment has no variable outside the allowlist.
    - The owner pushes a new head during a request: a new window starts.
-   - A system reassignment that names a new owner is refused.
+   - A system reassignment that names a new owner is refused and writes
+     nothing. So is one whose row 20 guard fails: the L10 match is not
+     accepted.
+   - A verdict computed before the attempt was ended, and published after,
+     is refused: the check inside the handoff lock sees the ended attempt.
+   - An attempt that runs for ten minutes with steady output keeps the
+     request lock, and a second process does not take it.
+   - Two same-lab requests for changes, then a third request: no same-lab
+     dispatch, one escalation.
+   - `btrain loop --lane <id> --max-rounds 1` on a `needs-review` lane makes
+     exactly one dispatch.
+   - A reviewer started by hand: `btrain handoff` opens an attempt at the
+     request's head, and its `handoff resolve` is accepted. The same resolve
+     with no pickup is refused. A reviewer that commits and then picks up
+     cannot resolve, because the branch has moved past the request's head.
+   - A verdict run from another worktree of the repository is accepted when
+     the lane's branch has not moved.
    - TLC passes; the harness reports no new candidate finding.
 
 ### WS6: late verdicts
@@ -593,7 +748,12 @@ The second is code.
 Two PRs. The first is prose and model: spec 002 `CLI Commands` and
 `PR-flow states and actors`, spec 005 `Proposed Status Model` and FR-5, the
 re-pin, the status, the three actions, `fixAuthors`, `FixSeparation`, the
-restated `PrFlowEntryByReviewer`, the mirror, and TLC. The second is code.
+restated `PrFlowEntryByReviewer`, the mirror, and TLC. Two details the model
+must get right: `RepairEnter` takes any status in `ActiveStatuses` except
+`repair-needed`, so it must also exclude `fix-confirmation`; and
+`ReviewerFix` sets `peerApproved` and `approver`, and `ConfirmFix` leaves
+both alone, so `PrFlowNeedsPeerApproval` holds without change. The second
+PR is code.
 
 1. Add `fix-confirmation` to the status sets and the three rows to
    `TRANSITION_ROWS`. Exclude it from the sources of rows 13 and L3, and
@@ -612,14 +772,21 @@ restated `PrFlowEntryByReviewer`, the mirror, and TLC. The second is code.
    recorded approval, the actor, and lock coverage, and calls
    `applyTransition` for `ConfirmFix`. With PR flow on it moves the lane to
    `ready-for-pr` with `updateHandoff` and event type `fix-confirmed`. With
-   PR flow off it calls `resolveHandoff` with the internal `transitionEvent`
-   option set to `handoff confirm-fix`, so the existing resolve path
-   releases the locks. `resolveHandoff` reads that option for its terminal
-   transition; that line and step 5 are its only edits here.
-4. `validateNeedsReviewTransition`: from `fix-confirmation`, require a
-   commit after `fixHead`. `finishPatchWithReviewerDispatch`: on that
-   hand-off, write `fix-confirmed` with `how: amend` for the fix commits
-   still in the head. The new attempt reviews the commits after `fixHead`.
+   PR flow off it writes `fix-confirmed` first and then calls
+   `resolveHandoff` with the internal `transitionEvent` option set to
+   `handoff confirm-fix`, so the existing resolve path releases the locks
+   and records its own `resolve` event. `resolveHandoff` reads that option
+   for its terminal transition; that line and step 5 are its only edits
+   here. Export `updateHandoff`, regenerate the baseline, and change the
+   three count assertions from 71 to 72.
+4. `AmendFix`: `resolveReassignInputs` adds `commitAfterFixHead` to
+   `gateFacts` when the lane is `fix-confirmation`, true when the lane's
+   branch holds a commit after `fixHead`. It reaches the gate through the
+   spread WS4 added, also when an override ID skips
+   `validateNeedsReviewTransition`. `finishPatchWithReviewerDispatch`: on
+   that hand-off, write `fix-confirmed` with `how: amend` for the fix
+   commits still in the head. The new attempt reviews the commits after
+   `fixHead`.
 5. `resolveHandoff`: refuse when the head holds a commit that `fix-applied`
    recorded for the resolving reviewer and no `fix-confirmed` covers it.
 6. `renderPreCommitHook`: during `fix-confirmation`, only the owner may
@@ -631,10 +798,13 @@ restated `PrFlowEntryByReviewer`, the mirror, and TLC. The second is code.
    to the owner, tell the owner to read `git diff <fixBase>..<fixHead>`
    only, and print both exits. Reviewer guidance gains the judgment
    conditions of FR-11.
-8. The confirmation deadline: when the owner has not picked the lane up
-   within `other_lab_window`, the process that dispatched it, or
-   `btrain loop --lane <id>`, writes `review-escalation` with reason
-   `fix-unconfirmed`. The lane stays `fix-confirmation`.
+8. The confirmation deadline. `runLoop` returns when its one round ends, so
+   `fixHandoff` itself then waits, polling the record, until the owner's
+   pickup or `other_lab_window`. At the window with no pickup it writes
+   `review-escalation` with reason `fix-unconfirmed`. The `btrain loop`
+   command in `cli.mjs` makes the same check before it calls `runLoop` for a
+   `fix-confirmation` lane. `runLoop` is not edited for this. The lane stays
+   `fix-confirmation`.
 9. Tests: every Rule 2 acceptance criterion in the spec, one test each, and:
    - Each FR-11 refusal has its own message.
    - A fix by the reviewer does not add the reviewer to the author history,
@@ -645,8 +815,12 @@ restated `PrFlowEntryByReviewer`, the mirror, and TLC. The second is code.
    - Row 13 refuses `fix-confirmation` as a source.
    - A commit made with `--no-verify` in the fix range makes `handoff fix`
      fail on the missing trailer.
-   - With PR flow off, `confirm-fix` resolves the lane and releases its
-     locks.
+   - With PR flow off, `confirm-fix` resolves the lane, releases its
+     locks, and the log holds `fix-confirmed` before `resolve`.
+   - The owner's `handoff update --status needs-review` from
+     `fix-confirmation` with no commit after `fixHead` is refused, also with
+     a `needs-review` override ID.
+   - In TLC, no step enters `repair-needed` from `fix-confirmation`.
    - TLC passes with `FixSeparation` and the restated
      `PrFlowEntryByReviewer`, and the transcription cross-check agrees.
 
@@ -714,8 +888,9 @@ restated `PrFlowEntryByReviewer`, the mirror, and TLC. The second is code.
   the way `priorOwner` narrows the author history.
 - `node scripts/decomposition_inventory.mjs --stages` exits 0 with no change
   to `specs/020-ws2-module-assignment.json` in every workstream.
-  `test/decomposition_inventory.test.mjs` passes, with the one stated change
-  in WS5.
+  `test/decomposition_inventory.test.mjs` passes, with its stated changes:
+  the export counts in WS2 and WS7, the `patchHandoff` pin in WS4, and the
+  `runLoop` pin in WS5.
 - The export-surface check passes against the regenerated baseline in WS2
   and WS7, and against the unchanged baseline in every other workstream.
   `test/cli-internal-options.test.mjs` passes with no new internal option.
@@ -737,7 +912,9 @@ restated `PrFlowEntryByReviewer`, the mirror, and TLC. The second is code.
 | A lab is declared wrong in `[agents.labs]` | `btrain doctor` prints every resolved lab. The spec treats the table as the operator's assertion |
 | A reviewer's fix is wrong | The limits of FR-11, the owner's confirmation, and the owner's right to amend |
 | The trailer can be typed by hand | Accepted by the spec. It catches a bypassed hook, not a deliberate forgery |
-| `runLoop` grows and its pin changes | Once, in WS5, with the old and new counts in the handoff |
+| `patchHandoff` and `runLoop` grow and their pins change | Once each, in WS4 and WS5, with the old and new counts in the handoff |
+| The handoff lock is `withFileLock`, which steals a lock older than 30 seconds | Every write under it here is short. The stale-steal race that lane d is reproducing must be fixed before WS5 relies on the lock for verdict ordering; WS5 does not start until it is |
+| A reviewer started by hand never runs `btrain handoff` | Its verdict is refused with the command to run. It costs one command and keeps the head check |
 | The fold over the event log gets slow on a long-lived lane | It uses only events after the last claim. Commands already read the whole lane log through `readWorkflowEvents`, so the fold adds no read |
 | TLC's state space grows with `fixAuthors` | Measured in WS7, with a one-slot fallback |
 | Every consuming repository's managed block changes | WS9 ships it last and its PR says so |

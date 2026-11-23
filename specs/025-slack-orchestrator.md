@@ -1,7 +1,7 @@
 # 025 — A Local Orchestrator in Slack
 
 **Status**: Draft
-**Version**: 0.5.1
+**Version**: 0.5.2
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -213,12 +213,18 @@ shell.
 |---|---|---|
 | `status` | Runs the publisher's refresh (`btrain slack refresh`, spec 024 FR-11): re-renders the board and every active card | No |
 | `flush` | Drains the publisher's outbox | No |
-| `poll-pr lane=<id>` | Rejected unless the lane's stored status is `pr-review`, `ready-to-merge`, or a PR-flow `changes-requested`. Then runs `btrain pr poll --lane <id> --apply` | No |
-| `retry-review lane=<id>` | Rejected unless the lane's stored status is `needs-review`. Then runs `btrain loop --lane <id> --max-rounds 1` as a child process, which dispatches the reviewer once. Under spec 023 this starts a new review attempt | No |
+| `poll-pr lane=<id>` | Rejected unless the lane's stored status is `pr-review`, `ready-to-merge`, or a PR-flow `changes-requested`: one whose latest entry to that status was made by `pr-poll`. A PR number alone is not enough. Then runs `btrain pr poll --lane <id> --apply` | No |
+| `retry-review lane=<id>` | Rejected unless the lane's stored status is `needs-review`. Then runs `btrain loop --lane <id> --max-rounds 1 --expect-status needs-review` as a child process, which dispatches the reviewer once. Under spec 023 this starts a new review attempt | No |
 | `start owner=<agent>` with `task`, `files`, and optional `objective`, `deliverable`, `acceptance`, `done-when`, `reviewer` | Claims a free lane and starts the owner's runner (FR-8) | Yes |
 | `pause` | Stops the listener from acting on Slack messages (FR-11) | Typed by the operator only |
 
 A command the operator typed needs no separate approval.
+
+The status is read twice: when the command is checked, and again just before
+the child starts. `btrain loop` dispatches whoever the lane's status names,
+so a lane that left `needs-review` in between would send the owner, not the
+reviewer. `btrain loop` gains `--expect-status <status>`: the command reads
+the lane and exits without a dispatch when the status differs.
 
 `poll-pr` can move a lane. `btrain pr poll --apply` records bot feedback as
 `changes-requested`, a clear review as `ready-to-merge`, and a merged or
@@ -292,9 +298,11 @@ operator added.
   in one canonical form. That text is what it posts, in a code block, and
   what it stores.
 - If the text handling of spec 024 FR-8 would change the canonical text,
-  because a secret pattern matches, the text is over the length limit, or it
-  holds a URL that would be rewritten, the proposal is rejected and nothing
-  is stored. Only the escaping of `&`, `<`, and `>` is applied when it is
+  because a secret pattern matches, it holds a URL that would be rewritten,
+  or the proposal with its code block and approval line would not fit in one
+  3,999-character message, the proposal is rejected and nothing is stored.
+  The field limits of FR-8 are checked on their own; the shorter cuts that
+  spec 024 applies to a card's task and summary do not apply to a proposal. Only the escaping of `&`, `<`, and `>` is applied when it is
   posted, and inside a code block that changes nothing the operator sees.
 - A proposal becomes pending only after its post succeeds. It is keyed by the
   `ts` of that post. Approval runs the stored text.
@@ -395,8 +403,14 @@ repository in its state, and they are part of the snapshot of FR-14.
   `btrain slack listen --resume` is run on the machine. It cannot be resumed
   from Slack. A paused listener still drains the outbox. Stop and pause reach
   the running listener through flag files in the btrain home that it checks
-  every cycle, so only the listener writes its state. On resume it moves
-  every cursor to the current time: nothing sent during a pause is acted on.
+  every cycle, so only the listener writes its state. When it handles
+  `pause` it drops the rest of the messages it has read. On resume it moves
+  every channel cursor and every open thread's reply cursor to the current
+  time: nothing sent during a pause is acted on.
+- **Remembering what was handled.** A handled `ts` is kept for 48 hours. A
+  cursor is never moved back more than 24 hours, and `approvalMinutes` may
+  not be set above 24 hours, so a message cannot be read again after its
+  `ts` has been forgotten.
 - **Running it.** `btrain slack listen --install` writes a user launch agent
   on macOS and prints a systemd user unit on Linux. Nothing is installed
   unless that command is run.
@@ -480,7 +494,11 @@ enforced by the listener, which does not depend on the model following it.
 - **Profile check.** The check starts the runner once with the profile
   and fails the profile when the CLI reports any tool, any MCP server, or an
   API key as its credential source. A failed profile is not used, so a run
-  cannot fall back to metered usage. The verdict is saved with the runner
+  cannot fall back to metered usage. Every later run is started with the
+  same arguments and is held to the same test on what it reports about
+  itself: a run that reports a tool, an MCP server, or an API key is
+  stopped, its output is discarded, and the profile is marked failed. The
+  verdict is saved with the runner
   string and the CLI's version. The check runs when the listener starts, and
   when `btrain doctor` finds no saved verdict for the current runner and
   version. `btrain doctor` otherwise reports the saved verdict, so it does

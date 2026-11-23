@@ -496,6 +496,8 @@ After spec 023 is implemented:
      not picked it up within `[review].other_lab_window`.
    - A lane that needs repair while in `fix-confirmation` mentions a person at
      once.
+   - A reviewer that stays silent on a lane with a linked PR mentions a
+     person when the window ends with no verdict.
    - No reviewer available at any tier, and a same-lab review that needs
      escalation, mention a person. `dispatch-failed` stops mentioning.
 3. A test for each condition, with a fake clock.
