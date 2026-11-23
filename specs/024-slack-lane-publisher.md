@@ -1,7 +1,7 @@
 # 024 — Slack Lane Publisher
 
 **Status**: Draft
-**Version**: 0.2.0
+**Version**: 0.3.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -132,8 +132,8 @@ and not readable by group or other. A file that fails a check is reported as
 stays off.
 
 The channel for a repository comes from `channels` in the same file, keyed
-by the repository's registered path. Registered names are not unique, and
-btrain already refuses a name that two repositories share. The operator's Slack user ID comes from
+by the repository's registered path. Registered names are not unique: two
+repositories can share one, and a lookup by that name then fails. The operator's Slack user ID comes from
 `operator`, and the people to mention from `mention`. None of these appears
 in `project.toml`. Channel mapping is FR-16.
 
@@ -356,6 +356,8 @@ process gives up, not when the problem appears.
 | Late request for changes | The owner is dispatched to acknowledge it (spec 023 FR-6) | It is still unacknowledged after `[review].other_lab_window` |
 | Outside-lab PR bot is silent | The next outside-lab bot is requested (spec 023 FR-9) | Every outside-lab bot is silent past the pending window |
 | Stale or inconsistent lane state | The watchdog's safe repairs (spec 006 FR-2) | The lane enters `repair-needed` and that repair escalates |
+| Reviewer fix waiting for the owner | The owner is dispatched to confirm it (spec 023 FR-12) | The owner has not picked it up within `[review].other_lab_window` |
+| Lane needs repair while in `fix-confirmation` | Nothing automatic; that status cannot enter `repair-needed` (spec 023) | At once |
 
 Each problem is posted in the lane's thread without a mention when it
 happens, so the thread shows the problem and the attempt to fix it.

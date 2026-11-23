@@ -1,7 +1,7 @@
 # 023 — Cross-Lab Review by Default and Reviewer-Applied Fixes
 
 **Status**: Draft
-**Version**: 0.2.0
+**Version**: 0.3.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -224,8 +224,7 @@ same-lab tier.
 in the process that requested the review, as reviewer dispatch does today,
 and that command stays in the foreground until a verdict or the same-lab
 dispatch. Attempt records are persisted (FR-5), so `btrain loop --lane <id>`
-or a running Slack listener (spec 025) can continue a request whose process
-ended. With no process running, nothing advances. The next process to pick
+can continue a request whose process ended. With no process running, nothing advances. The next process to pick
 the request up applies the three conditions above. Elapsed wall time alone
 never sends a review to the same lab.
 
@@ -243,6 +242,9 @@ from the reviewer of the lane's active attempt, and:
   equal the attempt's head. A reviewer that has committed since then cannot
   resolve. Its exits are `handoff fix`, or removing its commits.
 - `handoff fix` requires `fixBase` to equal the attempt's head (FR-11).
+- `handoff resolve` is rejected when the head contains a commit that
+  `handoff fix` recorded for the resolving reviewer and that the owner has
+  not confirmed, through `handoff confirm-fix` or the re-handoff of FR-10.
 
 A duplicate verdict changes nothing.
 
@@ -294,7 +296,7 @@ Changing the lane's reviewer for fallback or recovery is spec 015 row 20
 the previous reviewer, the new reviewer, and the attempts that led to it.
 Spec 017 FR-7 proposes the same designation. The row's existing guards still
 apply: owner and reviewer differ, the reviewer is not in the author history,
-and no PR is linked.
+and no PR is linked. The system changes the reviewer only, never the owner.
 
 #### FR-8: Same-lab reviews run in a fresh session and are labeled
 
@@ -349,8 +351,11 @@ the responsible actor.
   `ready-for-pr` when PR flow is enabled, else to `resolved` and releases
   locks.
 - `btrain handoff update --lane <id> --status needs-review --actor <owner>`
-  from `fix-confirmation`: the owner changed or reverted the fix. The usual
-  review-context and diff guards apply, and a new review window starts.
+  from `fix-confirmation`: the owner changed or reverted the fix. Only the
+  owner may do this. By handing off again the owner confirms the fix commits
+  that remain in the head, and btrain records that confirmation. The new
+  attempt reviews the commits after `fixHead`. The usual review-context and
+  diff guards apply to those commits, and a new review window starts.
 
 `btrain handoff` guidance for `fix-confirmation` tells the owner to review
 `git diff <fixBase>..<fixHead>` only, and prints both exits.
@@ -364,6 +369,8 @@ the responsible actor.
 - `[review.fixes].enabled` is true.
 - `fixBase` is the head of the active attempt, `fixHead` descends from it,
   and every commit in the range was made after the attempt started.
+- Every commit in the range carries the active reviewer's `Btrain-Agent`
+  trailer (FR-13).
 - Every path changed in the range is in the lane's locked files.
 - The range changes at most `max_files` files and `max_changed_lines` lines.
 - The range removes or changes no existing line in a test file or test
@@ -386,8 +393,10 @@ Only the lane's owner confirms a fix. The owner did not write the fix range
 (FR-13, FR-14), its lab differs from the fixer's because fixes are limited
 to the other-lab tier (FR-11), and the owner knows the intent.
 
-The confirmation clock starts when the lane enters `fix-confirmation`. When
-the owner's runtime is unavailable, or has not picked the lane up within
+The confirmation clock starts when the lane enters `fix-confirmation`.
+`handoff fix` dispatches the owner the way a review request dispatches a
+reviewer. That process, or `btrain loop --lane <id>`, notices the deadline.
+When the owner's runtime is unavailable, or has not picked the lane up within
 `[review].other_lab_window`, the lane stays `fix-confirmation` and the
 problem escalates to a person (spec 024 FR-15). No other agent confirms in
 this version. Keeping the confirmer inside the lane's two agents keeps the
@@ -404,17 +413,19 @@ the same lane.
 btrain cannot prove which agent made a commit: every agent on a machine
 commits as the same git user. Authorship of a range rests on the lane
 protocol, as it does today for the owner's work. During `needs-review` only
-the active reviewer may commit (FR-14), and by running `handoff fix` the
-reviewer declares every commit in the range as its own. An owner commit
-slipped into the range is a protocol violation that the hook blocks and that
-`git commit --no-verify` can bypass. That bypass exists today and is a known
-limit of hook enforcement.
+the active reviewer may commit (FR-14). The managed commit-message hook
+writes a `Btrain-Agent` trailer that names the committing agent, and
+`handoff fix` is rejected unless every commit in the range carries the
+active reviewer's trailer. A commit made with `git commit --no-verify` has
+no trailer, so the bypass that exists today is caught at `handoff fix`. A
+trailer can still be typed by hand: this raises the bar and is not proof.
 
 #### FR-14: Writes during review
 
 While a lane is `needs-review`, only the reviewer of the active attempt may
 commit to the lane's locked files. While it is `fix-confirmation`, only the
-owner may. The managed pre-commit hook enforces both.
+owner may. The managed pre-commit hook enforces both, and the
+commit-message hook writes the `Btrain-Agent` trailer of FR-13.
 
 ## Non-Goals
 
@@ -469,14 +480,18 @@ Transition-table changes:
 |---|---|---|---|---|---|---|---|
 | new | ReviewerFix | `handoff fix` | `needs-review` | `fix-confirmation` | reviewer | active other-lab attempt; `fixBase` equals its head; fix limits pass; records the reviewer as approver | retain |
 | new | ConfirmFix | `handoff confirm-fix` | `fix-confirmation` | `ready-for-pr` or `resolved` | owner | head equals `fixHead`; a recorded reviewer approval exists; owner not a fix author | retain or release |
-| new | AmendFix | `handoff update --status` | `fix-confirmation` | `needs-review` | owner | review context and diff | retain |
+| new | AmendFix | `handoff update --status` | `fix-confirmation` | `needs-review` | owner | review context and diff after `fixHead`; records the owner's confirmation of the fix commits that remain | retain |
 | 1 | Claim | unchanged | unchanged | unchanged | unchanged | adds the lab rule of FR-3 | unchanged |
 | 3, 4, 5 | verdict rows | unchanged | unchanged | unchanged | reviewer of the active attempt | adds attempt and head match (FR-5) | unchanged |
-| 20 | Reassign | unchanged | unchanged | unchanged | adds `system` | reason recorded (FR-7) | unchanged |
-| L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, and `ready-to-merge` as targets | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
+| 20 | Reassign | unchanged | unchanged | unchanged | adds `system`, for the reviewer only | reason recorded (FR-7); the existing distinct-owner, author-history, and no-PR guards | unchanged |
+| L3, L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, and `ready-to-merge` as targets; L3 never takes `fix-confirmation` as a source | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
 
-`fix-confirmation` joins the active statuses, so rows 13, 17, and 18 cover
-it. It is not a PR-flow status.
+`fix-confirmation` holds locks like any active status, so rows 17 and 18
+cover it. It is not a source for row 13: spec 006 FR-29 lists the statuses a
+lane may enter `repair-needed` from, and `RepairClear` returns a lane to
+`in-progress`, which would drop the pending confirmation. A lane that needs
+repair while in `fix-confirmation` escalates to a person (spec 024 FR-15).
+It is not a PR-flow status.
 
 Model changes in `specs/tla/LaneLock.tla` and `lane-lock-model.mjs`:
 
@@ -484,8 +499,10 @@ Model changes in `specs/tla/LaneLock.tla` and `lane-lock-model.mjs`:
   `fix-confirmation` (spec 015 requires one primary row for each status), so
   `getPrimaryTransition` and `getLoopActorForState` route the status to the
   owner.
-- `ReviewerFix` sets the lane's approver to the reviewer. The approval covers
-  the owner's work at `fixBase`.
+- `ReviewerFix` sets `peerApproved` and sets the lane's approver to the
+  reviewer. The approval covers the owner's work at `fixBase`. `ConfirmFix`
+  leaves both unchanged, so `PrFlowNeedsPeerApproval` still holds on entry
+  to `ready-for-pr`.
 - Restate `PrFlowEntryByReviewer`. Today it requires every entry to
   `ready-for-pr` to come from `needs-review` with the reviewer as approver.
   It must also allow entry from `fix-confirmation` when the approver recorded
@@ -494,6 +511,10 @@ Model changes in `specs/tla/LaneLock.tla` and `lane-lock-model.mjs`:
   the agent that confirms a fix is not in that lane's `fixAuthors`.
 - `ReviewerSeparation`, `AuthorSeparation`, and `LastActorIsLaneAgent` are
   unchanged and must still hold.
+- `Reassign` gains a system case. Today `reassign authority` accepts only a
+  lane agent, in the gate and in the model. The system may change the
+  reviewer only, under the row's existing guards, and `lastActor` becomes
+  the owner so that `LastActorIsLaneAgent` still holds.
 - Labs, the 15-minute window, pickup, and progress signals are not modeled.
   `in-review` and `confirming-fix` are display states, not statuses. A
   fallback enters the model as a `system` Reassign, the way spec 014 treats
@@ -567,6 +588,15 @@ Rule 2:
   attempt.
 - With the owner's runtime unavailable, a lane in `fix-confirmation` stays
   there and escalates. No other agent can run `handoff confirm-fix`.
+- The reviewer's `handoff update --status needs-review` from
+  `fix-confirmation` is rejected.
+- After the owner amends a fix and hands off again, the reviewer can resolve
+  the new head. Without that hand-off or a `confirm-fix`, a resolve over the
+  reviewer's own fix commits is rejected.
+- `handoff fix` over a range that holds a commit without the reviewer's
+  `Btrain-Agent` trailer is rejected.
+- A system reassignment that would change the owner is rejected.
+- `repair-needed` cannot be entered from `fix-confirmation`.
 
 ## Follow-ups
 

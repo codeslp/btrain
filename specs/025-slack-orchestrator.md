@@ -1,7 +1,7 @@
 # 025 — A Local Orchestrator in Slack
 
 **Status**: Draft
-**Version**: 0.4.0
+**Version**: 0.5.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -190,9 +190,10 @@ key: value
   key, a missing required key, or a value that fails its check is rejected
   whole. The listener replies with the reason. Nothing runs.
 
-`repo=<name>` names the repository a command applies to. It is required when
-the channel is mapped to more than one repository (spec 024 FR-16), and it
-must be one of them. Lane IDs are per repository, so `lane=e` alone is
+`repo=<name-or-path>` names the repository a command applies to. It is
+required when the channel is mapped to more than one repository (spec 024
+FR-16), and it must be one of them. A name is accepted when exactly one of
+the channel's repositories has it. Otherwise the registered path is needed. Lane IDs are per repository, so `lane=e` alone is
 ambiguous in a shared channel.
 
 There is no verb that passes arguments through to the btrain CLI or to a
@@ -204,7 +205,7 @@ shell.
 |---|---|---|
 | `status` | Runs the publisher's refresh (`btrain slack refresh`, spec 024 FR-11): re-renders the board and every active card | No |
 | `flush` | Drains the publisher's outbox | No |
-| `poll-pr lane=<id>` | Runs `btrain pr poll --lane <id> --apply` | No |
+| `poll-pr lane=<id>` | Rejected unless the lane's stored status is `pr-review`, `ready-to-merge`, or a PR-flow `changes-requested`. Then runs `btrain pr poll --lane <id> --apply` | No |
 | `retry-review lane=<id>` | Rejected unless the lane's stored status is `needs-review`. Then runs `btrain loop --lane <id> --max-rounds 1` as a child process, which dispatches the reviewer once. Under spec 023 this starts a new review attempt | No |
 | `start owner=<agent>` with `task`, `files`, and optional `objective`, `deliverable`, `acceptance`, `done-when`, `reviewer` | Claims a free lane and starts the owner's runner (FR-8) | Yes |
 | `pause` | Stops the listener from acting on Slack messages (FR-11) | Typed by the operator only |
@@ -215,7 +216,9 @@ A command the operator typed needs no separate approval.
 `changes-requested`, a clear review as `ready-to-merge`, and a merged or
 closed PR as `resolved`. It does this from GitHub's state through the system
 rows of spec 015, not from anything in the proposal, and that is why it may
-run unapproved. The operator chose this on 2026-11-23. Removing `poll-pr`
+run unapproved. The status check in the table is needed because legacy row
+L5 still accepts a `pr-poll` from any status, while spec 002 allows these
+outcomes only from those three. The operator chose this on 2026-11-23. Removing `poll-pr`
 from `auto` makes it wait for approval.
 
 `[slack.orchestrator].auto` names the verbs a proposal may run without
@@ -627,6 +630,9 @@ starts a real model.
   runs, does not run the command on restart.
 - A message skipped for its age gets exactly one reply.
 - `retry-review` for a lane that is not `needs-review` is rejected.
+- `poll-pr` for a lane in `needs-review` or `in-progress` is rejected.
+- In a channel with two repositories of the same name, `repo=` with the
+  name is rejected and `repo=` with a registered path is accepted.
 - The listener keeps polling while a started loop and a model run are in
   progress.
 - A secret pattern in lane text does not appear in the model's input.
