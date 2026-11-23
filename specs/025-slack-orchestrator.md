@@ -645,6 +645,10 @@ Not checked live: the Tier 3 rate limit, which is from Slack's documentation.
    Slack.
 2. A proposal may run `status`, `flush`, `poll-pr`, and `retry-review`
    without approval. `start` always needs approval (FR-3).
+3. Approval is a typed `approve` reply only (FR-6). Brian first chose
+   "a check-mark reaction or the word approve". Review found that an app
+   acting as the operator can add a reaction that the listener cannot tell
+   from the operator's, and he confirmed typed-only the same day.
 
 ## Defaults to confirm during implementation
 
@@ -654,10 +658,6 @@ Not checked live: the Tier 3 rate limit, which is from Slack's documentation.
 - Orchestrator runs are limited to 30 an hour and 180 seconds each.
 - The default orchestrator runner is `claude -p`.
 
-## Open questions for Brian
+## Open questions
 
-1. **Approval by reaction is dropped. Is a typed `approve` acceptable?** On
-   2026-11-23 you chose "either a check-mark reaction or the word approve".
-   Review then found that an agent with its own Slack access can add a
-   reaction as you, and the listener cannot tell it from yours. A typed reply
-   can be told apart, so this draft accepts only that.
+None.
