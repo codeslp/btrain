@@ -33,10 +33,15 @@ Six decisions shape the design:
 - **One writer for the state file.** Only the listener writes `inbox.json`.
   `--stop`, `--resume`, and `pause` use small flag files, so no second process
   ever rewrites the state.
-- **The same hard constraints as the spec 024 plan.** No new function in
-  `core.mjs`, no added line in `patchHandoff` or `runLoop`, `slack/` never
-  imports `core.mjs`, zero runtime dependencies, and no usage-billed service.
-  This plan adds two lines to one unpinned core function, `claimHandoff`.
+- **The hard constraints of the spec 024 plan, with one stated exception.**
+  No new function in `core.mjs`, no added line in `patchHandoff`, `slack/`
+  never imports `core.mjs`, zero runtime dependencies, and no usage-billed
+  service. This plan adds two lines to one unpinned core function,
+  `claimHandoff`. The exception is `runLoop`: `retry-review` must never
+  dispatch an owner, and only a check on the state `runLoop` itself reads
+  can promise that. WS5 adds an `expectStatus` option to `runLoop`, a few
+  lines, and changes the pinned line count in
+  `test/decomposition_inventory.test.mjs` in the same PR.
 - **No model run in a test.** Tests use the fake Slack `fetch` of spec 024
   WS0, extended for the two read calls, and a fake runner executable.
 
@@ -54,8 +59,8 @@ what this plan needs from it. Both lists are below.
 | --- | --- | --- |
 | `src/brain_train/slack/` | Does not exist on `main`. The spec 024 plan creates it in its WS1 to WS5 | Twelve new modules. Three spec 024 modules gain exports (see "What the spec 024 plan must provide") |
 | The `slack` block in `cli.mjs` | Planned by spec 024 WS2. It hands `slack/cli.mjs` one object of readers, with the `readLanes` function that falls back to the single handoff in a repository without lanes | Add to that object: `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (see `poll-pr`), and the path of the running CLI file. Add `listen` and `whois` to the help text |
-| The `loop` block in `cli.mjs` (line 2363) | Calls `runLoop` for the lane's current status | Add `--expect-status <status>`: read the lane first and exit 1 with no dispatch when its status differs. `runLoop` is not edited |
-| `enteredChangesRequestedViaPrPoll` in `core.mjs` (line 5383) | Tells a PR-flow `changes-requested` from a local one by the event that entered the status. Private, as is `readWorkflowEvents` | Unchanged. `cli.mjs` builds `enteredByPrPoll` from the lane's event log. It uses `readWorkflowEvents` once spec 023 WS2 has exported it, and until then reads the log file through the exported `getRepoPaths` |
+| The `loop` block in `cli.mjs` (line 2363) and `runLoop` in `core.mjs` | The block calls `runLoop`, which reads the configuration and the harness profile, then the lane, then dispatches whoever `getLoopActorForState` names for that snapshot. A check made in `cli.mjs` before the call would leave the time of those first reads open | The block passes `--expect-status <status>` to `runLoop` as `expectStatus`. `runLoop` compares it with the lane state it has just read, before it picks an actor, and returns with no dispatch when they differ. The command exits 1. This is the one edit to `runLoop`, and its pin changes |
+| `enteredChangesRequestedViaPrPoll` in `core.mjs` (line 5383) | Tells a PR-flow `changes-requested` from a local one: it takes the newest event whose `after.status` is `changes-requested` and whose `before.status` is not, and is true when that event's `details.transitionEvent` is `pr-poll`. Private, as are `readWorkflowEvents` and the function that builds the log's path | Unchanged. `cli.mjs` builds `enteredByPrPoll` with the same predicate. It uses `readWorkflowEvents` once spec 023 WS2 has exported it. Until then it reads the file itself: `lane-<id>.jsonl`, or `repo.jsonl` in a repository without lanes, in the `eventsDir` that the exported `getRepoPaths` returns, which is under the shared state root also from a linked worktree. A line that does not parse is skipped, as `readWorkflowEvents` does |
 | `claimHandoff` in `core.mjs` (line 5959) | Takes the named `--owner` as the transition's actor and does not check who is calling. With no `--lane` it picks a lane with `findAvailableLane`. Its claim event records `task`, `lockedFiles`, and cgraph data. Not a pinned function | One conditional line in each of its two `eventDetails` objects, to record a `--requested-via` value. No other core change |
 | `findAvailableLane`, `readAllLaneStates`, `readProjectConfig`, `listRepos` in `core.mjs` | All four are exported. `readAllLaneStates` returns null in a repository without lanes | Passed to the listener by `cli.mjs`, the lane reader wrapped as spec 024's `readLanes`. Not imported by `slack/` |
 | `parseOptions` in `cli.mjs` (line 288) | An argument that starts with `--` is always read as a flag, even in a value position | Unchanged. The listener rejects any field value that starts with `-` before it builds an argument list |
@@ -132,8 +137,9 @@ pass removes its skip.
 11. The listener starts no child with an agent identity or a lane pin in its
     environment, and reads lane state only through the reader functions.
 12. One listener runs for each btrain home.
-13. `core.mjs` gains no function, and `patchHandoff` and `runLoop` keep their
-    line counts. The gates are those of the spec 024 plan's invariant 8.
+13. `core.mjs` gains no function, and `patchHandoff` keeps its line count.
+    `runLoop` changes once, in WS5, by the `expectStatus` check. The gates
+    are those of the spec 024 plan's invariant 8.
 
 ### Data model
 
@@ -177,7 +183,9 @@ written to a temporary name and renamed, with mode 0600.
   hours is a configuration error, so no message can be read again after its
   `ts` was removed.
 - `proposals` states are `pending`, `approved`, `rejected`, `expired`, and
-  `cancelled`. Only `pending` can be approved.
+  `cancelled`. Only `pending` can be approved, and `approve` compares
+  `expiresAt` with the current time itself. It does not rely on the later
+  step of the cycle that marks proposals expired.
 - `results` keeps the last 20 for each repository.
 - `windows` holds the times of the last hour, for the limits of FR-10.
 - `outgoing` holds a reply whose post failed with a transient error. It is
@@ -185,8 +193,11 @@ written to a temporary name and renamed, with mode 0600.
   the reply is a proposal, the entry's `proposal` holds the whole record
   that would have been stored: thread, repository, canonical text, source,
   and expiry. When a retry succeeds, the proposal is stored as pending under
-  the `ts` that post returns. A proposal whose post is dropped never becomes
-  pending, and the thread gets no approval line.
+  the `ts` that post returns, unless its expiry has passed or the thread
+  already has another pending proposal: then nothing is stored and the
+  thread gets a one-line note that the proposal lapsed. Storing a new
+  proposal for a thread also removes that thread's waiting `outgoing`
+  proposal. A proposal whose post is dropped never becomes pending.
 - No message text from Slack is stored. A model run reads its thread from
   Slack again.
 
@@ -194,9 +205,13 @@ written to a temporary name and renamed, with mode 0600.
 ID, and the start time. It is the delivery lock of spec 024 with another
 path: under 60 seconds old means live. The listener touches it on a
 15-second timer for as long as it runs, so a cycle that waits out a
-`Retry-After` or pages a long history never looks dead. Before every action
-it reads the nonce again. If the nonce is not its own, it stops the cycle,
-starts nothing more, and exits without writing `inbox.json`.
+`Retry-After` or pages a long history never looks dead. A timer does not
+run while the process itself is suspended, so the listener also reads the
+nonce again as the last thing before each rename of `inbox.json`, with
+synchronous calls and no `await` between that read and the rename. A child
+starts only after that rename. If the nonce is not its own, it renames
+nothing, starts nothing, and exits. What is left is the time between two
+system calls.
 
 **`listen.stop`**: written by `btrain slack listen --stop`. The listener
 checks for it every cycle, removes it, releases the lease, and exits.
@@ -321,9 +336,9 @@ directory.
 
 The checks for `poll-pr` and `retry-review` run twice: when the command is
 accepted, and again in the same tick as the child's start. For
-`retry-review` the child checks a third time itself, through
-`--expect-status`, so a lane that has left `needs-review` never gets its
-owner dispatched by this verb.
+`retry-review` the child checks a third time itself: `runLoop` compares
+`expectStatus` with the lane state it reads and dispatches from, so a lane
+that has left `needs-review` never gets its owner dispatched by this verb.
 
 Every verb also counts against `max_commands_per_hour` for its repository.
 `start` and `pause` are refused in `[slack.orchestrator].auto` when the
@@ -531,7 +546,7 @@ is paused. A listener that is not running is not a finding.
 | 2 Toggle, settings, state, lease | `slack_listen`; `slack/inbox.mjs`, `lease.mjs`; orchestrator settings; `whois`; the listening manifest | `repo_mode.mjs` (lane a), `cli.mjs` (lane c) | WS0, 024 WS2 | State survives a restart; a second lease is refused; invariants 1 and 12 pass |
 | 3 The poll loop | `slack/read-client.mjs`, `listen.mjs`; stop, pause, resume; the age rule; conversations open and close; outbox drain | None | WS1, WS2, 024 WS3 | A listener against the fake hears only the operator, replies "commands only" to a mention, and drains the outbox; invariants 3 and 10 pass |
 | 4 The model run | `slack/runner.mjs`, `snapshot.mjs`; the profile check; doctor findings; turns and their limit | None | WS3, 024 WS1 | A typed mention gets a handled reply from the fake runner; invariants 7, 8, and 9 pass |
-| 5 Typed commands | `slack/commands.mjs`; `status`, `flush`, `poll-pr`, `retry-review`, `pause`; results; command limits; `--expect-status` on `btrain loop` | `cli.mjs` (lane c) | WS3, 024 WS4 | Each of the five verbs runs from a typed command with its checks and its result reply; invariant 11 passes |
+| 5 Typed commands | `slack/commands.mjs`; `status`, `flush`, `poll-pr`, `retry-review`, `pause`; results; command limits; `--expect-status` on `btrain loop` | `cli.mjs` (lane c), `core.mjs` (lane h) | WS3, 024 WS4 | Each of the five verbs runs from a typed command with its checks and its result reply; invariant 11 passes |
 | 6 `start`, proposals, approval | `start`; proposals from a reply; `approve` and `reject`; expiry; `--requested-via` | `core.mjs` (lane h), `cli.mjs` (lane c) | WS4, WS5 | A proposal runs only after a typed `approve`, and runs the stored text; invariants 4 and 13 pass |
 | 7 Install and pilot | `--install`; README section; the listener on for the btrain repository only | `README.md` (lane h) | WS6, 024 WS6 | Two weeks of real use with the measures below reported |
 | 8 Spec 023 | `retry-review` starts a review attempt; display states in the snapshot; the pickup test | Depends on spec 023's lanes | Spec 023 | The listener's reads record no pickup, shown against the real pickup code |
@@ -602,8 +617,8 @@ first. Run
    - A message with another user's ID, and one with the operator's ID and an
      `app_id`, are both classified as ignored.
    - A reply shown in the channel from under another thread is ignored.
-   - A canonical text that the scrub, the cut, or the URL rewrite would
-     change is rejected.
+   - A canonical text that the scrub or the URL rewrite would change is
+     rejected, and so is a proposal over 3,999 characters.
    - No verb template contains a word from the FR-4 list, and the verb table
      has exactly six verbs.
    - `start` and `pause` in `auto` are refused.
@@ -684,7 +699,8 @@ first. Run
    - A cycle that waits 90 seconds on a `Retry-After` keeps its lease, and a
      second listener is refused.
    - A listener whose lease nonce was replaced starts no further action and
-     writes no state.
+     writes no state, also when the nonce changes after an action was
+     decided and before its state write.
    - After 30 hours down, a message handled before the stop is not acted on
      and gets no second reply. `approvalMinutes` of 1,500 is a
      configuration error.
@@ -742,7 +758,11 @@ first. Run
 1. `commands.mjs`: the pre-checks, run when a command is accepted and again
    just before its child starts, the argument lists, the child environment,
    `execFile` for short children, a detached start for loops, and the loop
-   list. `--expect-status` on the `loop` command in `cli.mjs`.
+   list. `--expect-status` on the `loop` command in `cli.mjs`, passed to
+   `runLoop` as `expectStatus`, with the pinned line count of `runLoop`
+   changed in `test/decomposition_inventory.test.mjs` and both numbers
+   stated in the handoff. If spec 023 WS5 has already changed that pin,
+   start from its number.
 2. `status`, `flush`, `poll-pr`, `retry-review`, and `pause` from a message
    the operator typed.
 3. Results: a reply for every command the listener acts on, and the last 20
@@ -757,8 +777,8 @@ first. Run
      entered, with or without a PR number.
    - A lane that leaves `needs-review` between the check and the start gets
      no child. One that leaves it after the start gets no dispatch:
-     `btrain loop --expect-status needs-review` exits 1.
-   - `start` and the snapshot work in a repository without lanes.
+     `btrain loop --expect-status needs-review` exits 1, also when the
+     status changes after the command starts and before `runLoop` reads it.
    - A composition test: `retry-review` against the real CLI in a temporary
      repository, with a fake reviewer runner, dispatches the reviewer once.
    - The child's environment has none of the seven removed names.
@@ -801,6 +821,12 @@ first. Run
      under the retry's `ts`, and `approve` runs it.
    - A `start` proposal with a 2,000-character task is accepted. One whose
      message would pass 3,999 characters is rejected.
+   - A proposal whose retry succeeds after its expiry is not stored, and
+     `approve` runs nothing. One whose retry succeeds after a newer proposal
+     was stored is not stored either.
+   - An `approve` that arrives in the same cycle a proposal expires runs
+     nothing.
+   - `start` and the snapshot work in a repository without lanes.
    - A proposal for `retry-review` runs without approval. The fourth one for
      a lane in an hour is refused with a reason.
    - A proposal for `pause` is rejected.
@@ -859,8 +885,10 @@ After spec 023 is implemented:
 
 - `npm test` and `npm run test:formal` give the same results as `main` in
   every workstream. The formal harness is not touched.
-- **Formal impact: none** for WS0 to WS5, WS7, and WS8. No status,
-  transition, guard, lock rule, or actor changes.
+- **Formal impact: none** for WS0 to WS4, WS7, and WS8. No status,
+  transition, guard, lock rule, or actor changes. WS5 edits `runLoop`, a
+  modeled entry point, without changing a transition: that lane classifies
+  it as `validation` and runs the formal advisory command.
   `python3 scripts/tla_pin.py --check` stays at 1 pin clean.
 - **WS6 edits `claimHandoff`**, which the formal harness drives. The change
   adds a key to event details and no behavior. That lane classifies it as
@@ -868,8 +896,8 @@ After spec 023 is implemented:
   skill, and records the result.
 - `node scripts/decomposition_inventory.mjs --stages` exits 0 without a
   change to `specs/020-ws2-module-assignment.json`, and
-  `test/decomposition_inventory.test.mjs` passes. This is the gate for
-  invariant 13 in WS6.
+  `test/decomposition_inventory.test.mjs` passes, with the one stated change
+  to the `runLoop` pin in WS5. This is the gate for invariant 13.
 - `btrain review code` passes on each lane.
 - No test calls Slack and no test starts a real model. The two live steps of
   WS0 are run by a person and leave only fixtures.
@@ -899,7 +927,7 @@ After spec 023 is implemented:
 | Slack turns a file name into a link | The grammar undoes link markup, and WS0 captures the real shape first |
 | Polling adds up to 10 seconds to every reply | Accepted. A live connection is a follow-up and changes no rule here |
 | Two developers share one bot user in one workspace | Each listener hears only its own operator, and the thread filter keeps only replies that carry its own label |
-| The wiring lanes wait on other lanes' locks | WS1, WS3, WS4, and WS5 touch none of the held files |
+| The wiring lanes wait on other lanes' locks | WS1, WS3, and WS4 touch none of the held files |
 
 ## Spec amendments made with this plan
 
@@ -934,7 +962,8 @@ A second review, of this plan, added four more in version 0.5.2:
 13. **FR-3:** `poll-pr` accepts a `changes-requested` lane only when `pr-poll`
     entered that status. A PR number alone is not enough.
 14. **FR-3:** the status is read again just before the child starts, and
-    `btrain loop` gains `--expect-status`.
+    `btrain loop` gains `--expect-status`, checked by the loop on the state
+    it dispatches from.
 15. **FR-7:** the length limit for a proposal is one 3,999-character message,
     not the card cuts of spec 024.
 16. **FR-11:** `pause` drops the rest of what was read; resume also moves
@@ -949,8 +978,8 @@ The spec 024 plan was amended in this lane to state each of these.
 
 1. `slack/text.mjs` exports its steps one by one as well as the whole
    function: scrub, cut, escape, and the URL rewrite, each returning the text
-   and whether it changed. The proposal check needs the first, second, and
-   fourth alone.
+   and whether it changed. The proposal check needs the scrub and the
+   URL rewrite alone.
 2. `slack/client.mjs` exports its low-level call, with the error classes, and
    that call can send a GET request with query parameters.
    `conversations.replies` does not accept a JSON body.

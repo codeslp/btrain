@@ -1,7 +1,7 @@
 # 023 — Cross-Lab Review by Default and Reviewer-Applied Fixes
 
 **Status**: Draft
-**Version**: 0.3.2
+**Version**: 0.3.3
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -265,15 +265,20 @@ A duplicate verdict changes nothing.
 **The lane's head.** The review request records the branch the owner was on
 and its commit. Later checks read that branch, so a reviewer working from
 another checkout of the repository sees the same head. With a detached
-checkout, the head is the commit of the checkout the command runs in.
+checkout there is no branch to read, so the head is the recorded commit,
+and a pickup or a verdict is accepted only from a checkout that is at that
+commit.
 
 **An attempt with no dispatch.** A reviewer session started by hand, and a
 reviewer with a `notify` runner, are never dispatched. When the lane's
 recorded reviewer picks up a `needs-review` lane that has no open attempt,
 btrain opens an attempt for it at the request's head. Its tier comes from
 that reviewer's lab, and a reviewer with no lab is recorded as `same-lab`.
-The recorded reviewer got its role through the claim rule (FR-3), a system
-reassignment (FR-7), or an override, so this opens no way around Rule 1. A
+An attempt opened this way needs what a dispatch would need. For a
+same-lab or no-lab reviewer that means no other-lab agent with a `cli`
+runner is configured, or a `same-lab-review` override was used for the
+lane, or a fallback (FR-7) put that reviewer there. Otherwise no attempt
+opens, and the message gives the FR-3 fix. A
 verdict with no open attempt is rejected, and the message tells the reviewer
 to run `btrain handoff --lane <id>` first.
 

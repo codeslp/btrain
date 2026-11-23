@@ -223,8 +223,9 @@ A command the operator typed needs no separate approval.
 The status is read twice: when the command is checked, and again just before
 the child starts. `btrain loop` dispatches whoever the lane's status names,
 so a lane that left `needs-review` in between would send the owner, not the
-reviewer. `btrain loop` gains `--expect-status <status>`: the command reads
-the lane and exits without a dispatch when the status differs.
+reviewer. `btrain loop` gains `--expect-status <status>`: the loop compares
+it with the lane state it reads and dispatches from, and exits without a
+dispatch when the status differs.
 
 `poll-pr` can move a lane. `btrain pr poll --apply` records bot feedback as
 `changes-requested`, a clear review as `ready-to-merge`, and a merged or
