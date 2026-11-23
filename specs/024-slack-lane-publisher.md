@@ -122,7 +122,8 @@ inline_timeout_ms = 2000
 exactly `true`. This differs from the older toggles: `isFeatureEnabled`
 treats a missing `[features]` table or a missing key as enabled, so that
 legacy repositories keep everything on. That rule would switch the publisher
-on in every existing repository, so `slack` is marked explicit-only. With the
+on in every existing repository, so `slack` is marked explicit-only, and
+`btrain features` shows and writes it the same way. With the
 toggle off, btrain writes no outbox, makes no network call, and prints
 nothing about Slack.
 
@@ -195,7 +196,8 @@ btrain has no daemon, and this spec adds none.
   `withFileLock`, which waits up to 5 seconds and then throws. The holder
   touches the lock before every Slack call. A lock is taken over only when
   it has not been touched for 60 seconds, so a long flush never looks
-  abandoned and two live processes never both deliver.
+  abandoned. A holder checks before every send that the lock is still its
+  own, and stops if it is not.
 - **Delivery never sleeps and never throws.** A Slack error, a timeout, or a
   `Retry-After` records the earliest next try on the entry and returns.
 - Entries for one lane are sent in order. A failing entry holds back later

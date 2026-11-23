@@ -57,11 +57,11 @@ drop one entry).
 | The last statement of `cli.mjs` | `run().catch(...)` prints the error and sets exit code 1. `run()` is a chain of `if` blocks that return, and commands set `process.exitCode`; nothing calls `process.exit` | Replace with `try { await run() } catch { print; set exit code } finally { await deliverAfterCommand() }` |
 | `printHandoffState` in `cli.mjs` | Prints the guidance string that `checkHandoff` returns. `checkHandoff` itself prints nothing and is also called by PR flow and the startup snapshot | Print the FR-12 thread line here, so only `btrain handoff` shows it |
 | Command routing in `cli.mjs` | One `if (command === "...")` block per command | A `slack` block that delegates to `slack/cli.mjs` |
-| `isFeatureEnabled` and `FEATURES` in `repo_mode.mjs` | Thirteen toggles. A missing `[features]` table or a missing key means enabled, so legacy repositories keep everything on. `localDefault: false` only affects the table written for a new repository | Add `slack` with `localDefault: false` and a new `explicitOnly: true` flag. `isFeatureEnabled` returns true for an explicit-only feature only when its key is exactly `true` |
+| `isFeatureEnabled` and `FEATURES` in `repo_mode.mjs` | Thirteen toggles. A missing `[features]` table or a missing key means enabled, so legacy repositories keep everything on. `localDefault: false` only affects the table written for a new repository | Add `slack` with `localDefault: false` and a new `explicitOnly: true` flag. An explicit-only feature is on only when its key is exactly `true`, in `isFeatureEnabled`, `getAllOnFeatureMap`, `getEffectiveFeatureMap`, and `getNewRepoFeatureBase`. `btrain features` on a repository with no table then shows it off, and `btrain features enable` or `disable` on such a repository does not write `slack = true` |
 | `SECRET_PATTERNS` in `review/code-rules.mjs` | Module-private list of seven patterns. It does not match a Slack webhook URL or `github_pat_` | Export it and add those two patterns |
 | `loadSystemOneRuntimeConfig` in `system-one.mjs` | Reads `~/.btrain/jev.json` with no-follow, size, owner and mode checks | Unchanged. The same checks are written once in `slack/credentials.mjs`; sharing one helper is a follow-up |
 | `withFileLock` in `core.mjs` | Waits up to 5 seconds, then throws; steals a lock older than 30 seconds | Not used. Delivery has its own lock |
-| Lane state | Holds `prNumber`, not a PR URL | Unchanged. The link is built from the `origin` remote and the PR number |
+| Lane state | Holds `prNumber`, not a PR URL | Unchanged. The link is built from the PR's base remote and the PR number |
 | `~/.btrain` via `getBrainTrainHome` | Registry, templates, `jev.json`, `dashboard.json` | Add `slack.json` and `slack/boards.json` |
 | `<state root>/.btrain/` | Locks, events, overrides, PR comments. Ignored by git except `project.toml` | Add `slack/` for the outbox and the thread map |
 
@@ -80,6 +80,7 @@ drop one entry).
 | `slack/lock.mjs` | The delivery lock with a heartbeat | No |
 | `slack/client.mjs` | `chat.postMessage`, `chat.update`, `pins.add`, `auth.test` over an injected `fetch`; error classes | No |
 | `slack/threads.mjs` | Thread map in the state root; board map in the global home | No |
+| `slack/remote.mjs` | Parse a git remote and build a GitHub PR link | Yes |
 | `slack/deliver.mjs` | Drain: order, budget, card from current state, board | No |
 | `slack/doctor.mjs` | Findings for `btrain doctor` | No |
 | `slack/cli.mjs` | `setup`, `test`, `status`, `flush`, `refresh`, `channels` | No |
@@ -88,6 +89,9 @@ drop one entry).
 `offerWorkflowEvent(repoRoot, config, event)` gets everything it needs as
 arguments. `deliverAfterCommand` takes a `readLanes` function from `cli.mjs`,
 which is how delivery reads current lane state without importing core.
+`readAllLaneStates` returns null in a repository with lanes turned off, so
+the function `cli.mjs` passes falls back to the single state that
+`checkHandoff` reads.
 
 ### Invariants
 
@@ -114,8 +118,10 @@ pass removes its skip.
 ### Data model
 
 **Outbox**: a directory, `<state root>/.btrain/slack/outbox/`, with one file for
-each entry, named `<queuedAt>-<id>.json`. An entry is written under a temporary
-name and renamed into place, so a reader never sees half an entry and two
+each entry, named `<stamp>-<id>.json`. `<stamp>` is the queue time as a
+fixed-width UTC string with no colon, such as `20261123T214500123Z`, so names
+sort in time order and are legal on Windows. The ISO time stays inside the
+JSON. An entry is written under a temporary name and renamed into place, so a reader never sees half an entry and two
 writers never share a file. Delivery lists the directory in name order and
 removes a file when its entry is done. Nothing appends to a shared file.
 
@@ -147,13 +153,21 @@ it. `channels` is keyed by registered repository path.
 
 `<state root>/.btrain/slack/delivery.lock`, created with an exclusive open.
 
-- The holder touches the file before every Slack call. Each call has a
-  10-second timeout.
+- The holder writes a random nonce into the lock when it creates it, and
+  touches the file before every Slack call.
 - A process that finds the lock checks its modification time. Under 60 seconds
   old, the lock is live and the process skips delivery. Older, the holder is
-  gone and the process removes the lock and takes it.
-- A long flush therefore never looks abandoned while it is working, and two
-  live processes never both hold the lock.
+  taken to be gone: the process removes the lock and creates its own. If the
+  removal fails, it skips.
+- Before every send, the holder reads the lock again and stops delivering if
+  the nonce is not its own. Two processes can both judge one lock stale; the
+  second removal then deletes the first one's new lock. The nonce check ends
+  the first process at its next send, so the overlap is at most one entry.
+- A long flush never looks abandoned while it is working.
+- **Call timeouts.** `btrain slack flush` and `refresh` give each call 10
+  seconds. Delivery after a lane command gives each call only the time left
+  in `inline_timeout_ms` and aborts it when that runs out, so a slow Slack
+  call cannot hold a command past the 2-second budget.
 
 ### Text pipeline
 
@@ -183,8 +197,8 @@ snapshots to one kind. The first matching row wins.
 | `pr-linked` | `prNumber` changes to a new value | No |
 | `returned-to-pr` | status becomes `pr-review` from `changes-requested` | No |
 | `ready-to-merge` | status becomes `ready-to-merge` | Yes, with the PR link |
-| `merged` | status becomes `resolved` from a PR-flow status | No |
-| `abandoned` | status becomes `resolved` from `in-progress` or `changes-requested` | No |
+| `merged` | status becomes `resolved` from a PR-flow status, or from `changes-requested` with a PR linked | No |
+| `abandoned` | status becomes `resolved` from `in-progress`, or from `changes-requested` with no PR linked | No |
 | `repair-needed` | status becomes `repair-needed` | Only when `repairEscalation` is `human` |
 | `repair-cleared` | status becomes `in-progress` from `repair-needed` | No |
 | `repair-resolved` | status becomes `resolved` from `repair-needed` | No |
@@ -291,9 +305,15 @@ channel and the token. WS2 can be split so that the modules land first and the
 ### WS2: config, credentials, setup
 
 1. Add `slack` to `FEATURES` with `localDefault: false` and
-   `explicitOnly: true`. `isFeatureEnabled` returns true for it only when
-   `[features].slack` is exactly `true`. `btrain features` reports it the same
-   way.
+   `explicitOnly: true`, and honor the flag in all four places a feature's
+   state is decided in `repo_mode.mjs`: `isFeatureEnabled`,
+   `getAllOnFeatureMap`, `getEffectiveFeatureMap`, and
+   `getNewRepoFeatureBase`. `initRepo` spreads `getAllOnFeatureMap()` under
+   the caller's map, so fixing that helper keeps `slack = true` out of a
+   table written for a legacy repository, with no edit to `core.mjs`. Change
+   the `btrain features` line that says every feature is on, and exempt
+   explicit-only ids in the `test/local-init.test.mjs` case that asserts the
+   legacy rule for every id.
 2. `credentials.mjs`: environment variable first, else the private file with
    the no-follow, size, owner, and mode checks, and the same two failure
    reasons the spec names. Windows skips the owner and mode checks.
@@ -302,7 +322,10 @@ channel and the token. WS2 can be split so that the modules land first and the
 4. `slack/cli.mjs`: `setup` with the token from standard input and the channel
    prompt of the CLI contract; `status`; `channels`; `test`.
 5. Tests:
-   - A repository with no `[features]` table has the publisher off.
+   - A repository with no `[features]` table has the publisher off, and
+     `btrain features` shows it off.
+   - `btrain features disable formal` on a repository with no table writes a
+     table without `slack = true`.
    - Each rejected credential-file shape.
    - The toggle on with no credentials: every lane command succeeds with no
      network call, and `status` names the missing token.
@@ -330,6 +353,8 @@ channel and the token. WS2 can be split so that the modules land first and the
    - Order within a lane, and a failing entry on one lane does not hold
      another lane.
    - A 429 with `Retry-After` is not retried early.
+   - Every post sends `unfurl_links` and `unfurl_media` as false and never
+     sends `link_names`.
    - `channel_not_found` pauses delivery; a later successful test call clears
      the pause.
    - `msg_too_long` drops one entry and the lane's later entries still send.
@@ -339,6 +364,11 @@ channel and the token. WS2 can be split so that the modules land first and the
      one duplicate reply and a correct card.
    - Two live processes: the second skips while the first holds a fresh lock,
      and each entry is delivered once.
+   - Two processes that both judge a lock stale: the one whose nonce was
+     replaced stops at its next send, and at most one entry is sent twice.
+   - With a 2-second budget and a call that never returns, delivery ends
+     within the budget.
+   - An entry's file name contains no colon.
    - A flush of more entries than fit in 60 seconds keeps the lock, because of
      the heartbeat.
    - A lock older than 60 seconds is taken over.
@@ -374,6 +404,8 @@ channel and the token. WS2 can be split so that the modules land first and the
      unchanged, and the entry stays queued.
    - A paused publisher adds exactly one warning line, and `btrain doctor`
      reports the pause.
+   - `btrain doctor` reports the toggle on with no token, the toggle on with
+     no channel, and an oldest entry over an hour old.
    - `btrain handoff` shows the thread line; `btrain pr status` does not.
    - `node scripts/decomposition_inventory.mjs --stages` exits 0 and the
      inventory test passes, with no change to the assignment JSON.
@@ -385,9 +417,13 @@ channel and the token. WS2 can be split so that the modules land first and the
    repository's lane state, pinned once, kept for a repository that cannot be
    read.
 2. The merge announcement: on `ready-to-merge`, a reply with the mention list
-   and the PR link. The link is built from the `origin` remote when it is a
-   GitHub remote, plus the PR number. Any other remote gets "PR #N" with no
-   link. Lane state and `pr-flow.mjs` are not changed.
+   and the PR link. `slack/remote.mjs` builds the link from the remote PR flow
+   opens the PR on: `upstream`, then `github`, then `origin`, the order
+   `resolveBaseRemote` uses. A fork's `origin` is the fork, so `origin` alone
+   would link the wrong repository. The parser accepts `https://`, `ssh://`,
+   and the `git@host:owner/repo.git` form. Only a `github.com` host gets a
+   link; any other gets "PR #N" with none. `pr-flow.mjs` keeps its own
+   private copy of this logic and is not changed; sharing it is a follow-up.
 3. Mentions for `repair-needed` only when the repair has escalated, and for
    `dispatch-failed` until spec 023 replaces it.
 4. Shared channels: repository name on every card and reply; developer label
@@ -401,6 +437,10 @@ channel and the token. WS2 can be split so that the modules land first and the
      others.
    - A first `repair-needed` has no mention; its escalation has one.
    - `ready-to-merge` has the link and a mention; `merged` has neither.
+   - The link uses `upstream` when it exists, parses an SSH remote, and is
+     omitted for a host that is not `github.com`.
+   - A failed `pins.add` is reported by `btrain slack status` and blocks
+     nothing.
    - A repository-wide search finds no real Slack token, workspace ID, channel
      ID, or user ID outside fixtures with obviously fake values.
 
@@ -466,7 +506,7 @@ After spec 023 is implemented:
 | The wiring lanes wait on other lanes' locks | WS1 and WS3 need none of those files. WS2 can land its modules first |
 | A legacy repository turns the publisher on by accident | The toggle is explicit-only: a missing table or key means off |
 | Two processes write the queue at once | One file per entry, created by rename. Nothing appends to a shared file |
-| A long flush looks abandoned and a second process double-sends | The holder touches the lock before every call; only a lock untouched for 60 seconds is taken |
+| A long flush looks abandoned and a second process double-sends | The holder touches the lock before every call; only a lock untouched for 60 seconds is taken; a nonce check before every send bounds a double takeover to one entry |
 | A crash between Slack's reply and the entry's removal | Replies are at-least-once in that window; the card and board are rewritten whole |
 | One bad entry blocks a lane's later posts | Entry errors drop the entry; unknown errors drop it after 5 attempts |
 | A line added to a pinned core function fails the inventory test | The plan touches only `appendWorkflowEvent`, `finishPatchWithReviewerDispatch`, and `doctorRepo` |
@@ -479,6 +519,7 @@ After spec 023 is implemented:
 ## Follow-ups
 
 - One shared private-file helper for `system-one.mjs` and `slack/credentials.mjs`.
+- One shared remote parser for `pr-flow.mjs` and `slack/remote.mjs`.
 - The listener of spec 025 drains the outbox continuously.
 - Per-lane and per-day digests if the pilot shows too many posts.
 
@@ -495,7 +536,8 @@ files are held by other lanes? What does Slack require for an updatable card?
 `repo_mode.mjs`, `system-one.mjs`, and `review/code-rules.mjs`, `btrain locks`
 on 2026-11-23, and Slack's API documentation for the four calls.
 **Reviews that shaped this plan:** a same-lab lane review (three corrections)
-and a cross-lab review by Grok 4.7 through the Cursor CLI (twelve findings).
+and two cross-lab rounds by Grok 4.7 through the Cursor CLI (twelve findings,
+then seven more).
 **Constraints:** zero runtime dependencies, no usage-billed service, no new
 function in `core.mjs`, and no change to lane authority.
 **Gaps:** no organizational history; the pilot's measures have no baseline;
