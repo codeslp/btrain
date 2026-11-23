@@ -401,8 +401,10 @@ function parseBody(raw, contentType = "") {
     return { body: null, token: undefined }
   }
   let fields
+  let form = false
   if (raw instanceof URLSearchParams) {
     fields = Object.fromEntries(raw)
+    form = true
   } else {
     let text
     if (typeof raw === "string") {
@@ -414,20 +416,31 @@ function parseBody(raw, contentType = "") {
     }
     if (contentType.includes("application/x-www-form-urlencoded")) {
       fields = Object.fromEntries(new URLSearchParams(text))
+      form = true
     } else if (contentType.includes("application/json")) {
       try {
         fields = JSON.parse(text)
       } catch {
-        return { body: { unparsed: text }, token: undefined }
+        return { body: { unparsed: redactTokenText(text) }, token: undefined }
       }
     } else {
-      return { body: { unparsed: text }, token: undefined }
+      return { body: { unparsed: redactTokenText(text) }, token: undefined }
     }
   }
   if (!fields || typeof fields !== "object" || fields.token === undefined) {
     return { body: fields, token: undefined }
   }
-  return { body: { ...fields, token: REDACTED }, token: String(fields.token) }
+  // Slack takes a token from a form argument, never from a JSON body; the
+  // value is redacted either way.
+  return { body: { ...fields, token: REDACTED }, token: form ? String(fields.token) : undefined }
+}
+
+// An ignored body is recorded as text; keep any token in it out of the record.
+function redactTokenText(text) {
+  return text
+    .replace(/(token=)[^&\s]*/gi, `$1${REDACTED}`)
+    .replace(/("token"\s*:\s*)"[^"]*"/gi, `$1"${REDACTED}"`)
+    .replace(/\bxox[a-z]-[A-Za-z0-9-]+/gi, REDACTED)
 }
 
 function describeOutcome(outcome) {

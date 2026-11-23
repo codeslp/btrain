@@ -150,6 +150,23 @@ describe("fake Slack: recording", () => {
     assert.deepEqual(fake.calls[0].body, { unparsed: JSON.stringify({ channel: "C0000FAKE", text: "x" }) })
   })
 
+  it("takes a token only from the header or a form argument, and records none", async () => {
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const inJson = await fake.fetch("https://slack.com/api/auth.test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: TOKEN }),
+    })
+    assert.deepEqual(await inJson.json(), { ok: false, error: "not_authed" }, "Slack ignores a token in a JSON body")
+    await fake.fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      body: `channel=C0000FAKE&token=${TOKEN}`,
+    })
+    assert.equal(fake.calls[0].body.token, "[redacted]")
+    assert.match(fake.calls[1].body.unparsed, /token=\[redacted\]/)
+    assert.doesNotMatch(JSON.stringify(fake.calls), new RegExp(TOKEN))
+  })
+
   it("answers not_authed with no token and invalid_auth with the wrong one", async () => {
     const fake = createFakeSlack({ expectedToken: TOKEN })
     assert.deepEqual(await (await post(fake, "chat.postMessage", { channel: "C0000FAKE", text: "x" }, { token: null })).json(), {
