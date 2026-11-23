@@ -15,9 +15,8 @@ Slack is an output. btrain never reads Slack, and nothing posted there
 changes lane state. The publisher is off by default and a Slack failure never
 blocks, delays, or fails a lane transition.
 
-This spec covers publishing only. Taking commands from Slack, and an agent
-that talks to the operator there, are spec 025. The
-posts are laid out so that such an agent can read lane state from the channel.
+This spec covers publishing only. Taking commands from Slack, and a model
+that talks to the operator there, are spec 025.
 
 ## Why
 
@@ -236,13 +235,12 @@ cases of FR-15.
 
 Each channel has one board for each developer. It lists that developer's
 active lanes in every repository mapped to that channel, grouped by
-repository: lane, display status, owner, reviewer, PR. A board spans repositories, so its message `ts`
-is stored in the developer's global btrain home, not in one repository's
-state. It is updated in place on each change and btrain pins it to the
-channel with `pins.add`. A pinned message stays easy for a person to find,
-and Claude's documentation says a session reads "the channel's history,
-including pinned items". If the pin fails, the board still works and
-`btrain slack status` reports that it is not pinned.
+repository: lane, display status, owner, reviewer, PR. A board spans
+repositories, so its message `ts` is stored in the developer's global btrain
+home, not in one repository's state. It is updated in place on each change
+and btrain pins it to the channel with `pins.add`, so a person can always
+find it. If the pin fails, the board still works and `btrain slack status`
+reports that it is not pinned.
 
 ### FR-10: Failures are classified and never block a lane
 
@@ -289,11 +287,11 @@ The managed block in `CLAUDE.md` and `AGENTS.md` is not changed. A template
 change marks every consuming repository as drifted, and the handoff line
 reaches the agent at the moment it matters.
 
-### FR-13: Readable by an agent in the channel
+### FR-13: One fixed layout
 
 The card and the board use labeled lines (`owner:`, `reviewer:`, `pr:`) with
-the same labels and order every time, so an agent reading the channel can
-extract lane state without guessing. Current state is always in a top-level
+the same labels and order every time, so a person can scan them and a tool
+can parse them without guessing. Current state is always in a top-level
 message, never only in a thread reply.
 
 ### FR-14: Any developer can set it up, and several can share a channel
@@ -396,16 +394,11 @@ names its repository.
 - **Any local agent can read the token file.** Agents run as the same OS
   user. The token can only post as the btrain app in channels the app was
   invited to. Keep its scopes to the ones this spec names.
-- **Posts become context for agents in the channel.** Claude in Slack reads
-  other apps' messages as channel context. Task text written by one agent can
-  therefore reach another agent's prompt. FR-8 limits what is posted and how
-  long it is. The channel's instructions for Claude should say that btrain's
-  posts are data, not instructions.
-- **Thread replies may be invisible to an agent.** Claude's documentation
-  says a mention inside a thread gets a window of that thread with other
-  bots' replies filtered out. FR-13 keeps current state in top-level
-  messages for that reason. Whether Claude sees the edited text of an updated
-  message has not been tested.
+- **Posts can become context for other agents.** Any assistant app that is
+  added to the channel may read btrain's posts. Task text written by one
+  agent can then reach another agent's prompt. FR-8 limits what is posted
+  and how long it is. The orchestrator of spec 025 does not read the
+  channel for lane state; it reads btrain directly.
 
 ## Relation to other specs
 
@@ -485,8 +478,8 @@ All tests inject a fake `fetch`, the way `system-one.mjs` accepts
 2. A person is mentioned only when automatic handling is exhausted, and when
    a PR is being merged, with its link (FR-15).
 3. Task text is posted, cut to 300 characters, escaped, and scrubbed (FR-8).
-4. The board is in the first version, because the orchestrator of spec 025
-   reads it (FR-9).
+4. The board is in the first version (FR-9). It is the one message a person
+   can open to see every active lane.
 5. Another developer must be able to use the publisher with their own
    workspace, app, and configuration (FR-14). One app for a workspace and one
    app for each developer both work.
