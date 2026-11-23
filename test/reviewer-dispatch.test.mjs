@@ -283,6 +283,73 @@ describe("needs-review reviewer dispatch", () => {
     }
   })
 
+  it("spawns a Cursor agent -p reviewer (floord-app-dev) and resolves on approval", async () => {
+    const tmpDir = await makeTmpDir()
+    try {
+      await exec("git", ["init", tmpDir])
+      await exec("git", ["-C", tmpDir, "config", "user.email", "test@example.com"])
+      await exec("git", ["-C", tmpDir, "config", "user.name", "Test Bot"])
+      const init = await runBtrain(
+        ["init", tmpDir, "--agent", "owner", "--agent", "floord-app-dev", "--core-only"],
+        tmpDir,
+      )
+      assert.equal(init.code, 0, init.stderr)
+      const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+      assert.match(projectToml, /"floord-app-dev" = "agent -p"/)
+
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+      await fs.writeFile(path.join(tmpDir, "src", "feature.ts"), "export const feature = true\n", "utf8")
+
+      // Fake Cursor Agent CLI: same resolve behavior as the claude stub, but as `agent`.
+      const agentBin = path.join(tmpDir, "bin", "agent")
+      await writeExecutable(
+        agentBin,
+        fakeClaudeSource().replaceAll('"claude"', '"floord-app-dev"'),
+      )
+      await setRunnerConfig(tmpDir, [`"owner" = "notify"`, `"floord-app-dev" = "${agentBin} -p"`])
+
+      const claim = await runBtrain(
+        [
+          "handoff", "claim", "--repo", tmpDir, "--lane", "a",
+          "--task", "Cursor reviewer dispatch",
+          "--owner", "owner",
+          "--reviewer", "floord-app-dev",
+          "--files", "src/feature.ts",
+        ],
+        tmpDir,
+        { BTRAIN_AGENT: "owner" },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+
+      const spawnMark = path.join(tmpDir, "spawned.txt")
+      const argvPath = path.join(tmpDir, "argv.json")
+      const result = await runBtrain(needsReviewArgs(tmpDir), tmpDir, {
+        REVIEWER_SPAWN_MARK: spawnMark,
+        REVIEWER_ARGV_PATH: argvPath,
+        REVIEWER_ACTION: "resolve",
+      })
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stdout, /dispatch floord-app-dev/)
+      assert.match(result.stdout, /status: resolved/)
+      const spawned = await fs.readFile(spawnMark, "utf8")
+      assert.match(spawned, /spawned/)
+      const argv = JSON.parse(await fs.readFile(argvPath, "utf8"))
+      assert.ok(argv.includes("-p"), `expected -p in ${JSON.stringify(argv)}`)
+      assert.ok(argv.includes("--trust"), `expected --trust in ${JSON.stringify(argv)}`)
+      assert.ok(argv.includes("--workspace"), `expected --workspace in ${JSON.stringify(argv)}`)
+      assert.ok(argv.includes(tmpDir), `expected workspace path in ${JSON.stringify(argv)}`)
+      assert.ok(argv.includes("--auto-review"), `expected --auto-review for needs-review in ${JSON.stringify(argv)}`)
+      assert.ok(
+        argv.some((token) => token === "bth" || String(token).startsWith("bth ")),
+        `expected bth prompt in ${JSON.stringify(argv)}`,
+      )
+      const content = await readLane(tmpDir)
+      assert.match(content, /Status: resolved/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
   it("accepts a completed review even if the reviewer CLI then exits nonzero", async () => {
     const { tmpDir } = await setupRepo()
     try {

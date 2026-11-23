@@ -2456,6 +2456,16 @@ function inferDefaultAgentRunner(agentName) {
   if (normalized.includes("gemini")) {
     return "gemini"
   }
+  // Cursor Agent CLI (`agent` / `cursor-agent`). floord-app-dev is the
+  // Cursor-hosted peer reviewer identity used by ai_sales.
+  if (
+    normalized.includes("floord") ||
+    normalized.includes("cursor") ||
+    normalized.includes("app-dev") ||
+    normalized.includes("app-developer")
+  ) {
+    return "agent -p"
+  }
   return "notify"
 }
 
@@ -2466,7 +2476,11 @@ function renderAgentRunnerEntry(agentName) {
 function buildAgentRunnerLines(agentNames) {
   const collaborators = normalizeStringList(agentNames)
   if (collaborators.length === 0) {
-    return ['# "Claude" = "claude -p"', '# "GPT Codex" = "codex"'].join("\n")
+    return [
+      '# "Claude" = "claude -p"',
+      '# "GPT Codex" = "codex"',
+      '# "floord-app-dev" = "agent -p"',
+    ].join("\n")
   }
 
   return collaborators.map(renderAgentRunnerEntry).join("\n")
@@ -8717,6 +8731,12 @@ function isCodexRunnerCommand(command, args) {
   return basename === "codex" || (basename === "npx" && args[0] === "@openai/codex")
 }
 
+/** Cursor Agent CLI: published as `agent` and `cursor-agent`. */
+function isCursorAgentRunnerCommand(command) {
+  const basename = path.basename(command)
+  return basename === "cursor-agent" || basename === "agent"
+}
+
 function hasCodexRepoArg(args) {
   return args.some((token) => token === "-C" || token === "--cd" || token.startsWith("--cd="))
 }
@@ -8854,6 +8874,30 @@ function normalizeLoopCliRunner(runnerValue, {
     }
     if (!hasRunnerArg(args, "--allowedTools", "--allowed-tools")) {
       args.push(`--allowedTools=${allowedTools.join(",")}`)
+    }
+    if (!placeholderPrompt) {
+      args.push(prompt)
+    }
+  } else if (isCursorAgentRunnerCommand(command)) {
+    // Headless Cursor Agent: print mode + trust the lane workspace. Tool
+    // approval mirrors Claude's phase allowlists — auto-review for peer
+    // review (read), force for write/pr/merge so loop dispatch stays
+    // unattended. Explicit flags in the runner config win.
+    if (!hasRunnerArg(args, "-p", "--print")) {
+      args.unshift("-p")
+    }
+    if (!hasRunnerArg(args, "--trust")) {
+      args.push("--trust")
+    }
+    if (!hasRunnerArg(args, "--workspace") && !placeholderRepo) {
+      args.push("--workspace", repoRoot)
+    }
+    if (!hasRunnerArg(args, "--force", "--yolo", "--auto-review")) {
+      if (permissionPhase === "read") {
+        args.push("--auto-review")
+      } else {
+        args.push("--force")
+      }
     }
     if (!placeholderPrompt) {
       args.push(prompt)
