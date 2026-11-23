@@ -21,7 +21,9 @@
 //   { hang: true }                    never resolves; an AbortSignal still rejects it,
 //                                     as a real fetch would
 //   { hang: true, ignoreAbort: true } never settles, even when aborted
-//   { ok: true, ...fields }           success with these fields merged in
+//   { ok: true, ...fields }           success with these fields merged in; also
+//                                     the way to script a method that has no
+//                                     built-in body in SUCCESS_BODIES
 //
 // `queue(method, ...outcomes)` answers the next calls to that method in order,
 // one outcome per call. `setDefault(method, outcome)` answers every call to
@@ -195,46 +197,50 @@ function buildResponse(method, body, outcome, nextTs) {
       kind: "slack-error", status: 200, error: outcome.error,
     })
   }
-  const success = successPayload(method, body, nextTs)
-  if (!success) {
+  const builder = SUCCESS_BODIES[method]
+  // A method with no built-in body answers `unknown_method`, as Slack does,
+  // unless the test scripted a success for it with `{ ok: true, ... }`.
+  if (!builder && outcome?.ok !== true) {
     return jsonResponse(200, { ok: false, error: "unknown_method" }, {}, {
       kind: "slack-error", status: 200, error: "unknown_method",
     })
   }
+  const success = builder ? builder(body && typeof body === "object" ? body : {}, nextTs) : { ok: true }
   const { ok: _ignored, ...extra } = outcome || {}
   const payload = { ...success, ...extra }
   return jsonResponse(200, payload, {}, { kind: "ok", status: 200, ts: payload.ts })
 }
 
-function successPayload(method, body, nextTs) {
-  const fields = body && typeof body === "object" ? body : {}
-  switch (method) {
-    case "chat.postMessage": {
-      const ts = nextTs()
-      return {
-        ok: true,
-        channel: fields.channel,
-        ts,
-        message: { type: "message", text: fields.text, ts, bot_id: FAKE_BOT_ID, user: FAKE_BOT_USER_ID },
-      }
+// Built-in success bodies, keyed by Slack method name. A method added later
+// (spec 025 reads `conversations.history` and `conversations.replies`) gets one
+// entry here, or a scripted `{ ok: true, ... }` outcome in the test.
+export const SUCCESS_BODIES = {
+  "chat.postMessage"(fields, nextTs) {
+    const ts = nextTs()
+    return {
+      ok: true,
+      channel: fields.channel,
+      ts,
+      message: { type: "message", text: fields.text, ts, bot_id: FAKE_BOT_ID, user: FAKE_BOT_USER_ID },
     }
-    case "chat.update":
-      return { ok: true, channel: fields.channel, ts: fields.ts, text: fields.text }
-    case "pins.add":
-      return { ok: true }
-    case "auth.test":
-      return {
-        ok: true,
-        url: "https://fake-workspace.example.invalid/",
-        team: "Fake Workspace",
-        user: "btrain",
-        team_id: FAKE_TEAM_ID,
-        user_id: FAKE_BOT_USER_ID,
-        bot_id: FAKE_BOT_ID,
-      }
-    default:
-      return null
-  }
+  },
+  "chat.update"(fields) {
+    return { ok: true, channel: fields.channel, ts: fields.ts, text: fields.text }
+  },
+  "pins.add"() {
+    return { ok: true }
+  },
+  "auth.test"() {
+    return {
+      ok: true,
+      url: "https://fake-workspace.example.invalid/",
+      team: "Fake Workspace",
+      user: "btrain",
+      team_id: FAKE_TEAM_ID,
+      user_id: FAKE_BOT_USER_ID,
+      bot_id: FAKE_BOT_ID,
+    }
+  },
 }
 
 function jsonResponse(status, payload, headers, record) {

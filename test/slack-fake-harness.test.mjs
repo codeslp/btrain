@@ -137,12 +137,21 @@ describe("fake Slack: recording", () => {
     const unknown = await (await post(fake, "conversations.create", { name: "x" })).json()
     assert.deepEqual(unknown, { ok: false, error: "unknown_method" })
 
+    // A method with no built-in body can still be scripted by name.
+    fake.setDefault("conversations.history", { ok: true, messages: [{ ts: "1.000001", text: "hi" }] })
+    fake.queue("conversations.history", { retryAfter: 3 })
+    assert.equal((await post(fake, "conversations.history", { channel: "C0000FAKE" })).status, 429)
+    assert.deepEqual(await (await post(fake, "conversations.history", { channel: "C0000FAKE" })).json(), {
+      ok: true,
+      messages: [{ ts: "1.000001", text: "hi" }],
+    })
+
     await assert.rejects(
       fake.fetch("https://hooks.slack.com/services/T0000FAKE/B0000FAKE/fake", { method: "POST" }),
       /fake-slack: refused a request/,
     )
     await assert.rejects(fake.fetch("http://127.0.0.1:1/api/health"), /fake-slack: refused a request/)
-    assert.equal(fake.calls.length, 1, "a refused URL is not recorded as a Slack call")
+    assert.equal(fake.calls.length, 3, "a refused URL is not recorded as a Slack call")
   })
 
   it("reset clears calls, queues, and defaults", async () => {
