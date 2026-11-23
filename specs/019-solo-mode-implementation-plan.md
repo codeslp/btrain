@@ -1,6 +1,6 @@
 # Plan: Implement Solo Mode (Spec 017)
 
-**Status**: Draft
+**Status**: Superseded on 2026-11-23 by [spec 023](023-cross-lab-review-and-reviewer-fixes.md), which lists what carries over. Kept for history.
 **Version**: 0.1.0
 **Date**: 2026-09-02
 **Source**: [017-solo-mode-internal-review.md](017-solo-mode-internal-review.md)
