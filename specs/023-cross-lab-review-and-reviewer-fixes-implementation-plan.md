@@ -674,9 +674,10 @@ mirror gets the same action. The second PR is code.
 4. `actorMatches`: `reassign authority` returns true for `systemEvent` only
    when `ownerChanged` is not true. `startAttempt` checks that the matched
    row is 20 before it writes, because a refused row 20 otherwise matches
-   legacy row L10. The event records `btrain-system` as the actor and the
-   owner as the responsible actor, as a reviewer that replaces itself does
-   today.
+   legacy row L10. The gate's actor is `btrain-system`. The event's actor
+   is the lane's owner, with `btrain-system` in `details.by`, because
+   `getCanonicalWorkflowActor` returns the event's actor and nothing else.
+   A reviewer that replaces itself is recorded the same way today.
 5. `requestChangesHandoff` and `resolveHandoff`: pass `attemptMatches`, true
    when an attempt is open, the actor is its reviewer, and the lane's head
    is the attempt's head. Add the optional `precondition` to
