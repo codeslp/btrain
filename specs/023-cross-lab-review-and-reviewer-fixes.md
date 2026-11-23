@@ -1,7 +1,7 @@
 # 023 — Cross-Lab Review by Default and Reviewer-Applied Fixes
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.2.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -191,7 +191,9 @@ a valid reviewer, and "valid" now includes the lab rule.
 #### FR-4: The 15-minute window
 
 The window starts when the lane enters `needs-review` at a head commit. A
-new head commit starts a new window.
+new head commit by the owner starts a new window. A commit by the reviewer of
+the active attempt does not: it is a fix in progress (FR-11), and the attempt
+keeps the head it was dispatched for.
 
 During the window btrain tries other-lab reviewers one at a time:
 
@@ -209,10 +211,23 @@ During the window btrain tries other-lab reviewers one at a time:
 - When every other-lab reviewer has been tried, btrain probes the list again
   at each `silence_limit` interval until the window ends.
 
-btrain assigns a same-lab reviewer only when both are true: the window has
-passed, and no other-lab attempt has shown progress within the last
-`silence_limit`. An other-lab reviewer that is still making progress when the
-window ends keeps the lane, up to `[review].attempt_max` for that attempt.
+btrain assigns a same-lab reviewer only when all three are true: the window
+has passed; every configured other-lab reviewer has had at least one attempt
+in this request, or failed its probe; and no other-lab attempt has shown
+progress within the last `silence_limit`. An other-lab reviewer that is still
+making progress when the window ends keeps the lane, up to
+`[review].attempt_max` for that attempt. When an attempt is stopped at
+`attempt_max`, any other-lab reviewer not yet tried is tried before the
+same-lab tier.
+
+**What keeps the clock running.** btrain has no daemon. The attempt loop runs
+in the process that requested the review, as reviewer dispatch does today,
+and that command stays in the foreground until a verdict or the same-lab
+dispatch. Attempt records are persisted (FR-5), so `btrain loop --lane <id>`
+or a running Slack listener (spec 025) can continue a request whose process
+ended. With no process running, nothing advances. The next process to pick
+the request up applies the three conditions above. Elapsed wall time alone
+never sends a review to the same lab.
 
 When no other-lab agent with a `cli` runner is configured at all, there is
 nothing to wait for. The same-lab tier applies at once with reason
@@ -221,10 +236,15 @@ nothing to wait for. The same-lab tier applies at once with reason
 #### FR-5: Attempts are recorded and verdicts are bound to them
 
 Before each dispatch btrain persists an attempt record: attempt id, lane,
-reviewer, tier, head commit, and request time. A `handoff resolve`,
-`handoff request-changes`, or `handoff fix` is accepted only when the actor
-is the reviewer of the lane's active attempt and the lane's head equals the
-attempt's head. A duplicate verdict changes nothing.
+reviewer, tier, head commit, and request time. A verdict is accepted only
+from the reviewer of the lane's active attempt, and:
+
+- `handoff resolve` and `handoff request-changes` require the lane's head to
+  equal the attempt's head. A reviewer that has committed since then cannot
+  resolve. Its exits are `handoff fix`, or removing its commits.
+- `handoff fix` requires `fixBase` to equal the attempt's head (FR-11).
+
+A duplicate verdict changes nothing.
 
 **Pickup.** The attempt records a pickup time the first time its reviewer
 runs `btrain handoff --lane <id>` under its own verified identity. A read by
@@ -243,11 +263,15 @@ attempt is later marked `unresponsive`, the display returns to `needs-review`
 with no transition to undo.
 
 The same record applies to a fix confirmation (FR-12): the lane shows as
-`confirming-fix` once the confirmer picks it up.
+`confirming-fix` once the owner picks it up.
 
-This requires spec 015 legacy rows L8 and L15 to be enforced. While they are
-advisory, a verdict from an actor that is not the recorded reviewer is
-accepted with an advisory, and this requirement cannot hold.
+This requires three spec 015 legacy rows to be enforced. While L8 and L15
+are advisory, a verdict from an actor that is not the recorded reviewer is
+accepted with an advisory. While L4 is advisory, `btrain handoff update
+--status ready-for-pr` moves a lane into the PR flow with no verdict at all;
+the caller rejects only `--status resolved` today. Until L4 stops accepting
+`ready-for-pr`, `pr-review`, and `ready-to-merge` as targets, and L8 and L15
+are retired, the invariant in the Decision does not hold.
 
 #### FR-6: Late verdicts
 
@@ -338,8 +362,8 @@ the responsible actor.
 - The review tier of the active attempt is `other-lab`. A same-lab reviewer
   cannot apply fixes.
 - `[review.fixes].enabled` is true.
-- `fixHead` descends from the reviewed head, and every commit in the range
-  was made after the attempt started.
+- `fixBase` is the head of the active attempt, `fixHead` descends from it,
+  and every commit in the range was made after the attempt started.
 - Every path changed in the range is in the lane's locked files.
 - The range changes at most `max_files` files and `max_changed_lines` lines.
 - The range removes or changes no existing line in a test file or test
@@ -356,23 +380,35 @@ any doubt goes through `handoff request-changes`. The owner's right to amend
 `handoff fix` is all or nothing. A reviewer with any blocking finding that it
 did not fix uses `handoff request-changes` and pushes no commits.
 
-#### FR-12: Who confirms
+#### FR-12: The owner confirms
 
-The confirmer must not have committed in the fix range, and its lab must
-differ from the fixer's lab. The owner is first choice because the owner
-knows the intent.
+Only the lane's owner confirms a fix. The owner did not write the fix range
+(FR-13, FR-14), its lab differs from the fixer's because fixes are limited
+to the other-lab tier (FR-11), and the owner knows the intent.
 
-When the owner's runtime is unavailable or unresponsive, FR-4 applies to the
-confirmation with the fix range as the work under review: another agent
-whose lab differs from the fixer's is tried within the 15-minute window, and
-a fresh-session agent of the fixer's lab is the labeled last resort.
+The confirmation clock starts when the lane enters `fix-confirmation`. When
+the owner's runtime is unavailable, or has not picked the lane up within
+`[review].other_lab_window`, the lane stays `fix-confirmation` and the
+problem escalates to a person (spec 024 FR-15). No other agent confirms in
+this version. Keeping the confirmer inside the lane's two agents keeps the
+model's `LastActorIsLaneAgent` invariant true.
 
 #### FR-13: Fix authors are tracked apart from lane authors
 
-A reviewer that applies a fix is recorded in the lane's `fixAuthors`, not in
-its author history. Spec 005 FR-5 keeps rejecting any reassignment that makes
-a lane author the reviewer. The reviewer that fixed stays eligible to review
-the owner's later changes on the same lane.
+`handoff fix` records the commits of the fix range, and the reviewer that ran
+it, in the lane's `fixAuthors`, not in its author history. Spec 005 FR-5
+keeps rejecting any reassignment that makes a lane author the reviewer. The
+reviewer that fixed stays eligible to review the owner's later changes on
+the same lane.
+
+btrain cannot prove which agent made a commit: every agent on a machine
+commits as the same git user. Authorship of a range rests on the lane
+protocol, as it does today for the owner's work. During `needs-review` only
+the active reviewer may commit (FR-14), and by running `handoff fix` the
+reviewer declares every commit in the range as its own. An owner commit
+slipped into the range is a protocol violation that the hook blocks and that
+`git commit --no-verify` can bypass. That bypass exists today and is a known
+limit of hook enforcement.
 
 #### FR-14: Writes during review
 
@@ -431,22 +467,33 @@ Transition-table changes:
 
 | Row | Action | Event | From | To | Actor | Guard | Locks |
 |---|---|---|---|---|---|---|---|
-| new | ReviewerFix | `handoff fix` | `needs-review` | `fix-confirmation` | reviewer | active other-lab attempt at head; fix limits pass | retain |
-| new | ConfirmFix | `handoff confirm-fix` | `fix-confirmation` | `ready-for-pr` or `resolved` | owner or FR-12 confirmer | head equals `fixHead`; confirmer not a fix author | retain or release |
+| new | ReviewerFix | `handoff fix` | `needs-review` | `fix-confirmation` | reviewer | active other-lab attempt; `fixBase` equals its head; fix limits pass; records the reviewer as approver | retain |
+| new | ConfirmFix | `handoff confirm-fix` | `fix-confirmation` | `ready-for-pr` or `resolved` | owner | head equals `fixHead`; a recorded reviewer approval exists; owner not a fix author | retain or release |
 | new | AmendFix | `handoff update --status` | `fix-confirmation` | `needs-review` | owner | review context and diff | retain |
 | 1 | Claim | unchanged | unchanged | unchanged | unchanged | adds the lab rule of FR-3 | unchanged |
 | 3, 4, 5 | verdict rows | unchanged | unchanged | unchanged | reviewer of the active attempt | adds attempt and head match (FR-5) | unchanged |
 | 20 | Reassign | unchanged | unchanged | unchanged | adds `system` | reason recorded (FR-7) | unchanged |
+| L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, and `ready-to-merge` as targets | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
 
 `fix-confirmation` joins the active statuses, so rows 13, 17, and 18 cover
 it. It is not a PR-flow status.
 
 Model changes in `specs/tla/LaneLock.tla` and `lane-lock-model.mjs`:
 
-- Add the status and the three rows.
+- Add the status and the three rows. `ConfirmFix` is the primary row for
+  `fix-confirmation` (spec 015 requires one primary row for each status), so
+  `getPrimaryTransition` and `getLoopActorForState` route the status to the
+  owner.
+- `ReviewerFix` sets the lane's approver to the reviewer. The approval covers
+  the owner's work at `fixBase`.
+- Restate `PrFlowEntryByReviewer`. Today it requires every entry to
+  `ready-for-pr` to come from `needs-review` with the reviewer as approver.
+  It must also allow entry from `fix-confirmation` when the approver recorded
+  by `ReviewerFix` is the reviewer and is not the owner.
 - Add `fixAuthors` as a lane-indexed set and the invariant `FixSeparation`:
   the agent that confirms a fix is not in that lane's `fixAuthors`.
-- `ReviewerSeparation` and `AuthorSeparation` are unchanged.
+- `ReviewerSeparation`, `AuthorSeparation`, and `LastActorIsLaneAgent` are
+  unchanged and must still hold.
 - Labs, the 15-minute window, pickup, and progress signals are not modeled.
   `in-review` and `confirming-fix` are display states, not statuses. A
   fallback enters the model as a `system` Reassign, the way spec 014 treats
@@ -510,8 +557,16 @@ Rule 2:
 - The reviewer that applied a fix can still review the owner's later changes
   on that lane. A reassignment that makes a lane author the reviewer is still
   rejected.
-- TLC passes with `FixSeparation` added, and the formal harness reports no
-  new candidate finding.
+- TLC passes with `FixSeparation` added and `PrFlowEntryByReviewer`
+  restated, and the formal harness reports no new candidate finding.
+- `btrain handoff update --status ready-for-pr` is rejected for every actor.
+- After the reviewer commits during `needs-review`, `handoff resolve` is
+  rejected and `handoff fix` is accepted.
+- With the first other-lab reviewer silent past 15 minutes and a second one
+  never tried, no same-lab reviewer is assigned until the second has had an
+  attempt.
+- With the owner's runtime unavailable, a lane in `fix-confirmation` stays
+  there and escalates. No other agent can run `handoff confirm-fix`.
 
 ## Follow-ups
 
@@ -533,8 +588,8 @@ with one exception. These parts are not covered above:
   enforcement, retires legacy row L8, and adds the regression that rejects
   an owner's approval from `needs-review`. Spec 015 names it as the work
   that started L8's advisory period. It is a prerequisite of FR-5 here, and
-  this spec extends it to retire L15 as well. Until both rows are enforced,
-  the attempt binding of FR-5 is advisory.
+  this spec extends it to retire L15 and to narrow L4 (FR-5). Until all three
+  are enforced, the invariant in the Decision does not hold.
 
 - **Single-agent repositories.** A repository that configures one agent has
   no distinct same-lab identity. Spec 017's `<runtime>#review` identity (its

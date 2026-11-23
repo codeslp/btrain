@@ -1,7 +1,7 @@
 # 024 — Slack Lane Publisher
 
 **Status**: Draft
-**Version**: 0.1.0
+**Version**: 0.2.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -93,10 +93,10 @@ never in a repository:
   "mention": ["U0XXXXXXXXX"],
   "defaultChannel": "C0CCCCCCCCC",
   "channels": {
-    "btrain": "C0AAAAAAAAA",
-    "shop-web": "C0BBBBBBBBB",
-    "shop-api": "C0BBBBBBBBB",
-    "shop-docs": "C0BBBBBBBBB"
+    "/Users/dev/code/btrain": "C0AAAAAAAAA",
+    "/Users/dev/code/shop-web": "C0BBBBBBBBB",
+    "/Users/dev/code/shop-api": "C0BBBBBBBBB",
+    "/Users/dev/code/shop-docs": "C0BBBBBBBBB"
   }
 }
 ```
@@ -132,7 +132,8 @@ and not readable by group or other. A file that fails a check is reported as
 stays off.
 
 The channel for a repository comes from `channels` in the same file, keyed
-by the repository's registered name. The operator's Slack user ID comes from
+by the repository's registered path. Registered names are not unique, and
+btrain already refuses a name that two repositories share. The operator's Slack user ID comes from
 `operator`, and the people to mention from `mention`. None of these appears
 in `project.toml`. Channel mapping is FR-16.
 
@@ -157,7 +158,8 @@ written. The publisher appends an outbox entry to
 
 `id` comes from `crypto.randomUUID()`. The state change and the event are
 complete before the entry is queued. An error while queuing is logged and
-swallowed.
+swallowed. Text is scrubbed for secret patterns (FR-8) before the entry is
+written, so the outbox file never holds a secret.
 
 State changes that are recorded outside the workflow log are offered the same
 way when they exist: reviewer dispatch outcomes today, and the attempt,
@@ -167,13 +169,20 @@ pickup, fallback, and fix events of spec 023 when it lands.
 
 btrain has no daemon, and this spec adds none.
 
-- After queuing, the same process tries to deliver, with a total budget of 2
-  seconds (`[slack].inline_timeout_ms`). What it cannot send stays queued.
-- Every later btrain command that changes state drains the queue first, as
-  do `btrain loop`, `btrain handoff wait`, and `btrain slack flush`.
-- Delivery holds a lock on the outbox so that concurrent btrain processes in
-  different worktrees do not send the same entry. The lock is held for less
-  than `withFileLock`'s 30-second stale limit.
+- **Delivery comes last.** A command queues its entries and finishes its own
+  work first: the state change, the event, and its printed result. Only then
+  does it try to deliver, with a total budget of 2 seconds
+  (`[slack].inline_timeout_ms`). What it cannot send stays queued. No
+  delivery step runs before a transition.
+- Any btrain command that changes state drains older entries in that same
+  final step, as do `btrain loop`, `btrain handoff wait`, and
+  `btrain slack flush`.
+- **The delivery lock never waits.** A process that finds the outbox lock
+  held skips delivery and leaves the queue to the holder. It does not use
+  `withFileLock`, which waits up to 5 seconds and then throws. A holder
+  keeps the lock for less than 30 seconds.
+- **Delivery never sleeps and never throws.** A Slack error, a timeout, or a
+  `Retry-After` records the earliest next try on the entry and returns.
 - Entries for one lane are sent in order. A failing entry holds back later
   entries for that lane only.
 - An entry older than 24 hours is not sent as a reply. Its lane gets one
@@ -216,15 +225,20 @@ writes or edits it.
 Lane text is written by agents and is untrusted.
 
 - `&`, `<`, and `>` are converted to `&amp;`, `&lt;`, and `&gt;` in every
-  agent-written field. Agent text therefore cannot produce a mention, a
-  channel-wide notification, or a link.
+  agent-written field, so agent text cannot produce a mention or a
+  channel-wide notification.
+- Slack turns a bare URL into a link even in escaped text. In every
+  agent-written field the scheme separator `://` is rewritten to `[:]//`, so
+  agent text cannot produce a link.
 - `link_names` is never sent, so Slack does not turn plain `@here` or
   `@channel` text into a notification.
 - `unfurl_links` and `unfurl_media` are sent as `false`.
 - The task is cut to `[slack].task_chars` and a review summary to
   `[slack].summary_chars`. Every message stays under 4,000 characters.
 - The secret patterns of `btrain review code` (`review/code-rules.mjs`) are
-  applied to outgoing text. A match is replaced with `[redacted]`.
+  applied before text is queued. A match is replaced with `[redacted]`. This
+  spec adds two patterns that the list lacks today: Slack webhook URLs and
+  GitHub fine-grained tokens (`github_pat_`).
 - Diffs, file contents, environment values, and the full reviewer context
   are never posted. Only the fields named in FR-6 and FR-7 are.
 
@@ -241,6 +255,11 @@ home, not in one repository's state. It is updated in place on each change
 and btrain pins it to the channel with `pins.add`, so a person can always
 find it. If the pin fails, the board still works and `btrain slack status`
 reports that it is not pinned.
+
+The board is rendered from a read of each repository's lane state. A
+repository whose state cannot be read at that moment, because of a lock or
+an error, keeps its last rendered lines with a "not refreshed" note. One
+repository never blocks the board for the others.
 
 ### FR-10: Failures are classified and never block a lane
 
@@ -436,8 +455,18 @@ All tests inject a fake `fetch`, the way `system-one.mjs` accepts
 - Claim, review request, request-changes, approval, PR link, and merge each
   produce the expected reply text and a card with the expected fields.
 - A metadata-only update refreshes the card and posts no reply.
-- A fetch that fails or hangs leaves the lane transition's result, exit code,
-  and timing bound unchanged, and the entry stays queued.
+- A fetch that fails or hangs leaves the lane transition's result and exit
+  code unchanged, the command's result is printed before any Slack call, and
+  the entry stays queued.
+- A held outbox lock makes a command skip delivery. It does not wait or
+  throw.
+- Agent text with a bare `https://` URL, a Slack webhook URL, and a
+  `github_pat_` token is posted with no link and both secrets redacted, and
+  neither secret is in the outbox file.
+- Two registered repositories with the same name map to their own channels
+  by path.
+- A repository whose state cannot be read does not stop the board from
+  updating for the others.
 - A later command drains the queue in order. A failing entry on lane a does
   not hold back lane b.
 - Two concurrent processes deliver each entry once.

@@ -1,13 +1,14 @@
 # 025 — A Local Orchestrator in Slack
 
 **Status**: Draft
-**Version**: 0.3.0
+**Version**: 0.4.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
 Version 0.2.0 replaced the hosted Claude in Slack of 0.1.0 with a local
 model. Version 0.3.0 tightens that design after review: the model gets no
 tools, approval is a typed reply, and the transition table is unchanged.
+Version 0.4.0 addresses a cross-lab review by Grok 4.7.
 
 ## Decision
 
@@ -23,8 +24,9 @@ on the operator's machine reads the channel and does two things:
   command or approved it. Four housekeeping verbs may also run from the
   model's proposal without approval.
 
-The model never changes lane state. It has no tools, no shell, and no access
-to Slack. btrain stays the only authority over lanes, locks, and reviews.
+The model cannot choose a lane's state. It has no tools, no shell, and no
+access to Slack. One housekeeping verb, `poll-pr`, can move a lane, and it
+does so only to match what GitHub already shows (FR-3). btrain stays the only authority over lanes, locks, and reviews.
 
 The orchestrator holds no lane role. It is never an owner or a reviewer, so
 the cross-lab review rule of spec 023 is not affected by which model
@@ -203,11 +205,18 @@ shell.
 | `status` | Runs the publisher's refresh (`btrain slack refresh`, spec 024 FR-11): re-renders the board and every active card | No |
 | `flush` | Drains the publisher's outbox | No |
 | `poll-pr lane=<id>` | Runs `btrain pr poll --lane <id> --apply` | No |
-| `retry-review lane=<id>` | For a lane in `needs-review`, runs `btrain loop --lane <id> --max-rounds 1`, which dispatches the reviewer once. Under spec 023 this starts a new review attempt | No |
+| `retry-review lane=<id>` | Rejected unless the lane's stored status is `needs-review`. Then runs `btrain loop --lane <id> --max-rounds 1` as a child process, which dispatches the reviewer once. Under spec 023 this starts a new review attempt | No |
 | `start owner=<agent>` with `task`, `files`, and optional `objective`, `deliverable`, `acceptance`, `done-when`, `reviewer` | Claims a free lane and starts the owner's runner (FR-8) | Yes |
 | `pause` | Stops the listener from acting on Slack messages (FR-11) | Typed by the operator only |
 
 A command the operator typed needs no separate approval.
+
+`poll-pr` can move a lane. `btrain pr poll --apply` records bot feedback as
+`changes-requested`, a clear review as `ready-to-merge`, and a merged or
+closed PR as `resolved`. It does this from GitHub's state through the system
+rows of spec 015, not from anything in the proposal, and that is why it may
+run unapproved. The operator chose this on 2026-11-23. Removing `poll-pr`
+from `auto` makes it wait for approval.
 
 `[slack.orchestrator].auto` names the verbs a proposal may run without
 approval. Its default is `["status", "flush", "poll-pr", "retry-review"]`.
@@ -278,6 +287,10 @@ operator added.
   `ts` of that post. Approval runs the stored text.
 - An operator's command is keyed by its own `ts` and runs at most once,
   across listener restarts.
+- **Record first, then act.** The listener writes a message's `ts` to its
+  handled set before it starts a command or a model run for it. A crash in
+  between loses that one action and never repeats it. The operator can send
+  the message again.
 
 ### FR-8: `start`
 
@@ -320,8 +333,9 @@ they are part of the snapshot of FR-14.
 - At most `maxTurnsPerHour` (default 30) orchestrator runs start per
   developer. Each run spends the operator's subscription usage.
 - A message first seen more than `approvalMinutes` after it was posted gets
-  no model run and no command run. A listener that was down does not work
-  through a backlog when it comes back.
+  no model run and no command run, and one reply that says it was skipped
+  for its age. A listener that was down does not work through a backlog
+  when it comes back.
 
 ### FR-11: The listener
 
@@ -334,19 +348,24 @@ they are part of the snapshot of FR-14.
   any other thread.
 - **Reading.** Every `pollSeconds` (default 10) it calls
   `conversations.history` for each mapped channel from its saved cursor, and
-  `conversations.replies` for each open conversation thread. A live check
+  `conversations.replies` for each open conversation thread, paged from that
+  thread's own saved cursor. A live check
   confirmed that channel history marks a thread's parent with `reply_count`
   and `latest_reply`.
 - **Conversations close.** A conversation thread stays open until
   `conversationMinutes` (default 30) after the operator's last message in it.
   A closed thread is no longer polled. A new mention starts a new one.
+- **Nothing blocks the poll.** A command that starts a loop, and every
+  orchestrator run, is a child process. The listener keeps polling while
+  they run.
 - **Budget.** At most 30 Slack read calls a minute for each channel. Both
   methods are documented as Tier 3, "50+ per minute".
 - **One listener for each developer.** A single listener serves every mapped
   channel and repository. A lease file with a heartbeat in the btrain home
   stops a second one.
-- **State.** The cursor, open conversations, pending proposals, results, and
-  the set of commands already run live in `~/.btrain/slack/inbox.json`.
+- **State.** Each channel's cursor, each open thread's reply cursor, the set
+  of handled message `ts` values, pending proposals, and results live in
+  `~/.btrain/slack/inbox.json`, written to a temporary file and renamed.
 - **Publishing.** Each cycle also drains each served repository's spec 024
   outbox, so posts go out within seconds while a listener runs.
 - **Stopping.** `btrain slack listen --stop` ends it. `btrain> pause`, typed
@@ -398,7 +417,8 @@ is text the listener builds:
   propose anything in FR-4, and say so when asked.
 
 The listener builds the snapshot with btrain's read functions and no agent
-identity. Building it never counts as a reviewer's pickup or progress under
+identity, and applies the secret scrubbing of spec 024 FR-8 before the model
+sees it. Building it never counts as a reviewer's pickup or progress under
 spec 023.
 
 The instruction text is guidance for a model. Every rule that matters is
@@ -413,20 +433,26 @@ enforced by the listener, which does not depend on the model following it.
 - **Profile.** A profile must give a run with no tools, no project or user
   customizations, no MCP servers or connectors, and no saved session. For
   the `claude` CLI at the time of writing that is
-  `--tools "" --safe-mode --strict-mcp-config --no-session-persistence
-  --permission-prompts none`. `--bare` is not used because it skips the
-  keychain read that a subscription login needs.
+  `--tools "" --safe-mode --restricted --strict-mcp-config
+  --no-session-persistence --permission-prompts none`. `--restricted` makes
+  the CLI ignore user, project, and local settings files, which could
+  otherwise set an API key or a key helper. `--bare` is not used because it
+  skips the keychain read that a subscription login needs.
 - **No repository access.** The run starts in an empty temporary directory.
   It reads no files and runs no commands, so it cannot run btrain, change
   git state, or read btrain's credential file.
 - **No Slack access.** The run is not given the Slack token and has no
   connector. Only the listener posts.
-- **Environment.** The run gets `PATH`, `HOME`, `TMPDIR`, `TERM`, `LANG`,
-  `SHELL`, `USER`, proxy variables, and the CLI's own configuration
-  directory. Removed: every name ending in `_API_KEY` or `_API_TOKEN`,
-  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, every `BTRAIN_*` name, and
-  every Slack name. With no API key in its environment, the CLI uses the
-  subscription login and cannot fall back to metered usage.
+- **Environment.** The run gets only `PATH`, `HOME`, `TMPDIR`, `TERM`,
+  `LANG`, `SHELL`, `USER`, proxy variables, and the CLI's own configuration
+  directory. Nothing else is passed: no API key or token of any kind, no
+  base-URL override, no GitHub token, no `BTRAIN_*` name, and no Slack name.
+- **`HOME` is not a secret boundary.** The run can be given `HOME` because
+  it has no tool that reads a file. The no-tools profile is the control.
+- **Profile check.** `btrain doctor` starts the runner once with the profile
+  and fails the profile when the CLI reports any tool, any MCP server, or an
+  API key as its credential source. A failed profile is not used, so a run
+  cannot fall back to metered usage.
 - **Time.** A run that exceeds `turnSeconds` (default 180) is stopped, and
   the listener replies that the orchestrator timed out.
 - **Unavailable.** When the runner is missing, out of usage, or refused, the
@@ -502,8 +528,8 @@ from their own listener, labeled with the developer label of spec 024.
 - **Injected text in the snapshot.** Lane text written by an agent reaches
   the model. The worst outcomes are a misleading answer, a `start` proposal
   that the operator must still read and approve, or one of the four
-  housekeeping verbs, which are rate-limited and change no lane on their own
-  judgment.
+  housekeeping verbs. Those are rate-limited. Three change no lane, and
+  `poll-pr` moves a lane only to match what GitHub already shows.
 - **The typed-message rule depends on Slack's fields.** FR-5 relies on
   `app_id` and `bot_id` being present on app-posted messages. That was
   checked live for one connector. An agent that drives the operator's own
@@ -597,6 +623,15 @@ starts a real model.
 - A run that exceeds `turnSeconds` is stopped and reported. A runner that
   reports a usage limit produces the one-line unavailable reply.
 - Every command the listener acts on gets a result reply.
+- A crash after a message is recorded as handled, and before its command
+  runs, does not run the command on restart.
+- A message skipped for its age gets exactly one reply.
+- `retry-review` for a lane that is not `needs-review` is rejected.
+- The listener keeps polling while a started loop and a model run are in
+  progress.
+- A secret pattern in lane text does not appear in the model's input.
+- `btrain doctor` fails a profile whose runner reports an API key as its
+  credential source.
 - `pause` stops all handling of Slack messages, the outbox still drains, and
   only a local `--resume` restores it.
 - No verb reaches merge, resolve, override, lock release, or configuration.
