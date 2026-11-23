@@ -88,7 +88,7 @@ export function createFakeSlack({
   }
 
   async function fetchImpl(input, options = {}) {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url
+    const url = requestUrl(input)
     const signal = options.signal
     if (typeof url !== "string" || !url.startsWith(SLACK_API_PREFIX)) {
       // Recorded, so a test still sees a request that the code under test
@@ -329,8 +329,12 @@ function parseBody(body, contentType = "") {
   if (body instanceof URLSearchParams) {
     return Object.fromEntries(body)
   }
-  const text = typeof body === "string" ? body : Buffer.isBuffer(body) || body instanceof Uint8Array ? Buffer.from(body).toString("utf8") : null
-  if (text === null) {
+  let text
+  if (typeof body === "string") {
+    text = body
+  } else if (body instanceof Uint8Array) {
+    text = Buffer.from(body).toString("utf8")
+  } else {
     return { unparsed: Object.prototype.toString.call(body) }
   }
   if (contentType.includes("application/x-www-form-urlencoded")) {
@@ -341,6 +345,16 @@ function parseBody(body, contentType = "") {
   } catch {
     return { unparsed: text }
   }
+}
+
+function requestUrl(input) {
+  if (typeof input === "string") {
+    return input
+  }
+  if (input instanceof URL) {
+    return input.href
+  }
+  return input?.url
 }
 
 function describeOutcome(outcome) {
@@ -403,18 +417,9 @@ export function fakeSlackProcessEnv({ logPath, script, expectedToken } = {}) {
  * A missing log means no call.
  */
 export function readFakeSlackLog(logPath) {
-  let text
-  try {
-    text = fs.readFileSync(logPath, "utf8")
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return []
-    }
-    throw error
-  }
   const calls = []
   const byKey = new Map()
-  for (const record of readLogRecords(text)) {
+  for (const record of readLogRecords(logPath)) {
     if (record.record === "refused") {
       continue
     }
@@ -434,6 +439,10 @@ export function readFakeSlackLog(logPath) {
 
 /** Requests the preload refused because they were not Slack API calls. */
 export function readFakeSlackRefusals(logPath) {
+  return readLogRecords(logPath).filter((record) => record.record === "refused")
+}
+
+function readLogRecords(logPath) {
   let text
   try {
     text = fs.readFileSync(logPath, "utf8")
@@ -443,10 +452,6 @@ export function readFakeSlackRefusals(logPath) {
     }
     throw error
   }
-  return readLogRecords(text).filter((record) => record.record === "refused")
-}
-
-function readLogRecords(text) {
   return text.split("\n").filter(Boolean).map((line) => JSON.parse(line))
 }
 
