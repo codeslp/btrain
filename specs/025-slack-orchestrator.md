@@ -382,11 +382,13 @@ label of spec 024 appears in every reply.
   whether Claude sees the current text of a message that btrain updated in
   place, and whether Claude sees btrain's replies inside its own working
   thread. FR-11 and FR-13 are written so the design holds either way.
-- **Mentions sent through the Claude connector got no answer.** Two test
-  mentions posted on the operator's behalf through the Claude Slack
-  connector went unanswered, one before and one after Claude joined the
-  channel. Whether Claude answers a mention the operator types has not
-  been confirmed in this workspace, and the orchestrator depends on it.
+- **Claude's channel assistant was not set up in the test workspace.** On
+  2026-11-23 Claude answered an operator-typed mention in `#btrain` with
+  "This workspace isn't set up for Claude Tag yet". Earlier test mentions
+  got no visible answer because the operator's Claude account was not yet
+  connected in Slack, and that prompt is shown only to the operator.
+  Setting up Claude Tag is a workspace-admin step and a prerequisite of
+  this spec. The two open checks above wait on it.
 - **A model must write an exact format.** A malformed command is rejected
   with a reason, and the operator can always type the command directly.
 
