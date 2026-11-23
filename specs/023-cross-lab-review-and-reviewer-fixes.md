@@ -349,7 +349,8 @@ the responsible actor.
 - `btrain handoff confirm-fix --lane <id> --summary <text> --actor <owner>`:
   the owner's approval of `fixBase..fixHead`. Moves `fix-confirmation` to
   `ready-for-pr` when PR flow is enabled, else to `resolved` and releases
-  locks.
+  locks. It is rejected while the lane's lock coverage is suspended, as row
+  4 is. The owner restores coverage first (row 17).
 - `btrain handoff update --lane <id> --status needs-review --actor <owner>`
   from `fix-confirmation`: the owner changed or reverted the fix. Only the
   owner may do this. By handing off again the owner confirms the fix commits
@@ -479,19 +480,21 @@ Transition-table changes:
 | Row | Action | Event | From | To | Actor | Guard | Locks |
 |---|---|---|---|---|---|---|---|
 | new | ReviewerFix | `handoff fix` | `needs-review` | `fix-confirmation` | reviewer | active other-lab attempt; `fixBase` equals its head; fix limits pass; records the reviewer as approver | retain |
-| new | ConfirmFix | `handoff confirm-fix` | `fix-confirmation` | `ready-for-pr` or `resolved` | owner | head equals `fixHead`; a recorded reviewer approval exists; owner not a fix author | retain or release |
+| new | ConfirmFix | `handoff confirm-fix` | `fix-confirmation` | `ready-for-pr` or `resolved` | owner | head equals `fixHead`; a recorded reviewer approval exists; owner not a fix author; lane covered, as row 4 requires | retain or release |
 | new | AmendFix | `handoff update --status` | `fix-confirmation` | `needs-review` | owner | review context and diff after `fixHead`; records the owner's confirmation of the fix commits that remain | retain |
 | 1 | Claim | unchanged | unchanged | unchanged | unchanged | adds the lab rule of FR-3 | unchanged |
 | 3, 4, 5 | verdict rows | unchanged | unchanged | unchanged | reviewer of the active attempt | adds attempt and head match (FR-5) | unchanged |
 | 20 | Reassign | unchanged | unchanged | unchanged | adds `system`, for the reviewer only | reason recorded (FR-7); the existing distinct-owner, author-history, and no-PR guards | unchanged |
-| L3, L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, and `ready-to-merge` as targets; L3 never takes `fix-confirmation` as a source | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
+| L3, L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, and `ready-to-merge` as targets; L3 and L4 never take `fix-confirmation` as a source | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
 
 `fix-confirmation` holds locks like any active status, so rows 17 and 18
 cover it. It is not a source for row 13: spec 006 FR-29 lists the statuses a
 lane may enter `repair-needed` from, and `RepairClear` returns a lane to
 `in-progress`, which would drop the pending confirmation. A lane that needs
 repair while in `fix-confirmation` escalates to a person (spec 024 FR-15).
-It is not a PR-flow status.
+Legacy rows L3 and L4 are narrowed the same way, so no `handoff update
+--status` leaves `fix-confirmation` except the owner's hand-off back to
+review (AmendFix). It is not a PR-flow status.
 
 Model changes in `specs/tla/LaneLock.tla` and `lane-lock-model.mjs`:
 
@@ -596,7 +599,10 @@ Rule 2:
 - `handoff fix` over a range that holds a commit without the reviewer's
   `Btrain-Agent` trailer is rejected.
 - A system reassignment that would change the owner is rejected.
-- `repair-needed` cannot be entered from `fix-confirmation`.
+- `repair-needed` cannot be entered from `fix-confirmation`, by row 13 or by
+  `handoff update --status`.
+- `handoff confirm-fix` is rejected for a lane whose locks were
+  force-released, until coverage is restored.
 
 ## Follow-ups
 
