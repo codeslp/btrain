@@ -13,6 +13,7 @@ import {
   createFakeSlack,
   fakeSlackProcessEnv,
   readFakeSlackLog,
+  readFakeSlackRefusals,
 } from "./helpers/fake-slack.mjs"
 
 const exec = promisify(execFile)
@@ -152,6 +153,31 @@ describe("fake Slack: recording", () => {
     )
     await assert.rejects(fake.fetch("http://127.0.0.1:1/api/health"), /fake-slack: refused a request/)
     assert.equal(fake.calls.length, 3, "a refused URL is not recorded as a Slack call")
+    assert.deepEqual(fake.refused.map((refusal) => refusal.url), [
+      "https://hooks.slack.com/services/T0000FAKE/B0000FAKE/fake",
+      "http://127.0.0.1:1/api/health",
+    ], "but it is recorded as a refusal")
+  })
+
+  it("answers a built-in method called without a needed argument with Slack's error", async () => {
+    const fake = createFakeSlack()
+    const errorFor = async (method, body) => (await (await post(fake, method, body)).json()).error
+    assert.equal(await errorFor("chat.postMessage", { text: "x" }), "channel_not_found")
+    assert.equal(await errorFor("chat.postMessage", { channel: "C0000FAKE" }), "no_text")
+    assert.equal(await errorFor("chat.update", { channel: "C0000FAKE", text: "x" }), "message_not_found")
+    assert.equal(await errorFor("pins.add", { channel: "C0000FAKE" }), "no_item_specified")
+    assert.equal(fake.posts.every((call) => call.result.kind === "slack-error"), true)
+  })
+
+  it("rejects a body on GET, as a real fetch does", async () => {
+    const fake = createFakeSlack()
+    await assert.rejects(
+      fake.fetch("https://slack.com/api/chat.postMessage", { body: JSON.stringify({ channel: "C0000FAKE", text: "x" }) }),
+      (error) => error instanceof TypeError && /GET\/HEAD/.test(error.message),
+    )
+    const auth = await fake.fetch("https://slack.com/api/auth.test")
+    assert.equal((await auth.json()).ok, true, "a GET without a body is answered")
+    assert.equal(fake.calls.at(-1).httpMethod, "GET")
   })
 
   it("reset clears calls, queues, and defaults", async () => {
@@ -206,7 +232,8 @@ describe("fake Slack: failures on demand", () => {
 
     const errors = []
     for (const method of ["auth.test", "auth.test", "pins.add"]) {
-      errors.push((await (await post(fake, method, {})).json()).error ?? "ok")
+      const body = method === "pins.add" ? { channel: "C0000FAKE", timestamp: "1.000001" } : {}
+      errors.push((await (await post(fake, method, body)).json()).error ?? "ok")
     }
     assert.deepEqual(errors, ["internal_error", "token_revoked", "ok"])
     assert.deepEqual(fake.calls.map((call) => call.source), ["queue:*", "default:*", "default"])
@@ -338,6 +365,7 @@ describe("fake Slack: subprocess preload", () => {
       assert.match(posted.body.ts, /^\d{10}\.\d{6}$/)
       assert.equal(limited.status, 429)
       assert.match(refused, /fake-slack: refused a request/)
+      assert.deepEqual(readFakeSlackRefusals(logPath).map((refusal) => refusal.url), ["https://example.invalid/"])
 
       const log = readFakeSlackLog(logPath)
       assert.deepEqual(log.map((call) => [call.method, call.body.text, call.auth, call.result.kind]), [
@@ -359,6 +387,7 @@ describe("fake Slack: subprocess preload", () => {
 
   it("reads a missing log as no calls, and changes nothing without a log path", async () => {
     assert.deepEqual(readFakeSlackLog(path.join(os.tmpdir(), "btrain-fake-slack-missing", "none.jsonl")), [])
+    assert.deepEqual(readFakeSlackRefusals(path.join(os.tmpdir(), "btrain-fake-slack-missing", "none.jsonl")), [])
     assert.throws(() => fakeSlackProcessEnv({}), /needs logPath/)
 
     const env = { ...process.env }

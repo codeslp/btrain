@@ -5,14 +5,16 @@
 // The tests are written against the planned interfaces: modules under
 // src/brain_train/slack/, the `[features].slack` toggle, `~/.btrain/slack.json`,
 // and the `btrain slack` commands. None of that exists yet, so every slack/
-// module is imported inside a test body, never at module load. A workstream
-// that settles on a different export name or option updates the test with it.
+// module is imported inside a test body, never at module load. The plan does
+// not name the WS1 exports; invariant 5 uses `prepareAgentText`,
+// `classifyWorkflowEvent`, `renderCard`, and `renderReply`, and WS1 renames
+// them here if it settles on other names.
 //
-// No test calls Slack. CLI tests run btrain with
-// test/helpers/fake-slack-preload.mjs, which answers every Slack call from the
-// fake and logs it. Every repository gets its own BRAIN_TRAIN_HOME in a
-// temporary directory, so nothing registers in the real ~/.btrain and nothing
-// reads the real ~/.btrain/slack.json.
+// No test calls Slack. Every btrain run, `init` included, goes through
+// test/helpers/fake-slack-preload.mjs, which answers Slack calls from the fake,
+// refuses any other URL, and logs both. Every repository gets its own
+// BRAIN_TRAIN_HOME in a temporary directory, so nothing registers in the real
+// ~/.btrain and nothing reads the real ~/.btrain/slack.json.
 import { describe, it, after } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
@@ -22,12 +24,13 @@ import { execFile } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { withoutLaneScope } from "./helpers/runner-scope.mjs"
-import { fakeSlackProcessEnv, readFakeSlackLog } from "./helpers/fake-slack.mjs"
+import { fakeSlackProcessEnv, readFakeSlackLog, readFakeSlackRefusals } from "./helpers/fake-slack.mjs"
 
 const exec = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const CLI = path.join(REPO_ROOT, "src/brain_train/cli.mjs")
-const CORE = path.join(REPO_ROOT, "src/brain_train/core.mjs")
+const CORE_RELATIVE = "src/brain_train/core.mjs"
+const ASSIGNMENT_RELATIVE = "specs/020-ws2-module-assignment.json"
 const SLACK_DIR = path.join(REPO_ROOT, "src/brain_train/slack")
 const PRELOAD = path.join(REPO_ROOT, "test/helpers/fake-slack-preload.mjs")
 const slackModule = (name) => import(new URL(`../src/brain_train/slack/${name}`, import.meta.url))
@@ -39,9 +42,20 @@ const CHANNEL = "C0000FAKE"
 const OPERATOR = "U0000FAKE"
 const GITHUB_PAT = ["github", "pat", "1".repeat(22), "2".repeat(59)].join("_")
 const GITHUB_CLASSIC = ["ghp", "3".repeat(36)].join("_")
-const WEBHOOK = ["https:", "", "hooks.slack.com", "services", "T0000FAKE", "B0000FAKE", "4".repeat(24)].join("/")
+const WEBHOOK_PATH = ["hooks.slack.com", "services", "T0000FAKE", "B0000FAKE", "4".repeat(24)].join("/")
+const WEBHOOK = `https://${WEBHOOK_PATH}`
+// A secret counts as leaked when any of these survives, so a webhook that was
+// defanged to `https[:]//...` but not redacted is still caught.
+const SECRET_MARKERS = [GITHUB_PAT, GITHUB_CLASSIC, WEBHOOK_PATH, "4".repeat(24)]
 // Plan WS4: delivery after a lane command has a 2-second budget.
 const INLINE_BUDGET_MS = 2000
+// A command that hangs is killed after this, so a regression fails the test
+// instead of wedging the suite (node --test has no default timeout).
+const COMMAND_TIMEOUT_MS = 15000
+// How much longer than the same command with the publisher off a command may
+// take when it must not wait.
+const NO_WAIT_MARGIN_MS = 1500
+const NETWORK_DOWN = { defaults: { "*": { network: true } } }
 
 const roots = []
 after(async () => {
@@ -58,7 +72,7 @@ async function createSlackRepo({ toggle = "on", slackConfig = true } = {}) {
   roots.push(root)
   const repo = path.join(root, "repo")
   const home = path.join(root, "home")
-  const logPath = path.join(root, "slack-calls.jsonl")
+  const logPath = path.join(root, "fake-calls.jsonl")
   await fs.mkdir(home, { recursive: true })
   await exec("git", ["init", "-q", repo])
   await exec("git", ["-C", repo, "config", "user.email", "test@example.com"])
@@ -71,19 +85,9 @@ async function createSlackRepo({ toggle = "on", slackConfig = true } = {}) {
     BTRAIN_DASHBOARD_DISABLED: "1",
   }
   delete baseEnv.BTRAIN_SLACK_BOT_TOKEN
-  const init = await exec("node", [CLI, "init", repo, "--agent", "claude", "--agent", "codex", "--tracked"], {
-    cwd: repo,
-    env: baseEnv,
-  })
-  assert.ok(init.stdout.length > 0)
 
-  const tomlPath = path.join(repo, ".btrain", "project.toml")
-  const toml = await fs.readFile(tomlPath, "utf8")
-  assert.doesNotMatch(toml, /^\[features\]/m, "a tracked init writes no [features] table")
-  if (toggle !== "absent") {
-    await fs.writeFile(tomlPath, `${toml.trimEnd()}\n\n[features]\nslack = ${toggle === "on"}\n`, "utf8")
-  }
   if (slackConfig) {
+    // Written before init, so an init that reached the publisher would find it.
     const configPath = path.join(home, "slack.json")
     await fs.writeFile(configPath, `${JSON.stringify({
       botToken: TOKEN,
@@ -103,16 +107,28 @@ async function createSlackRepo({ toggle = "on", slackConfig = true } = {}) {
         cwd: repo,
         env: { ...baseEnv, ...fakeSlackProcessEnv({ logPath, script, expectedToken: TOKEN }), ...env },
         maxBuffer: 5 * 1024 * 1024,
+        timeout: COMMAND_TIMEOUT_MS,
       })
-      return { code: 0, stdout: result.stdout, stderr: result.stderr, ms: Date.now() - started }
+      return { code: 0, stdout: result.stdout, stderr: result.stderr, ms: Date.now() - started, killed: false }
     } catch (error) {
       return {
         code: typeof error.code === "number" ? error.code : 1,
         stdout: error.stdout || "",
         stderr: error.stderr || "",
         ms: Date.now() - started,
+        killed: Boolean(error.killed),
       }
     }
+  }
+
+  const init = await btrain(["init", repo, "--agent", "claude", "--agent", "codex", "--tracked"])
+  assert.equal(init.code, 0, init.stderr)
+
+  const tomlPath = path.join(repo, ".btrain", "project.toml")
+  const toml = await fs.readFile(tomlPath, "utf8")
+  assert.doesNotMatch(toml, /^\[features\]/m, "a tracked init writes no [features] table")
+  if (toggle !== "absent") {
+    await fs.writeFile(tomlPath, `${toml.trimEnd()}\n\n[features]\nslack = ${toggle === "on"}\n`, "utf8")
   }
 
   return {
@@ -122,6 +138,7 @@ async function createSlackRepo({ toggle = "on", slackConfig = true } = {}) {
     logPath,
     btrain,
     calls: () => readFakeSlackLog(logPath),
+    refusals: () => readFakeSlackRefusals(logPath),
     slackStateDir: path.join(repo, ".btrain", "slack"),
   }
 }
@@ -154,8 +171,27 @@ async function listFiles(dir) {
   return out.sort()
 }
 
+async function readAll(files) {
+  return Promise.all(files.map(async (file) => ({ file, text: await fs.readFile(file, "utf8") })))
+}
+
 async function exists(target) {
   return fs.stat(target).then(() => true, () => false)
+}
+
+function assertNoSecret(text, where) {
+  for (const marker of SECRET_MARKERS) {
+    assert.ok(!text.includes(marker), `${where} holds a secret (${marker.slice(0, 12)}...)`)
+  }
+}
+
+async function git(args) {
+  try {
+    const { stdout } = await exec("git", args, { cwd: REPO_ROOT, maxBuffer: 20 * 1024 * 1024 })
+    return stdout
+  } catch {
+    return null
+  }
 }
 
 describe("spec 024 publisher invariants", () => {
@@ -170,10 +206,15 @@ describe("spec 024 publisher invariants", () => {
 
       for (const args of [claimArgs(), metadataUpdateArgs(), ["handoff", "--lane", "a"], ["status"], ["doctor"]]) {
         const result = await fixture.btrain(args)
-        assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /slack/i, `${toggle}: ${args.join(" ")} prints nothing about Slack`)
+        // The feature list may name slack (`doctor` prints "features off:
+        // slack"); nothing else may, such as a pause warning or a thread line.
+        const publisherLines = `${result.stdout}\n${result.stderr}`.split("\n")
+          .filter((line) => /slack/i.test(line) && !/^\s*features off:/.test(line))
+        assert.deepEqual(publisherLines, [], `${toggle}: ${args.join(" ")} prints nothing from the publisher`)
       }
       assert.equal(await exists(fixture.slackStateDir), false, `${toggle}: no .btrain/slack/ directory`)
-      assert.deepEqual(fixture.calls(), [], `${toggle}: no fetch call`)
+      assert.deepEqual(fixture.calls(), [], `${toggle}: no Slack call`)
+      assert.deepEqual(fixture.refusals(), [], `${toggle}: no request to any other URL`)
     }
   })
 
@@ -192,14 +233,14 @@ describe("spec 024 publisher invariants", () => {
 
     const events = await fs.readFile(path.join(fixture.repo, ".btrain", "events", "lane-a.jsonl"), "utf8")
     assert.match(events, /"type":"claim"/, "the claim event is in the lane's event log")
-    const handoff = await fixture.btrain(["handoff", "--lane", "a"], { script: { defaults: { "*": { network: true } } } })
+    const handoff = await fixture.btrain(["handoff", "--lane", "a"], { script: NETWORK_DOWN })
     assert.match(handoff.stdout, /status: in-progress/, "the state change was written")
 
     // Queue an entry that cannot be sent (a lock change is a `locks-changed`
     // reply), then run a command that fails. The queued entry is delivered
     // only after the error is printed.
     const queued = await fixture.btrain(["handoff", "update", "--lane", "a", "--files", "src/,docs/", "--actor", "claude"], {
-      script: { defaults: { "*": { network: true } } },
+      script: NETWORK_DOWN,
     })
     assert.equal(queued.code, 0, queued.stderr)
     const before = fixture.calls().length
@@ -241,6 +282,7 @@ describe("spec 024 publisher invariants", () => {
       const script = { defaults: { "*": outcome } }
       for (const [index, args] of steps.entries()) {
         const result = await fixture.btrain(args, { script })
+        assert.equal(result.killed, false, `${label}: ${args.join(" ")} did not exit within ${COMMAND_TIMEOUT_MS} ms`)
         assert.equal(result.code, expected[index], `${label}: ${args.join(" ")} keeps its exit code\n${result.stderr}`)
         assert.doesNotMatch(result.stderr, /\n\s+at .+:\d+:\d+/, `${label}: no stack trace reaches the command`)
         assert.ok(result.ms < INLINE_BUDGET_MS + 5000, `${label}: ${args.join(" ")} took ${result.ms} ms`)
@@ -263,37 +305,42 @@ describe("spec 024 publisher invariants", () => {
       return result
     }
 
-    // Leave entries queued, then deliver them, so both the outbox and the
-    // thread map are written.
-    assert.equal((await run(claimArgs("a", task), { defaults: { "*": { network: true } } })).code, 0)
-    assert.ok((await listFiles(path.join(fixture.slackStateDir, "outbox"))).length > 0, "an entry is queued")
-    await run(metadataUpdateArgs("a", `Summary mentions ${GITHUB_CLASSIC}`), { defaults: { "*": { network: true } } })
+    // Leave entries queued and read them before anything delivers them: a
+    // flush removes finished entries.
+    assert.equal((await run(claimArgs("a", task), NETWORK_DOWN)).code, 0)
+    assert.equal((await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"], NETWORK_DOWN)).code, 0)
+    const queued = await readAll(await listFiles(path.join(fixture.slackStateDir, "outbox")))
+    assert.ok(queued.length >= 2, "the claim and the reviewer change are queued")
+    for (const { file, text } of queued) {
+      assert.ok(!text.includes(TOKEN), `${file} holds the token`)
+      assertNoSecret(text, file)
+    }
+
+    // Deliver them, so the thread map and any log are written too.
     const slackOutputs = []
     for (const args of [["slack", "flush"], ["slack", "status"], ["slack", "channels"], ["slack", "refresh"]]) {
       const result = await run(args)
       slackOutputs.push(result.stdout, result.stderr)
     }
+    assert.ok(await exists(path.join(fixture.slackStateDir, "threads.json")), "the thread map is written")
 
-    const secrets = [GITHUB_PAT, GITHUB_CLASSIC, WEBHOOK]
-    for (const file of await listFiles(fixture.slackStateDir)) {
-      const text = await fs.readFile(file, "utf8")
+    for (const { file, text } of await readAll(await listFiles(fixture.slackStateDir))) {
       assert.ok(!text.includes(TOKEN), `${file} holds the token`)
-      for (const secret of secrets) assert.ok(!text.includes(secret), `${file} holds a secret`)
+      assertNoSecret(text, file)
     }
-    for (const file of await listFiles(path.join(fixture.repo, ".btrain"))) {
-      assert.ok(!(await fs.readFile(file, "utf8")).includes(TOKEN), `${file} holds the token`)
+    for (const { file, text } of await readAll(await listFiles(path.join(fixture.repo, ".btrain")))) {
+      assert.ok(!text.includes(TOKEN), `${file} holds the token`)
     }
     for (const text of outputs) {
       assert.ok(!text.includes(TOKEN), "command output holds the token")
     }
     for (const text of slackOutputs) {
-      for (const secret of secrets) assert.ok(!text.includes(secret), "btrain slack output holds a secret")
+      assertNoSecret(text, "btrain slack output")
     }
     const sent = fixture.calls()
     assert.ok(sent.length > 0)
     for (const call of sent) {
-      const body = JSON.stringify(call.body)
-      for (const secret of secrets) assert.ok(!body.includes(secret), `${call.method} sent a secret to Slack`)
+      assertNoSecret(JSON.stringify(call.body), `${call.method} sent to Slack`)
     }
     assert.ok(!(await fs.readFile(fixture.logPath, "utf8")).includes(TOKEN))
   })
@@ -308,20 +355,27 @@ describe("spec 024 publisher invariants", () => {
     assert.equal(typeof render.renderCard, "function", "WS1: render.mjs renders the card")
     assert.equal(typeof render.renderReply, "function", "WS1: render.mjs renders a reply line")
 
+    // Slack also links `www.` and bare domains; the plan's pipeline rewrites
+    // only `://`, so those are left out here until the spec decides.
     const hostile = [
       "<!channel> <!here> <!everyone> <@U0000FAKE> <#C0000FAKE> <!subteam^S0000FAKE>",
-      "<https://evil.example.invalid|click> https://evil.example.invalid/x www.example.invalid",
+      "<https://evil.example.invalid|click> https://evil.example.invalid/x",
       `& ${WEBHOOK} ${GITHUB_PAT} ${GITHUB_CLASSIC}`,
     ].join(" ")
     const assertInert = (output, where) => {
       assert.doesNotMatch(output, /[<>]/, `${where}: no raw angle bracket, so no mention or link markup`)
       assert.doesNotMatch(output, /:\/\//, `${where}: no scheme separator, so Slack makes no link`)
-      assert.ok(!output.includes(WEBHOOK) && !output.includes(GITHUB_PAT) && !output.includes(GITHUB_CLASSIC), `${where}: secrets redacted`)
+      assertNoSecret(output, where)
+    }
+    // Where the agent text itself is shown, it is escaped and redacted, not dropped.
+    const assertEscapedAndRedacted = (output, where) => {
       assert.match(output, /&amp;/, `${where}: & is escaped`)
       assert.match(output, /\[redacted\]/, `${where}: redaction is visible`)
     }
 
-    assertInert(text.prepareAgentText(hostile, { maxChars: 4000 }), "prepareAgentText")
+    const prepared = text.prepareAgentText(hostile, { maxChars: 4000 })
+    assertInert(prepared, "prepareAgentText")
+    assertEscapedAndRedacted(prepared, "prepareAgentText")
 
     const before = { task: "old", owner: "claude", reviewer: "codex", status: "in-progress", lockedFiles: ["src/"], lane: "a" }
     const lane = { ...before, task: hostile, status: "needs-review", reviewerContext: hostile }
@@ -340,21 +394,26 @@ describe("spec 024 publisher invariants", () => {
     assert.equal(classified.mention, false)
     // No mention IDs and no PR, so btrain itself adds no markup either.
     const context = { repoName: "fixture-repo", label: "test-dev", mention: [], channel: CHANNEL }
+    // A reply is a fixed template and may not quote the agent text at all.
     assertInert(render.renderReply(classified, context), "renderReply")
-    assertInert(render.renderCard(lane, context), "renderCard")
+    const card = render.renderCard(lane, context)
+    assertInert(card, "renderCard")
+    assertEscapedAndRedacted(card, "renderCard task line")
   })
 
   // btrain-allow: skipped-test
   it("6. a card and a board are functions of current lane state, and sending one twice leaves Slack unchanged", { skip: "enabled in WS4" }, async () => {
     const fixture = await createSlackRepo()
-    assert.equal((await fixture.btrain(claimArgs())).code, 0)
+    assert.equal((await fixture.btrain(claimArgs("a", "Task at claim time"))).code, 0)
     const cardPost = fixture.calls().find((call) => call.method === "chat.postMessage" && !call.body.thread_ts)
-    assert.ok(cardPost, "the claim posts a card")
+    assert.ok(cardPost?.result?.ts, "the claim posts a card")
 
-    // Replies and card refreshes that were never delivered do not matter: the
-    // next render reads current state.
-    await fixture.btrain(metadataUpdateArgs("a", "First"), { script: { defaults: { "*": { network: true } } } })
-    await fixture.btrain(metadataUpdateArgs("a", "Second"), { script: { defaults: { "*": { network: true } } } })
+    // Card fields change while Slack is down, so those updates never reach it.
+    // The next render must still show current state, not the claim's.
+    const down = await fixture.btrain(["handoff", "update", "--lane", "a", "--task", "Task changed while Slack was down", "--actor", "claude"], { script: NETWORK_DOWN })
+    assert.equal(down.code, 0, down.stderr)
+    const reviewer = await fixture.btrain(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"], { script: NETWORK_DOWN })
+    assert.equal(reviewer.code, 0, reviewer.stderr)
 
     const refresh = async () => {
       const before = fixture.calls().length
@@ -369,15 +428,22 @@ describe("spec 024 publisher invariants", () => {
     assert.ok(first.length > 0, "refresh updates the card")
     assert.ok(second.every((call) => call.method === "chat.update"), "a second refresh posts nothing new")
     assert.deepEqual(shape(second), shape(first.filter((call) => call.method === "chat.update")), "the same state renders the same messages")
+
     const card = second.find((call) => call.body.ts === cardPost.result.ts)
     assert.ok(card, "the refresh updates the card the claim posted, by its ts")
-    assert.match(card.body.text, /Publisher invariant fixture/, "the card shows the current task")
-    assert.match(card.body.text, /owner: claude/)
-    assert.match(card.body.text, /reviewer: codex/)
+    assert.match(card.body.text, /Task changed while Slack was down/, "the card shows the current task")
+    assert.doesNotMatch(card.body.text, /Task at claim time/, "not the task at claim time")
+    assert.match(card.body.text, /owner: claude\b/)
+    assert.match(card.body.text, /reviewer: claude-reviewer\b/, "the card shows the current reviewer")
   })
 
   // btrain-allow: skipped-test
   it("7. a process that finds a live delivery lock skips delivery and returns", { skip: "enabled in WS4" }, async () => {
+    // The same claim with the publisher off is the time to beat.
+    const baseline = await createSlackRepo({ toggle: "off" })
+    const baselineClaim = await baseline.btrain(claimArgs())
+    assert.equal(baselineClaim.code, 0, baselineClaim.stderr)
+
     const fixture = await createSlackRepo()
     await fs.mkdir(fixture.slackStateDir, { recursive: true })
     const lockPath = path.join(fixture.slackStateDir, "delivery.lock")
@@ -386,7 +452,10 @@ describe("spec 024 publisher invariants", () => {
 
     const result = await fixture.btrain(claimArgs())
     assert.equal(result.code, 0, result.stderr)
-    assert.ok(result.ms < INLINE_BUDGET_MS + 5000, `the command returned in ${result.ms} ms; it must not wait for the lock`)
+    assert.ok(
+      result.ms < baselineClaim.ms + NO_WAIT_MARGIN_MS,
+      `the command took ${result.ms} ms against ${baselineClaim.ms} ms with the publisher off; it must not wait for the lock`,
+    )
     assert.deepEqual(fixture.calls(), [], "no Slack call while another process holds a live lock")
     assert.equal(await fs.readFile(lockPath, "utf8"), nonce, "the live lock is left alone")
     assert.ok((await listFiles(path.join(fixture.slackStateDir, "outbox"))).length > 0, "the entry stays queued for the holder")
@@ -397,19 +466,41 @@ describe("spec 024 publisher invariants", () => {
   })
 
   // btrain-allow: skipped-test
-  it("8. core.mjs gains no function, keeps its pinned line counts, and imports only the slack entry point", { skip: "enabled in WS4" }, async () => {
+  it("8. core.mjs gains no function, keeps its pinned line counts, and imports only the slack entry point", { skip: "enabled in WS4" }, async (t) => {
     const inventory = await exec("node", [path.join(REPO_ROOT, "scripts/decomposition_inventory.mjs"), "--stages"], { cwd: REPO_ROOT })
       .then(() => 0, (error) => (typeof error.code === "number" ? error.code : 1))
     assert.equal(inventory, 0, "node scripts/decomposition_inventory.mjs --stages exits 0")
 
     const { readFunctionSpans } = await import(new URL("../scripts/decomposition_inventory.mjs", import.meta.url))
-    const { spans } = readFunctionSpans(CORE)
+    const { spans } = readFunctionSpans(path.join(REPO_ROOT, CORE_RELATIVE))
     assert.equal(spans.find((span) => span.name === "patchHandoff").lines, 585)
     assert.equal(spans.find((span) => span.name === "runLoop").lines, 422)
 
+    // `--stages` passes when a new function is also added to the assignment
+    // JSON, so compare against the branch point: no function added to
+    // core.mjs, and no change to the JSON.
+    const base = (await git(["merge-base", "HEAD", "origin/main"]))?.trim()
+    if (!base) {
+      t.diagnostic("origin/main is not available; skipped the comparison with the branch point")
+    } else {
+      const baseCore = await git(["show", `${base}:${CORE_RELATIVE}`])
+      const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-core-base-"))
+      try {
+        await fs.writeFile(path.join(scratch, "core.mjs"), baseCore, "utf8")
+        const baseNames = new Set(readFunctionSpans(path.join(scratch, "core.mjs")).spans.map((span) => span.name))
+        const added = spans.map((span) => span.name).filter((name) => !baseNames.has(name))
+        assert.deepEqual(added, [], "core.mjs gains no function")
+      } finally {
+        await fs.rm(scratch, { recursive: true, force: true })
+      }
+      const assignmentDiff = await exec("git", ["diff", "--quiet", base, "--", ASSIGNMENT_RELATIVE], { cwd: REPO_ROOT })
+        .then(() => 0, (error) => error.code)
+      assert.equal(assignmentDiff, 0, `${ASSIGNMENT_RELATIVE} is unchanged`)
+    }
+
     // core.mjs reaches the publisher through slack/index.mjs only, and no
     // slack/ module imports core.mjs (that would be an import cycle).
-    const core = await fs.readFile(CORE, "utf8")
+    const core = await fs.readFile(path.join(REPO_ROOT, CORE_RELATIVE), "utf8")
     const slackImports = [...core.matchAll(/from\s+["'](\.\/slack\/[^"']+)["']/g)].map((match) => match[1])
     assert.deepEqual([...new Set(slackImports)], ["./slack/index.mjs"])
     for (const file of await listFiles(SLACK_DIR)) {

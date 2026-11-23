@@ -56,8 +56,10 @@ export function createFakeSlack({
   now = () => Date.now(),
   onCall,
   onResult,
+  onRefused,
 } = {}) {
   const calls = []
+  const refused = []
   const queues = new Map()
   const defaults = new Map()
   let sequence = 0
@@ -89,7 +91,17 @@ export function createFakeSlack({
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url
     const signal = options.signal
     if (typeof url !== "string" || !url.startsWith(SLACK_API_PREFIX)) {
+      // Recorded, so a test still sees a request that the code under test
+      // caught and swallowed.
+      const refusal = { url: String(url), at: now() }
+      refused.push(refusal)
+      onRefused?.(refusal)
       throw new Error(`fake-slack: refused a request to ${url}; only ${SLACK_API_PREFIX}<method> is served`)
+    }
+    const httpMethod = String(options.method || "GET").toUpperCase()
+    if ((httpMethod === "GET" || httpMethod === "HEAD") && options.body !== undefined && options.body !== null) {
+      // What a real fetch does with a body on GET or HEAD.
+      throw new TypeError("Request with GET/HEAD method cannot have body.")
     }
     const method = url.slice(SLACK_API_PREFIX.length).split(/[?#]/)[0]
     const headers = recordHeaders(options.headers)
@@ -99,7 +111,7 @@ export function createFakeSlack({
       index: calls.length,
       method,
       url,
-      httpMethod: String(options.method || "GET").toUpperCase(),
+      httpMethod,
       body,
       headers,
       auth: authState(options.headers, expectedToken),
@@ -146,6 +158,7 @@ export function createFakeSlack({
   return {
     fetch: fetchImpl,
     calls,
+    refused,
     queue(method, ...outcomes) {
       if (!queues.has(method)) {
         queues.set(method, [])
@@ -163,6 +176,7 @@ export function createFakeSlack({
     },
     reset() {
       calls.length = 0
+      refused.length = 0
       queues.clear()
       defaults.clear()
       return this
@@ -205,10 +219,34 @@ function buildResponse(method, body, outcome, nextTs) {
       kind: "slack-error", status: 200, error: "unknown_method",
     })
   }
-  const success = builder ? builder(body && typeof body === "object" ? body : {}, nextTs) : { ok: true }
+  const fields = body && typeof body === "object" ? body : {}
+  const missing = builder ? missingArgumentError(method, fields) : null
+  if (missing) {
+    return jsonResponse(200, { ok: false, error: missing }, {}, {
+      kind: "slack-error", status: 200, error: missing,
+    })
+  }
+  const success = builder ? builder(fields, nextTs) : { ok: true }
   const { ok: _ignored, ...extra } = outcome || {}
   const payload = { ...success, ...extra }
   return jsonResponse(200, payload, {}, { kind: "ok", status: 200, ts: payload.ts })
+}
+
+// The error Slack returns when a built-in method is called without an
+// argument it needs, or null.
+const REQUIRED_ARGUMENTS = {
+  "chat.postMessage": [["channel", "channel_not_found"], ["text", "no_text"]],
+  "chat.update": [["channel", "channel_not_found"], ["ts", "message_not_found"]],
+  "pins.add": [["channel", "channel_not_found"], ["timestamp", "no_item_specified"]],
+}
+
+function missingArgumentError(method, fields) {
+  for (const [name, error] of REQUIRED_ARGUMENTS[method] || []) {
+    if (fields[name] === undefined || fields[name] === null || fields[name] === "") {
+      return error
+    }
+  }
+  return null
 }
 
 // Built-in success bodies, keyed by Slack method name. A method added later
@@ -376,8 +414,10 @@ export function readFakeSlackLog(logPath) {
   }
   const calls = []
   const byKey = new Map()
-  for (const line of text.split("\n").filter(Boolean)) {
-    const record = JSON.parse(line)
+  for (const record of readLogRecords(text)) {
+    if (record.record === "refused") {
+      continue
+    }
     const key = `${record.pid}:${record.index}`
     if (record.record === "result") {
       const call = byKey.get(key)
@@ -390,6 +430,24 @@ export function readFakeSlackLog(logPath) {
     calls.push(record)
   }
   return calls
+}
+
+/** Requests the preload refused because they were not Slack API calls. */
+export function readFakeSlackRefusals(logPath) {
+  let text
+  try {
+    text = fs.readFileSync(logPath, "utf8")
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return []
+    }
+    throw error
+  }
+  return readLogRecords(text).filter((record) => record.record === "refused")
+}
+
+function readLogRecords(text) {
+  return text.split("\n").filter(Boolean).map((line) => JSON.parse(line))
 }
 
 /**
@@ -419,6 +477,9 @@ export function installFakeSlackFromEnv(env = process.env) {
     onResult(call) {
       const record = { record: "result", pid: process.pid, index: call.index, result: call.result }
       fs.appendFileSync(logPath, `${JSON.stringify(record)}\n`)
+    },
+    onRefused(refusal) {
+      fs.appendFileSync(logPath, `${JSON.stringify({ record: "refused", pid: process.pid, ...refusal })}\n`)
     },
   })
   for (const [method, outcomes] of Object.entries(script.queue || {})) {
