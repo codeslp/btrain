@@ -10,9 +10,15 @@
 // `classifyWorkflowEvent`, `renderCard`, and `renderReply`, and WS1 renames
 // them here if it settles on other names.
 //
-// No test calls Slack. Every btrain run, `init` included, goes through
-// test/helpers/fake-slack-preload.mjs, which answers Slack calls from the fake,
-// refuses any other URL, and logs both. Every repository gets its own
+// No test calls Slack. Every btrain run, `init` included, loads
+// test/helpers/fake-slack-preload.mjs through NODE_OPTIONS (so node processes
+// btrain starts load it too), and it answers Slack calls from the fake,
+// refuses any other URL, and logs both.
+//
+// To leave entries queued, a test holds a live delivery lock while it runs
+// the commands that queue them (invariant 7: a process that finds the lock
+// skips delivery). A failed send would also leave them queued, but it records
+// a retry time, and delivery may then hold the lane's later entries back. Every repository gets its own
 // BRAIN_TRAIN_HOME in a temporary directory, so nothing registers in the real
 // ~/.btrain and nothing reads the real ~/.btrain/slack.json.
 import { describe, it, after } from "node:test"
@@ -32,7 +38,6 @@ const CLI = path.join(REPO_ROOT, "src/brain_train/cli.mjs")
 const CORE_RELATIVE = "src/brain_train/core.mjs"
 const ASSIGNMENT_RELATIVE = "specs/020-ws2-module-assignment.json"
 const SLACK_DIR = path.join(REPO_ROOT, "src/brain_train/slack")
-const PRELOAD = path.join(REPO_ROOT, "test/helpers/fake-slack-preload.mjs")
 const slackModule = (name) => import(new URL(`../src/brain_train/slack/${name}`, import.meta.url))
 
 // Fake values, built at runtime so the source holds no string that matches a
@@ -55,7 +60,6 @@ const COMMAND_TIMEOUT_MS = 15000
 // How much longer than the same command with the publisher off a command may
 // take when it must not wait.
 const NO_WAIT_MARGIN_MS = 1500
-const NETWORK_DOWN = { defaults: { "*": { network: true } } }
 
 const roots = []
 after(async () => {
@@ -103,7 +107,7 @@ async function createSlackRepo({ toggle = "on", slackConfig = true } = {}) {
   async function btrain(args, { script, env = {} } = {}) {
     const started = Date.now()
     try {
-      const result = await exec("node", ["--import", PRELOAD, CLI, ...args], {
+      const result = await exec("node", [CLI, ...args], {
         cwd: repo,
         env: { ...baseEnv, ...fakeSlackProcessEnv({ logPath, script, expectedToken: TOKEN }), ...env },
         maxBuffer: 5 * 1024 * 1024,
@@ -143,8 +147,20 @@ async function createSlackRepo({ toggle = "on", slackConfig = true } = {}) {
   }
 }
 
-function claimArgs(lane = "a", task = "Publisher invariant fixture") {
-  return ["handoff", "claim", "--lane", lane, "--task", task, "--owner", "claude", "--reviewer", "codex", "--files", "src/"]
+/** Run `fn` while another process appears to hold a live delivery lock. */
+async function withDeliveryHeld(fixture, fn) {
+  await fs.mkdir(fixture.slackStateDir, { recursive: true })
+  const lockPath = path.join(fixture.slackStateDir, "delivery.lock")
+  await fs.writeFile(lockPath, "held-by-the-test", { flag: "wx" })
+  try {
+    return await fn()
+  } finally {
+    await fs.rm(lockPath, { force: true })
+  }
+}
+
+function claimArgs(lane = "a", task = "Publisher invariant fixture", files = "src/") {
+  return ["handoff", "claim", "--lane", lane, "--task", task, "--owner", "claude", "--reviewer", "codex", "--files", files]
 }
 
 function metadataUpdateArgs(lane = "a", next = "Keep going on the fixture") {
@@ -233,15 +249,14 @@ describe("spec 024 publisher invariants", () => {
 
     const events = await fs.readFile(path.join(fixture.repo, ".btrain", "events", "lane-a.jsonl"), "utf8")
     assert.match(events, /"type":"claim"/, "the claim event is in the lane's event log")
-    const handoff = await fixture.btrain(["handoff", "--lane", "a"], { script: NETWORK_DOWN })
+    const handoff = await fixture.btrain(["handoff", "--lane", "a"])
     assert.match(handoff.stdout, /status: in-progress/, "the state change was written")
 
-    // Queue an entry that cannot be sent (a lock change is a `locks-changed`
-    // reply), then run a command that fails. The queued entry is delivered
-    // only after the error is printed.
-    const queued = await fixture.btrain(["handoff", "update", "--lane", "a", "--files", "src/,docs/", "--actor", "claude"], {
-      script: NETWORK_DOWN,
-    })
+    // Queue an entry while delivery is held (a lock change is a
+    // `locks-changed` reply), then run a command that fails. The queued entry
+    // is delivered only after the error is printed.
+    const queued = await withDeliveryHeld(fixture, () =>
+      fixture.btrain(["handoff", "update", "--lane", "a", "--files", "src/,docs/", "--actor", "claude"]))
     assert.equal(queued.code, 0, queued.stderr)
     const before = fixture.calls().length
     const failing = await fixture.btrain(claimArgs("a", "A second claim on a busy lane"))
@@ -307,9 +322,11 @@ describe("spec 024 publisher invariants", () => {
 
     // Leave entries queued and read them before anything delivers them: a
     // flush removes finished entries.
-    assert.equal((await run(claimArgs("a", task), NETWORK_DOWN)).code, 0)
-    assert.equal((await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"], NETWORK_DOWN)).code, 0)
-    const queued = await readAll(await listFiles(path.join(fixture.slackStateDir, "outbox")))
+    const queued = await withDeliveryHeld(fixture, async () => {
+      assert.equal((await run(claimArgs("a", task))).code, 0)
+      assert.equal((await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])).code, 0)
+      return readAll(await listFiles(path.join(fixture.slackStateDir, "outbox")))
+    })
     assert.ok(queued.length >= 2, "the claim and the reviewer change are queued")
     for (const { file, text } of queued) {
       assert.ok(!text.includes(TOKEN), `${file} holds the token`)
@@ -408,12 +425,14 @@ describe("spec 024 publisher invariants", () => {
     const cardPost = fixture.calls().find((call) => call.method === "chat.postMessage" && !call.body.thread_ts)
     assert.ok(cardPost?.result?.ts, "the claim posts a card")
 
-    // Card fields change while Slack is down, so those updates never reach it.
-    // The next render must still show current state, not the claim's.
-    const down = await fixture.btrain(["handoff", "update", "--lane", "a", "--task", "Task changed while Slack was down", "--actor", "claude"], { script: NETWORK_DOWN })
-    assert.equal(down.code, 0, down.stderr)
-    const reviewer = await fixture.btrain(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"], { script: NETWORK_DOWN })
-    assert.equal(reviewer.code, 0, reviewer.stderr)
+    // Card fields change while delivery is held, so those updates never reach
+    // Slack. The next render must still show current state, not the claim's.
+    await withDeliveryHeld(fixture, async () => {
+      const task = await fixture.btrain(["handoff", "update", "--lane", "a", "--task", "Task changed while Slack was down", "--actor", "claude"])
+      assert.equal(task.code, 0, task.stderr)
+      const reviewer = await fixture.btrain(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+      assert.equal(reviewer.code, 0, reviewer.stderr)
+    })
 
     const refresh = async () => {
       const before = fixture.calls().length
@@ -439,10 +458,15 @@ describe("spec 024 publisher invariants", () => {
 
   // btrain-allow: skipped-test
   it("7. a process that finds a live delivery lock skips delivery and returns", { skip: "enabled in WS4" }, async () => {
-    // The same claim with the publisher off is the time to beat.
+    // The same claim with the publisher off is the time to beat; the slower
+    // of two samples, so one fast sample does not make the test flaky.
     const baseline = await createSlackRepo({ toggle: "off" })
-    const baselineClaim = await baseline.btrain(claimArgs())
-    assert.equal(baselineClaim.code, 0, baselineClaim.stderr)
+    const samples = [
+      await baseline.btrain(claimArgs("a")),
+      await baseline.btrain(claimArgs("b", "Second timing sample", "docs/")),
+    ]
+    for (const sample of samples) assert.equal(sample.code, 0, sample.stderr)
+    const baselineMs = Math.max(...samples.map((sample) => sample.ms))
 
     const fixture = await createSlackRepo()
     await fs.mkdir(fixture.slackStateDir, { recursive: true })
@@ -453,8 +477,8 @@ describe("spec 024 publisher invariants", () => {
     const result = await fixture.btrain(claimArgs())
     assert.equal(result.code, 0, result.stderr)
     assert.ok(
-      result.ms < baselineClaim.ms + NO_WAIT_MARGIN_MS,
-      `the command took ${result.ms} ms against ${baselineClaim.ms} ms with the publisher off; it must not wait for the lock`,
+      result.ms < baselineMs + NO_WAIT_MARGIN_MS,
+      `the command took ${result.ms} ms against ${baselineMs} ms with the publisher off; it must not wait for the lock`,
     )
     assert.deepEqual(fixture.calls(), [], "no Slack call while another process holds a live lock")
     assert.equal(await fs.readFile(lockPath, "utf8"), nonce, "the live lock is left alone")
@@ -478,7 +502,9 @@ describe("spec 024 publisher invariants", () => {
 
     // `--stages` passes when a new function is also added to the assignment
     // JSON, so compare against the branch point: no function added to
-    // core.mjs, and no change to the JSON.
+    // core.mjs, and no change to the JSON. This guards a branch; on main the
+    // branch point is HEAD and the comparison is empty. The 585 and 422 above
+    // are the pins of test/decomposition_inventory.test.mjs.
     const base = (await git(["merge-base", "HEAD", "origin/main"]))?.trim()
     if (!base) {
       t.diagnostic("origin/main is not available; skipped the comparison with the branch point")

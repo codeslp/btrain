@@ -120,17 +120,73 @@ describe("fake Slack: recording", () => {
     const fake = createFakeSlack()
     await fake.fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded", authorization: `Bearer ${TOKEN}` },
       body: new URLSearchParams({ channel: "C0000FAKE", text: "hi" }).toString(),
     })
-    await fake.fetch("https://slack.com/api/chat.postMessage", {
+    // A form `token` argument authenticates the call and is not recorded.
+    const viaForm = await fake.fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
-      body: new URLSearchParams({ channel: "C0000FAKE", text: "there" }),
+      body: new URLSearchParams({ channel: "C0000FAKE", text: "there", token: TOKEN }),
     })
+    assert.equal((await viaForm.json()).ok, true)
     assert.deepEqual(fake.calls.map((call) => call.body), [
       { channel: "C0000FAKE", text: "hi" },
-      { channel: "C0000FAKE", text: "there" },
+      { channel: "C0000FAKE", text: "there", token: "[redacted]" },
     ])
+    assert.equal(fake.calls[1].auth, "present")
+    assert.equal(fake.calls[1].headers["content-type"], "application/x-www-form-urlencoded;charset=UTF-8")
+    assert.doesNotMatch(JSON.stringify(fake.calls), new RegExp(TOKEN))
+  })
+
+  it("ignores a JSON body sent without a JSON content type, as Slack does", async () => {
+    const fake = createFakeSlack()
+    const response = await fake.fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ channel: "C0000FAKE", text: "x" }),
+    })
+    assert.deepEqual(await response.json(), { ok: false, error: "channel_not_found" })
+    assert.equal(fake.calls[0].headers["content-type"], "text/plain;charset=UTF-8", "fetch's default for a string body")
+    assert.deepEqual(fake.calls[0].body, { unparsed: JSON.stringify({ channel: "C0000FAKE", text: "x" }) })
+  })
+
+  it("answers not_authed with no token and invalid_auth with the wrong one", async () => {
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    assert.deepEqual(await (await post(fake, "chat.postMessage", { channel: "C0000FAKE", text: "x" }, { token: null })).json(), {
+      ok: false,
+      error: "not_authed",
+    })
+    assert.deepEqual(await (await post(fake, "auth.test", {}, { token: OTHER_TOKEN })).json(), {
+      ok: false,
+      error: "invalid_auth",
+    })
+    // A scripted outcome still wins: the test asked for it.
+    fake.queue("auth.test", { retryAfter: 1 })
+    assert.equal((await post(fake, "auth.test", {}, { token: null })).status, 429)
+  })
+
+  it("reads method, headers, body, and signal from a Request object", async () => {
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const request = new Request("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ channel: "C0000FAKE", text: "from a Request" }),
+    })
+    const payload = await (await fake.fetch(request)).json()
+    assert.equal(payload.ok, true)
+    const [call] = fake.calls
+    assert.equal(call.httpMethod, "POST")
+    assert.equal(call.auth, "match")
+    assert.deepEqual(call.body, { channel: "C0000FAKE", text: "from a Request" })
+
+    const controller = new AbortController()
+    fake.queue("auth.test", { hang: true })
+    const pending = fake.fetch(new Request("https://slack.com/api/auth.test", {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: controller.signal,
+    }))
+    controller.abort()
+    await assert.rejects(pending, (error) => error.name === "AbortError")
   })
 
   it("answers an unknown method the way Slack does and refuses any other URL", async () => {
@@ -175,7 +231,7 @@ describe("fake Slack: recording", () => {
       fake.fetch("https://slack.com/api/chat.postMessage", { body: JSON.stringify({ channel: "C0000FAKE", text: "x" }) }),
       (error) => error instanceof TypeError && /GET\/HEAD/.test(error.message),
     )
-    const auth = await fake.fetch("https://slack.com/api/auth.test")
+    const auth = await fake.fetch("https://slack.com/api/auth.test", { headers: { authorization: `Bearer ${TOKEN}` } })
     assert.equal((await auth.json()).ok, true, "a GET without a body is answered")
     assert.equal(fake.calls.at(-1).httpMethod, "GET")
   })
@@ -352,9 +408,14 @@ describe("fake Slack: subprocess preload", () => {
         out.push(await call("chat.postMessage", { channel: "C0000FAKE", text: "second" }))
         out.push(await call("chat.update", { channel: "C0000FAKE", ts: "1.1", text: "card" }))
         try { await fetch("https://example.invalid/") } catch (error) { out.push(error.message) }
+        // A node process this one starts inherits NODE_OPTIONS, so it gets the fake too.
+        const { execFileSync } = await import("node:child_process")
+        execFileSync(process.execPath, ["--input-type=module", "-e",
+          'await fetch("https://slack.com/api/auth.test", { headers: { authorization: "Bearer ${TOKEN}" } })'])
         console.log(JSON.stringify(out))
       `
-      const { stdout } = await exec(process.execPath, ["--import", PRELOAD, "--input-type=module", "-e", program], { env })
+      // No --import argument: the preload arrives through NODE_OPTIONS.
+      const { stdout } = await exec(process.execPath, ["--input-type=module", "-e", program], { env })
       const [started, result] = stdout.trim().split("\n")
       assert.equal(started, "started")
       const [rejected, posted, limited, refused] = JSON.parse(result)
@@ -368,15 +429,17 @@ describe("fake Slack: subprocess preload", () => {
       assert.deepEqual(readFakeSlackRefusals(logPath).map((refusal) => refusal.url), ["https://example.invalid/"])
 
       const log = readFakeSlackLog(logPath)
-      assert.deepEqual(log.map((call) => [call.method, call.body.text, call.auth, call.result.kind]), [
+      assert.deepEqual(log.map((call) => [call.method, call.body?.text, call.auth, call.result.kind]), [
         ["chat.postMessage", "first", "match", "slack-error"],
         ["chat.postMessage", "second", "match", "ok"],
         ["chat.update", "card", "match", "http"],
+        ["auth.test", undefined, "match", "ok"],
       ])
+      assert.notEqual(log[3].pid, log[0].pid, "the grandchild logged under its own pid")
       assert.equal(log[1].result.ts, posted.body.ts, "the log carries the ts the fake returned")
       assert.ok(log.every((call) => Number.isInteger(call.pid)))
       assert.ok(
-        log.every((call) => call.outputBefore.stdout === "started\n".length && call.outputBefore.stderr === 0),
+        log.slice(0, 3).every((call) => call.outputBefore.stdout === "started\n".length && call.outputBefore.stderr === 0),
         "each call records the output written before it",
       )
       assert.doesNotMatch(await fs.readFile(logPath, "utf8"), new RegExp(TOKEN))

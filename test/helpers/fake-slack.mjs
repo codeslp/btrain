@@ -6,9 +6,12 @@
 // request itself and rejects any URL that is not a Slack Web API method.
 //
 // Each call is recorded with its method, URL, parsed body, and headers. The
-// token value is never recorded: the authorization header is replaced by
-// `[redacted]`, and `auth` says only whether a token was sent and, when the
-// test passed `expectedToken`, whether it matched.
+// token value is never recorded: the authorization header and a `token` form
+// argument are replaced by `[redacted]`, and `auth` says only whether a token
+// was sent and, when the test passed `expectedToken`, whether it matched. As
+// Slack does, a call with no token is answered `not_authed` and one with the
+// wrong token `invalid_auth`, and a body that is neither JSON (by its content
+// type) nor a form is ignored, so its arguments are missing.
 //
 // An outcome tells the fake how to answer one call:
 //
@@ -87,8 +90,11 @@ export function createFakeSlack({
     return { outcome: null, source: "success" }
   }
 
-  async function fetchImpl(input, options = {}) {
-    const url = requestUrl(input)
+  async function fetchImpl(input, init = {}) {
+    // Awaits only for a Request object, so a plain call records itself and
+    // checks its signal before it yields, as before.
+    const options = isRequest(input) ? await requestObjectOptions(input, init) : { ...init, url: requestUrl(input) }
+    const url = options.url
     const signal = options.signal
     if (typeof url !== "string" || !url.startsWith(SLACK_API_PREFIX)) {
       // Recorded, so a test still sees a request that the code under test
@@ -104,8 +110,10 @@ export function createFakeSlack({
       throw new TypeError("Request with GET/HEAD method cannot have body.")
     }
     const method = url.slice(SLACK_API_PREFIX.length).split(/[?#]/)[0]
-    const headers = recordHeaders(options.headers)
-    const body = parseBody(options.body, headers["content-type"])
+    const headers = recordHeaders(options.headers, options.body)
+    const parsed = parseBody(options.body, headers["content-type"])
+    const auth = authState(bearerToken(options.headers) ?? parsed.token, expectedToken)
+    const body = parsed.body
     const { outcome, source } = takeOutcome(method)
     const call = {
       index: calls.length,
@@ -114,7 +122,7 @@ export function createFakeSlack({
       httpMethod,
       body,
       headers,
-      auth: authState(options.headers, expectedToken),
+      auth,
       at: now(),
       outcome: describeOutcome(outcome),
       source,
@@ -150,7 +158,7 @@ export function createFakeSlack({
       settle({ kind: "network", code })
       throw networkError(code)
     }
-    const response = buildResponse(method, body, outcome, nextTs)
+    const response = buildResponse(method, body, outcome, nextTs, auth)
     settle(response.record)
     return response.response
   }
@@ -193,7 +201,7 @@ export function createFakeSlack({
   }
 }
 
-function buildResponse(method, body, outcome, nextTs) {
+function buildResponse(method, body, outcome, nextTs, auth) {
   if (outcome?.retryAfter !== undefined) {
     const seconds = String(outcome.retryAfter ?? DEFAULT_RETRY_AFTER_SECONDS)
     return jsonResponse(429, { ok: false, error: "ratelimited" }, { "retry-after": seconds }, {
@@ -209,6 +217,14 @@ function buildResponse(method, body, outcome, nextTs) {
   if (outcome?.error) {
     return jsonResponse(200, { ok: false, error: outcome.error }, {}, {
       kind: "slack-error", status: 200, error: outcome.error,
+    })
+  }
+  // Slack checks the token before anything else. A scripted error, status,
+  // hang, or network failure above still wins, since the test asked for it.
+  const authError = { missing: "not_authed", mismatch: "invalid_auth" }[auth]
+  if (authError) {
+    return jsonResponse(200, { ok: false, error: authError }, {}, {
+      kind: "slack-error", status: 200, error: authError,
     })
   }
   const builder = SUCCESS_BODIES[method]
@@ -289,24 +305,78 @@ function jsonResponse(status, payload, headers, record) {
   return { response, record }
 }
 
-function recordHeaders(headers) {
+function isRequest(input) {
+  return typeof Request !== "undefined" && input instanceof Request
+}
+
+// A `Request` object's method, headers, body, and signal, overridden by any
+// `init` the caller passed, as fetch would send them.
+async function requestObjectOptions(input, init) {
+  let body = init.body
+  if (body === undefined) {
+    body = input.body ? await input.clone().text() : null
+  }
+  return {
+    url: input.url,
+    method: init.method ?? input.method,
+    headers: init.headers ?? [...input.headers.entries()],
+    body,
+    signal: init.signal ?? input.signal,
+  }
+}
+
+function requestUrl(input) {
+  if (typeof input === "string") {
+    return input
+  }
+  if (input instanceof URL) {
+    return input.href
+  }
+  return input?.url
+}
+
+// Headers as sent, with the token redacted and the content type fetch adds
+// when the caller set none (a string body goes out as text/plain).
+function recordHeaders(headers, body) {
   const out = {}
   for (const [name, value] of headerEntries(headers)) {
     const key = name.toLowerCase()
     out[key] = key === "authorization" ? REDACTED : String(value)
   }
+  if (!out["content-type"]) {
+    const inferred = inferredContentType(body)
+    if (inferred) {
+      out["content-type"] = inferred
+    }
+  }
   return out
 }
 
-function authState(headers, expectedToken) {
+function inferredContentType(body) {
+  if (typeof body === "string") {
+    return "text/plain;charset=UTF-8"
+  }
+  if (body instanceof URLSearchParams) {
+    return "application/x-www-form-urlencoded;charset=UTF-8"
+  }
+  return null
+}
+
+function bearerToken(headers) {
   const value = headerEntries(headers).find(([name]) => name.toLowerCase() === "authorization")?.[1]
-  if (!value) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(value ?? ""))
+  return match ? match[1] : undefined
+}
+
+// "missing", "present" (no expectation set), "match", or "mismatch".
+function authState(token, expectedToken) {
+  if (!token) {
     return "missing"
   }
   if (expectedToken === undefined) {
     return "present"
   }
-  return String(value) === `Bearer ${expectedToken}` ? "match" : "mismatch"
+  return token === expectedToken ? "match" : "mismatch"
 }
 
 function headerEntries(headers) {
@@ -322,39 +392,42 @@ function headerEntries(headers) {
   return Object.entries(headers)
 }
 
-function parseBody(body, contentType = "") {
-  if (body === undefined || body === null) {
-    return null
+// Slack reads JSON arguments only from an application/json body and form
+// arguments from a form body; it ignores any other body, so the fake records
+// that as `unparsed` and answers as if no argument was sent. A `token` form
+// argument authenticates the call and is redacted from the record.
+function parseBody(raw, contentType = "") {
+  if (raw === undefined || raw === null) {
+    return { body: null, token: undefined }
   }
-  if (body instanceof URLSearchParams) {
-    return Object.fromEntries(body)
-  }
-  let text
-  if (typeof body === "string") {
-    text = body
-  } else if (body instanceof Uint8Array) {
-    text = Buffer.from(body).toString("utf8")
+  let fields
+  if (raw instanceof URLSearchParams) {
+    fields = Object.fromEntries(raw)
   } else {
-    return { unparsed: Object.prototype.toString.call(body) }
+    let text
+    if (typeof raw === "string") {
+      text = raw
+    } else if (raw instanceof Uint8Array) {
+      text = Buffer.from(raw).toString("utf8")
+    } else {
+      return { body: { unparsed: Object.prototype.toString.call(raw) }, token: undefined }
+    }
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      fields = Object.fromEntries(new URLSearchParams(text))
+    } else if (contentType.includes("application/json")) {
+      try {
+        fields = JSON.parse(text)
+      } catch {
+        return { body: { unparsed: text }, token: undefined }
+      }
+    } else {
+      return { body: { unparsed: text }, token: undefined }
+    }
   }
-  if (contentType.includes("application/x-www-form-urlencoded")) {
-    return Object.fromEntries(new URLSearchParams(text))
+  if (!fields || typeof fields !== "object" || fields.token === undefined) {
+    return { body: fields, token: undefined }
   }
-  try {
-    return JSON.parse(text)
-  } catch {
-    return { unparsed: text }
-  }
-}
-
-function requestUrl(input) {
-  if (typeof input === "string") {
-    return input
-  }
-  if (input instanceof URL) {
-    return input.href
-  }
-  return input?.url
+  return { body: { ...fields, token: REDACTED }, token: String(fields.token) }
 }
 
 function describeOutcome(outcome) {
@@ -388,19 +461,28 @@ export const FAKE_SLACK_LOG_ENV = "BTRAIN_FAKE_SLACK_LOG"
 export const FAKE_SLACK_SCRIPT_ENV = "BTRAIN_FAKE_SLACK_SCRIPT"
 export const FAKE_SLACK_AUTH_ENV = "BTRAIN_FAKE_SLACK_EXPECTED_AUTH"
 
+const INSTALLED = Symbol.for("btrain.fakeSlack")
+
+export const FAKE_SLACK_PRELOAD_URL = new URL("./fake-slack-preload.mjs", import.meta.url).href
+
 /**
- * Environment that makes a `node --import <preload>` btrain subprocess answer
- * Slack calls from the fake and append each call to `logPath`.
+ * Environment that makes a node subprocess, and every node process it starts,
+ * answer Slack calls from the fake and append each call to `logPath`. The
+ * preload goes in NODE_OPTIONS (after any options `nodeOptions` already
+ * holds), so a btrain command's own node children are covered too.
  *
  * `script` is `{ queue: { method: [outcome, ...] }, defaults: { method: outcome } }`.
  * Each process starts with its own copy of the script, so a queue is per
  * process, not shared across the commands a test runs.
  */
-export function fakeSlackProcessEnv({ logPath, script, expectedToken } = {}) {
+export function fakeSlackProcessEnv({ logPath, script, expectedToken, nodeOptions = process.env.NODE_OPTIONS } = {}) {
   if (!logPath) {
     throw new Error("fakeSlackProcessEnv needs logPath")
   }
-  const env = { [FAKE_SLACK_LOG_ENV]: logPath }
+  const env = {
+    [FAKE_SLACK_LOG_ENV]: logPath,
+    NODE_OPTIONS: [nodeOptions, `--import=${FAKE_SLACK_PRELOAD_URL}`].filter(Boolean).join(" "),
+  }
   if (script) {
     env[FAKE_SLACK_SCRIPT_ENV] = JSON.stringify(script)
   }
@@ -468,6 +550,10 @@ export function installFakeSlackFromEnv(env = process.env) {
   if (!logPath) {
     return null
   }
+  // Loaded both by --import and by NODE_OPTIONS: install once.
+  if (globalThis[INSTALLED]) {
+    return globalThis[INSTALLED]
+  }
   const script = env[FAKE_SLACK_SCRIPT_ENV] ? JSON.parse(env[FAKE_SLACK_SCRIPT_ENV]) : {}
   const written = { stdout: countWrites(process.stdout), stderr: countWrites(process.stderr) }
   const fake = createFakeSlack({
@@ -494,6 +580,7 @@ export function installFakeSlackFromEnv(env = process.env) {
     fake.setDefault(method, outcome)
   }
   globalThis.fetch = fake.fetch
+  globalThis[INSTALLED] = fake
   return fake
 }
 
