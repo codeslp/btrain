@@ -1,7 +1,7 @@
 # 025 — A Local Orchestrator in Slack
 
 **Status**: Draft
-**Version**: 0.5.0
+**Version**: 0.5.1
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -161,7 +161,9 @@ retry_review_per_hour = 3
 
 ### FR-1: Two toggles
 
-`slack_listen` is a new feature, off by default, separate from `slack`. A
+`slack_listen` is a new feature, off by default, separate from `slack`. Like
+`slack` (spec 024 FR-1) it is on only when its key in `[features]` is exactly
+`true`. A repository with no `[features]` table has it off. A
 developer can publish without listening. The listener serves a repository
 only when both toggles are on in that repository and it has a channel in the
 map of spec 024. It refuses to start when `operator` is not configured.
@@ -185,7 +187,13 @@ key: value
 - In an operator's message, text before the `btrain>` line and after the
   blank line is ignored.
 - Slack returns `>`, `<`, and `&` as HTML entities. The listener decodes them
-  before it parses.
+  before it parses. A Slack client can also turn a file name such as
+  `README.md` into link markup, and an operator can paste a command inside a
+  code block. The listener replaces `<url|label>` with `label` and `<url>`
+  with `url`, and removes a code fence around the command. A command that
+  still holds a user, channel, or special mention is rejected.
+- A value may not start with `-`. The btrain CLI reads any argument that
+  starts with `--` as a flag, even where a value is expected.
 - A message or reply with two `btrain>` lines, an unknown verb, an unknown
   key, a missing required key, or a value that fails its check is rejected
   whole. The listener replies with the reason. Nothing runs.
@@ -284,8 +292,10 @@ operator added.
   in one canonical form. That text is what it posts, in a code block, and
   what it stores.
 - If the text handling of spec 024 FR-8 would change the canonical text,
-  because a secret pattern matches or the text is over the length limit, the
-  proposal is rejected and nothing is stored.
+  because a secret pattern matches, the text is over the length limit, or it
+  holds a URL that would be rewritten, the proposal is rejected and nothing
+  is stored. Only the escaping of `&`, `<`, and `>` is applied when it is
+  posted, and inside a code block that changes nothing the operator sees.
 - A proposal becomes pending only after its post succeeds. It is keyed by the
   `ts` of that post. Approval runs the stored text.
 - An operator's command is keyed by its own `ts` and runs at most once,
@@ -300,11 +310,16 @@ operator added.
 `start` does what a person at the machine would do with two commands:
 
 1. `btrain handoff claim` on the first free lane, with the given owner, task,
-   files, and delegation-packet fields. The reviewer is inferred by btrain
+   files, and delegation-packet fields. The listener picks the lane, by the
+   rule the claim command uses, and passes `--lane`, because it needs the
+   lane ID for step 2. If another process takes that lane first, the claim
+   fails and the listener reports it. The reviewer is inferred by btrain
    (spec 023 FR-2) unless `reviewer` is given, and the usual claim guards
    apply, including lock conflicts and the lab rule.
 2. `btrain loop --lane <id>` as a child process, bounded by
-   `[slack.orchestrator].max_rounds`, so the owner's runner starts.
+   `[slack.orchestrator].max_rounds`, so the owner's runner starts. The
+   runner works in the repository's registered checkout, as it does for a
+   loop started at the machine.
 
 Checks before the claim: `owner` and `reviewer` are configured agents with a
 `cli` runner; every `files` entry is a relative path inside the repository
@@ -316,14 +331,16 @@ The claim uses the existing entry point, where the named owner is the
 transition's actor, as it is for any claim made on an agent's behalf today.
 The event details record that the operator requested it through Slack,
 whether a person or an orchestrator run wrote the command, and the Slack
-message it came from.
+message it came from. `btrain handoff claim` gains a `--requested-via <text>`
+flag that carries this into the claim event. It records text and changes no
+guard.
 
 ### FR-9: Every command gets a result
 
 The listener replies in the thread, through the btrain app, to every command
 it acts on: accepted, waiting for approval, ran with its outcome, rejected
-with the reason, or expired. It keeps the last 20 results in its state, and
-they are part of the snapshot of FR-14.
+with the reason, or expired. It keeps the last 20 results for each
+repository in its state, and they are part of the snapshot of FR-14.
 
 ### FR-10: Limits
 
@@ -361,8 +378,10 @@ they are part of the snapshot of FR-14.
 - **Nothing blocks the poll.** A command that starts a loop, and every
   orchestrator run, is a child process. The listener keeps polling while
   they run.
-- **Budget.** At most 30 Slack read calls a minute for each channel. Both
-  methods are documented as Tier 3, "50+ per minute".
+- **Budget.** At most 30 Slack read calls a minute for each channel, and at
+  most 40 a minute for each method over all channels. Both methods are
+  documented as Tier 3, "50+ per minute", and Slack counts that limit for
+  each method across the workspace, not for each channel.
 - **One listener for each developer.** A single listener serves every mapped
   channel and repository. A lease file with a heartbeat in the btrain home
   stops a second one.
@@ -374,7 +393,10 @@ they are part of the snapshot of FR-14.
 - **Stopping.** `btrain slack listen --stop` ends it. `btrain> pause`, typed
   by the operator, makes it ignore every Slack message until
   `btrain slack listen --resume` is run on the machine. It cannot be resumed
-  from Slack. A paused listener still drains the outbox.
+  from Slack. A paused listener still drains the outbox. Stop and pause reach
+  the running listener through flag files in the btrain home that it checks
+  every cycle, so only the listener writes its state. On resume it moves
+  every cursor to the current time: nothing sent during a pause is acted on.
 - **Running it.** `btrain slack listen --install` writes a user launch agent
   on macOS and prints a systemd user unit on Linux. Nothing is installed
   unless that command is run.
@@ -432,7 +454,10 @@ enforced by the listener, which does not depend on the model following it.
 - **Runner.** `orchestrator.runner` is a subscription CLI command. The
   default is `claude -p`. The listener starts a runner only when it has a
   profile for it. A runner with no profile is not started, and
-  `btrain doctor` reports the gap.
+  `btrain doctor` reports the gap. A profile lists the words a runner string
+  may hold besides the executable, such as a model name. A string with any
+  other word has no profile. This version has a profile for macOS and Linux
+  only.
 - **Profile.** A profile must give a run with no tools, no project or user
   customizations, no MCP servers or connectors, and no saved session. For
   the `claude` CLI at the time of writing that is
@@ -452,10 +477,14 @@ enforced by the listener, which does not depend on the model following it.
   base-URL override, no GitHub token, no `BTRAIN_*` name, and no Slack name.
 - **`HOME` is not a secret boundary.** The run can be given `HOME` because
   it has no tool that reads a file. The no-tools profile is the control.
-- **Profile check.** `btrain doctor` starts the runner once with the profile
+- **Profile check.** The check starts the runner once with the profile
   and fails the profile when the CLI reports any tool, any MCP server, or an
   API key as its credential source. A failed profile is not used, so a run
-  cannot fall back to metered usage.
+  cannot fall back to metered usage. The verdict is saved with the runner
+  string and the CLI's version. The check runs when the listener starts, and
+  when `btrain doctor` finds no saved verdict for the current runner and
+  version. `btrain doctor` otherwise reports the saved verdict, so it does
+  not start a model run each time.
 - **Time.** A run that exceeds `turnSeconds` (default 180) is stopped, and
   the listener replies that the orchestrator timed out.
 - **Unavailable.** When the runner is missing, out of usage, or refused, the
