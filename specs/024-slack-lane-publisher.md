@@ -270,6 +270,8 @@ board are rewritten whole, so they are always correct.
 - `btrain slack status`: toggle, credential source, channel, queue depth, age
   of the oldest entry, pause reason, last error.
 - `btrain slack flush`: drain the queue now.
+- `btrain slack refresh`: re-render and update the board and every active
+  card from current lane state.
 - `btrain slack channels`: print the repository-to-channel map (FR-16).
 
 `btrain doctor` reports a paused publisher, a missing token or channel while

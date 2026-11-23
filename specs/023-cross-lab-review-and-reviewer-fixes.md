@@ -227,7 +227,8 @@ is the reviewer of the lane's active attempt and the lane's head equals the
 attempt's head. A duplicate verdict changes nothing.
 
 **Pickup.** The attempt records a pickup time the first time its reviewer
-runs `btrain handoff --lane <id>` under its own identity. Every dispatched
+runs `btrain handoff --lane <id>` under its own verified identity. A read by
+any other process, such as the Slack listener of spec 025, is not a pickup. Every dispatched
 reviewer already runs that command first, so pickup needs no extra step from
 the agent. From pickup until the verdict, `btrain handoff`, `btrain status`,
 and the dashboard show the lane as `in-review`, with the reviewer and the
