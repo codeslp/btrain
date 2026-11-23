@@ -1,7 +1,7 @@
 # 024 — Slack Lane Publisher
 
 **Status**: Draft
-**Version**: 0.3.0
+**Version**: 0.4.0
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -118,8 +118,13 @@ inline_timeout_ms = 2000
 ### FR-1: A feature toggle, off by default
 
 `slack` joins `FEATURES` in `repo_mode.mjs` with `localDefault: false`, like
-`agentchattr` and `handoff_history`. With the toggle off, btrain writes no
-outbox, makes no network call, and prints nothing about Slack.
+`agentchattr` and `handoff_history`. It is on only when `[features].slack` is
+exactly `true`. This differs from the older toggles: `isFeatureEnabled`
+treats a missing `[features]` table or a missing key as enabled, so that
+legacy repositories keep everything on. That rule would switch the publisher
+on in every existing repository, so `slack` is marked explicit-only. With the
+toggle off, btrain writes no outbox, makes no network call, and prints
+nothing about Slack.
 
 ### FR-2: Credentials never enter a repository
 
@@ -148,18 +153,26 @@ process an agent starts would still find the file through `HOME`.
 ### FR-3: Every workflow event is offered to the publisher
 
 `appendWorkflowEvent` offers each event to the publisher after the event is
-written. The publisher appends an outbox entry to
-`<state root>/.btrain/slack/outbox.jsonl`:
+written. The publisher writes one file for each entry into
+`<state root>/.btrain/slack/outbox/`. A file is written under a temporary
+name and renamed into place, and it is removed when its entry is done.
+Nothing appends to a shared file, so two btrain processes cannot lose each
+other's entries. An entry looks like this:
 
 ```json
 {"id": "<uuid>", "queuedAt": "<ISO time>", "laneId": "e",
- "kind": "sent-to-review", "event": { "...the workflow event..." }}
+ "kind": "sent-to-review",
+ "fields": {"actor": "claude", "reviewer": "codex-reviewer"}}
 ```
+
+`fields` holds only the values the entry's message needs, already scrubbed
+(FR-8). The workflow event itself is not copied into the outbox. It stays in
+the event log.
 
 `id` comes from `crypto.randomUUID()`. The state change and the event are
 complete before the entry is queued. An error while queuing is logged and
 swallowed. Text is scrubbed for secret patterns (FR-8) before the entry is
-written, so the outbox file never holds a secret.
+written, so no outbox entry ever holds a secret.
 
 State changes that are recorded outside the workflow log are offered the same
 way when they exist: reviewer dispatch outcomes today, and the attempt,
@@ -179,8 +192,10 @@ btrain has no daemon, and this spec adds none.
   `btrain slack flush`.
 - **The delivery lock never waits.** A process that finds the outbox lock
   held skips delivery and leaves the queue to the holder. It does not use
-  `withFileLock`, which waits up to 5 seconds and then throws. A holder
-  keeps the lock for less than 30 seconds.
+  `withFileLock`, which waits up to 5 seconds and then throws. The holder
+  touches the lock before every Slack call. A lock is taken over only when
+  it has not been touched for 60 seconds, so a long flush never looks
+  abandoned and two live processes never both deliver.
 - **Delivery never sleeps and never throws.** A Slack error, a timeout, or a
   `Retry-After` records the earliest next try on the entry and returns.
 - Entries for one lane are sent in order. A failing entry holds back later
@@ -272,12 +287,16 @@ repository never blocks the board for the others.
   `not_in_channel`, `no_permission`, and `is_archived` are configuration
   errors. The publisher pauses for that repository, keeps queuing, and stops
   calling Slack until `btrain slack test` succeeds.
+- An error about one message's content, such as `msg_too_long`, drops that
+  entry and is counted and logged. An error btrain does not recognize is
+  retried for 5 attempts and then dropped the same way. No entry is retried
+  forever, so one bad entry cannot hold a lane's later entries.
 - No Slack outcome changes the exit code or the output of the btrain command
   that queued the entry, apart from one warning line when the publisher is
   paused.
 
 A reply can be sent twice when a process stops between Slack's response and
-the outbox update. Replies are therefore at-least-once. The card and the
+the removal of its entry file. Replies are therefore at-least-once. The card and the
 board are rewritten whole, so they are always correct.
 
 ### FR-11: Commands
@@ -453,7 +472,7 @@ pinned prose is edited. The implementation lane runs the pin check and
 All tests inject a fake `fetch`, the way `system-one.mjs` accepts
 `fetchImpl`. No test calls Slack.
 
-- Toggle off: no outbox file, no fetch call.
+- Toggle off, or no `[features]` table: no outbox entry, no fetch call.
 - Claim, review request, request-changes, approval, PR link, and merge each
   produce the expected reply text and a card with the expected fields.
 - A metadata-only update refreshes the card and posts no reply.
@@ -464,7 +483,7 @@ All tests inject a fake `fetch`, the way `system-one.mjs` accepts
   throw.
 - Agent text with a bare `https://` URL, a Slack webhook URL, and a
   `github_pat_` token is posted with no link and both secrets redacted, and
-  neither secret is in the outbox file.
+  neither secret is in any outbox entry.
 - Two registered repositories with the same name map to their own channels
   by path.
 - A repository whose state cannot be read does not stop the board from
