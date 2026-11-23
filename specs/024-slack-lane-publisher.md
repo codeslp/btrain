@@ -95,9 +95,9 @@ never in a repository:
   "defaultChannel": "C0CCCCCCCCC",
   "channels": {
     "btrain": "C0AAAAAAAAA",
-    "zo_cal": "C0BBBBBBBBB",
-    "kitchen_vision": "C0BBBBBBBBB",
-    "spec_shoot": "C0BBBBBBBBB"
+    "shop-web": "C0BBBBBBBBB",
+    "shop-api": "C0BBBBBBBBB",
+    "shop-docs": "C0BBBBBBBBB"
   }
 }
 ```
