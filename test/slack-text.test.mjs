@@ -49,6 +49,20 @@ describe("the four steps, each on its own", () => {
     assert.equal(prepareAgentText("a\nb", { singleLine: true }), "a b")
   })
 
+  it("redacts a bearer token whose separator is a control character the pattern's \\s does not match", () => {
+    const token = "y".repeat(30)
+    for (const separator of ["\u0000", "\u0001", "\u001b", "\u007f", "\u0085"]) {
+      for (const singleLine of [true, false]) {
+        const text = prepareAgentText(`Bearer${separator}${token} rest`, { maxChars: 200, singleLine })
+        assert.equal(text, "[redacted] rest", `${JSON.stringify(separator)} singleLine=${singleLine}`)
+      }
+    }
+  })
+
+  it("flattenLines keeps line breaks and tabs when asked, and still clears other controls", () => {
+    assert.deepEqual(flattenLines("a\nb\tc\u0000d\u0085e\u2028f", { keepLineBreaks: true }), { text: "a\nb\tc d e\u2028f", changed: true })
+  })
+
   it("cutText cuts on a character boundary and counts the ellipsis", () => {
     assert.deepEqual(cutText("abcdef", 4), { text: "abc…", changed: true })
     assert.deepEqual(cutText("abc", 4), { text: "abc", changed: false })

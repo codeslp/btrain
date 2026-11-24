@@ -3,7 +3,9 @@
 // decision"); the secret list is review/secret-patterns.mjs, the list
 // `btrain review code` uses.
 //
-// Order (plan, "Text pipeline"):
+// Order (plan, "Text pipeline", with one step added in front):
+//   0. control characters become spaces (and line breaks too, for a
+//      one-line field), so none can hide a secret from the scrub;
 //   1. scrub: every secret match becomes `[redacted]`;
 //   2. cut to the field's length on a character boundary;
 //   3. escape `&`, `<`, `>`;
@@ -78,27 +80,36 @@ export function defangUrls(value) {
 }
 
 /**
- * For a one-line field: every line break, tab, other control character, and
- * the Unicode line and paragraph separators become one space, so agent text
- * cannot add a line to a card (forging an FR-13 `owner:` or `pr:` line) or
- * turn a one-line reply (FR-7) into two.
+ * Turn control characters into one space. By default that is every line
+ * break, tab, other control character, and the Unicode line and paragraph
+ * separators, so agent text cannot add a line to a card (forging an FR-13
+ * `owner:` or `pr:` line) or turn a one-line reply (FR-7) into two. With
+ * `keepLineBreaks`, `\n`, `\r`, `\t` and U+2028/U+2029 stay.
+ *
+ * It runs before the scrub. A control character that a secret pattern's `\s`
+ * does not match (`\u0000`, `\u0085`, ...) would otherwise hide `Bearer<ctl>
+ * <token>` from the scrub and become a matching space here.
  */
-export function flattenLines(value) {
+export function flattenLines(value, { keepLineBreaks = false } = {}) {
   const input = asText(value)
-  // eslint-disable-next-line no-control-regex
-  const text = input.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ")
+  const text = keepLineBreaks
+    // eslint-disable-next-line no-control-regex
+    ? input.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0085]+/g, " ")
+    // eslint-disable-next-line no-control-regex
+    : input.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ")
   return { text, changed: text !== input }
 }
 
 /**
  * The whole pipeline for one agent-written field. `maxChars` is the field's
  * length limit (`[slack].task_chars`, `summary_chars`); without one the field
- * is only scrubbed, escaped, and defanged. `singleLine` flattens line breaks
- * after the scrub; every card, reply, and board field uses it.
+ * is only flattened, scrubbed, escaped, and defanged. Control characters
+ * become spaces first; `singleLine` also flattens line breaks, and every card,
+ * reply, and board field uses it.
  */
 export function prepareAgentText(value, { maxChars, singleLine = false } = {}) {
-  let { text } = scrubSecrets(value)
-  if (singleLine) text = flattenLines(text).text
+  let { text } = flattenLines(value, { keepLineBreaks: !singleLine })
+  text = scrubSecrets(text).text
   text = cutText(text, maxChars).text
   text = escapeSlackText(text).text
   text = defangUrls(text).text
