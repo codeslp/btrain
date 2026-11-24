@@ -207,10 +207,12 @@ export function findRejectedRunnerArgs(executable, args = []) {
       found.push(token)
     }
   }
-  // A subcommand is the first word that is not a flag.
-  const subcommand = list.find((token) => !token.startsWith("-"))
-  if (subcommand && entry.rejectedSubcommands.includes(subcommand)) {
-    found.push(subcommand)
+  // A resume subcommand can follow flag values (`codex -m gpt resume`) or
+  // another subcommand (`codex exec resume`), so any word equal to one counts.
+  for (const token of list) {
+    if (entry.rejectedSubcommands.includes(token)) {
+      found.push(token)
+    }
   }
   return found
 }

@@ -186,13 +186,22 @@ function needsReviewArgs({ dispatch = true } = {}) {
 
 const DISPATCH_ON = { BTRAIN_NO_REVIEW_DISPATCH: "0" }
 
-/** Events that put lane `a` in an open request with one dispatched attempt, as WS5 writes them. */
-function openAttemptEvents({ head, reviewer = AGENTS.otherLabA.name, attemptId = "t1", requestId = "r1", tier = "other-lab" }) {
+/**
+ * Events that put lane `a` in an open request with one dispatched attempt, as
+ * WS5 writes them. `at` is the time of both, in every field the fold reads.
+ */
+function openAttemptEvents({ head, reviewer = AGENTS.otherLabA.name, attemptId = "t1", requestId = "r1", tier = "other-lab", at = new Date().toISOString(), request = true }) {
   return [
-    { type: "review-request", actor: AGENTS.owner.name, details: { requestId, branch: "refs/heads/feat/x", head, requestedAt: new Date().toISOString(), otherLab: [AGENTS.otherLabA.name, AGENTS.otherLabB.name], sameLab: [AGENTS.sameLab.name] } },
-    { type: "review-attempt", actor: AGENTS.owner.name, details: { attemptId, requestId, reviewer, previousReviewer: "", reason: "", tier, head, startedAt: new Date().toISOString(), opened: "dispatch", by: "btrain-system" } },
+    ...(request
+      ? [{ type: "review-request", actor: AGENTS.owner.name, recordedAt: at, details: { requestId, branch: "refs/heads/feat/x", head, requestedAt: at, otherLab: [AGENTS.otherLabA.name, AGENTS.otherLabB.name], sameLab: [AGENTS.sameLab.name] } }]
+      : []),
+    { type: "review-attempt", actor: AGENTS.owner.name, recordedAt: at, details: { attemptId, requestId, reviewer, previousReviewer: "", reason: "", tier, head, startedAt: at, opened: "dispatch", by: "btrain-system" } },
   ]
 }
+
+// A short review policy, so a test of the request loop runs its window,
+// silence limit, and re-probe in seconds, inside COMMAND_TIMEOUT_MS.
+const SHORT_REVIEW = '[review]\nother_lab_window = "3s"\nsilence_limit = "1s"\nattempt_max = "6s"'
 
 /**
  * The seven functions `runReviewRequest` takes (plan, "Modules"), over an
@@ -295,7 +304,7 @@ describe("the invariant harness itself", () => {
 })
 
 describe("spec 023 invariants", () => {
-  it("1. a same-lab reviewer is assigned only by override, or after the window with every other-lab reviewer tried and none progressing", { skip: "WS5: the request loop (T028)" }, async () => {
+  it("1. a same-lab reviewer is assigned only by override, or after the window with every other-lab reviewer tried and none progressing", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
     const { runReviewRequest } = await reviewModule("request.mjs")
     const clock = createFakeClock()
     const world = createLoopWorld({ clock, behaviors: { [AGENTS.otherLabA.name]: "silent", [AGENTS.otherLabB.name]: "silent" } })
@@ -316,14 +325,17 @@ describe("spec 023 invariants", () => {
     assert.equal(record.fallbackReason, "other-lab-unavailable")
   })
 
-  it("2. elapsed wall time alone never assigns a same-lab reviewer; with no btrain process running the lane does not change", { skip: "WS5: the request loop (T028)" }, async () => {
+  it("2. elapsed wall time alone never assigns a same-lab reviewer; with no btrain process running the lane does not change", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
     const repo = await createReviewRepo()
     const update = await repo.btrain(needsReviewArgs({ dispatch: false }))
     assert.equal(update.code, 0, update.stderr)
     // The request and its only attempt are an hour old: no process ran since.
     const hourAgo = new Date(Date.now() - 60 * MIN).toISOString()
     const head = await repo.head()
-    await repo.appendEvents(openAttemptEvents({ head }).map((event) => ({ ...event, recordedAt: hourAgo })))
+    await repo.appendEvents(openAttemptEvents({ head, at: hourAgo }))
+    const record = await repo.record()
+    assert.equal(record.request.requestedAt, hourAgo, "the fold sees an hour-old request")
+    assert.equal(record.attempts[0].startedAt, hourAgo, "and an hour-old attempt")
     const before = await repo.events()
     const beforeFile = await repo.handoffFile()
     // Commands that read the lane are not a dispatcher.
@@ -338,24 +350,36 @@ describe("spec 023 invariants", () => {
     assert.deepEqual(await readFakeRunnerStarts(repo.logPath), [])
   })
 
-  it("3. a verdict changes the lane only from the reviewer of the active attempt at that attempt's head", { skip: "WS5: verdicts bound to attempts (T025, T028)" }, async () => {
+  it("3. a verdict changes the lane only from the reviewer of the active attempt at that attempt's head", { skip: "WS5: verdicts bound to attempts (T025, T028)" }, async () => { // btrain-allow: skipped-test
     const repo = await createReviewRepo()
     assert.equal((await repo.btrain(needsReviewArgs({ dispatch: false }))).code, 0)
-    const head = await repo.head()
-    await repo.appendEvents(openAttemptEvents({ head }))
+    const reviewer = AGENTS.otherLabA.name
+    const resolve = () => repo.btrain(["handoff", "resolve", "--lane", "a", "--summary", "Looks right", "--actor", reviewer], { agent: reviewer })
+    const firstHead = await repo.head()
 
-    const wrongReviewer = await repo.btrain(["handoff", "resolve", "--lane", "a", "--summary", "ok", "--actor", AGENTS.otherLabB.name], { agent: AGENTS.otherLabB.name })
-    assert.notEqual(wrongReviewer.code, 0, "a reviewer that is not the active attempt's is refused")
-    assert.match(await repo.handoffFile(), /^Status: needs-review$/m)
+    // The recorded reviewer, whose attempt has ended: no active attempt is its.
+    await repo.appendEvents([
+      ...openAttemptEvents({ head: firstHead }),
+      { type: "review-attempt-ended", actor: AGENTS.owner.name, details: { attemptId: "t1", outcome: "unresponsive", detail: "no-pickup" } },
+    ])
+    await resolve()
+    assert.match(await repo.handoffFile(), /^Status: needs-review$/m, "a verdict from an ended attempt changes nothing")
 
-    await repo.ownerCommit()
-    const wrongHead = await repo.btrain(["handoff", "resolve", "--lane", "a", "--summary", "ok", "--actor", AGENTS.otherLabA.name], { agent: AGENTS.otherLabA.name })
-    assert.notEqual(wrongHead.code, 0, "a verdict at another head is refused")
-    assert.match(await repo.handoffFile(), /^Status: needs-review$/m)
+    // The active attempt's reviewer, after the owner moved the head.
+    await repo.appendEvents(openAttemptEvents({ head: firstHead, attemptId: "t2", request: false }))
+    const newHead = await repo.ownerCommit()
+    await resolve()
+    assert.match(await repo.handoffFile(), /^Status: needs-review$/m, "a verdict at another head changes nothing")
+
+    // The active attempt's reviewer at that attempt's head: accepted.
+    await repo.appendEvents(openAttemptEvents({ head: newHead, attemptId: "t3", requestId: "r2" }))
+    const accepted = await resolve()
+    assert.equal(accepted.code, 0, `${accepted.stdout}\n${accepted.stderr}`)
+    assert.doesNotMatch(await repo.handoffFile(), /^Status: needs-review$/m, "the active attempt's verdict at its head is applied")
   })
 
-  it("4. while a lane is needs-review with an open request, its recorded reviewer is the active attempt's reviewer", { skip: "WS5: the request loop (T028)" }, async () => {
-    const repo = await createReviewRepo()
+  it("4. while a lane is needs-review with an open request, its recorded reviewer is the active attempt's reviewer", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
+    const repo = await createReviewRepo({ review: SHORT_REVIEW })
     const quota = await fs.readFile(path.join(SAMPLES, "codex-usage-limit.txt"), "utf8")
     await repo.scenario({
       agents: {
@@ -373,7 +397,7 @@ describe("spec 023 invariants", () => {
     }
   })
 
-  it("5. the stored status is never in-review or confirming-fix", { skip: "WS2: the review record and display (T011)" }, async () => {
+  it("5. the stored status is never in-review or confirming-fix", { skip: "WS2: the review record and display (T011)" }, async () => { // btrain-allow: skipped-test
     const repo = await createReviewRepo()
     assert.equal((await repo.btrain(needsReviewArgs({ dispatch: false }))).code, 0)
     await repo.appendEvents(openAttemptEvents({ head: await repo.head() }))
@@ -392,7 +416,7 @@ describe("spec 023 invariants", () => {
     assert.doesNotMatch(await repo.handoffFile(), /^Status: (in-review|confirming-fix)$/m)
   })
 
-  it("6. a lane enters ready-for-pr only by row 4 or ConfirmFix, and leaves fix-confirmation only by the owner's hand-off to needs-review", { skip: "WS7: reviewer fixes (T039); WS3 enforces the ready-for-pr half (T016)" }, async () => {
+  it("6. a lane enters ready-for-pr only by row 4 or ConfirmFix, and leaves fix-confirmation only by the owner's hand-off to needs-review", { skip: "WS7: reviewer fixes (T039); WS3 enforces the ready-for-pr half (T016)" }, async () => { // btrain-allow: skipped-test
     const repo = await createReviewRepo({ prFlow: true })
     for (const actor of [AGENTS.owner.name, AGENTS.otherLabA.name, "someone-else"]) {
       for (const status of ["ready-for-pr", "pr-review", "ready-to-merge", "fix-confirmation"]) {
@@ -423,7 +447,7 @@ describe("spec 023 invariants", () => {
     assert.match(await repo.handoffFile(), /^Status: fix-confirmation$/m)
   })
 
-  it("7. the agent that confirms a fix is not in the lane's fixAuthors", { skip: "WS7: reviewer fixes (T039)" }, async () => {
+  it("7. the agent that confirms a fix is not in the lane's fixAuthors", { skip: "WS7: reviewer fixes (T039)" }, async () => { // btrain-allow: skipped-test
     const repo = await createReviewRepo({ prFlow: true })
     assert.equal((await repo.btrain(needsReviewArgs({ dispatch: false }))).code, 0)
     await repo.appendEvents(openAttemptEvents({ head: await repo.head() }))
@@ -446,8 +470,8 @@ describe("spec 023 invariants", () => {
     assert.match(await repo.handoffFile(), /^Status: ready-for-pr$/m)
   })
 
-  it("8. a system reassignment changes the reviewer only, and the canonical actor after it is a lane agent", { skip: "WS5: the system reassignment (T024, T028)" }, async () => {
-    const repo = await createReviewRepo()
+  it("8. a system reassignment changes the reviewer only, and the canonical actor after it is a lane agent", { skip: "WS5: the system reassignment (T024, T028)" }, async () => { // btrain-allow: skipped-test
+    const repo = await createReviewRepo({ review: SHORT_REVIEW })
     const quota = await fs.readFile(path.join(SAMPLES, "codex-usage-limit.txt"), "utf8")
     await repo.scenario({
       agents: {
@@ -455,7 +479,8 @@ describe("spec 023 invariants", () => {
         [AGENTS.otherLabB.name]: [{ do: "handoff" }, { do: "exit", code: 1, text: "crashed" }],
       },
     })
-    await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
+    const update = await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
+    assert.equal(update.code, 0, `${update.stdout}\n${update.stderr}`)
     const reassignment = (await repo.events()).find((event) => event.type === "review-attempt" && event.details.previousReviewer && event.details.previousReviewer !== event.details.reviewer)
     assert.ok(reassignment, "the loop reassigned the lane")
     assert.equal(reassignment.actor, AGENTS.owner.name, "the event's actor is the owner")
@@ -469,24 +494,29 @@ describe("spec 023 invariants", () => {
     assert.match(await repo.handoffFile(), new RegExp(`^Repair Owner: ${AGENTS.owner.name}$`, "m"))
   })
 
-  it("9. an attempt that ends without a verdict leaves the status needs-review; a runner failure is never an approval", { skip: "WS5: the request loop (T028)" }, async () => {
-    const repo = await createReviewRepo({ reviewers: ["otherLabA"] })
+  it("9. an attempt that ends without a verdict leaves the status needs-review; a runner failure is never an approval", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
+    const repo = await createReviewRepo({ reviewers: ["otherLabA"] , review: SHORT_REVIEW })
     const quota = await fs.readFile(path.join(SAMPLES, "codex-usage-limit.txt"), "utf8")
     await repo.scenario({ agents: { [AGENTS.otherLabA.name]: { invocations: [[{ do: "exit", code: 1, text: quota }], [{ do: "exit", code: 2, text: "boom" }]] } } })
-    await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
+    const update = await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
+    assert.equal(update.code, 0, `${update.stdout}\n${update.stderr}`)
     assert.match(await repo.handoffFile(), /^Status: needs-review$/m)
     const events = await repo.events()
     assert.equal(events.filter((event) => event.type === "resolve").length, 0)
+    // The quota exit, then the re-probe at the silence limit that exits 2.
+    assert.equal((await readFakeRunnerStarts(repo.logPath, AGENTS.otherLabA.name)).length, 2)
     const ended = events.filter((event) => event.type === "review-attempt-ended")
-    assert.ok(ended.length >= 1)
-    assert.ok(ended.every((event) => ["tool_unavailable", "failed", "unresponsive", "policy_blocked", "stopped-at-max", "superseded"].includes(event.details.outcome)))
+    assert.deepEqual(ended.map((event) => event.details.outcome), ["tool_unavailable", "failed"])
+    // No same-lab candidate is configured, so the request ends in an escalation.
+    assert.equal(events.filter((event) => event.type === "review-escalation").length, 1)
   })
 
   describe("10. a same-lab review always has a recorded reason and the attempts that led to it, and shows its tier", () => {
-    it("in btrain handoff and btrain status", { skip: "WS5: the request loop (T028)" }, async () => {
-      const repo = await createReviewRepo({ reviewers: ["sameLab"] })
+    it("in btrain handoff and btrain status", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
+      const repo = await createReviewRepo({ reviewers: ["sameLab"], review: SHORT_REVIEW })
       await repo.scenario({ agents: { [AGENTS.sameLab.name]: [{ do: "handoff" }, { do: "silent", ms: 200 }, { do: "exit", code: 0 }] } })
-      await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
+      const update = await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
+      assert.equal(update.code, 0, `${update.stdout}\n${update.stderr}`)
       const record = await repo.record()
       const sameLab = record.attempts.filter((attempt) => attempt.tier === "same-lab")
       assert.ok(sameLab.length >= 1)
@@ -499,7 +529,7 @@ describe("spec 023 invariants", () => {
       }
     })
 
-    it("in the PR body", { skip: "WS9: the tier in PR bodies (T043)" }, async () => {
+    it("in the PR body", { skip: "WS9: the tier in PR bodies (T043)" }, async () => { // btrain-allow: skipped-test
       const { buildPrBody } = await import(new URL("../src/brain_train/pr-flow.mjs", import.meta.url))
       const body = buildPrBody({
         laneId: "a", owner: AGENTS.owner.name, reviewer: AGENTS.sameLab.name, objective: "Change the feature",
@@ -510,7 +540,7 @@ describe("spec 023 invariants", () => {
     })
   })
 
-  it("11. handoff fix is refused, with its own message, for each FR-11 condition that fails", { skip: "WS7: fix-rules.mjs (T033, T039)" }, async () => {
+  it("11. handoff fix is refused, with its own message, for each FR-11 condition that fails", { skip: "WS7: fix-rules.mjs (T033, T039)" }, async () => { // btrain-allow: skipped-test
     const { evaluateFixRules } = await reviewModule("fix-rules.mjs")
     const head = "a".repeat(40)
     const good = {
@@ -552,7 +582,7 @@ describe("spec 023 invariants", () => {
     assert.equal(messages.size, Object.keys(breaks).length, "every condition has its own message")
   })
 
-  it("12. core.mjs gains no function; the patchHandoff and runLoop pins change once each", { skip: "WS7: checked after the last core.mjs edit of spec 023 (T039)" }, async () => {
+  it("12. core.mjs gains no function; the patchHandoff and runLoop pins change once each", { skip: "WS7: checked after the last core.mjs edit of spec 023 (T039)" }, async () => { // btrain-allow: skipped-test
     const stages = await exec("node", [path.join(REPO_ROOT, "scripts/decomposition_inventory.mjs"), "--stages"], { cwd: REPO_ROOT }).then(
       () => 0,
       (error) => error.code ?? 1,
@@ -571,7 +601,7 @@ describe("spec 023 invariants", () => {
     assert.equal(spans.find((span) => span.name === "runLoop").lines, runLoopPin)
   })
 
-  it("13. a verdict with no open attempt is refused; a recorded reviewer that was not dispatched gets an attempt at pickup, at the request's head", { skip: "WS5: verdicts bound to attempts (T025, T028)" }, async () => {
+  it("13. a verdict with no open attempt is refused; a recorded reviewer that was not dispatched gets an attempt at pickup, at the request's head", { skip: "WS5: verdicts bound to attempts (T025, T028)" }, async () => { // btrain-allow: skipped-test
     const repo = await createReviewRepo()
     assert.equal((await repo.btrain(needsReviewArgs({ dispatch: false }))).code, 0)
     const requestHead = await repo.head()

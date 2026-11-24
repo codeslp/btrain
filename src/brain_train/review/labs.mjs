@@ -8,7 +8,11 @@
 // never read to infer a lab: an agent called `claude-gpt` with a `codex`
 // runner is `openai`.
 
+import { stripTomlComment } from "./review-config.mjs"
 import { labOfExecutable, runnerExecutable } from "./runner-table.mjs"
+
+// A lab is a lowercase label (spec 023 "Terms"), such as `openai`.
+const LAB_LABEL = /^[a-z0-9][a-z0-9_-]*$/
 
 export const TIERS = Object.freeze({
   OTHER_LAB: "other-lab",
@@ -68,12 +72,20 @@ export function runnerKindOf(config, agent) {
 
 /**
  * The lab of an agent and where it came from: `{ lab, source, executable }`.
- * `source` is `agents.labs`, `runner`, or "" when the agent has no lab.
+ * `source` is `agents.labs`, `runner`, or "" when the agent has no lab. An
+ * `[agents.labs]` value that is not a lowercase label adds `invalid`.
  */
 export function explainAgentLab(config, agent) {
-  const declared = lookupByAgent(tableOf(config?.agents?.labs), agent)
+  const declared = stripTomlComment(lookupByAgent(tableOf(config?.agents?.labs), agent))
   if (typeof declared === "string" && declared.trim()) {
-    return { lab: declared.trim().toLowerCase(), source: "agents.labs", executable: runnerExecutable(runnerValueOf(config, agent)) }
+    const lab = declared.trim().toLowerCase()
+    const executable = runnerExecutable(runnerValueOf(config, agent))
+    // A value that is not a label (a typo, or text the TOML parser kept) is
+    // no lab, never a lab that would make a same-lab agent look other-lab.
+    // `invalid` carries it for a doctor warning.
+    return LAB_LABEL.test(lab)
+      ? { lab, source: "agents.labs", executable }
+      : { lab: "", source: "", executable, invalid: declared }
   }
   const runnerValue = runnerValueOf(config, agent)
   if (!runnerValue || runnerKindOf(config, agent) === "notify") {
@@ -186,7 +198,7 @@ export function orderCandidates(config, { owner = "", authorHistory = [], config
   const eligible = (name) => name && !authorKeys.has(keyOf(name)) && runnerKindOf(config, name) === "cli"
   const isOtherLab = (name) => tierOf(name, { config, authorLabs: labs }) === TIERS.OTHER_LAB
 
-  const reviewerOrderRaw = config?.review?.reviewer_order
+  const reviewerOrderRaw = stripTomlComment(config?.review?.reviewer_order)
   const reviewerOrder = Array.isArray(reviewerOrderRaw) ? reviewerOrderRaw.map(normalizeName).filter(Boolean) : []
   const unknownReviewerOrder = reviewerOrder.filter((name) => !canonical(name))
 

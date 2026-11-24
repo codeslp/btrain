@@ -79,6 +79,23 @@ describe("resolveAgentLab: the FR-1 sources of a lab", () => {
     assert.equal(resolveAgentLab(config({ runners: { codex: "notify" } }), "codex"), "")
   })
 
+  it("reads an [agents.labs] value that ends in an inline comment", () => {
+    const cfg = config({ runners: { someone: "agent -p" }, labs: { someone: '"google"  # pinned model' } })
+    assert.equal(resolveAgentLab(cfg, "someone"), "google")
+  })
+
+  it("gives no lab, never a wrong one, for an [agents.labs] value that is not a label", () => {
+    for (const value of ['"anthropic"  x', "open ai", "OpenAI!", "-x"]) {
+      const cfg = config({ runners: { someone: "claude -p" }, labs: { someone: value } })
+      const result = explainAgentLab(cfg, "someone")
+      assert.equal(result.lab, "", value)
+      assert.equal(result.invalid, value)
+    }
+    // A same-lab reviewer with a garbled lab stays same-lab: no lab is same-lab.
+    const cfg = config({ active: ["claude", "claude-reviewer"], runners: { claude: "claude -p", "claude-reviewer": "claude -p" }, labs: { "claude-reviewer": "anthropic x" } })
+    assert.deepEqual(orderCandidates(cfg, { owner: "claude" }).otherLab, [])
+  })
+
   it("ignores an empty [agents.labs] entry and falls back to the runner", () => {
     const cfg = config({ runners: { someone: "claude -p" }, labs: { someone: "  " } })
     assert.equal(resolveAgentLab(cfg, "someone"), "anthropic")

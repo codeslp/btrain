@@ -126,6 +126,11 @@ describe("fresh sessions (spec 017 FR-3, spec 023 FR-8)", () => {
     assert.deepEqual(findRejectedRunnerArgs("codex", ["resume", "--last"]), ["resume"])
     assert.deepEqual(findRejectedRunnerArgs("codex", ["exec", "--session-id", "x"]), ["--session-id"])
     assert.deepEqual(findRejectedRunnerArgs("codex", ["fork"]), ["fork"])
+    // This repository's codex runners put flags first, and `codex exec resume`
+    // is the CLI's own resume form.
+    assert.deepEqual(findRejectedRunnerArgs("codex", ["-m", "gpt-6.1-sol", "resume", "--last"]), ["resume"])
+    assert.deepEqual(findRejectedRunnerArgs("codex", ["exec", "resume", "--last"]), ["resume"])
+    assert.deepEqual(findRejectedRunnerArgs("codex", ["-c", "x=1", "exec", "fork"]), ["fork"])
     assert.deepEqual(findRejectedRunnerArgs("gemini", ["-r", "latest"]), ["-r"])
     assert.deepEqual(findRejectedRunnerArgs("codex", ["exec", "--json"]), [])
     assert.deepEqual(findRejectedRunnerArgs("agent", ["--resume"]), [])

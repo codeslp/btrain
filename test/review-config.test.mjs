@@ -2,7 +2,7 @@
 // (plan WS1, T005).
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { getReviewPolicy, parseDuration, REVIEW_DEFAULTS } from "../src/brain_train/review/review-config.mjs"
+import { getReviewPolicy, parseDuration, REVIEW_DEFAULTS, stripTomlComment } from "../src/brain_train/review/review-config.mjs"
 
 const MIN = 60_000
 
@@ -62,6 +62,38 @@ describe("getReviewPolicy", () => {
     assert.deepEqual(policy.fixes, { enabled: false, maxFiles: 5, maxChangedLines: 120, maxRounds: 1 })
     assert.deepEqual(policy.signals, { codex: { unavailable: ["usage limit"], refused: ["content policy"] } })
     assert.deepEqual(policy.errors, [])
+  })
+
+  it("reads the spec's own sample, whose values end in inline comments the TOML parser keeps", () => {
+    // What parseProjectToml in core.mjs returns for the spec's Configuration block.
+    const policy = getReviewPolicy({
+      review: {
+        other_lab_window: '"20m"   # no same-lab review before this has passed',
+        silence_limit: '"2m"       # no progress for this long ends one attempt',
+        attempt_max: '"1h"        # hard cap on one attempt that keeps progressing',
+        reviewer_order: '["gem", "codex-reviewer"]        # optional preference among other-lab agents',
+        signals: { codex: { unavailable: '["usage limit"]  # note' } },
+        fixes: { max_files: "3" },
+      },
+      pr_flow: { bot_pending_timeout: '"10m"   # new key: wait before asking the next bot' },
+    })
+    assert.deepEqual(policy.errors, [])
+    assert.equal(policy.otherLabWindowMs, 20 * MIN)
+    assert.equal(policy.silenceLimitMs, 2 * MIN)
+    assert.equal(policy.attemptMaxMs, 60 * MIN)
+    assert.equal(policy.botPendingTimeoutMs, 10 * MIN)
+    assert.deepEqual(policy.reviewerOrder, ["gem", "codex-reviewer"])
+    assert.deepEqual(policy.signals.codex.unavailable, ["usage limit"])
+  })
+
+  it("stripTomlComment recovers a quoted value or a list of quoted values, and leaves anything else", () => {
+    assert.equal(stripTomlComment('"anthropic"  # x'), "anthropic")
+    assert.equal(stripTomlComment('"a # b"  # c'), "a # b")
+    assert.deepEqual(stripTomlComment("[]  # empty"), [])
+    assert.deepEqual(stripTomlComment('["a", "b"] # c'), ["a", "b"])
+    assert.equal(stripTomlComment("15m"), "15m")
+    assert.equal(stripTomlComment('"15m'), '"15m')
+    assert.deepEqual(stripTomlComment(["a"]), ["a"])
   })
 
   it("uses the default and reports an error for a duration that does not parse", () => {

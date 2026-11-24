@@ -49,6 +49,39 @@ function tableOf(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {}
 }
 
+/**
+ * The value a TOML line meant when it ended in a comment. The project parser
+ * in core.mjs does not strip `# ...` after a value, so `x = "15m"  # note`
+ * reaches this module as the text `"15m"  # note`, and `x = []  # note` as
+ * `[]  # note`. This returns the quoted string or the list of quoted strings;
+ * any other value is returned unchanged.
+ */
+export function stripTomlComment(value) {
+  if (typeof value !== "string") {
+    return value
+  }
+  const quoted = /^"((?:[^"\\]|\\.)*)"\s*#.*$/.exec(value)
+  if (quoted) {
+    return quoted[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\")
+  }
+  const list = /^\[(.*)\]\s*#.*$/.exec(value)
+  if (list) {
+    const body = list[1].trim()
+    if (!body) return []
+    const items = body.split(",").map((item) => item.trim()).filter(Boolean)
+    if (items.every((item) => /^"(?:[^"\\]|\\.)*"$/.test(item))) {
+      return items.map((item) => item.slice(1, -1))
+    }
+  }
+  return value
+}
+
+function cleanTable(table) {
+  const clean = {}
+  for (const [key, value] of Object.entries(table)) clean[key] = stripTomlComment(value)
+  return clean
+}
+
 function readDuration(table, key, fallback, section, errors) {
   if (!Object.hasOwn(table, key)) {
     return parseDuration(fallback)
@@ -117,7 +150,7 @@ function readNameList(table, key, section, errors) {
 function readSignals(reviewTable, errors) {
   const signals = {}
   for (const [executable, value] of Object.entries(tableOf(reviewTable.signals))) {
-    const table = tableOf(value)
+    const table = cleanTable(tableOf(value))
     const entry = { unavailable: [], refused: [] }
     for (const key of Object.keys(entry)) {
       entry[key] = readNameList(table, key, `review.signals.${executable}`, errors)
@@ -135,9 +168,10 @@ function readSignals(reviewTable, errors) {
  */
 export function getReviewPolicy(config) {
   const errors = []
-  const review = tableOf(config?.review)
-  const fixes = tableOf(review.fixes)
-  const prFlow = tableOf(config?.pr_flow)
+  const rawReview = tableOf(config?.review)
+  const review = { ...cleanTable(rawReview), signals: rawReview.signals }
+  const fixes = cleanTable(tableOf(rawReview.fixes))
+  const prFlow = cleanTable(tableOf(config?.pr_flow))
 
   return {
     otherLabWindowMs: readDuration(review, "other_lab_window", REVIEW_DEFAULTS.otherLabWindow, "review", errors),
