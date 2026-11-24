@@ -2,6 +2,10 @@
 // (plan WS1, T005).
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { readProjectConfig } from "../src/brain_train/core.mjs"
 import { getReviewPolicy, parseDuration, REVIEW_DEFAULTS, stripTomlComment } from "../src/brain_train/review/review-config.mjs"
 
 const MIN = 60_000
@@ -29,6 +33,25 @@ describe("parseDuration", () => {
 })
 
 describe("getReviewPolicy", () => {
+  it("keeps the configured reviewer opt-out and limits when TOML scalars have comments", async (t) => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-review-policy-"))
+    t.after(() => fs.rm(repo, { recursive: true, force: true }))
+    const configDir = path.join(repo, ".btrain")
+    await fs.mkdir(configDir)
+    await fs.writeFile(path.join(configDir, "project.toml"), [
+      "[review.fixes]",
+      "enabled = false # no reviewer commits",
+      "max_files = 1 # keep changes narrow",
+      "max_changed_lines = 10# comments may follow the value directly",
+      "max_rounds = 1 # one attempt",
+      "",
+    ].join("\n"))
+
+    const policy = getReviewPolicy(await readProjectConfig(repo))
+    assert.deepEqual(policy.fixes, { enabled: false, maxFiles: 1, maxChangedLines: 10, maxRounds: 1 })
+    assert.deepEqual(policy.errors, [])
+  })
+
   it("applies the spec's defaults when nothing is configured", () => {
     const policy = getReviewPolicy({})
     assert.equal(policy.otherLabWindowMs, 15 * MIN)

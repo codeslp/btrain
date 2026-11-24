@@ -53,12 +53,18 @@ function tableOf(value) {
  * The value a TOML line meant when it ended in a comment. The project parser
  * in core.mjs does not strip `# ...` after a value, so `x = "15m"  # note`
  * reaches this module as the text `"15m"  # note`, and `x = []  # note` as
- * `[]  # note`. This returns the quoted string or the list of quoted strings;
- * any other value is returned unchanged.
+ * `[]  # note`. Recover quoted strings, lists of quoted strings, boolean
+ * flags, and unsigned integers. Preserve other values for validation.
  */
 export function stripTomlComment(value) {
   if (typeof value !== "string") {
     return value
+  }
+  const scalar = /^(true|false|\d+)\s*#.*$/.exec(value)
+  if (scalar) {
+    const [, text] = scalar
+    if (text === "true" || text === "false") return text === "true"
+    return text
   }
   const quoted = /^"((?:[^"\\]|\\.)*)"\s*#.*$/.exec(value)
   if (quoted) {
