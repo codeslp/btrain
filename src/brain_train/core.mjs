@@ -9503,7 +9503,7 @@ async function pushAgentPrompt(agentName, { repoName = "", taskDescription = "",
 }
 
 function classifyLoopTraceResult(result) {
-  if (["completed", "noop", "dry-run"].includes(result.status)) {
+  if (["completed", "noop", "dry-run", "review-reported"].includes(result.status)) {
     return { outcome: "pass", failureCategory: "" }
   }
   if (result.status === "timed-out") {

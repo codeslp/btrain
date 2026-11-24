@@ -353,6 +353,10 @@ console.log("APPROVED")
       const content = await readLane(tmpDir)
       assert.match(content, /Status: needs-review/)
 
+      const traces = await runBtrain(["harness", "trace", "list", "--limit", "1"], tmpDir)
+      assert.equal(traces.code, 0, traces.stderr)
+      assert.match(traces.stdout, /\[pass\]/)
+
       // The configured reviewer submits a verdict through the normal handoff command.
       const resolve = await runBtrain(["handoff", "resolve", "--lane", "a", "--summary", "Reviewed independently"], tmpDir, { BTRAIN_AGENT: "floord-app-dev" })
       assert.equal(resolve.code, 0, resolve.stderr)
