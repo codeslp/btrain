@@ -82,14 +82,17 @@ bth wait --lane a --timeout 3600
 # After a session restart, resume from a previously printed state hash.
 bth wait --lane a --since <state-hash> --timeout 3600
 
-# Reviewer approves
+# Reviewer approves (LOCAL peer review — required before any GitHub PR / bot review)
 btrain handoff resolve --lane a --summary "Approved." --actor "codex"
 
-# In repos with [pr_flow].enabled = true, local approval moves to ready-for-pr:
+# Only after local resolve: lane is ready-for-pr. Then create the PR and ask bots.
+# btrain refuses `pr create` / `pr request-review` until the lane is ready-for-pr
+# or pr-review. Do not post @codex review by hand to skip local review.
 btrain pr create --lane a --bots all
 btrain pr poll --lane a --apply
 
-# If bots request changes, fix/push and request them again
+# If bots request changes: fix, push, return through local needs-review first,
+# then relink pr-review and request bots again.
 btrain pr request-review --lane a --bots all
 
 # When the PR is merged, poll once more to release locks and resolve the lane
@@ -609,9 +612,14 @@ btrain verifies which agent is speaking:
 "Claude" = "claude -p"
 "GPT" = "codex"
 "Gemini" = "gemini"
+"floord-app-dev" = "agent -p"
 ```
 
-New and updated collaborator configurations infer these runner commands from common Claude, Codex/GPT, and Gemini names. Unknown agents receive an explicit `notify` runner so fallback behavior is visible in config. `btrain doctor` warns if an active agent has no runner mapping.
+New and updated collaborator configurations infer these runner commands from common Claude, Codex/GPT, Gemini, and Cursor Agent (`agent` / `cursor-agent`, including `floord-app-dev`) names. Unknown agents receive an explicit `notify` runner so fallback behavior is visible in config. `btrain doctor` warns if an active agent has no runner mapping.
+
+Use `cursor-agent` for a custom identity. The shorter `agent` command gets Cursor flags for `floord-app-dev` and identities with a `cursor` name token. Outside peer review, dispatch adds `--trust`, sets the workspace to the repo by default, and uses `--auto-review` unless the runner config specifies an approval mode.
+
+In `needs-review`, btrain gives Cursor a committed patch in an isolated temporary workspace. Cursor runs in read-only Ask mode and returns findings. This dispatch uses the configured model and drops other configured arguments. The assigned reviewer records a verdict separately with `handoff resolve` or `handoff request-changes`. Open the GitHub PR or request bot review after local approval.
 
 ### Lane-scoped loop dispatch
 
