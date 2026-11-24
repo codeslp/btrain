@@ -6783,16 +6783,25 @@ describe("withFileLock", () => {
     assert.equal(exists, false, "Lockfile should be cleaned up after error")
   })
 
-  it("recovers from stale lockfiles older than 30 seconds", async () => {
+  it("leaves an old-format lockfile in place when it cannot identify its owner", async () => {
     const lockPath = path.join(tmpDir, "stale.lock")
-    // Create a lockfile and backdate it
     await fs.writeFile(lockPath, "stale")
     const past = new Date(Date.now() - 31_000)
     await fs.utimes(lockPath, past, past)
 
-    let entered = false
-    await withFileLock(lockPath, async () => { entered = true })
-    assert.ok(entered, "Should acquire lock after removing stale lockfile")
+    await assert.rejects(withFileLock(lockPath, () => assert.fail("entered with a legacy owner"), { timeoutMs: 150 }), /legacy lockfile/)
+    assert.equal(await fs.readFile(lockPath, "utf8"), "stale")
+    assert.ok(!(await fs.readdir(tmpDir)).some((name) => name.startsWith("stale.lock.pending-")))
+
+    await fs.unlink(lockPath)
+    await withFileLock(lockPath, async () => assert.ok((await fs.stat(lockPath)).isDirectory()))
+  })
+
+  it("acquires a lock after an interrupted release leaves an empty directory", async () => {
+    const lockPath = path.join(tmpDir, "empty.lock")
+    await fs.mkdir(lockPath)
+    await withFileLock(lockPath, async () => assert.equal((await fs.readdir(lockPath)).length, 1))
+    await assert.rejects(fs.stat(lockPath), { code: "ENOENT" })
   })
 })
 
