@@ -62,23 +62,17 @@ import {
   readLockRegistry,
   readProjectConfig,
 } from "../core.mjs"
+import { SECRET_PATTERNS } from "./secret-patterns.mjs"
 
 const execFileAsync = promisify(execFile)
 
 const DIFF_MAX_BUFFER = 32 * 1024 * 1024
 
 // ---- secret patterns ----
-// Each entry: { id, regex, label }. The regex matches a key inside a longer
-// line; we only flag added (`+`) diff lines.
-const SECRET_PATTERNS = [
-  { id: "aws-access-key-id", regex: /\bAKIA[0-9A-Z]{16}\b/, label: "AWS access key ID" },
-  { id: "github-token", regex: /\bgh[pousr]_[A-Za-z0-9_]{36,}\b/, label: "GitHub token" },
-  { id: "stripe-key", regex: /\bsk_(?:live|test)_[A-Za-z0-9]{24,}\b/, label: "Stripe key" },
-  { id: "openai-key", regex: /\bsk-[A-Za-z0-9]{40,}\b/, label: "OpenAI-style key" },
-  { id: "anthropic-key", regex: /\bsk-ant-[A-Za-z0-9_-]{32,}\b/, label: "Anthropic key" },
-  { id: "slack-token", regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/, label: "Slack token" },
-  { id: "bearer-token", regex: /\b[Bb]earer\s+[A-Za-z0-9._-]{20,}\b/, label: "Bearer token" },
-]
+// The list lives in secret-patterns.mjs, which imports nothing, so the Slack
+// text pipeline (spec 024 FR-8) scrubs with the same patterns without
+// importing this module and, through it, core.mjs.
+export { SECRET_PATTERNS }
 
 const CORS_WILDCARD_PATTERNS = [
   // btrain-allow: cors-wildcard
