@@ -109,6 +109,9 @@ async function withFileLock(lockPath, fn, {
   timeoutMs = FILE_LOCK_TIMEOUT_MS,
   heartbeatMs = FILE_LOCK_HEARTBEAT_MS,
 } = {}) {
+  // A lockfile can be the first thing written under its directory (an override
+  // lock in a checkout with no .btrain yet); a missing parent is not an error.
+  await ensureDir(path.dirname(lockPath))
   const deadline = Date.now() + timeoutMs
   let fd = null
   while (Date.now() < deadline) {

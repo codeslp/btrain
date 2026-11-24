@@ -154,6 +154,27 @@ describe("single-use overrides under concurrency", () => {
   })
 })
 
+describe("overrides on a directory btrain never initialised", () => {
+  it("reports a missing override as a btrain error, not a missing lockfile directory", async () => {
+    await withTmp(async (root) => {
+      const bare = path.join(root, "never-initialised")
+      await fs.mkdir(bare)
+
+      await assert.rejects(
+        consumeOverride(bare, { action: "push", actor: "alpha" }),
+        /No active override found/,
+      )
+      const record = await grantOverride(bare, {
+        action: "push",
+        requestedBy: "alpha",
+        confirmedBy: "human",
+        reason: "grant with no .btrain directory yet",
+      })
+      assert.deepEqual((await listActiveOverrides(bare)).map((entry) => entry.id), [record.id])
+    })
+  })
+})
+
 describe("withFileLock", () => {
   it("keeps a waiter out while the holder is still inside a critical section older than the stale window", async () => {
     await withTmp(async (root) => {
