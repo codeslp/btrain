@@ -1951,7 +1951,9 @@ function realPathOrSelf(target) {
 // leaked into registry-wide audits (spec 015 FR-5). An explicit
 // BRAIN_TRAIN_HOME is a deliberate choice and still registers anything.
 function temporaryRoots() {
-  const roots = [os.tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
+  const roots = [os.tmpdir()]
+  if (process.platform !== "win32") roots.push("/tmp")
+  if (process.platform === "darwin") roots.push("/var/folders")
   return [...new Set(roots.flatMap((root) => [path.resolve(root), realPathOrSelf(root)]))]
 }
 

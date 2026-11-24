@@ -257,6 +257,30 @@ describe("registry guard for scratch repositories", () => {
     assert.match(result.stdout, /^registry: skipped \(.*temporary directory/m)
   })
 
+  it("does not apply Unix temporary aliases under the Windows root policy", { skip: process.platform === "win32" }, async (t) => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(path.sep, "tmp", "btrain-registry-windows-policy-")))
+    t.after(() => fs.rm(root, { recursive: true, force: true }))
+    const repo = await gitRepo(path.join(root, "repo"))
+    const actualTemp = path.join(root, "actual-temp")
+    const home = path.join(root, "home")
+    const preload = path.join(root, "windows-policy.cjs")
+    await fs.mkdir(actualTemp)
+    // Simulate the platform branch while leaving the POSIX sandbox paths and Git intact.
+    await fs.writeFile(preload, `Object.defineProperty(process, "platform", { value: "win32" });\n`)
+    const env = cleanEnv({
+      HOME: home, USERPROFILE: home, TMPDIR: actualTemp, TMP: actualTemp, TEMP: actualTemp,
+      NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+    })
+    const result = await btrain(["init", repo, "--tracked", "--core-only", "--no-hooks"], env)
+    assert.equal(result.code, 0, result.stderr)
+    assert.doesNotMatch(result.stdout, /^registry: skipped/m)
+    const scratchRepo = await gitRepo(path.join(actualTemp, "repo"))
+    const skipped = await btrain(["init", scratchRepo, "--tracked", "--core-only", "--no-hooks"], env)
+    assert.equal(skipped.code, 0, skipped.stderr)
+    assert.match(skipped.stdout, /^registry: skipped \(.*temporary directory/m)
+    assert.deepEqual((await readRegistry(path.join(home, ".btrain"))).map((entry) => entry.path), [repo])
+  })
+
   it("M11: skipped initialization leaves a malformed default registry unread", async (t) => {
     const root = await scratch()
     t.after(() => fs.rm(root, { recursive: true, force: true }))
