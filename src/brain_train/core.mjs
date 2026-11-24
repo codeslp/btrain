@@ -2458,12 +2458,7 @@ function inferDefaultAgentRunner(agentName) {
   }
   // Cursor Agent CLI (`agent` / `cursor-agent`). floord-app-dev is the
   // Cursor-hosted peer reviewer identity used by ai_sales.
-  if (
-    normalized.includes("floord") ||
-    normalized.includes("cursor") ||
-    normalized.includes("app-dev") ||
-    normalized.includes("app-developer")
-  ) {
+  if (normalized === "floord-app-dev" || normalized.split(/[^a-z0-9]+/).includes("cursor")) {
     return "agent -p"
   }
   return "notify"
@@ -8872,26 +8867,21 @@ function normalizeLoopCliRunner(runnerValue, {
     if (!placeholderPrompt) {
       args.push(prompt)
     }
-  } else if (["agent", "cursor-agent"].includes(path.basename(command))) {
-    // Headless Cursor Agent: print mode + trust the lane workspace. Tool
-    // approval mirrors Claude's phase allowlists — auto-review for peer
-    // review (read), force for write/pr/merge so loop dispatch stays
-    // unattended. Explicit flags in the runner config win.
+  } else if (path.basename(command) === "cursor-agent"
+    || (path.basename(command) === "agent" && inferDefaultAgentRunner(agentName) === "agent -p")) {
+    // Use Cursor's approval classifier unless the runner config opts into
+    // an explicit approval mode.
     if (!hasRunnerArg(args, "-p", "--print")) {
       args.unshift("-p")
     }
     if (!hasRunnerArg(args, "--trust")) {
       args.push("--trust")
     }
-    if (!hasRunnerArg(args, "--workspace") && !placeholderRepo) {
+    if (!hasRunnerArg(args, "--workspace")) {
       args.push("--workspace", repoRoot)
     }
     if (!hasRunnerArg(args, "--force", "--yolo", "--auto-review")) {
-      if (permissionPhase === "read") {
-        args.push("--auto-review")
-      } else {
-        args.push("--force")
-      }
+      args.push("--auto-review")
     }
     if (!placeholderPrompt) {
       args.push(prompt)

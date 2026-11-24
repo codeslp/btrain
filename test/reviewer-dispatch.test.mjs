@@ -306,7 +306,7 @@ describe("needs-review reviewer dispatch", () => {
         agentBin,
         fakeClaudeSource().replaceAll('"claude"', '"floord-app-dev"'),
       )
-      await setRunnerConfig(tmpDir, [`"owner" = "notify"`, `"floord-app-dev" = "${agentBin} -p"`])
+      await setRunnerConfig(tmpDir, [`"owner" = "notify"`, `"floord-app-dev" = "${agentBin} -p repo={repo}"`])
 
       const claim = await runBtrain(
         [
@@ -339,12 +339,34 @@ describe("needs-review reviewer dispatch", () => {
       assert.ok(argv.includes("--workspace"), `expected --workspace in ${JSON.stringify(argv)}`)
       assert.ok(argv.includes(tmpDir), `expected workspace path in ${JSON.stringify(argv)}`)
       assert.ok(argv.includes("--auto-review"), `expected --auto-review for needs-review in ${JSON.stringify(argv)}`)
+      assert.ok(!argv.includes("--force"), `unexpected --force for needs-review in ${JSON.stringify(argv)}`)
       assert.ok(
         argv.some((token) => token === "bth" || String(token).startsWith("bth ")),
         `expected bth prompt in ${JSON.stringify(argv)}`,
       )
       const content = await readLane(tmpDir)
       assert.match(content, /Status: resolved/)
+
+      const writerClaim = await runBtrain(
+        [
+          "handoff", "claim", "--repo", tmpDir, "--lane", "a",
+          "--task", "Cursor writer dispatch",
+          "--owner", "floord-app-dev",
+          "--reviewer", "owner",
+          "--files", "src/feature.ts",
+        ],
+        tmpDir,
+        { BTRAIN_AGENT: "floord-app-dev" },
+      )
+      assert.equal(writerClaim.code, 0, writerClaim.stderr)
+      const preview = await runBtrain(
+        ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run"],
+        tmpDir,
+        { BTRAIN_AGENT: "floord-app-dev" },
+      )
+      assert.equal(preview.code, 0, preview.stderr)
+      assert.match(preview.stdout, /--auto-review/)
+      assert.doesNotMatch(preview.stdout, /--force/)
     } finally {
       await rmDir(tmpDir)
     }

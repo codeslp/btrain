@@ -860,12 +860,14 @@ describe("dynamic collaborator bootstrap", () => {
       const exec = promisify(execFile)
       await exec("git", ["init", floordDir])
       const floordInit = await runBtrain(
-        ["init", floordDir, "--agent", "claude", "--agent", "floord-app-dev", "--core-only"],
+        ["init", floordDir, "--agent", "claude", "--agent", "floord-app-dev", "--agent", "cursor-reviewer", "--agent", "web-app-dev", "--core-only"],
         floordDir,
       )
       assert.equal(floordInit.code, 0, floordInit.stderr)
       const floordToml = await fs.readFile(path.join(floordDir, ".btrain", "project.toml"), "utf8")
       assert.ok(floordToml.includes('"floord-app-dev" = "agent -p"'), floordToml)
+      assert.ok(floordToml.includes('"cursor-reviewer" = "agent -p"'), floordToml)
+      assert.ok(floordToml.includes('"web-app-dev" = "notify"'), floordToml)
     } finally {
       await rmDir(floordDir)
     }
