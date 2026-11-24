@@ -1,6 +1,6 @@
 # 017 — Solo Mode: Internal Subagent Review When Peers Are Unavailable
 
-**Status**: Draft
+**Status**: Superseded on 2026-11-23 by [spec 023](023-cross-lab-review-and-reviewer-fixes.md), which lists what carries over. Kept for history.
 **Version**: 0.1.0
 **Author**: btrain
 **Date**: 2026-09-01
