@@ -1,7 +1,6 @@
 import { execFile, spawn } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
-import { open } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -109,67 +108,109 @@ async function withFileLock(lockPath, fn, {
   timeoutMs = FILE_LOCK_TIMEOUT_MS,
   heartbeatMs = FILE_LOCK_HEARTBEAT_MS,
 } = {}) {
-  // A lockfile can be the first thing written under its directory (an override
-  // lock in a checkout with no .btrain yet); a missing parent is not an error.
   await ensureDir(path.dirname(lockPath))
+  const host = createHash("sha256").update(os.hostname()).digest("hex").slice(0, 16)
+  const id = randomUUID()
+  const owner = `owner-${host}-${process.pid}-${id}`
+  const pending = `${lockPath}.pending-${id}`
   const deadline = Date.now() + timeoutMs
-  let fd = null
-  while (Date.now() < deadline) {
-    try {
-      fd = await open(lockPath, "wx")
-      break
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err
-      // A live holder refreshes its lockfile (see the heartbeat below), so one
-      // older than the stale window belongs to a dead process.
+  const ownerPattern = /^owner-([0-9a-f]{16})-([1-9]\d*)-[0-9a-f-]{36}$/
+  const missing = (err) => ["ENOENT", "ENOTDIR"].includes(err.code)
+  const contention = (err) => ["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR", "EPERM", "EACCES"].includes(err.code)
+
+  // All published locks already contain a unique token. Delayed cleanup can
+  // unlink only its generation's token, and rmdir cannot remove a successor's
+  // nonempty directory. A crashed remover may leave an empty directory.
+  const removeEmptyLock = () => fs.rmdir(lockPath).catch((err) => {
+    if (!missing(err) && !["ENOTEMPTY", "EEXIST"].includes(err.code)) throw err
+  })
+  const removeOwner = async (name) => {
+    await fs.unlink(path.join(lockPath, name)).catch((err) => {
+      if (!missing(err)) throw err
+    })
+    await removeEmptyLock()
+  }
+
+  await fs.mkdir(pending, { mode: 0o700 })
+  let fd
+  let acquired = false
+  let legacyFile = false
+  let heartbeat
+  try {
+    await fs.writeFile(path.join(pending, owner), "", { flag: "wx", mode: 0o600 })
+    while (Date.now() < deadline) {
       try {
-        const stat = await fs.stat(lockPath)
-        if (Date.now() - stat.mtimeMs > FILE_LOCK_STALE_MS) {
-          await fs.unlink(lockPath).catch(() => {})
-          continue
-        }
-      } catch {
-        // stat failed — file was already removed, retry
+        await fs.rename(pending, lockPath)
+        acquired = true
+        break
+      } catch (err) {
+        if (!contention(err)) throw err
+      }
+
+      const current = await fs.lstat(lockPath).catch((err) => {
+        if (!missing(err)) throw err
+        return null
+      })
+      if (!current) continue
+      // Older clients publish an ownerless file. Wait for their release;
+      // age alone cannot establish that an older client has stopped writing.
+      legacyFile = current.isFile()
+      if (!current.isDirectory()) {
+        await delay(retryMs)
         continue
+      }
+      const entries = await fs.readdir(lockPath, { withFileTypes: true }).catch((err) => {
+        if (!missing(err)) throw err
+        return null
+      })
+      if (entries?.length === 0) {
+        await removeEmptyLock()
+        continue
+      }
+      if (entries?.length === 1 && entries[0].isFile()) {
+        const name = entries[0].name
+        const match = ownerPattern.exec(name)
+        // Only the originating host can check whether this owner has exited.
+        if (match?.[1] === host) {
+          const stat = await fs.stat(path.join(lockPath, name)).catch((err) => {
+            if (!missing(err)) throw err
+            return null
+          })
+          if (stat && Date.now() - stat.mtimeMs > FILE_LOCK_STALE_MS) {
+            let ownerExited = false
+            try {
+              process.kill(Number(match[2]), 0)
+            } catch (err) {
+              ownerExited = err.code === "ESRCH"
+            }
+            if (ownerExited) {
+              await removeOwner(name)
+              continue
+            }
+          }
+        }
       }
       await delay(retryMs)
     }
-  }
 
-  if (!fd) {
-    throw new Error(`Timed out waiting for file lock: ${lockPath}`)
-  }
-
-  // Keep the lockfile fresh for as long as the critical section runs, however
-  // long that is. The refresh goes through our own handle, so it can never
-  // touch a successor's lockfile.
-  const heartbeat = setInterval(() => {
-    const now = new Date()
-    fd.utimes(now, now).catch(() => {})
-  }, heartbeatMs)
-  heartbeat.unref()
-
-  try {
+    if (!acquired) {
+      const hint = legacyFile ? " (legacy lockfile: verify its writer exited before removing it)" : ""
+      throw new Error(`Timed out waiting for file lock: ${lockPath}${hint}`)
+    }
+    fd = await fs.open(path.join(lockPath, owner), "r+")
+    heartbeat = setInterval(() => {
+      const now = new Date()
+      fd.utimes(now, now).catch(() => {})
+    }, heartbeatMs)
+    heartbeat.unref()
     return await fn()
   } finally {
     clearInterval(heartbeat)
-    // Release only our own lock. If a waiter judged it stale and removed it,
-    // the path may now name the next holder's lockfile. The inode cannot be
-    // reused while our handle keeps the file open, so equal ids mean the path
-    // is still ours.
-    let stillOurs = false
     try {
-      const [held, current] = await Promise.all([
-        fd.stat({ bigint: true }),
-        fs.stat(lockPath, { bigint: true }),
-      ])
-      stillOurs = held.ino === current.ino && held.dev === current.dev
-    } catch {
-      // The lockfile is gone: nothing of ours to remove.
-    }
-    await fd.close()
-    if (stillOurs) {
-      await fs.unlink(lockPath).catch(() => {})
+      await fd?.close()
+    } finally {
+      if (acquired) await removeOwner(owner)
+      else await fs.rm(pending, { recursive: true, force: true })
     }
   }
 }

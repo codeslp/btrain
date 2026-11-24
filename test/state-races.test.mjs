@@ -176,6 +176,19 @@ describe("overrides on a directory btrain never initialised", () => {
 })
 
 describe("withFileLock", () => {
+  async function leaveCrashedLock(lockPath) {
+    const coreUrl = new URL("../src/brain_train/core.mjs", import.meta.url).href
+    await exec(process.execPath, ["--input-type=module", "-e", `
+      import { withFileLock } from ${JSON.stringify(coreUrl)}
+      await withFileLock(process.argv[1], () => process.exit(0))
+    `, lockPath])
+    const [owner] = await fs.readdir(lockPath)
+    const token = path.join(lockPath, owner)
+    const stale = new Date(Date.now() - 31_000)
+    await fs.utimes(token, stale, stale)
+    return token
+  }
+
   it("keeps a waiter out while the holder is still inside a critical section older than the stale window", async () => {
     await withTmp(async (root) => {
       const lockPath = path.join(root, "state.lock")
@@ -188,20 +201,18 @@ describe("withFileLock", () => {
         maxInside = Math.max(maxInside, inside)
       }
 
-      // heartbeatMs is the holder's lease-refresh interval; code without a
-      // lease ignores it.
       const holder = withFileLock(lockPath, async () => {
         enter()
         holderInside.resolve()
         await releaseHolder.promise
         inside -= 1
-      }, { heartbeatMs: 20 })
+      }, { heartbeatMs: 60_000 })
       await holderInside.promise
 
       // The holder has now been working for 31 seconds.
       const longAgo = new Date(Date.now() - 31_000)
-      await fs.utimes(lockPath, longAgo, longAgo)
-      await delay(120)
+      const [owner] = await fs.readdir(lockPath)
+      await fs.utimes(path.join(lockPath, owner), longAgo, longAgo)
 
       const waiter = withFileLock(lockPath, async () => {
         enter()
@@ -234,7 +245,9 @@ describe("withFileLock", () => {
 
       // The first holder's lock is reaped (as a waiter does to a stale lock)
       // and a second holder takes the lock.
-      await fs.unlink(lockPath)
+      const [owner] = await fs.readdir(lockPath)
+      await fs.unlink(path.join(lockPath, owner))
+      await fs.rmdir(lockPath)
       const second = withFileLock(lockPath, async () => {
         secondIsInside = true
         secondInside.resolve()
@@ -255,6 +268,74 @@ describe("withFileLock", () => {
       await second
 
       assert.equal(thirdEnteredDuringSecond, false, "the first holder's release deleted the second holder's lock and let a third caller in")
+    })
+  })
+
+  it("does not let a stale waiter remove a successor's live lock", async () => {
+    await withTmp(async (root) => {
+      const lockPath = path.join(root, "state.lock")
+      const deadToken = await leaveCrashedLock(lockPath)
+      const reaperPaused = deferred()
+      const resumeReaper = deferred()
+      const successorInside = deferred()
+      const releaseSuccessor = deferred()
+      const unlink = fs.unlink
+      const operations = []
+      let paused = false
+      let successorActive = false
+      let overlap = false
+
+      try {
+        fs.unlink = async (target, ...args) => {
+          if (!paused && target === deadToken) {
+            paused = true
+            reaperPaused.resolve()
+            await resumeReaper.promise
+          }
+          return unlink(target, ...args)
+        }
+        const waiter = withFileLock(lockPath, async () => {
+          overlap = successorActive
+        }, { timeoutMs: 1000 }).catch((error) => {
+          assert.match(error.message, /Timed out waiting for file lock/)
+        })
+        operations.push(waiter)
+        await Promise.race([reaperPaused.promise, waiter])
+        assert.equal(paused, true, "the waiter must reach the stale cleanup before the ownership changes")
+
+        // The successor reaps the crashed owner and acquires while the first
+        // reaper is paused with the dead owner's token path.
+        const successor = withFileLock(lockPath, async () => {
+          successorActive = true
+          successorInside.resolve()
+          await releaseSuccessor.promise
+          successorActive = false
+        })
+        operations.push(successor)
+        await Promise.race([successorInside.promise, successor])
+        assert.equal(successorActive, true)
+        resumeReaper.resolve()
+        await waiter
+        assert.equal(overlap, false, "a stale cleanup let the waiter enter the successor's critical section")
+      } finally {
+        fs.unlink = unlink
+        resumeReaper.resolve()
+        releaseSuccessor.resolve()
+        await Promise.allSettled(operations)
+      }
+    })
+  })
+
+  it("leaves expired tokens from other hosts alone", async () => {
+    await withTmp(async (root) => {
+      const lockPath = path.join(root, "state.lock")
+      const token = await leaveCrashedLock(lockPath)
+      const foreignName = path.basename(token).replace(/^owner-([0-9a-f])/, (_, first) => `owner-${first === "0" ? "1" : "0"}`)
+      await fs.rename(token, path.join(lockPath, foreignName))
+      await assert.rejects(withFileLock(lockPath, () => assert.fail("reaped another host's lock"), {
+        timeoutMs: 150,
+      }), /Timed out waiting for file lock/)
+      assert.deepEqual(await fs.readdir(lockPath), [foreignName])
     })
   })
 })
