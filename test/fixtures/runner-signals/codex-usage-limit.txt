@@ -1,0 +1,1 @@
+{"error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 9:30 PM.","codex_error_info":"usage_limit_exceeded"}}

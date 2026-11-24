@@ -283,6 +283,110 @@ describe("needs-review reviewer dispatch", () => {
     }
   })
 
+  it("reports a Cursor review of the committed patch without changing the lane", async () => {
+    const tmpDir = await makeTmpDir()
+    try {
+      await exec("git", ["init", tmpDir])
+      await exec("git", ["-C", tmpDir, "config", "user.email", "test@example.com"])
+      await exec("git", ["-C", tmpDir, "config", "user.name", "Test Bot"])
+      const init = await runBtrain(
+        ["init", tmpDir, "--agent", "owner", "--agent", "floord-app-dev", "--core-only"],
+        tmpDir,
+      )
+      assert.equal(init.code, 0, init.stderr)
+      const projectToml = await fs.readFile(path.join(tmpDir, ".btrain", "project.toml"), "utf8")
+      assert.match(projectToml, /"floord-app-dev" = "agent -p"/)
+
+      await fs.mkdir(path.join(tmpDir, "src"), { recursive: true })
+      const feature = path.join(tmpDir, "src", "feature.ts")
+      await fs.writeFile(feature, "export const feature = false\n", "utf8")
+      await exec("git", ["-C", tmpDir, "add", "src/feature.ts"])
+      await exec("git", ["-C", tmpDir, "commit", "-qm", "base"])
+      await fs.writeFile(feature, "export const feature = true\n", "utf8")
+      await fs.writeFile(path.join(tmpDir, "outside.ts"), "unrelated committed change\n", "utf8")
+      await exec("git", ["-C", tmpDir, "add", "outside.ts"])
+      await exec("git", ["-C", tmpDir, "commit", "-qam", "feature"])
+      await fs.writeFile(feature, "uncommitted change\n", "utf8")
+
+      const agentBin = path.join(tmpDir, "bin", "agent")
+      await writeExecutable(agentBin, `#!/usr/bin/env node
+const fs = require("node:fs")
+const { argv, env } = process
+argv[7] = fs.realpathSync(argv[7])
+fs.writeFileSync(env.REVIEWER_ARGV_PATH, JSON.stringify({ argv, cwd: process.cwd(), identity: env.BTRAIN_AGENT, lane: env.BTRAIN_LANE, repo: env.BTRAIN_REPO }))
+console.log(fs.readFileSync("review.patch", "utf8"))
+console.log("APPROVED")
+`)
+      await setRunnerConfig(tmpDir, [`"owner" = "notify"`, `"floord-app-dev" = "${agentBin} -p --force --plan --approve-mcps --workspace {repo} --model example-model"`])
+
+      const claim = await runBtrain(
+        [
+          "handoff", "claim", "--repo", tmpDir, "--lane", "a",
+          "--task", "Cursor reviewer dispatch",
+          "--owner", "owner",
+          "--reviewer", "floord-app-dev",
+          "--files", "src/feature.ts",
+        ],
+        tmpDir,
+        { BTRAIN_AGENT: "owner" },
+      )
+      assert.equal(claim.code, 0, claim.stderr)
+
+      const argvPath = path.join(tmpDir, "argv.json")
+      const args = needsReviewArgs(tmpDir)
+      args[args.indexOf("--base") + 1] = "HEAD^"
+      const result = await runBtrain(args, tmpDir, { REVIEWER_ARGV_PATH: argvPath })
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+      assert.match(result.stdout, /dispatch floord-app-dev/)
+      assert.match(result.stdout, /status: needs-review/)
+      assert.match(result.stdout, /APPROVED/)
+      assert.match(result.stdout, /\+export const feature = true/)
+      assert.doesNotMatch(result.stdout, /uncommitted change|unrelated committed change/)
+      const { argv, cwd, identity, lane, repo } = JSON.parse(await fs.readFile(argvPath, "utf8"))
+      assert.notEqual(cwd, await fs.realpath(tmpDir))
+      assert.equal(identity, undefined)
+      assert.equal(lane, undefined)
+      assert.equal(repo, undefined)
+      assert.deepEqual(argv.slice(2, -1), ["-p", "--mode", "ask", "--trust", "--workspace", cwd, "--model", "example-model"])
+      assert.doesNotMatch(argv.at(-1), /\bbth\b|handoff resolve/)
+      await assert.rejects(fs.access(cwd), { code: "ENOENT" })
+      const content = await readLane(tmpDir)
+      assert.match(content, /Status: needs-review/)
+
+      const traces = await runBtrain(["harness", "trace", "list", "--limit", "1"], tmpDir)
+      assert.equal(traces.code, 0, traces.stderr)
+      assert.match(traces.stdout, /\[pass\]/)
+
+      // The configured reviewer submits a verdict through the normal handoff command.
+      const resolve = await runBtrain(["handoff", "resolve", "--lane", "a", "--summary", "Reviewed independently"], tmpDir, { BTRAIN_AGENT: "floord-app-dev" })
+      assert.equal(resolve.code, 0, resolve.stderr)
+
+      const writerClaim = await runBtrain(
+        [
+          "handoff", "claim", "--repo", tmpDir, "--lane", "a",
+          "--task", "Cursor writer dispatch",
+          "--owner", "floord-app-dev",
+          "--reviewer", "owner",
+          "--files", "src/feature.ts",
+        ],
+        tmpDir,
+        { BTRAIN_AGENT: "floord-app-dev" },
+      )
+      assert.equal(writerClaim.code, 0, writerClaim.stderr)
+      await setRunnerConfig(tmpDir, [`"owner" = "notify"`, `"floord-app-dev" = "${agentBin} -p"`])
+      const preview = await runBtrain(
+        ["loop", "--repo", tmpDir, "--lane", "a", "--dry-run"],
+        tmpDir,
+        { BTRAIN_AGENT: "floord-app-dev" },
+      )
+      assert.equal(preview.code, 0, preview.stderr)
+      assert.match(preview.stdout, /--auto-review/)
+      assert.doesNotMatch(preview.stdout, /--force/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
   it("accepts a completed review even if the reviewer CLI then exits nonzero", async () => {
     const { tmpDir } = await setupRepo()
     try {

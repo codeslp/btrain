@@ -13,13 +13,14 @@ import {
   BtrainError,
   checkHandoff,
   getPrFlowConfig,
+  getRepoPaths,
   normalizePrNumber,
   patchHandoff,
   readProjectConfig,
   resolveHandoff,
 } from "./core.mjs"
 import { applyTransition } from "./transitions.mjs"
-import { canonicalRepoIdentity, enforceLocalReview, normalizeReviewTarget, readLaneEvents } from "./local_review.mjs"
+import { enforceLocalReview } from "./local_review.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -38,6 +39,92 @@ import {
 const execFileAsync = promisify(execFile)
 const GH_MAX_BUFFER = 16 * 1024 * 1024
 const MIN_COMMIT_PREFIX_LENGTH = 10
+
+const FULL_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+function stripGitSuffix(value) {
+  return String(value).replace(/\.git$/i, "").replace(/\/+$/, "")
+}
+
+// One spelling for one repository. A remote arrives as a clone URL, an
+// scp-like address, or the `host/owner/repo` a reviewer types, and all three
+// must compare equal. A remote with no host is a path, kept verbatim after
+// `path:` because paths are case-sensitive where hosts are not.
+function canonicalRepoIdentity(value) {
+  const raw = String(value || "").trim().replace(/\/+$/, "")
+  if (!raw) return ""
+  if (raw.toLowerCase().startsWith("path:")) {
+    const rest = stripGitSuffix(raw.slice(5).trim())
+    return rest ? `path:${rest}` : ""
+  }
+  const scpLike = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(raw)
+  if (scpLike) {
+    return `${scpLike[1]}/${stripGitSuffix(scpLike[2]).replace(/^\/+/, "")}`.toLowerCase()
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    let parsed
+    let repoPath
+    try {
+      parsed = new URL(raw)
+      repoPath = stripGitSuffix(decodeURIComponent(parsed.pathname).replace(/^\/+/, ""))
+    } catch {
+      return ""
+    }
+    if (parsed.protocol === "file:") return repoPath ? `path:/${repoPath}` : ""
+    if (!parsed.host || !repoPath) return ""
+    return `${parsed.host}/${repoPath}`.toLowerCase()
+  }
+  if (raw.startsWith("/") || raw.startsWith(".") || raw.startsWith("~")) {
+    const rest = stripGitSuffix(raw)
+    return rest ? `path:${rest}` : ""
+  }
+  // `host/owner/repo` as a reviewer writes it. A bare word names no
+  // repository — a remote name like `origin` means nothing outside one
+  // checkout — so it is not an identity.
+  return raw.includes("/") ? stripGitSuffix(raw).toLowerCase() : ""
+}
+
+function laneEventLogPath(repoRoot, laneId = "") {
+  const { eventsDir } = getRepoPaths(repoRoot)
+  return path.join(eventsDir, laneId ? `lane-${laneId}.jsonl` : "repo.jsonl")
+}
+
+async function readLaneEvents(repoRoot, laneId = "") {
+  let content = ""
+  try {
+    content = await fs.readFile(laneEventLogPath(repoRoot, laneId), "utf8")
+  } catch (error) {
+    if (error?.code === "ENOENT") return []
+    throw error
+  }
+  return content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line)
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+}
+
+function shaMatches(left, right) {
+  const a = String(left || "").trim().toLowerCase()
+  const b = String(right || "").trim().toLowerCase()
+  if (!FULL_OBJECT_ID_PATTERN.test(a) || !FULL_OBJECT_ID_PATTERN.test(b)) return false
+  return a === b
+}
+
+function normalizePrTarget({ repo = "", ref = "", sha = "" } = {}) {
+  const identity = canonicalRepoIdentity(repo)
+  const baseRef = String(ref || "").trim()
+  const baseSha = String(sha || "").trim().toLowerCase()
+  if (!identity || !baseRef || !FULL_OBJECT_ID_PATTERN.test(baseSha)) return null
+  return { repo: identity, ref: baseRef, sha: baseSha }
+}
 
 function normalizeLogin(value) {
   return String(value || "").trim().toLowerCase().replace(/\[bot\]$/, "")
@@ -353,6 +440,7 @@ export function classifyPrReviewState({ pr, rawComments = {}, prFlowConfig, sema
       headSha,
       headShort: shortSha(headSha),
       base: pr?.baseRefName || pr?.base?.ref || "",
+      baseSha: String(pr?.baseRefOid || pr?.base?.sha || "").toLowerCase(),
       head: pr?.headRefName || pr?.head?.ref || "",
       mergedAt: pr?.mergedAt || pr?.merged_at || "",
     },
@@ -836,10 +924,8 @@ async function resolveLaneAndPr(repoRoot, options) {
         : `This btrain runner is scoped to lane ${laneId}, which has no linked PR; refusing --pr ${explicitPr}.`,
     )
   }
-  // The lane's approval covers the lane's PR. Aiming an explicit --pr at a
-  // different PR would carry this lane's approval onto another one's head, so
-  // it is refused whenever the lane already has a PR linked. A lane with no
-  // linked PR still accepts --pr, which is how an existing PR gets adopted.
+  // An explicit number may adopt a PR for an unlinked lane. A linked lane
+  // must be relinked before a command can operate on a different number.
   if (explicitPr && linkedPr && explicitPr !== linkedPr) {
     throw new Error(
       `Lane ${laneId || "(single)"} is linked to PR #${linkedPr}; refusing --pr ${explicitPr}. `
@@ -882,8 +968,53 @@ async function fetchMarkedIssueCommentReactions({ host = "", owner, repo, issueC
   return out
 }
 
+// The lanes of this checkout that have pinned a repository for `prNumber`
+// under their current claim, as a map of repository to the lanes holding it.
+// A PR number is not an identity on its own, so the lookup answers with
+// everything it found and leaves the decision to the caller.
+async function lanesAssociatedWithPr(repoRoot, prNumber) {
+  const handoff = await checkHandoff(repoRoot)
+  const lanes = handoff.lanes || (handoff.current ? [handoff.current] : [])
+  const byRepo = new Map()
+  for (const lane of lanes) {
+    if (normalizePrNumber(lane.prNumber) !== prNumber) continue
+    const laneId = String(lane._laneId || "")
+    const claim = await currentClaimStamp(repoRoot, laneId)
+    const pinned = await readPrAssociation(repoRoot, laneId, prNumber, claim)
+    if (!pinned?.repo) continue
+    byRepo.set(pinned.repo, [...(byRepo.get(pinned.repo) || []), laneId || "(single)"])
+  }
+  return byRepo
+}
+
+// `btrain go` probes a lane's merge state with the repository root and the PR
+// number alone: it renders every lane in one loop and carries no lane
+// identity into the call. Re-deriving the repository from the checkout's
+// current remote would make a repointed remote enough to answer about a
+// different `#7` — exactly what the association exists to prevent — so the
+// lane that adopted this number answers for it instead. Two lanes holding
+// this number in two repositories make the number ambiguous, and an ambiguous
+// lookup is refused rather than resolved to one of them. With no association
+// at all the derivation stands, which is what a lane that has pinned nothing
+// still relies on.
+async function resolveProbePrRepository(repoRoot, prNumber) {
+  const byRepo = await lanesAssociatedWithPr(repoRoot, prNumber)
+  const repos = [...byRepo.keys()]
+  if (repos.length === 1) return repos[0]
+  if (repos.length > 1) {
+    throw new BtrainError({
+      message: `PR #${prNumber} is associated with more than one repository in this checkout: ${
+        repos.map((repo) => `\`${repo}\` (lane ${byRepo.get(repo).join(", ")})`).join(", ")
+      }.`,
+      reason: "A PR number names no repository, so a lookup that carries no lane cannot tell these PRs apart.",
+      fix: "Ask for this PR through its own lane, which resolves the repository that lane is associated with.",
+    })
+  }
+  return resolvePrRepository(repoRoot)
+}
+
 export async function fetchPrMergeState(repoRoot, prNumber, prRepo = null) {
-  const repo = prRepo === null ? await resolvePrRepository(repoRoot) : prRepo
+  const repo = prRepo === null ? await resolveProbePrRepository(repoRoot, prNumber) : prRepo
   return ghJson(["pr", "view", prNumber, ...ghRepoArgs(repo), "--json", "url,mergeable,mergeStateStatus"], repoRoot)
 }
 
@@ -892,6 +1023,10 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
   const prFlowConfig = getPrFlowConfig(config)
   const { prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
 
+  return fetchResolvedPrReviewStatus(repoRoot, prFlowConfig, prNumber, prRepo)
+}
+
+async function fetchResolvedPrReviewStatus(repoRoot, prFlowConfig, prNumber, prRepo) {
   if (!(await isGhAvailable())) {
     throw new Error("gh CLI is not installed; PR review flow requires gh.")
   }
@@ -902,8 +1037,9 @@ export async function fetchPrReviewStatus(repoRoot, options = {}) {
     prNumber,
     ...ghRepoArgs(prRepo),
     "--json",
-    "number,title,url,state,isDraft,mergedAt,headRefOid,headRefName,baseRefName",
+    "number,title,url,state,isDraft,mergedAt,headRefOid,headRefName,baseRefName,baseRefOid",
   ], repoRoot)
+  requirePrIdentity(pr, prNumber, prRepo)
   const identity = await prRestIdentity(repoRoot, prRepo)
   const rawComments = await fetchAllComments({ ...identity, prNumber, cwd: repoRoot })
   rawComments.issueCommentReactions = await fetchMarkedIssueCommentReactions({
@@ -1101,7 +1237,7 @@ export async function resolveTargetBase(repoRoot, remote, baseRef) {
     gitText(["remote", "get-url", remote], repoRoot).catch(() => ""),
     fetchRemoteBranchSha(repoRoot, remote, baseRef),
   ])
-  return normalizeReviewTarget({ repo: canonicalRepoIdentity(url || remote), ref: baseRef, sha: baseSha })
+  return normalizePrTarget({ repo: canonicalRepoIdentity(url || remote), ref: baseRef, sha: baseSha })
 }
 
 // `host/owner/repo` is what `gh --repo` accepts. A `path:` identity is a
@@ -1234,7 +1370,7 @@ function redirectRefusal(laneId, prNumber, associated, named) {
   if (!named || named === associated) return null
   return new BtrainError({
     message: `Lane ${laneId || "(single)"} is associated with PR #${prNumber} in \`${associated}\`; refusing to act on \`${named}\`.`,
-    reason: "A PR number means nothing without its repository, and this lane's approval, comment log and locks all belong to the associated one.",
+    reason: "The lane and its comment log belong to the associated PR.",
     fix: `Drop the repository from --pr, or claim a fresh lane for the PR in \`${named}\`.`,
   })
 }
@@ -1290,15 +1426,13 @@ async function pinPrRepository(repoRoot, { laneId, prNumber, claim, repo, named 
 
 // The repository a lane's PR lives in, resolved once per command and used for
 // every GitHub call it makes: views, comments, the REST comment fetch, and
-// the bot-review gate.
+// review requests.
 //
 // A recorded association wins outright. Without one — a lane that adopted a
 // PR before this record existed, or one that has just been handed a number —
 // the repository comes from a URL the caller named outright (`--pr <url>`, or
 // the URL `gh pr create` printed), else from the repository btrain opens PRs
-// on for this checkout, which is the base remote `pr create` authorized the
-// approval against. `GH_REPO` is never consulted: it describes the shell, not
-// the lane. The resolution is pinned so the next command reads it back.
+// on for this checkout. The next command reads the saved association.
 // `laneId` is null for the few read-only probes that are not run on a lane's
 // behalf; they derive the repository and read nothing. `linked` says the PR
 // is the one this lane is linked to, which is what may be pinned: a `--pr`
@@ -1343,24 +1477,44 @@ export function prCreateHeadSpec(branch, headIdentity, baseIdentity) {
   return owner ? `${owner}:${branch}` : branch
 }
 
-// GitHub's own answer for the whole target of a PR, not just its head: the
-// repository it lives in, the base it is open against, the object that base
-// is at, and the head. `fetchPrHeadSha` may substitute the local head when
-// it believes the branch is pushed, which is a judgement made from local
-// state; authorizing a bot request needs the remote truth instead. A PR
-// retargeted or rebased after the approval is visible only here, and asking
-// costs nothing extra — these fields come back in one `pr view`.
+// Read the live head and base together for clearance or bot review.
 export async function fetchAuthoritativePrHead(repoRoot, prNumber, prRepo = "") {
   const pr = await ghJson(
-    ["pr", "view", prNumber, ...ghRepoArgs(prRepo), "--json", "headRefOid,headRefName,baseRefName,baseRefOid,url"],
+    [
+      "pr",
+      "view",
+      prNumber,
+      ...ghRepoArgs(prRepo),
+      "--json",
+      "headRefOid,headRefName,headRepository,headRepositoryOwner,baseRefName,baseRefOid,url",
+    ],
     repoRoot,
   )
+  requirePrIdentity(pr, prNumber, prRepo)
   return {
     headRefOid: String(pr?.headRefOid || "").toLowerCase(),
     headRefName: String(pr?.headRefName || ""),
+    headRepo: prHeadRepositoryIdentity(pr),
     baseRefName: String(pr?.baseRefName || ""),
     baseRefOid: String(pr?.baseRefOid || "").toLowerCase(),
     repo: canonicalRepoIdentity(prRepoIdentityFromUrl(pr?.url)),
+  }
+}
+
+// The repository a PR's head branch lives in, which is the PR's own
+// repository for an ordinary branch and someone else's for a fork. GitHub
+// reports it as an owner and a name with no host, and the head repository
+// lives on the same host as the PR. An inaccessible or deleted head
+// repository reports neither, and that is "" — unknown, not "the PR's own".
+function prHeadRepositoryIdentity(pr) {
+  const owner = pr?.headRepositoryOwner?.login || ""
+  const name = pr?.headRepository?.name || ""
+  if (!owner || !name) return ""
+  try {
+    const { host } = new URL(String(pr?.url || ""))
+    return host ? canonicalRepoIdentity(`${host}/${owner}/${name}`) : ""
+  } catch {
+    return ""
   }
 }
 
@@ -1371,64 +1525,72 @@ function prRepoIdentityFromUrl(url) {
   return match ? match[1] : ""
 }
 
-async function fetchPrHeadSha(repoRoot, prNumber, prRepo = "") {
-  const pr = await ghJson(
-    ["pr", "view", prNumber, ...ghRepoArgs(prRepo), "--json", "headRefOid,headRefName,headRepository,headRepositoryOwner,url"],
-    repoRoot,
-  )
-  const headOwner = pr?.headRepositoryOwner?.login || ""
-  const headRepo = pr?.headRepository?.name || ""
-  let headTarget = ""
-  if (headOwner && headRepo) {
-    try {
-      // The head repo lives on the same host as the PR itself.
-      const host = new URL(String(pr?.url || "")).host
-      headTarget = host ? `${host}/${headOwner}/${headRepo}` : ""
-    } catch {
-      headTarget = ""
-    }
+function requirePrIdentity(pr, prNumber, prRepo) {
+  const urlNumber = /\/pull\/(\d+)(?:[/?#]|$)/.exec(String(pr?.url || ""))?.[1]
+  const repo = canonicalRepoIdentity(prRepoIdentityFromUrl(pr?.url))
+  const expectedRepo = ghRepoFlagFor(prRepo)
+  if (urlNumber !== prNumber || (expectedRepo && repo !== expectedRepo)) {
+    throw new Error(`GitHub did not return PR #${prNumber} in the selected repository.`)
   }
-  const [localBranch, localHeadSha, remoteHeadSha] = await Promise.all([
-    gitText(["branch", "--show-current"], repoRoot).catch(() => ""),
-    gitText(["rev-parse", "HEAD"], repoRoot).catch(() => ""),
-    resolvePushedHeadSha(repoRoot, pr?.headRefName || "", headTarget),
-  ])
-  return selectReviewRequestHeadSha({
-    prHeadSha: pr?.headRefOid || "",
-    prHeadRefName: pr?.headRefName || "",
-    localBranch,
-    localHeadSha,
-    remoteHeadSha,
-  })
 }
 
-// Every bot review request (pr create, pr request-review, pr poll
-// --request-review) posts through here, so the gate lives here. It asks
-// GitHub where the PR head is right now and authorizes against that answer:
-// a caller-supplied or locally-cached SHA can be stale, and the bots review
-// whatever GitHub has. It also re-reads the lane, which `pr poll --apply` may
-// just have moved. A commit made after the approval changes the head and is
-// refused even though the lane never left `pr-review`.
+// Whether this checkout's branch is the PR's head branch, and so may be held
+// to GitHub's head revision. A shared branch name proves nothing across
+// repositories: an adopted fork PR whose head branch is `main` is reviewed
+// from a `main` checkout of the base repository, and those two branches carry
+// different objects for ordinary reasons. So the branch must push into the
+// repository GitHub names as the head, under the head's own branch name.
+//
+// With no head repository reported — a head repository that was deleted or
+// is not visible — there is nothing to tell a fork from the PR's own
+// repository, and the branch name stands as it did before: a divergence is
+// still refused rather than waved through. When the head repository is known
+// but this branch pushes somewhere else, or nowhere at all, the checkout is
+// not the PR's head and the authoritative head and base gate decides alone.
+async function localBranchIsPrHead(repoRoot, branchName, headRepo, headRefName) {
+  if (!headRepo) return branchName === headRefName
+  for (const destination of ["push", "upstream"]) {
+    const ref = `${branchName}@{${destination}}`
+    const symbolic = await gitText(["rev-parse", "--symbolic-full-name", ref], repoRoot).catch(() => "")
+    if (!symbolic.startsWith("refs/remotes/")) continue
+    const [, , remote, ...rest] = symbolic.split("/")
+    if (!remote || rest.join("/") !== headRefName) continue
+    const urlArgs = destination === "push" ? ["--push", "--all"] : []
+    const urls = await gitText(["remote", "get-url", ...urlArgs, remote], repoRoot).catch(() => "")
+    if (urls.split("\n").some((url) => canonicalRepoIdentity(url) === headRepo)) return true
+  }
+  return false
+}
+
+// Use the current GitHub revision in each review request.
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
+  if (botIds.length === 0) return []
   const laneId = context.laneId || ""
-  const lane = findLane(await checkHandoff(repoRoot), laneId) || {}
+  const lane = findLane(await checkHandoff(repoRoot), laneId)
+  if (!lane) throw new Error(`Unknown lane: ${laneId}`)
+  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), {
+    lane, laneId, stage: "Requesting bot review",
+  })
+
   const target = context.prRepo || ""
-  const { headRefOid, headRefName, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber, target)
-  if (!headRefOid) {
+  const { headRefOid, headRefName, headRepo, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber, target)
+  if (!FULL_OBJECT_ID_PATTERN.test(headRefOid)) {
     throw new Error(`GitHub did not report a head revision for PR #${prNumber}, so no bot review can be authorized.`)
   }
-  if (!baseRefName || !baseRefOid || !prRepo) {
+  if (!baseRefName || !FULL_OBJECT_ID_PATTERN.test(baseRefOid) || !prRepo) {
     throw new Error(
       `GitHub did not report the full target of PR #${prNumber} (repository, base branch and base revision), so no bot review can be authorized.`,
     )
   }
 
-  // If the owner's checkout is on the PR's head branch but sits on a different
-  // revision, the two have diverged: either the push has not landed or
-  // propagated, or there are unpushed commits. Posting now would ask the bots
-  // to review something other than what is in front of the owner.
+  // If the owner's checkout is on the PR's own head branch — the same branch
+  // of the same repository, not merely the same name — but sits on a
+  // different revision, the two have diverged: either the push has not landed
+  // or propagated, or there are unpushed commits. Posting now would ask the
+  // bots to review something other than what is in front of the owner.
   const localBranch = await gitText(["branch", "--show-current"], repoRoot).catch(() => "")
-  if (localBranch && headRefName && localBranch === headRefName) {
+  if (localBranch && headRefName
+    && await localBranchIsPrHead(repoRoot, localBranch, headRepo, headRefName)) {
     const localHead = await gitText(["rev-parse", "HEAD"], repoRoot).catch(() => "")
     if (localHead && localHead.toLowerCase() !== headRefOid) {
       throw new Error(
@@ -1439,18 +1601,13 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
     }
   }
 
-  // GitHub's own repository, base ref and base revision for this PR. No
-  // local remote is consulted: the bots review what GitHub has, and a
-  // checkout's remotes can point somewhere else entirely.
-  const targetBase = normalizeReviewTarget({ repo: prRepo, ref: baseRefName, sha: baseRefOid })
+  const expectedBase = context.base
+  if ((context.headSha && !shaMatches(context.headSha, headRefOid))
+    || (expectedBase && (expectedBase.repo !== prRepo || expectedBase.ref !== baseRefName
+      || !shaMatches(expectedBase.sha, baseRefOid)))) {
+    throw new Error(`PR #${prNumber} changed before the bot request. Poll the updated target and try again.`)
+  }
 
-  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), {
-    lane,
-    laneId,
-    targetSha: headRefOid,
-    targetBase,
-    stage: "Posting a bot review request",
-  })
   context = { ...context, headSha: headRefOid }
   const posted = []
   for (const botId of botIds) {
@@ -1463,8 +1620,11 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   return posted
 }
 
+// Applies a classified outcome to the transition gate. The GitHub polling
+// entry point revalidates clearance against the live PR before calling this.
 export async function applyPrStatusToHandoff(repoRoot, options, status) {
-  const { laneId, lane, prNumber } = await resolveLaneAndPr(repoRoot, options)
+  const { laneId, lane, prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
+  if (status.pr?.url) requirePrIdentity(status.pr, prNumber, prRepo)
   const actor = typeof options.actor === "string" && options.actor.trim()
     ? options.actor.trim()
     : undefined
@@ -1517,6 +1677,13 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     return "resolved"
   }
 
+  if (!normalizePrNumber(lane.prNumber) && prRepo) {
+    // Publish the repository before the lane carries the number. A concurrent
+    // first adoption of this number must agree with that association.
+    const claim = await currentClaimStamp(repoRoot, laneId)
+    await pinPrRepository(repoRoot, { laneId, prNumber, claim, repo: prRepo, named: prRepo })
+  }
+
   if (status.overall === "feedback") {
     const feedbackBots = status.bots.filter((bot) => bot.state === "feedback").map((bot) => bot.id)
     await patchHandoff(repoRoot, {
@@ -1527,7 +1694,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
       transitionEvent: "pr-poll",
-      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, commit and push, then hand the fix back for local review with \`btrain handoff update --lane ${laneId} --status needs-review\`. After the reviewer resolves it, relink with \`btrain handoff update --lane ${laneId} --status pr-review --pr ${prNumber} --actor "${actorLabel}"\` and run \`btrain pr request-review --lane ${laneId} --bots all\`.`,
+      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}. Commit and push the fix, then return the lane to needs-review. After local peer approval, relink the PR and request bot review.`,
     })
     return "changes-requested"
   }
@@ -1563,7 +1730,7 @@ export async function runPrPoll(repoRoot, options = {}) {
   const rawComments = await fetchAllComments({ ...identity, prNumber, cwd: repoRoot })
   const shaped = shapeComments(rawComments)
   const appended = await appendComments(repoRoot, laneId, prNumber, shaped)
-  const status = await fetchPrReviewStatus(repoRoot, options)
+  const status = await fetchResolvedPrReviewStatus(repoRoot, prFlowConfig, prNumber, prRepo)
 
   if (options.format === "json") {
     console.log(JSON.stringify({ ...status, appendedToLog: appended.length }, null, 2))
@@ -1573,6 +1740,24 @@ export async function runPrPoll(repoRoot, options = {}) {
   }
 
   if (options.apply) {
+    if (status.overall === "ready-to-merge") {
+      const current = await resolveLaneAndPr(repoRoot, options)
+      if (current.prNumber !== prNumber || current.prRepo !== prRepo) {
+        throw new Error("The lane PR association changed. Poll again before applying clearance.")
+      }
+      const target = await fetchAuthoritativePrHead(repoRoot, prNumber, prRepo)
+      if (!shaMatches(status.pr.headSha, target.headRefOid)) {
+        throw new Error(`PR #${prNumber}'s head changed since bot review was checked. Poll again before applying clearance.`)
+      }
+      const classifiedRepo = canonicalRepoIdentity(prRepoIdentityFromUrl(status.pr.url))
+      if (classifiedRepo !== target.repo || status.pr.base !== target.baseRefName
+        || !shaMatches(status.pr.baseSha, target.baseRefOid)) {
+        throw new Error(`PR #${prNumber}'s base changed since bot review was checked. Poll again before applying clearance.`)
+      }
+      await enforceLocalReview(repoRoot, config, {
+        lane: current.lane, laneId, stage: "Applying bot clearance",
+      })
+    }
     const nextStatus = await applyPrStatusToHandoff(repoRoot, options, status)
     console.log(`handoff updated: ${nextStatus}`)
   }
@@ -1583,6 +1768,7 @@ export async function runPrPoll(repoRoot, options = {}) {
       laneId,
       prRepo,
       headSha: status.pr.headSha,
+      base: { repo: canonicalRepoIdentity(prRepoIdentityFromUrl(status.pr.url)), ref: status.pr.base, sha: status.pr.baseSha },
     })
     for (const item of posted) {
       console.log(`requested ${item.bot}: ${item.body}`)
@@ -1595,24 +1781,9 @@ export async function runPrPoll(repoRoot, options = {}) {
 export async function runPrRequestReview(repoRoot, options = {}) {
   const config = await readProjectConfig(repoRoot)
   const prFlowConfig = getPrFlowConfig(config)
-  const { laneId, lane, prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
-  // Refuse a hopeless request before spending a `gh` round trip: everything
-  // but the revision comparison can be settled from the lane and its events.
-  // The no-op onWarn leaves the toggle-off warning to the post-time check in
-  // requestReviewComments, which knows the PR head and prints it once.
-  await enforceLocalReview(repoRoot, config, {
-    lane,
-    laneId,
-    requireHead: false,
-    stage: "`btrain pr request-review`",
-  }, () => {})
-  const headSha = await fetchPrHeadSha(repoRoot, prNumber, prRepo)
+  const { laneId, prNumber, prRepo } = await resolveLaneAndPr(repoRoot, options)
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
-  const posted = await requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, {
-    laneId,
-    prRepo,
-    headSha,
-  })
+  const posted = await requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, { laneId, prRepo })
 
   for (const item of posted) {
     console.log(`requested ${item.bot}: ${item.body}`)
@@ -1768,23 +1939,19 @@ export async function runPrCreate(repoRoot, options = {}) {
   if (!lane) {
     throw new Error(`Unknown lane: ${laneId}`)
   }
-  // `ready-for-pr` is structural, not part of the local_review gate: spec 002
-  // row 7 opens a PR from `ready-for-pr` only, so `btrain features disable
-  // local_review` does not lift this. With the gate off, the owner reaches
-  // `ready-for-pr` through an advisory self-resolve instead, and the bot
-  // review that `pr create` posts below warns rather than refusing.
   if (lane.status !== "ready-for-pr") {
     const laneLabel = laneId || "(single)"
     const reviewerHint = lane.reviewer ? ` --actor "${lane.reviewer}"` : ""
     throw new Error(
       `\`btrain pr create\` requires lane ${laneLabel} to be in \`ready-for-pr\` (local peer review approved). Current status: \`${lane.status}\`. `
         + `Run \`btrain handoff resolve --lane ${laneLabel}${reviewerHint}\` after the local review passes; PR-flow repos route that to ready-for-pr. `
-        + "`btrain features disable local_review` does not lift this requirement; it only downgrades the bot-review request that follows to a warning. "
         + `To relink an existing PR without re-running create, use \`btrain handoff update --lane ${laneLabel} --status pr-review --pr <number> --actor "${lane.owner || "owner"}"\`.`,
     )
   }
 
   validatePrCreateTransition(lane, options.actor || lane.owner || "btrain")
+  await enforceLocalReview(repoRoot, config, { lane, laneId, stage: "Creating a PR" })
+
 
   const branch = await gitText(["branch", "--show-current"], repoRoot)
   if (!branch || ["main", "master"].includes(branch)) {
@@ -1793,31 +1960,16 @@ export async function runPrCreate(repoRoot, options = {}) {
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
-  // `gh pr create --base` only accepts a branch name on the remote. The base
-  // is resolved before the gate because `--base` can replace the base the
-  // lane was reviewed against, and the gate authorizes the whole target.
+  // `gh pr create --base` only accepts a branch name on the remote.
   const baseRemote = await resolveBaseRemote(repoRoot)
   const isRemoteBranch = (name) => remoteBranchExists(repoRoot, name, baseRemote)
   const base = options.base
     ? await resolvePrBaseBranch(options.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote, strict: true })
     : await resolvePrBaseBranch(lane.base, prFlowConfig.base, { isRemoteBranch, remote: baseRemote })
   const targetBase = await resolveTargetBase(repoRoot, baseRemote, base)
+  if (!targetBase) throw new Error(`Could not resolve the live base ${base} on remote ${baseRemote}.`)
 
-  // Before the push and before `gh pr create`: the local HEAD is what would
-  // become the PR head and `base` is what the diff would be taken against,
-  // so the peer approval must name that exact target. Nothing has left this
-  // machine yet when this throws.
-  await enforceLocalReview(repoRoot, config, {
-    lane,
-    laneId,
-    targetSha: headSha,
-    targetBase,
-    stage: "`btrain pr create`",
-  })
-
-  // `headSha` is the revision local peer review approved, checked above. Push
-  // that object by name rather than the branch tip: a `git push origin
-  // <branch>` would publish whatever HEAD has become since the gate ran.
+  // Publish the selected object even if the local branch moves during push.
   const headRemote = "origin"
   if (!options["no-push"]) {
     await execFileAsync("git", ["push", headRemote, `${headSha}:refs/heads/${branch}`], {
@@ -1842,24 +1994,26 @@ export async function runPrCreate(repoRoot, options = {}) {
       throw new Error(
         `${where} does not have the branch, so there is nothing for \`gh pr create\` to open.\n`
           + (options["no-push"]
-            ? `Push the approved revision yourself with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or re-run without --no-push.`
+            ? `Push the selected revision yourself with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or re-run without --no-push.`
             : `The push reported success but the destination does not show the branch; check \`git ls-remote --get-url --push ${headRemote}\`.`),
       )
     }
     if (published.sha !== headSha.toLowerCase()) {
       throw new Error(
-        `${where} is at ${published.sha}, but local peer review approved ${headSha.toLowerCase()}.\n`
-          + `\`gh pr create\` would open a PR on the published revision, which no reviewer has approved. `
-          + `Push the approved revision with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or hand the published revision through local review first.`,
+        `${where} is at ${published.sha}, but this command selected ${headSha.toLowerCase()}.\n`
+          + `\`gh pr create\` would open a PR on a different revision. `
+          + `Push the selected revision with \`git push ${headRemote} ${headSha}:refs/heads/${branch}\`, or check out the published revision and try again.`,
       )
     }
   }
 
   const title = typeof options.title === "string" && options.title.trim() ? options.title.trim() : lane.task || branch
   const body = typeof options.body === "string" && options.body.trim() ? options.body.trim() : buildPrBody(lane)
-  // Open the PR on the repository the approval was checked against, not on
-  // whichever one gh would have defaulted to. The head is qualified when it
-  // lives in another repository, which is the normal fork layout.
+  const currentBase = await resolveTargetBase(repoRoot, baseRemote, base)
+  if (!currentBase || currentBase.repo !== targetBase.repo || !shaMatches(currentBase.sha, targetBase.sha)) {
+    throw new Error(`The base ${base} changed before PR creation. Read the updated target and try again.`)
+  }
+  // Name the selected repository and qualify the branch for a fork.
   const repoFlag = ghRepoFlagFor(targetBase?.repo)
   // Where the branch was actually published: `--push` yields the push URL
   // when one is configured and the fetch URL otherwise.
@@ -1876,6 +2030,10 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
   const url = await ghText(args, repoRoot)
   const number = normalizePrNumber(url)
+  if (!number) throw new Error("GitHub did not return a PR number after creation.")
+  requirePrIdentity({ url }, number, repoFlag)
+  // Publish the association before the lane carries the PR number.
+  const prRepo = await resolvePrRepository(repoRoot, { laneId, prNumber: number, url, linked: true })
 
   await patchHandoff(repoRoot, {
     lane: laneId,
@@ -1890,14 +2048,10 @@ export async function runPrCreate(repoRoot, options = {}) {
 
   console.log(url)
 
-  // The URL gh printed says where the PR really landed, and the lane is now
-  // linked to it. Pinning it here is what lets the bot requests below, and
-  // every status, poll and request-review that follows in a later command,
-  // speak to the same repository without deriving it again.
-  const prRepo = await resolvePrRepository(repoRoot, { laneId, prNumber: number, url, linked: true })
-
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
-  const posted = await requestReviewComments(repoRoot, number, botIds, prFlowConfig, { laneId, prRepo, headSha })
+  const posted = await requestReviewComments(repoRoot, number, botIds, prFlowConfig, {
+    laneId, prRepo, headSha, base: ghRepoFlagFor(targetBase.repo) ? targetBase : null,
+  })
   for (const item of posted) {
     console.log(`requested ${item.bot}: ${item.body}`)
   }
