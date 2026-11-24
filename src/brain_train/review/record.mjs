@@ -93,14 +93,20 @@ export function foldReviewRecord(events, { status } = {}) {
     if (verdict) attempt.verdict = verdict
     if (record.activeAttemptId === attempt.id) record.activeAttemptId = ""
   }
+  // Close the active attempt with a verdict. Returns `{ applied, attempt }`:
+  // `applied` is false for a verdict that names an attempt other than the
+  // active one (a duplicate, or a late verdict, which has its own event,
+  // FR-6), and such a verdict changes nothing in the record. A verdict with
+  // no attempt id and no active attempt (written before the request loop
+  // existed) counts as applied on its own.
   const endVerdict = (event, verdict) => {
     const details = detailsOf(event)
-    const target = details.attemptId ? byId.get(details.attemptId) : active()
-    // A verdict naming an attempt that is not the active one does not close the
-    // active attempt; a late verdict is recorded with its own event (FR-6).
-    if (!target || (details.attemptId && target.id !== record.activeAttemptId)) return target || null
-    endAttempt(target, "verdict", { at: event.recordedAt || "", verdict })
-    return target
+    const current = active()
+    if (details.attemptId) {
+      if (!current || current.id !== details.attemptId) return { applied: false, attempt: null }
+    }
+    if (current) endAttempt(current, "verdict", { at: event.recordedAt || "", verdict })
+    return { applied: true, attempt: current }
   }
 
   for (const event of eventsSinceLastClaim(events)) {
@@ -148,14 +154,23 @@ export function foldReviewRecord(events, { status } = {}) {
         record.activeAttemptId = attempt.id
         record.tier = attempt.tier
         // A fallback is an attempt whose reviewer differs from the previous
-        // one; only a same-lab one carries a fallback reason for display.
-        record.fallbackReason = attempt.tier === "same-lab" ? attempt.reason : ""
+        // one. A same-lab one sets the reason shown with the tier; a later
+        // same-lab attempt that keeps the reviewer has an empty reason and
+        // keeps it. An other-lab attempt clears it.
+        if (attempt.tier === "same-lab") {
+          if (attempt.reason) record.fallbackReason = attempt.reason
+        } else {
+          record.fallbackReason = ""
+        }
         break
       }
       case "review-pickup": {
         const at = timeOf(event, details)
-        if (!details.attemptId && details.fixHead && record.fix) {
-          // The owner's pickup of a fix-confirmation lane (WS2, T010).
+        // The owner's pickup of a fix-confirmation lane (WS2, T010): a pickup
+        // that names the fix head, or the attempt that applied an unconfirmed
+        // fix (that attempt has ended, so it is no reviewer pickup).
+        const fixPending = record.fix && !record.fix.confirmed
+        if (fixPending && ((!details.attemptId && details.fixHead) || (details.attemptId && details.attemptId === record.fix.attemptId))) {
           if (!record.fix.pickedUpAt) record.fix.pickedUpAt = at
           break
         }
@@ -195,15 +210,17 @@ export function foldReviewRecord(events, { status } = {}) {
         break
       }
       case "request-changes": {
-        const attempt = endVerdict(event, "request-changes")
-        const tier = String(details.tier || attempt?.tier || "")
+        const { applied, attempt } = endVerdict(event, "request-changes")
+        if (!applied) break
+        const tier = String(attempt?.tier || details.tier || "")
         if (tier === "same-lab") record.sameLabChangeRequests += 1
         break
       }
       case "fix-applied": {
-        const attempt = endVerdict(event, "fix")
+        const { applied, attempt } = endVerdict(event, "fix")
+        if (!applied) break
         const round = Number(details.round)
-        record.fixRounds = Number.isInteger(round) && round > record.fixRounds ? round : record.fixRounds + 1
+        record.fixRounds = Number.isInteger(round) && round > 0 ? Math.max(record.fixRounds, round) : record.fixRounds + 1
         record.fix = {
           attemptId: String(details.attemptId || attempt?.id || ""),
           base: String(details.fixBase || ""),

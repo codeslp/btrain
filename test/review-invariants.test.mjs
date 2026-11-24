@@ -27,11 +27,12 @@ import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import {
   fakeRunnerEnv,
   installFakeRunner,
+  readFakeRunnerLog,
   readFakeRunnerStarts,
   writeFakeRunnerScenario,
 } from "./helpers/fake-runner.mjs"
 import { createFakeClock } from "./helpers/fake-clock.mjs"
-import { foldReviewRecord } from "../src/brain_train/review/record.mjs"
+import { foldReviewRecord, REVIEW_EVENT_TYPES } from "../src/brain_train/review/record.mjs"
 
 const exec = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -325,6 +326,20 @@ describe("spec 023 invariants", () => {
     const record = foldReviewRecord(world.events)
     assert.equal(record.tier, "same-lab")
     assert.equal(record.fallbackReason, "other-lab-unavailable")
+
+    // An other-lab reviewer that keeps progressing keeps the lane past the
+    // window, up to attempt_max; only then does the same lab get it.
+    const progressClock = createFakeClock()
+    const progressing = createLoopWorld({ clock: progressClock, behaviors: { [AGENTS.otherLabA.name]: "progress", [AGENTS.otherLabB.name]: "silent" } })
+    await runReviewRequest({
+      laneId: "a",
+      candidates: { otherLab: [AGENTS.otherLabA.name, AGENTS.otherLabB.name], sameLab: [AGENTS.sameLab.name] },
+      policy: { otherLabWindowMs: 15 * MIN, silenceLimitMs: 5 * MIN, attemptMaxMs: 45 * MIN },
+      ...progressing,
+    })
+    const firstSameLab = progressing.dispatched.find((item) => item.reviewer === AGENTS.sameLab.name)
+    assert.ok(firstSameLab, "the same lab is reached once progress stops at attempt_max")
+    assert.ok(firstSameLab.at >= 45 * MIN, `no same-lab dispatch while the other-lab reviewer progresses (at ${firstSameLab.at})`)
   })
 
   it("2. elapsed wall time alone never assigns a same-lab reviewer; with no btrain process running the lane does not change", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
@@ -346,8 +361,11 @@ describe("spec 023 invariants", () => {
       assert.equal(result.code, 0, `${args.join(" ")}: ${result.stderr}`)
     }
     const afterEvents = await repo.events()
-    assert.equal(afterEvents.filter((event) => event.type === "review-attempt").length, 1, "no attempt was started")
-    assert.deepEqual(afterEvents.slice(0, before.length), before)
+    assert.deepEqual(afterEvents.slice(0, before.length), before, "no event was rewritten")
+    // A read may log something of its own, but nothing that changes the lane
+    // or the review record.
+    const changing = new Set([...REVIEW_EVENT_TYPES, "claim", "update", "resolve", "request-changes", "watchdog-repair"])
+    assert.deepEqual(afterEvents.slice(before.length).filter((event) => changing.has(event.type)), [])
     assert.equal(await repo.handoffFile(), beforeFile)
     assert.deepEqual(await readFakeRunnerStarts(repo.logPath), [])
   })
@@ -393,6 +411,11 @@ describe("spec 023 invariants", () => {
     })
     const result = await repo.btrain(needsReviewArgs(), { env: DISPATCH_ON })
     assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+    // While gem's attempt was open, `btrain handoff` showed gem as the reviewer.
+    const gemHandoff = (await readFakeRunnerLog(repo.logPath)).find((entry) => entry.kind === "step" && entry.agent === AGENTS.otherLabB.name && entry.do === "handoff")
+    assert.ok(gemHandoff, "gem ran btrain handoff")
+    assert.match(gemHandoff.stdout, new RegExp(`reviewer:?\\s*${AGENTS.otherLabB.name}\\b`, "i"))
+    assert.doesNotMatch(gemHandoff.stdout, new RegExp(`reviewer:?\\s*${AGENTS.otherLabA.name}\\b`, "i"))
     const attempts = (await repo.events()).filter((event) => event.type === "review-attempt")
     assert.deepEqual(attempts.map((event) => event.details.reviewer), [AGENTS.otherLabA.name, AGENTS.otherLabB.name])
     for (const event of attempts) {
@@ -437,7 +460,7 @@ describe("spec 023 invariants", () => {
     await repo.scenario({ agents: { [AGENTS.otherLabA.name]: [{ do: "commit", file: "src/feature.mjs", content: "export const feature = 3\n" }] } })
     await exec(path.join(repo.root, "bin", AGENTS.otherLabA.name, "codex"), [], {
       cwd: repo.repo,
-      env: { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath: repo.scenarioPath, logPath: repo.logPath, cliPath: CLI }), BTRAIN_AGENT: AGENTS.otherLabA.name, BRAIN_TRAIN_HOME: repo.home },
+      env: { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath: repo.scenarioPath, logPath: repo.logPath, cliPath: CLI }), BTRAIN_AGENT: AGENTS.otherLabA.name, BTRAIN_LANE: "a", BRAIN_TRAIN_HOME: repo.home },
     })
     const fix = await repo.btrain(["handoff", "fix", "--lane", "a", "--summary", "one-line fix", "--actor", AGENTS.otherLabA.name], { agent: AGENTS.otherLabA.name })
     assert.equal(fix.code, 0, `${fix.stdout}\n${fix.stderr}`)
@@ -462,7 +485,7 @@ describe("spec 023 invariants", () => {
     ] } })
     await exec(path.join(repo.root, "bin", AGENTS.otherLabA.name, "codex"), [], {
       cwd: repo.repo,
-      env: { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath: repo.scenarioPath, logPath: repo.logPath, cliPath: CLI }), BTRAIN_AGENT: AGENTS.otherLabA.name, BRAIN_TRAIN_HOME: repo.home },
+      env: { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath: repo.scenarioPath, logPath: repo.logPath, cliPath: CLI }), BTRAIN_AGENT: AGENTS.otherLabA.name, BTRAIN_LANE: "a", BRAIN_TRAIN_HOME: repo.home },
     })
     assert.match(await repo.handoffFile(), /^Status: fix-confirmation$/m)
     assert.deepEqual((await repo.record()).fixAuthors, [AGENTS.otherLabA.name])
@@ -491,6 +514,11 @@ describe("spec 023 invariants", () => {
     assert.equal(reassignment.details.by, "btrain-system")
     assert.equal(reassignment.after.owner, reassignment.before.owner, "the owner did not change")
     assert.equal(reassignment.details.reason, "next-other-lab")
+    const canonicalTypes = new Set(["claim", "update", "request-changes", "resolve", "review-attempt"])
+    const laneAgents = new Set(Object.values(AGENTS).map((agent) => agent.name))
+    for (const event of (await repo.events()).filter((item) => canonicalTypes.has(item.type))) {
+      assert.ok(laneAgents.has(event.actor), `${event.type} has the lane agent ${event.actor} as its actor, never btrain-system`)
+    }
 
     // A repair after the reassignment goes to the owner, not to a reviewer.
     const repair = await repo.btrain(["handoff", "update", "--lane", "a", "--status", "repair-needed", "--reason-code", "spec-mismatch", "--actor", AGENTS.owner.name])
@@ -598,10 +626,9 @@ describe("spec 023 invariants", () => {
     assert.equal(stages, 0, "every core.mjs function is assigned in specs/020-ws2-module-assignment.json")
     const { readFunctionSpans } = await import(new URL("../scripts/decomposition_inventory.mjs", import.meta.url))
     const { spans } = readFunctionSpans(path.join(REPO_ROOT, "src/brain_train/core.mjs"))
-    // 357 top-level functions on main at 986b4f2, before any spec 023 work.
-    // A later count includes functions other specs added; WS7 records the
-    // count it measured before its own edits here.
-    assert.ok(spans.length <= 357, `core.mjs has ${spans.length} top-level functions`)
+    // "No new function" is the stage check above: every function must be
+    // assigned in specs/020-ws2-module-assignment.json, which spec 023 does
+    // not edit. A raw count would fail whenever another lane adds one.
     assert.equal(spans.find((span) => span.name === "patchHandoff").lines, 587, "WS4 adds one spread line to each gate input")
     const pinned = await fs.readFile(path.join(REPO_ROOT, "test/decomposition_inventory.test.mjs"), "utf8")
     const runLoopPin = Number(/name === "runLoop"\)\.lines, (\d+)/.exec(pinned)?.[1])

@@ -183,6 +183,21 @@ describe("fake runner", () => {
     assert.deepEqual((await readFakeRunnerStarts(logPath, "gem")).map((entry) => entry.invocation), [0, 1, 2])
   })
 
+  it("refuses a lane-scoped step when no lane is set, unless the step says noLane", async () => {
+    const root = await tempRoot()
+    const shim = await installFakeRunner(path.join(root, "bin"), "codex")
+    const logPath = path.join(root, "log.jsonl")
+    const scenarioPath = await writeFakeRunnerScenario(path.join(root, "scenario.json"), {
+      agents: { a: [{ do: "resolve" }], b: [{ do: "btrain", args: ["--version"], noLane: true }] },
+    })
+    const env = { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath, logPath, cliPath: CLI }) }
+    const refused = await runShim(shim, { cwd: root, env: { ...env, BTRAIN_AGENT: "a" } })
+    assert.equal(refused.code, 64)
+    assert.match(refused.stderr, /needs BTRAIN_LANE/)
+    const generic = await runShim(shim, { cwd: root, env: { ...env, BTRAIN_AGENT: "b" } })
+    assert.equal(generic.code, 0, generic.stderr)
+  })
+
   it("selects the default plan for an agent the scenario does not name", () => {
     assert.deepEqual(selectFakeRunnerPlan({ default: [{ do: "exit", code: 4 }] }, "x", 0).steps, [{ do: "exit", code: 4 }])
     assert.deepEqual(selectFakeRunnerPlan({}, "x", 0).steps, [])
@@ -271,6 +286,18 @@ describe("fake clock", () => {
     await clock.sleep(5 * 60_000)
     assert.deepEqual(seen.at(-1), ["progress", 14 * 60_000])
     assert.equal(clock.now(), 15 * 60_000)
+  })
+
+  it("never moves time back when a callback sleeps past the caller's target", async () => {
+    const clock = createFakeClock({ start: 0 })
+    let seen = 0
+    clock.at(1_000, async () => {
+      await clock.sleep(5_000)
+      seen = clock.now()
+    })
+    await clock.sleep(2_000)
+    assert.equal(seen, 6_000)
+    assert.equal(clock.now(), 6_000)
   })
 
   it("in manual mode, waits for the test to advance time", async () => {

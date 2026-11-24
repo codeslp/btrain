@@ -205,6 +205,46 @@ describe("foldReviewRecord", () => {
     assert.deepEqual(record.fixAuthors, ["codex-reviewer"])
   })
 
+  it("lets a duplicate or stale verdict change nothing", () => {
+    const changes = (attemptId) => ev("request-changes", { actor: "claude-reviewer", details: { attemptId, tier: "same-lab" } })
+    const twice = foldReviewRecord([claim(), request("r1"), attempt("t1", "claude-reviewer", { tier: "same-lab", reason: "other-lab-unavailable" }), changes("t1"), changes("t1")])
+    assert.equal(twice.sameLabChangeRequests, 1, "the same verdict twice is one round")
+
+    const stale = foldReviewRecord([
+      claim(), request("r1"), attempt("t1", "claude-reviewer", { tier: "same-lab" }), ended("t1", "failed"),
+      attempt("t2", "claude-reviewer", { tier: "same-lab" }), changes("t1"),
+    ])
+    assert.equal(stale.sameLabChangeRequests, 0, "a verdict for an ended attempt is not a round")
+    assert.equal(stale.activeAttemptId, "t2", "and it leaves the active attempt open")
+
+    const fix = (round) => ev("fix-applied", { actor: "codex-reviewer", details: { attemptId: "t1", fixBase: "a", fixHead: "b", round } })
+    const fixTwice = foldReviewRecord([claim(), request("r1"), attempt("t1", "codex-reviewer"), fix(1), fix(1)])
+    assert.equal(fixTwice.fixRounds, 1)
+  })
+
+  it("keeps a recorded fallback reason through a later same-lab attempt with no reason, and clears it for an other-lab one", () => {
+    const base = [
+      claim(), request("r1"),
+      attempt("t1", "codex-reviewer"), ended("t1", "tool_unavailable"),
+      attempt("t2", "claude-reviewer", { tier: "same-lab", reason: "other-lab-unavailable", previousReviewer: "codex-reviewer" }), ended("t2", "unresponsive"),
+      attempt("t3", "claude-reviewer", { tier: "same-lab", reason: "" }),
+    ]
+    assert.equal(foldReviewRecord(base).fallbackReason, "other-lab-unavailable")
+    const recovered = foldReviewRecord([...base, attempt("t4", "codex-reviewer", { reason: "other-lab-recovered", previousReviewer: "claude-reviewer" })])
+    assert.equal(recovered.fallbackReason, "")
+    assert.equal(recovered.tier, "other-lab")
+  })
+
+  it("counts the owner's pickup that names the attempt of an unconfirmed fix", () => {
+    const record = foldReviewRecord([
+      claim(), request("r1"), attempt("t1", "codex-reviewer"), pickup("t1", "codex-reviewer"),
+      ev("fix-applied", { actor: "codex-reviewer", details: { attemptId: "t1", fixBase: "a", fixHead: "b", round: 1 } }),
+      ev("review-pickup", { actor: "owner", details: { attemptId: "t1", at: at() } }),
+    ], { status: "fix-confirmation" })
+    assert.equal(record.display, "confirming-fix")
+    assert.ok(record.fix.pickedUpAt)
+  })
+
   it("records late reviews and their acknowledgement", () => {
     const late = (attemptId, verdict) => ev("late-review", { actor: "codex-reviewer", details: { attemptId, verdict, head: "a".repeat(40), summary: "found a bug" } })
     const one = foldReviewRecord([claim(), late("t1", "request-changes"), late("t2", "resolve")])

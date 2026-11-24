@@ -53,7 +53,9 @@ export function createFakeClock({ start = Date.UTC(2026, 10, 23, 12, 0, 0), auto
       current = Math.max(current, next.time)
       await runDue()
     }
-    current = target
+    // A callback that slept past the target has already moved time on;
+    // time never goes back.
+    current = Math.max(current, target)
     await runDue()
     wakeSleepers()
   }

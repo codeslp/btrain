@@ -29,6 +29,10 @@
 //   { "do": "request-changes", "summary": "...", "reasonCode": "spec-mismatch" }
 //   { "do": "fix", "summary": "..." }           `btrain handoff fix --lane <lane> --actor <agent>`
 //   { "do": "btrain", "args": [...] }           any btrain command
+//
+// `handoff`, `resolve`, `request-changes`, and `fix` add `--lane <BTRAIN_LANE>`.
+// With no `BTRAIN_LANE` they fail (exit 64) instead of running without a lane,
+// unless the step has `"noLane": true` (a repository without lanes).
 //   { "do": "exit", "code": 1, "text": "...", "stream": "stderr" }
 //
 // With no `exit` step the fake exits 0 after its last step. A btrain step that
@@ -182,6 +186,8 @@ function git(args, { cwd, env }) {
   return result.stdout.trim()
 }
 
+const LANE_SCOPED_STEPS = new Set(["handoff", "resolve", "request-changes", "fix"])
+
 function btrainArgsFor(step, { agent, lane }) {
   const laneArgs = lane ? ["--lane", lane] : []
   switch (step.do) {
@@ -248,6 +254,12 @@ async function runStep(step, context) {
     const head = git(["rev-parse", "HEAD"], { cwd, env })
     appendLog(logPath, { kind: "step", agent, do: "commit", file, trailer: withTrailer, noVerify: Boolean(step.noVerify), head })
     return { stop: false }
+  }
+
+  if (LANE_SCOPED_STEPS.has(step.do) && !lane && !step.noLane) {
+    appendLog(logPath, { kind: "exit", agent, code: 64, reason: `${step.do} needs BTRAIN_LANE` })
+    process.stderr.write(`fake-runner: step ${step.do} needs BTRAIN_LANE (or "noLane": true)\n`)
+    return { stop: true, code: 64 }
   }
 
   const args = btrainArgsFor(step, { agent, lane })
