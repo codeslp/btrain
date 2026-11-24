@@ -852,6 +852,27 @@ describe("dynamic collaborator bootstrap", () => {
     await rmDir(tmpDir)
   })
 
+  it("infers Cursor Agent CLI for floord-app-dev", async () => {
+    const floordDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", floordDir])
+      const floordInit = await runBtrain(
+        ["init", floordDir, "--agent", "claude", "--agent", "floord-app-dev", "--agent", "cursor-reviewer", "--agent", "web-app-dev", "--core-only"],
+        floordDir,
+      )
+      assert.equal(floordInit.code, 0, floordInit.stderr)
+      const floordToml = await fs.readFile(path.join(floordDir, ".btrain", "project.toml"), "utf8")
+      assert.ok(floordToml.includes('"floord-app-dev" = "agent -p"'), floordToml)
+      assert.ok(floordToml.includes('"cursor-reviewer" = "agent -p"'), floordToml)
+      assert.ok(floordToml.includes('"web-app-dev" = "notify"'), floordToml)
+    } finally {
+      await rmDir(floordDir)
+    }
+  })
+
   it("scaffolds 2 lanes per configured collaborator and renders their names into docs", async () => {
     const { code, stderr } = await runBtrain(
       [
