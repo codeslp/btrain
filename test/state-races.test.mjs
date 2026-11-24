@@ -95,15 +95,6 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function waitFor(check, { timeoutMs = 2000, stepMs = 5 } = {}) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (await check()) return true
-    await delay(stepMs)
-  }
-  return false
-}
-
 async function exists(filePath) {
   return fs.access(filePath).then(() => true, () => false)
 }
@@ -270,7 +261,7 @@ describe("handoff history compaction", () => {
           compaction.then(() => true, () => true),
           delay(400).then(() => false),
         ])
-        await fs.writeFile(handoffPath, `${read.trimEnd()}\n\n<!-- writer update -->\n`)
+        await fs.writeFile(handoffPath, read.replace("## Previous Handoffs", "<!-- writer update -->\n\n## Previous Handoffs"))
       })
       const [result] = await compaction
 

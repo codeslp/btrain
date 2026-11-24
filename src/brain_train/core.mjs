@@ -88,6 +88,8 @@ import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 const DEFAULT_LOCK_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const FILE_LOCK_RETRY_MS = 50
 const FILE_LOCK_TIMEOUT_MS = 5000
+const FILE_LOCK_STALE_MS = 30_000
+const FILE_LOCK_HEARTBEAT_MS = 5000
 const CGRAPH_ADVISORY_LOCK_TIMEOUT_MS = 500
 const CGRAPH_STATUS_CACHE_TTL_MS = 2000
 const DEFAULT_CGRAPH_GRAPH_MODE = "shared-working"
@@ -105,6 +107,7 @@ const cgraphProducerCache = new Map()
 async function withFileLock(lockPath, fn, {
   retryMs = FILE_LOCK_RETRY_MS,
   timeoutMs = FILE_LOCK_TIMEOUT_MS,
+  heartbeatMs = FILE_LOCK_HEARTBEAT_MS,
 } = {}) {
   const deadline = Date.now() + timeoutMs
   let fd = null
@@ -114,10 +117,11 @@ async function withFileLock(lockPath, fn, {
       break
     } catch (err) {
       if (err.code !== "EEXIST") throw err
-      // Check for stale lockfile (older than 30s = likely dead process)
+      // A live holder refreshes its lockfile (see the heartbeat below), so one
+      // older than the stale window belongs to a dead process.
       try {
         const stat = await fs.stat(lockPath)
-        if (Date.now() - stat.mtimeMs > 30_000) {
+        if (Date.now() - stat.mtimeMs > FILE_LOCK_STALE_MS) {
           await fs.unlink(lockPath).catch(() => {})
           continue
         }
@@ -133,11 +137,37 @@ async function withFileLock(lockPath, fn, {
     throw new Error(`Timed out waiting for file lock: ${lockPath}`)
   }
 
+  // Keep the lockfile fresh for as long as the critical section runs, however
+  // long that is. The refresh goes through our own handle, so it can never
+  // touch a successor's lockfile.
+  const heartbeat = setInterval(() => {
+    const now = new Date()
+    fd.utimes(now, now).catch(() => {})
+  }, heartbeatMs)
+  heartbeat.unref()
+
   try {
     return await fn()
   } finally {
+    clearInterval(heartbeat)
+    // Release only our own lock. If a waiter judged it stale and removed it,
+    // the path may now name the next holder's lockfile. The inode cannot be
+    // reused while our handle keeps the file open, so equal ids mean the path
+    // is still ours.
+    let stillOurs = false
+    try {
+      const [held, current] = await Promise.all([
+        fd.stat({ bigint: true }),
+        fs.stat(lockPath, { bigint: true }),
+      ])
+      stillOurs = held.ino === current.ino && held.dev === current.dev
+    } catch {
+      // The lockfile is gone: nothing of ours to remove.
+    }
     await fd.close()
-    await fs.unlink(lockPath).catch(() => {})
+    if (stillOurs) {
+      await fs.unlink(lockPath).catch(() => {})
+    }
   }
 }
 
@@ -2798,44 +2828,49 @@ async function grantOverride(repoRoot, options = {}) {
   }
 
   const scope = laneId ? "lane" : "repo"
-  const overrides = await listActiveOverrides(repoRoot)
-  const duplicate = overrides.find((record) => record.action === action && (record.laneId || "") === laneId)
-  if (duplicate) {
-    throw new BtrainError({
-      message: `An active override already exists for \`${action}\` ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
-      reason: `Override ${duplicate.id} is still pending. Only one override per action+scope is allowed.`,
-      fix: `Consume or wait for the existing override first. To consume it: btrain override consume --action ${action}${laneId ? ` --lane ${laneId}` : ""} --actor <agent>`,
-    })
-  }
+  // Grant and consume are check-then-act over the overrides directory. Both
+  // take this lock, so one override per action and scope is granted and a
+  // single-use override authorises one action.
+  return withFileLock(`${getRepoPaths(repoRoot).overridesDir}.lock`, async () => {
+    const overrides = await listActiveOverrides(repoRoot)
+    const duplicate = overrides.find((record) => record.action === action && (record.laneId || "") === laneId)
+    if (duplicate) {
+      throw new BtrainError({
+        message: `An active override already exists for \`${action}\` ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
+        reason: `Override ${duplicate.id} is still pending. Only one override per action+scope is allowed.`,
+        fix: `Consume or wait for the existing override first. To consume it: btrain override consume --action ${action}${laneId ? ` --lane ${laneId}` : ""} --actor <agent>`,
+      })
+    }
 
-  const id = buildOverrideId(action)
-  const record = {
-    version: 1,
-    id,
-    action,
-    scope,
-    laneId,
-    requestedBy,
-    confirmedBy,
-    reason,
-    createdAt: formatIsoTimestamp(),
-  }
-
-  await writeJson(getOverridePath(repoRoot, id), record)
-  await appendWorkflowEvent(repoRoot, config, {
-    type: "override-granted",
-    actor: requestedBy,
-    laneId,
-    details: {
-      overrideId: id,
+    const id = buildOverrideId(action)
+    const record = {
+      version: 1,
+      id,
       action,
       scope,
+      laneId,
+      requestedBy,
       confirmedBy,
       reason,
-    },
-  })
+      createdAt: formatIsoTimestamp(),
+    }
 
-  return record
+    await writeJson(getOverridePath(repoRoot, id), record)
+    await appendWorkflowEvent(repoRoot, config, {
+      type: "override-granted",
+      actor: requestedBy,
+      laneId,
+      details: {
+        overrideId: id,
+        action,
+        scope,
+        confirmedBy,
+        reason,
+      },
+    })
+
+    return record
+  })
 }
 
 async function consumeOverride(repoRoot, options = {}) {
@@ -2852,60 +2887,63 @@ async function consumeOverride(repoRoot, options = {}) {
       ? options.id.trim()
       : ""
   const actorLabel = options.actorLabel || options.actor || "btrain"
-  const overrides = await listActiveOverrides(repoRoot)
+  // Same lock as grantOverride: exactly one consumer takes a given override.
+  return withFileLock(`${getRepoPaths(repoRoot).overridesDir}.lock`, async () => {
+    const overrides = await listActiveOverrides(repoRoot)
 
-  let record = null
-  if (overrideId) {
-    record = overrides.find((candidate) => candidate.id === overrideId) || null
-    if (!record) {
+    let record = null
+    if (overrideId) {
+      record = overrides.find((candidate) => candidate.id === overrideId) || null
+      if (!record) {
+        throw new BtrainError({
+          message: `No active override found for id "${overrideId}".`,
+          reason: "The override may have already been consumed or the ID is incorrect.",
+          fix: "Run `btrain override list` to see active overrides, or grant a new one with `btrain override grant`.",
+        })
+      }
+    } else {
+      record = overrides.find((candidate) => candidate.action === action && (candidate.laneId || "") === laneId) || null
+      if (!record) {
+        throw new BtrainError({
+          message: `No active override found for \`${action}\` ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
+          reason: "No matching pending override exists for this action and scope.",
+          fix: `Grant one first: btrain override grant --action ${action}${laneId ? ` --lane ${laneId}` : ""} --requested-by <agent> --confirmed-by <human> --reason "..."`,
+        })
+      }
+    }
+
+    if (record.action !== action) {
       throw new BtrainError({
-        message: `No active override found for id "${overrideId}".`,
-        reason: "The override may have already been consumed or the ID is incorrect.",
-        fix: "Run `btrain override list` to see active overrides, or grant a new one with `btrain override grant`.",
+        message: `Override ${record.id} is for \`${record.action}\`, not \`${action}\`.`,
+        reason: "The override's action does not match the requested action.",
+        fix: `Use --action ${record.action} or grant a new override for \`${action}\`.`,
       })
     }
-  } else {
-    record = overrides.find((candidate) => candidate.action === action && (candidate.laneId || "") === laneId) || null
-    if (!record) {
+    if (laneId && (record.laneId || "") !== laneId) {
       throw new BtrainError({
-        message: `No active override found for \`${action}\` ${laneId ? `on lane ${laneId}` : "at repo scope"}.`,
-        reason: "No matching pending override exists for this action and scope.",
-        fix: `Grant one first: btrain override grant --action ${action}${laneId ? ` --lane ${laneId}` : ""} --requested-by <agent> --confirmed-by <human> --reason "..."`,
+        message: `Override ${record.id} is scoped to lane ${record.laneId || "(repo)"}, not lane ${laneId}.`,
+        reason: "The override's lane scope does not match the requested lane.",
+        fix: `Use --lane ${record.laneId || ""} to match the override, or grant a new override for lane ${laneId}.`,
       })
     }
-  }
 
-  if (record.action !== action) {
-    throw new BtrainError({
-      message: `Override ${record.id} is for \`${record.action}\`, not \`${action}\`.`,
-      reason: "The override's action does not match the requested action.",
-      fix: `Use --action ${record.action} or grant a new override for \`${action}\`.`,
+    await fs.rm(record.path, { force: true })
+    await appendWorkflowEvent(repoRoot, config, {
+      type: "override-consumed",
+      actor: actorLabel,
+      laneId: record.laneId || "",
+      details: {
+        overrideId: record.id,
+        action: record.action,
+        scope: record.scope,
+        requestedBy: record.requestedBy,
+        confirmedBy: record.confirmedBy,
+        reason: record.reason,
+      },
     })
-  }
-  if (laneId && (record.laneId || "") !== laneId) {
-    throw new BtrainError({
-      message: `Override ${record.id} is scoped to lane ${record.laneId || "(repo)"}, not lane ${laneId}.`,
-      reason: "The override's lane scope does not match the requested lane.",
-      fix: `Use --lane ${record.laneId || ""} to match the override, or grant a new override for lane ${laneId}.`,
-    })
-  }
 
-  await fs.rm(record.path, { force: true })
-  await appendWorkflowEvent(repoRoot, config, {
-    type: "override-consumed",
-    actor: actorLabel,
-    laneId: record.laneId || "",
-    details: {
-      overrideId: record.id,
-      action: record.action,
-      scope: record.scope,
-      requestedBy: record.requestedBy,
-      confirmedBy: record.confirmedBy,
-      reason: record.reason,
-    },
+    return record
   })
-
-  return record
 }
 
 async function loadRegistry() {
@@ -5587,37 +5625,41 @@ async function compactLaneHandoffHistory(repoRoot, {
     }
   }
 
-  const content = await readText(handoffPath)
-  const entries = extractPreviousHandoffEntries(content)
-  const keptEntries = entries.slice(0, safeKeep)
-  const archivedEntries = entries.slice(safeKeep)
-  let archivePath = getHandoffArchivePath(repoRoot, config, laneId)
+  // Compaction rewrites the handoff file, so it takes the same lock as
+  // updateHandoff. Every caller runs it after its own locked publish returns.
+  return withFileLock(`${handoffPath}.lock`, async () => {
+    const content = await readText(handoffPath)
+    const entries = extractPreviousHandoffEntries(content)
+    const keptEntries = entries.slice(0, safeKeep)
+    const archivedEntries = entries.slice(safeKeep)
+    let archivePath = getHandoffArchivePath(repoRoot, config, laneId)
 
-  if (archivedEntries.length > 0) {
-    archivePath = await appendHandoffArchive(repoRoot, config, laneId, [...archivedEntries].reverse())
-    await writeText(handoffPath, replacePreviousHandoffsSection(content, keptEntries))
-    await appendWorkflowEvent(repoRoot, config, {
-      type: "history-compact",
-      actor: actorLabel,
+    if (archivedEntries.length > 0) {
+      archivePath = await appendHandoffArchive(repoRoot, config, laneId, [...archivedEntries].reverse())
+      await writeText(handoffPath, replacePreviousHandoffsSection(content, keptEntries))
+      await appendWorkflowEvent(repoRoot, config, {
+        type: "history-compact",
+        actor: actorLabel,
+        laneId,
+        details: {
+          keep: safeKeep,
+          archivedCount: archivedEntries.length,
+          keptCount: keptEntries.length,
+          archivePath,
+          handoffPath,
+        },
+      })
+    }
+
+    return {
       laneId,
-      details: {
-        keep: safeKeep,
-        archivedCount: archivedEntries.length,
-        keptCount: keptEntries.length,
-        archivePath,
-        handoffPath,
-      },
-    })
-  }
-
-  return {
-    laneId,
-    handoffPath,
-    archivePath,
-    archivedCount: archivedEntries.length,
-    keptCount: keptEntries.length,
-    keep: safeKeep,
-  }
+      handoffPath,
+      archivePath,
+      archivedCount: archivedEntries.length,
+      keptCount: keptEntries.length,
+      keep: safeKeep,
+    }
+  })
 }
 
 async function compactHandoffHistory(repoRoot, { config: providedConfig, laneId = "", keep = DEFAULT_HISTORY_KEEP, actorLabel = "btrain" } = {}) {
@@ -5749,10 +5791,9 @@ async function readSpilledNextActionBody(repoRoot, nextAction) {
   if (!relativePath) {
     return null
   }
-  const normalized = relativePath.startsWith(".btrain/")
-    ? relativePath
-    : relativePath
-  const absolute = path.resolve(repoRoot, normalized)
+  // Spill files are lane state: they live under the shared state root, which
+  // is the main checkout when repoRoot is a linked worktree.
+  const absolute = path.resolve(resolveStateRoot(repoRoot), relativePath)
   if (!(await pathExists(absolute))) {
     return { path: absolute, body: null, missing: true }
   }
