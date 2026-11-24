@@ -1,7 +1,7 @@
 # 023 — Cross-Lab Review by Default and Reviewer-Applied Fixes
 
 **Status**: Draft
-**Version**: 0.3.0
+**Version**: 0.3.3
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -129,6 +129,10 @@ silence_limit = "5m"       # no progress for this long ends one attempt
 attempt_max = "45m"        # hard cap on one attempt that keeps progressing
 reviewer_order = []        # optional preference among other-lab agents
 
+# Optional. Adds to the built-in quota and authentication patterns.
+[review.signals.codex]
+unavailable = ["usage limit"]
+
 [review.fixes]
 enabled = true
 max_files = 3
@@ -184,7 +188,9 @@ rejected when the named reviewer is same-lab and at least one other-lab agent
 with a `cli` runner is configured. The error names the other-lab agents and
 the fix: name one of them, pass `--reviewer any-other`, or attach a
 human-confirmed override (`btrain override grant --action same-lab-review
---lane <id>`, a new override action added by this spec). This keeps spec 015
+--lane <id>`, a new override action added by this spec). An agent with no
+declared lab counts as same-lab for this rule, because btrain cannot show
+that it is from another lab. This keeps spec 015
 FR-9 intact: inference still never replaces
 a valid reviewer, and "valid" now includes the lab rule.
 
@@ -200,7 +206,9 @@ During the window btrain tries other-lab reviewers one at a time:
 - An attempt that fails its probe, or ends with a configured quota or
   authentication signal, is `tool_unavailable`. A provider refusal is
   `policy_blocked`. btrain tries the next reviewer immediately. These are the
-  failure classes of spec 017 FR-8.
+  failure classes of spec 017 FR-8. The signals are exit codes and output
+  patterns that btrain keeps for each runner executable.
+  `[review.signals.<executable>]` adds patterns for one repository.
 - An attempt with no pickup (FR-5) within `[review].silence_limit` of its
   dispatch, or with no progress signal for `silence_limit` after pickup, is
   `unresponsive`. btrain stops its runner and tries the next reviewer.
@@ -228,6 +236,12 @@ can continue a request whose process ended. With no process running, nothing adv
 the request up applies the three conditions above. Elapsed wall time alone
 never sends a review to the same lab.
 
+Output on a runner's stream is visible only to the process that started the
+runner. A later process that continues a request counts the persisted
+signals only: the pickup and the reviewer's lane-scoped btrain commands. It
+ends an open attempt that has neither within `silence_limit` as
+`unresponsive`.
+
 When no other-lab agent with a `cli` runner is configured at all, there is
 nothing to wait for. The same-lab tier applies at once with reason
 `no-other-lab-configured`, and `btrain doctor` warns on every run.
@@ -248,6 +262,30 @@ from the reviewer of the lane's active attempt, and:
 
 A duplicate verdict changes nothing.
 
+**The lane's head.** The review request records the branch the owner was on
+and its commit. Later checks read that branch, so a reviewer working from
+another checkout of the repository sees the same head. With a detached
+checkout there is no branch to read, so the head is the recorded commit,
+and a pickup or a verdict is accepted only from a checkout that is at that
+commit.
+
+**An attempt with no dispatch.** A reviewer session started by hand, and a
+reviewer with a `notify` runner, are never dispatched. When the lane's
+recorded reviewer picks up a `needs-review` lane that has no open attempt,
+btrain opens an attempt for it at the request's head. Its tier comes from
+that reviewer's lab, and a reviewer with no lab is recorded as `same-lab`.
+An attempt opened this way needs what a dispatch would need. For a
+same-lab or no-lab reviewer that means no other-lab agent with a `cli`
+runner is configured, or a `same-lab-review` override was used for the
+lane, or a fallback (FR-7) put that reviewer there. Otherwise no attempt
+opens, and the message gives the FR-3 fix. A
+verdict with no open attempt is rejected, and the message tells the reviewer
+to run `btrain handoff --lane <id>` first.
+
+**A reviewer change by a lane agent.** When a lane agent changes the
+reviewer during an open request (row 20), the open attempt ends. The new
+reviewer's attempt starts at its dispatch or its pickup.
+
 **Pickup.** The attempt records a pickup time the first time its reviewer
 runs `btrain handoff --lane <id>` under its own verified identity. A read by
 any other process, such as the Slack listener of spec 025, is not a pickup. Every dispatched
@@ -267,13 +305,15 @@ with no transition to undo.
 The same record applies to a fix confirmation (FR-12): the lane shows as
 `confirming-fix` once the owner picks it up.
 
-This requires three spec 015 legacy rows to be enforced. While L8 and L15
+This requires four spec 015 legacy rows to be enforced. While L8 and L15
 are advisory, a verdict from an actor that is not the recorded reviewer is
-accepted with an advisory. While L4 is advisory, `btrain handoff update
+accepted with an advisory. While L9 is advisory, the reviewer's approval of
+a lane whose lock coverage is suspended still enters `ready-for-pr`, where
+row 4 refuses it. While L4 is advisory, `btrain handoff update
 --status ready-for-pr` moves a lane into the PR flow with no verdict at all;
 the caller rejects only `--status resolved` today. Until L4 stops accepting
-`ready-for-pr`, `pr-review`, and `ready-to-merge` as targets, and L8 and L15
-are retired, the invariant in the Decision does not hold.
+`ready-for-pr`, `pr-review`, and `ready-to-merge` as targets, and L8, L9,
+and L15 are retired, the invariant in the Decision does not hold.
 
 #### FR-6: Late verdicts
 
@@ -290,13 +330,22 @@ A verdict from an other-lab attempt that was marked `unresponsive`:
 
 #### FR-7: Fallback is a system reassignment
 
-Changing the lane's reviewer for fallback or recovery is spec 015 row 20
-(Reassign) with actor `system`. The event records the reason
-(`other-lab-unavailable`, `other-lab-recovered`, `no-other-lab-configured`),
+Every change of the lane's reviewer by btrain is spec 015 row 20 (Reassign)
+with actor `system`: moving to the next other-lab reviewer, fallback, and
+recovery. The lane's recorded reviewer is therefore always the reviewer of
+the active attempt, and the gate and the hooks read that one field. The
+event records the reason (`next-other-lab`, `other-lab-unavailable`,
+`other-lab-recovered`, `no-other-lab-configured`),
 the previous reviewer, the new reviewer, and the attempts that led to it.
 Spec 017 FR-7 proposes the same designation. The row's existing guards still
 apply: owner and reviewer differ, the reviewer is not in the author history,
 and no PR is linked. The system changes the reviewer only, never the owner.
+
+A lane can be `needs-review` with a PR linked, after PR feedback and the
+owner's re-handoff. Row 20 refuses a reassignment there. That lane keeps its
+recorded reviewer: btrain dispatches only that reviewer and tries it again
+at each `silence_limit`. When the window ends with no verdict, the problem
+escalates to a person (spec 024 FR-15).
 
 #### FR-8: Same-lab reviews run in a fresh session and are labeled
 
@@ -485,7 +534,7 @@ Transition-table changes:
 | 1 | Claim | unchanged | unchanged | unchanged | unchanged | adds the lab rule of FR-3 | unchanged |
 | 3, 4, 5 | verdict rows | unchanged | unchanged | unchanged | reviewer of the active attempt | adds attempt and head match (FR-5) | unchanged |
 | 20 | Reassign | unchanged | unchanged | unchanged | adds `system`, for the reviewer only | reason recorded (FR-7); the existing distinct-owner, author-history, and no-PR guards | unchanged |
-| L3, L4, L8, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, and `ready-to-merge` as targets; L3 and L4 never take `fix-confirmation` as a source | unchanged | L8 and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
+| L3, L4, L8, L9, L15 | legacy | unchanged | unchanged | L4 loses `ready-for-pr`, `pr-review`, `ready-to-merge`, and `fix-confirmation` as targets; L3 and L4 never take `fix-confirmation` as a source | unchanged | L8, L9, and L15 retired, L4 narrowed, before this spec's rows are enforced (FR-5) | unchanged |
 
 `fix-confirmation` holds locks like any active status, so rows 17 and 18
 cover it. It is not a source for row 13: spec 006 FR-29 lists the statuses a
@@ -494,7 +543,7 @@ lane may enter `repair-needed` from, and `RepairClear` returns a lane to
 repair while in `fix-confirmation` escalates to a person (spec 024 FR-15).
 Legacy rows L3 and L4 are narrowed the same way, so no `handoff update
 --status` leaves `fix-confirmation` except the owner's hand-off back to
-review (AmendFix). It is not a PR-flow status.
+review (AmendFix), and none enters it. It is not a PR-flow status.
 
 Model changes in `specs/tla/LaneLock.tla` and `lane-lock-model.mjs`:
 
@@ -589,6 +638,19 @@ Rule 2:
 - With the first other-lab reviewer silent past 15 minutes and a second one
   never tried, no same-lab reviewer is assigned until the second has had an
   attempt.
+- `handoff update --status fix-confirmation` is rejected for every actor.
+- The reviewer's `handoff resolve` on a lane whose locks were force-released
+  is rejected until coverage is restored.
+- A reviewer started by hand runs `btrain handoff --lane <id>` and then
+  `handoff resolve`: the verdict is accepted and bound to the attempt that
+  pickup opened. The same resolve with no pickup first is rejected.
+- A reviewer that runs the review from another checkout of the repository
+  can resolve when the lane's branch has not moved.
+- When btrain moves a review from one other-lab reviewer to the next, the
+  lane's recorded reviewer changes with it and the event carries reason
+  `next-other-lab`.
+- A `needs-review` lane with a linked PR keeps its reviewer when that
+  reviewer is silent, and escalates when the window ends.
 - With the owner's runtime unavailable, a lane in `fix-confirmation` stays
   there and escalates. No other agent can run `handoff confirm-fix`.
 - The reviewer's `handoff update --status needs-review` from
@@ -624,8 +686,8 @@ with one exception. These parts are not covered above:
   enforcement, retires legacy row L8, and adds the regression that rejects
   an owner's approval from `needs-review`. Spec 015 names it as the work
   that started L8's advisory period. It is a prerequisite of FR-5 here, and
-  this spec extends it to retire L15 and to narrow L4 (FR-5). Until all three
-  are enforced, the invariant in the Decision does not hold.
+  this spec extends it to retire L9 and L15 and to narrow L4 (FR-5). Until
+  all four are enforced, the invariant in the Decision does not hold.
 
 - **Single-agent repositories.** A repository that configures one agent has
   no distinct same-lab identity. Spec 017's `<runtime>#review` identity (its

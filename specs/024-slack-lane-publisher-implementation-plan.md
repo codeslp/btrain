@@ -86,6 +86,21 @@ drop one entry).
 | `slack/cli.mjs` | `setup`, `test`, `status`, `flush`, `refresh`, `channels` | No |
 | `slack/index.mjs` | `offerWorkflowEvent`, `offerDispatchFailure`, `deliverAfterCommand` | No |
 
+Four of these modules are also used by the listener of spec 025, and are
+built for that from the start:
+
+- `text.mjs` exports the whole pipeline and each of its four steps. Each
+  step returns the text and whether it changed it.
+- `client.mjs` exports its low-level call with the error classes. That call
+  can send a GET request with query parameters as well as a JSON POST.
+- `lock.mjs` takes the lock's path as an argument.
+- `deliver.mjs` takes its time budget from the caller and can be called for
+  one named repository.
+
+The `slack` block in `cli.mjs` hands `slack/cli.mjs` one object of reader
+functions, so a later command can need another reader without a change to
+that call.
+
 `offerWorkflowEvent(repoRoot, config, event)` gets everything it needs as
 arguments. `deliverAfterCommand` takes a `readLanes` function from `cli.mjs`,
 which is how delivery reads current lane state without importing core.
@@ -273,7 +288,9 @@ channel and the token. WS2 can be split so that the modules land first and the
 
 1. `test/helpers/fake-slack.mjs`: a `fetch` replacement that records every
    call, returns a `ts` for posts, and can be told to return any Slack error,
-   an HTTP 429 with `Retry-After`, a network error, or to never resolve.
+   an HTTP 429 with `Retry-After`, a network error, or to never resolve. Its
+   scripted responses are keyed by Slack method name, so spec 025 can add
+   methods.
 2. One test for each invariant, written against the planned module interfaces
    and marked skipped with the workstream that will enable it. `npm test`
    stays the same as `main`.
@@ -283,7 +300,8 @@ channel and the token. WS2 can be split so that the modules land first and the
 
 ### WS1: text, events, rendering
 
-1. `text.mjs`: the pipeline above, as one exported function.
+1. `text.mjs`: the pipeline above, as one exported function, with each step
+   also exported on its own.
 2. Export `SECRET_PATTERNS` from `review/code-rules.mjs` and add two patterns:
    a Slack webhook URL and a GitHub fine-grained token. `btrain review code`
    then reports those two as hardcoded secrets as well. Add cases to
@@ -418,8 +436,9 @@ channel and the token. WS2 can be split so that the modules land first and the
    read.
 2. The merge announcement: on `ready-to-merge`, a reply with the mention list
    and the PR link. `slack/remote.mjs` builds the link from the remote PR flow
-   opens the PR on: `upstream`, then `github`, then `origin`, the order
-   `resolveBaseRemote` uses. A fork's `origin` is the fork, so `origin` alone
+   opens the PR on. `resolveBaseRemote` takes the remote that
+   `gh repo set-default` marked, else `upstream`, then `github`, then
+   `origin`, else the first remote. A fork's `origin` is the fork, so `origin` alone
    would link the wrong repository. The parser accepts `https://`, `ssh://`,
    and the `git@host:owner/repo.git` form. Only a `github.com` host gets a
    link; any other gets "PR #N" with none. `pr-flow.mjs` keeps its own
@@ -437,8 +456,9 @@ channel and the token. WS2 can be split so that the modules land first and the
      others.
    - A first `repair-needed` has no mention; its escalation has one.
    - `ready-to-merge` has the link and a mention; `merged` has neither.
-   - The link uses `upstream` when it exists, parses an SSH remote, and is
-     omitted for a host that is not `github.com`.
+   - The link uses the remote marked by `gh repo set-default`, else
+     `upstream` when it exists, parses an SSH remote, and is omitted for a
+     host that is not `github.com`.
    - A failed `pins.add` is reported by `btrain slack status` and blocks
      nothing.
    - A repository-wide search finds no real Slack token, workspace ID, channel
@@ -476,6 +496,8 @@ After spec 023 is implemented:
      not picked it up within `[review].other_lab_window`.
    - A lane that needs repair while in `fix-confirmation` mentions a person at
      once.
+   - A reviewer that stays silent on a lane with a linked PR mentions a
+     person when the window ends with no verdict.
    - No reviewer available at any tier, and a same-lab review that needs
      escalation, mention a person. `dispatch-failed` stops mentioning.
 3. A test for each condition, with a fake clock.

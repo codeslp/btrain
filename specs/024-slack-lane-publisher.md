@@ -1,7 +1,7 @@
 # 024 — Slack Lane Publisher
 
 **Status**: Draft
-**Version**: 0.4.0
+**Version**: 0.4.1
 **Author**: btrain (claude)
 **Date**: 2026-11-23
 
@@ -377,6 +377,7 @@ process gives up, not when the problem appears.
 | Late request for changes | The owner is dispatched to acknowledge it (spec 023 FR-6) | It is still unacknowledged after `[review].other_lab_window` |
 | Outside-lab PR bot is silent | The next outside-lab bot is requested (spec 023 FR-9) | Every outside-lab bot is silent past the pending window |
 | Stale or inconsistent lane state | The watchdog's safe repairs (spec 006 FR-2) | The lane enters `repair-needed` and that repair escalates |
+| Reviewer silent on a lane with a linked PR | The recorded reviewer is tried again; the reviewer cannot be changed while a PR is linked (spec 023 FR-7) | No verdict when `[review].other_lab_window` ends |
 | Reviewer fix waiting for the owner | The owner is dispatched to confirm it (spec 023 FR-12) | The owner has not picked it up within `[review].other_lab_window` |
 | Lane needs repair while in `fix-confirmation` | Nothing automatic; that status cannot enter `repair-needed` (spec 023) | At once |
 
