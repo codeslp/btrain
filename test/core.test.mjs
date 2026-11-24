@@ -2602,16 +2602,16 @@ describe("spec 016 WS3: repair decisions and the FR-5 advisory stage", () => {
     await rmDir(tmpDir)
   })
 
-  it("keeps the reviewer when the reviewer hands off (FR-9) and records the L3 advisory", async () => {
+  it("refuses an in-progress handoff from the reviewer and keeps the assigned peer", async () => {
     const result = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "reviewer"), tmpDir)
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /warning: transition-advisory L3: only the lane owner should move `in-progress -> needs-review`/)
-    assert.match(result.stdout, /peer reviewer: reviewer/)
-    assert.match(result.stdout, /active agent: writer/)
-    const events = await readLaneEvents(tmpDir, "a")
-    const update = lastEventOfType(events, "update")
-    assert.equal(update.details["transition-advisory"], "L3")
-    assert.equal(update.after.reviewer, "reviewer")
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /spec 015 L3, enforced/)
+    const beforeApproval = await readLaneEvents(tmpDir, "a")
+    assert.equal(lastEventOfType(beforeApproval, "update"), undefined)
+    const owner = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "writer"), tmpDir)
+    assert.equal(owner.code, 0, owner.stderr)
+    assert.match(owner.stdout, /peer reviewer: reviewer/)
+    assert.match(owner.stdout, /active agent: writer/)
   })
 
   it("records self-repair-audit only when the owner declares repair on their own lane (Q7)", async () => {

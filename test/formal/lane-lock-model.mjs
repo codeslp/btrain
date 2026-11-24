@@ -380,13 +380,14 @@ export class LaneLockModel {
       return this.#reject("lock-state-mismatch")
     }
 
-    // Implementation mirror: patchHandoff validates the target status name,
-    // the lock-state sync, and reason codes — but not the source status and
-    // not the acting agent. Any modeled target is accepted from any status.
-    // On a never-claimed lane it crashes reading the missing handoff file.
+    // The implementation mirror enforces the L3 retirement for in-progress.
+    // Other legacy updates keep their advisory behavior and lock checks.
     if (this.mode === "implementation") {
       if (!s.fileExists) return this.#reject("no-handoff-file")
       if (this.#coverageMismatch(lane)) return this.#reject("lock-state-mismatch")
+      if (s.status === "in-progress" && status === "needs-review" && actor !== s.owner) {
+        return this.#reject("needs-review-requires-owner")
+      }
       // Every modeled update target is an active status: patchHandoff
       // requires locked files and re-acquires them from the handoff record.
       if (s.lockedFiles.length === 0) return this.#reject("active-status-needs-locks")
@@ -652,6 +653,7 @@ export class LaneLockModel {
     }
 
     if (this.mode === "implementation") {
+      if (s.status === "in-progress") return this.#reject("pr-outcome-from-invalid-status")
       // Non-terminal outcomes route through patchHandoff and inherit its
       // guards: crash on a missing handoff file, rejection while the handoff
       // record and registry disagree, locked files required for every active

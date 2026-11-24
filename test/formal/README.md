@@ -292,10 +292,44 @@ event. It also checked the `role-advisory` field and blank or `Idle`
 statuses. Rows this PR does not retire have moved since the table above: L4
 last 2026-10-13T23:15:41.026Z, L10 2026-10-14T01:43:51.039Z (a pr-review
 reassign, not idle), and L11 2026-10-13T23:16:31.297Z. The 2026-10-20 audit
-refreshes the table. If FR-5 is read as the whole row rather than the
-retired idle slice, L10 moves this PR's bound to 2026-10-21T01:43:51.039Z
-and keeps moving while active-lane reassignments continue; that reading is
-an open decision for the maintainer.
+refreshes the table. FR-5 measures the whole row. At the time, the active L10 event moved the
+bound to 2026-10-21T01:43:51.039Z.
+
+#### 2026-11-24 audit reconciliation
+
+The audit found 37 registrations, 17 live event directories, and one
+preserved advisory event. It reported 12 gaps from deleted checkouts. The
+archived Cursor transcript `98425aca-e4d2-43ce-b5c9-ee3835e2cc28` accounts for
+11 of them. Three full runs of `cursor-runner-red-team.test.mjs` registered
+two, three, and three fixtures. Three filtered runs registered one fixture
+each. The counts and order match the 11 consecutive registrations with the
+`btrain-cursor-rt-` prefix, from 15:43:18Z through 15:44:24Z. In these
+fixtures, btrain ran `init`, `handoff claim`, and `loop --dry-run` only.
+The test set review states directly in fixture files for dry-run checks.
+None of those operations could emit an advisory for a row in this PR. The
+twelfth gap is the lane g reviewer fixture. Its preserved snapshot and the
+2026-10-14 review record identify the three rejected writes described above.
+
+| Row | Latest recorded advisory (UTC) | Seven-day bound (UTC) |
+| --- | --- | --- |
+| L2 | 2026-10-13 19:15:31 | 2026-10-20 19:15:31 |
+| L3 | 2026-11-24 17:02:12 | 2026-12-01 17:02:12 |
+| L5 | 2026-10-08 14:25:18 | 2026-10-15 14:25:18 |
+| L6 | 2026-11-24 16:18:38 | 2026-12-01 16:18:38 |
+| L10 | 2026-11-24 16:50:33 | 2026-12-01 16:50:33 |
+
+FR-5 measures advisory events for the entire row. The latest idle L6 event
+was 2026-10-16 at 02:32:27Z. No idle L10 advisory was found. The recent
+active L6 and L10 events still block enforcement of their idle slices.
+Run a fresh audit before requesting merge review.
+
+With seed `1167269621` and 15 runs, the contract harness reported two L3
+events where a non-owner entered `needs-review` from `in-progress`, and two
+L5 events where PR polling applied a non-terminal outcome to an
+`in-progress` lane without a recorded PR. They are distinct from the L4
+direct PR-link shortcut. After enforcement of these two in-progress paths, the same run passed all
+98 tests with no candidate findings. Other L3 and L5 source states stay in
+advisory mode. Other seeds can still surface those or other legacy paths.
 
 Run from any checkout. This command reads the registry, the pruned-evidence
 snapshots, and event logs only. It includes disabled repositories and test
@@ -313,15 +347,23 @@ const { repos } = JSON.parse(fs.readFileSync(path.join(home, "repos.json"), "utf
 const rows = {}, gaps = []
 let withEvents = 0, snapshotEvents = 0
 const tally = (event, repository) => {
-  const id = event.details?.["transition-advisory"]
-  if (!id) return
-  const row = rows[id] ??= { count: 0, idle: 0, last: "", repository: "" }
-  row.count += 1
-  if (event.before?.status === "idle") row.idle += 1
-  if (event.recordedAt > row.last) {
-    row.last = event.recordedAt
-    row.repository = repository
-    row.bound = new Date(Date.parse(row.last) + 7 * 86400000).toISOString()
+  const ids = new Set([event.details?.["transition-advisory"], event.details?.["role-advisory"]].filter(Boolean))
+  for (const id of ids) {
+    if (!Number.isFinite(Date.parse(event.recordedAt))) {
+      gaps.push(`Advisory ${id} has no valid timestamp: ${repository}`)
+      continue
+    }
+    const row = rows[id] ??= { count: 0, idle: 0, last: "", lastIdle: "", repository: "" }
+    row.count += 1
+    if (String(event.before?.status ?? "").trim().toLowerCase() === "idle") {
+      row.idle += 1
+      if (event.recordedAt > row.lastIdle) row.lastIdle = event.recordedAt
+    }
+    if (event.recordedAt > row.last) {
+      row.last = event.recordedAt
+      row.repository = repository
+      row.bound = new Date(Date.parse(row.last) + 7 * 86400000).toISOString()
+    }
   }
 }
 for (const repo of repos) {

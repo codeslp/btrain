@@ -62,9 +62,9 @@ export const TRANSITION_ROWS = Object.freeze([
   // ledger entry 13. Recheck them before merging this enforcement change.
   // The active-status slices of L6 and L10 stay advisory.
   row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "enforced", "legacy", "$all"),
-  row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy"),
+  row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy", ["in-progress"]),
   row("L4", "legacy", "handoff update --status", "$any", "$any", "any", "valid status", "per target", "forbidden by 002 and 014", "advisory", "legacy"),
-  row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "advisory", "legacy"),
+  row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "advisory", "legacy", ["in-progress"]),
   row("L6", "legacy", ["handoff update --files", "doctor repair"], "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope and resync designations (Q2)", "advisory", "legacy", ["idle"]),
   row("L7", "legacy", "handoff resolve", ["repair-needed"], "resolved", "any", "row 15 guard unmet", "release", "forbidden by 006 FR-29", "advisory", "legacy"),
   row("L8", "legacy", "handoff resolve", ["needs-review"], ["ready-for-pr", "resolved"], "any", "actor is not the recorded reviewer", "retain or release", "forbidden by 002 PR-flow row 1", "advisory", "legacy"),
@@ -254,17 +254,18 @@ function enforcedRejection(row, state, event, input) {
   const target = input.to ?? from
   const move = target !== from ? `\`${from} -> ${target}\`` : `\`${from}\``
   const actor = input.actor || "unknown"
-  // Every retired slice so far has an idle source: the lane was never
-  // claimed, so the fix is to claim it. A later retirement with another
-  // source adds its own hint here.
   const idle = from === "idle"
+  const fixes = {
+    L3: "Have the lane owner request peer review.",
+    L5: "Complete peer review and link the PR from ready-for-pr before polling.",
+  }
   return {
     rowId: row.id,
     message: `${idle ? "Lane is idle: " : ""}${event} ${move} by \`${actor}\` is outside the designated contract (spec 015 ${row.id}, enforced).`,
     reason: `${idle ? "An idle lane has no owner, reviewer, task, or locks; " : ""}${row.owner}.`,
     fix: idle
       ? 'Claim the lane first: btrain handoff claim --lane <id> --task "..." --owner <agent> --reviewer <agent> --files "..."'
-      : "Use the designated command for this transition (`btrain transitions` lists the rows).",
+      : fixes[row.id] || "Use the designated command for this transition (`btrain transitions` lists the rows).",
   }
 }
 

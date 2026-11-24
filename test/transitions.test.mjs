@@ -308,16 +308,17 @@ describe("lane transition contract", () => {
         assert.ok(["advisory", "enforced"].includes(row.state), `row ${row.id}: ${row.state}`)
       }
     }
-    // spec 015 FR-5 retirements so far (2026-10-13): L2 as a whole; L6 and
-    // L10 for an idle source only. Everything else is still in its window.
+    // FR-5 retirement covers the complete L2 row and selected source states.
     assert.equal(byId.get("L2").state, "enforced")
     assert.equal(byId.get("L2").enforced, "$all")
+    assert.deepEqual(byId.get("L3").enforced, ["in-progress"])
+    assert.deepEqual(byId.get("L5").enforced, ["in-progress"])
     assert.deepEqual(byId.get("L6").enforced, ["idle"])
     assert.deepEqual(byId.get("L10").enforced, ["idle"])
     assert.equal(byId.get("L6").state, "advisory")
     assert.equal(byId.get("L10").state, "advisory")
     for (const row of TRANSITION_ROWS) {
-      if (!["L2", "L6", "L10"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
+      if (!["L2", "L3", "L5", "L6", "L10"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
     }
     assert.equal(byId.get("20").actor, "reassign authority")
     assert.deepEqual(byId.get("8").from, ["pr-review", "ready-to-merge", "changes-requested"])
@@ -325,9 +326,13 @@ describe("lane transition contract", () => {
 
   it("classifies advisory legacy matches, including the FR-29 repair cases on L4", () => {
     const lane = { status: "in-progress", owner: "codex", reviewer: "claude" }
-    const reviewerHandoff = applyTransition(lane, "handoff update --status", { to: "needs-review", actor: "claude" })
-    assert.equal(reviewerHandoff.row.id, "L3")
-    assert.equal(advisoryRowId(reviewerHandoff.row, lane, { to: "needs-review" }), "L3")
+    assert.throws(
+      () => applyTransition(lane, "handoff update --status", { to: "needs-review", actor: "claude" }),
+      { rowId: "L3" },
+    )
+    const changesRequested = { ...lane, status: "changes-requested" }
+    const reviewerHandoff = applyTransition(changesRequested, "handoff update --status", { to: "needs-review", actor: "claude" })
+    assert.equal(advisoryRowId(reviewerHandoff.row, changesRequested, { to: "needs-review" }), "L3")
 
     const repairExit = applyTransition(
       { status: "repair-needed", owner: "codex", reviewer: "claude" },
@@ -379,7 +384,10 @@ describe("lane transition contract", () => {
     assert.equal(applyTransition(linked, "pr-poll", { to: "ready-to-merge", actor: "system", ...prFlow }).row.id, "10")
     assert.equal(applyTransition(linked, "pr-poll", { to: "pr-review", actor: "system", prLinked: true, prFlowChangesRequested: false }).row.id, "L5")
     assert.equal(applyTransition({ status: "ready-to-merge", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "8")
-    assert.equal(applyTransition({ status: "in-progress", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "L5")
+    assert.throws(
+      () => applyTransition({ status: "in-progress", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }),
+      { rowId: "L5" },
+    )
 
     const lane = { status: "in-progress", owner: "codex", reviewer: "claude" }
     assert.equal(applyTransition(lane, "handoff update --reassign", { actor: "codex", ownerChanged: true, distinctReviewer: true }).row.id, "20")
