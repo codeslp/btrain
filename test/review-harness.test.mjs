@@ -87,7 +87,7 @@ describe("fake runner", () => {
       },
     })
     const logPath = path.join(root, "log.jsonl")
-    const env = { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath, logPath, envKeys: ["EXTRA_KEY"] }), BTRAIN_AGENT: "codex-reviewer", BTRAIN_LANE: "a", EXTRA_KEY: "x" }
+    const env = { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath, logPath, envKeys: ["EXTRA_VAR"] }), BTRAIN_AGENT: "codex-reviewer", BTRAIN_LANE: "a", EXTRA_VAR: "x" }
     const result = await runShim(shim, { cwd: root, env, args: ["exec", "--json", "-C", root, "the prompt"] })
     assert.equal(result.code, 3)
     assert.deepEqual(result.lines.map((item) => item.line), ["first", "second"])
@@ -99,7 +99,7 @@ describe("fake runner", () => {
     assert.equal(start.lane, "a")
     assert.equal(start.executable, "codex")
     assert.deepEqual(start.argv, ["exec", "--json", "-C", root, "the prompt"])
-    assert.equal(start.env.EXTRA_KEY, "x")
+    assert.equal(start.env.EXTRA_VAR, "x")
     assert.equal(start.env.BTRAIN_AGENT, "codex-reviewer")
     assert.ok(start.envKeys.includes("PATH"))
     const exit = (await readFakeRunnerLog(logPath)).find((entry) => entry.kind === "exit")

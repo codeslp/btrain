@@ -77,23 +77,26 @@ export function runnerKindOf(config, agent) {
  */
 export function explainAgentLab(config, agent) {
   const declared = stripTomlComment(lookupByAgent(tableOf(config?.agents?.labs), agent))
+  let invalid
   if (typeof declared === "string" && declared.trim()) {
     const lab = declared.trim().toLowerCase()
-    const executable = runnerExecutable(runnerValueOf(config, agent))
+    if (LAB_LABEL.test(lab)) {
+      return { lab, source: "agents.labs", executable: runnerExecutable(runnerValueOf(config, agent)) }
+    }
     // A value that is not a label (a typo, or text the TOML parser kept) is
-    // no lab, never a lab that would make a same-lab agent look other-lab.
-    // `invalid` carries it for a doctor warning.
-    return LAB_LABEL.test(lab)
-      ? { lab, source: "agents.labs", executable }
-      : { lab: "", source: "", executable, invalid: declared }
+    // never used as a lab: it could make a same-lab agent look other-lab. The
+    // runner's lab still applies, which is never less safe, and `invalid`
+    // carries the value for a doctor warning.
+    invalid = declared
   }
+  const extra = invalid === undefined ? {} : { invalid }
   const runnerValue = runnerValueOf(config, agent)
   if (!runnerValue || runnerKindOf(config, agent) === "notify") {
-    return { lab: "", source: "", executable: "" }
+    return { lab: "", source: "", executable: "", ...extra }
   }
   const executable = runnerExecutable(runnerValue)
   const lab = labOfExecutable(executable)
-  return { lab, source: lab ? "runner" : "", executable }
+  return { lab, source: lab ? "runner" : "", executable, ...extra }
 }
 
 /** The lab of an agent, or "" when it has none (FR-1). */

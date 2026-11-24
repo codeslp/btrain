@@ -200,8 +200,10 @@ function openAttemptEvents({ head, reviewer = AGENTS.otherLabA.name, attemptId =
 }
 
 // A short review policy, so a test of the request loop runs its window,
-// silence limit, and re-probe in seconds, inside COMMAND_TIMEOUT_MS.
-const SHORT_REVIEW = '[review]\nother_lab_window = "3s"\nsilence_limit = "1s"\nattempt_max = "6s"'
+// silence limit, and re-probe in seconds, inside COMMAND_TIMEOUT_MS. The
+// silence limit leaves a fake runner time to start node and pick up even on
+// a loaded CI machine.
+const SHORT_REVIEW = '[review]\nother_lab_window = "6s"\nsilence_limit = "2500ms"\nattempt_max = "10s"'
 
 /**
  * The seven functions `runReviewRequest` takes (plan, "Modules"), over an
@@ -358,9 +360,11 @@ describe("spec 023 invariants", () => {
     const firstHead = await repo.head()
 
     // The recorded reviewer, whose attempt has ended: no active attempt is its.
+    // `failed`, not `unresponsive`: FR-6 applies a late verdict from an
+    // unresponsive other-lab attempt at the same head, by design.
     await repo.appendEvents([
       ...openAttemptEvents({ head: firstHead }),
-      { type: "review-attempt-ended", actor: AGENTS.owner.name, details: { attemptId: "t1", outcome: "unresponsive", detail: "no-pickup" } },
+      { type: "review-attempt-ended", actor: AGENTS.owner.name, details: { attemptId: "t1", outcome: "failed", detail: "exit 2" } },
     ])
     await resolve()
     assert.match(await repo.handoffFile(), /^Status: needs-review$/m, "a verdict from an ended attempt changes nothing")
@@ -379,7 +383,7 @@ describe("spec 023 invariants", () => {
   })
 
   it("4. while a lane is needs-review with an open request, its recorded reviewer is the active attempt's reviewer", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
-    const repo = await createReviewRepo({ review: SHORT_REVIEW })
+    const repo = await createReviewRepo()
     const quota = await fs.readFile(path.join(SAMPLES, "codex-usage-limit.txt"), "utf8")
     await repo.scenario({
       agents: {
@@ -503,10 +507,14 @@ describe("spec 023 invariants", () => {
     assert.match(await repo.handoffFile(), /^Status: needs-review$/m)
     const events = await repo.events()
     assert.equal(events.filter((event) => event.type === "resolve").length, 0)
-    // The quota exit, then the re-probe at the silence limit that exits 2.
-    assert.equal((await readFakeRunnerStarts(repo.logPath, AGENTS.otherLabA.name)).length, 2)
+    // The quota exit, then a re-probe at each silence limit until the window
+    // ends (FR-4), each exiting 2.
+    const starts = await readFakeRunnerStarts(repo.logPath, AGENTS.otherLabA.name)
+    assert.ok(starts.length >= 2, `re-probed after the quota exit: ${starts.length} starts`)
     const ended = events.filter((event) => event.type === "review-attempt-ended")
-    assert.deepEqual(ended.map((event) => event.details.outcome), ["tool_unavailable", "failed"])
+    assert.equal(ended.length, starts.length, "every attempt ended with a recorded outcome")
+    assert.equal(ended[0].details.outcome, "tool_unavailable")
+    assert.ok(ended.slice(1).every((event) => event.details.outcome === "failed"), JSON.stringify(ended.map((event) => event.details.outcome)))
     // No same-lab candidate is configured, so the request ends in an escalation.
     assert.equal(events.filter((event) => event.type === "review-escalation").length, 1)
   })

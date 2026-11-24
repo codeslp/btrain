@@ -84,16 +84,26 @@ describe("resolveAgentLab: the FR-1 sources of a lab", () => {
     assert.equal(resolveAgentLab(cfg, "someone"), "google")
   })
 
-  it("gives no lab, never a wrong one, for an [agents.labs] value that is not a label", () => {
+  it("never uses an [agents.labs] value that is not a label, and falls back to the runner's lab", () => {
     for (const value of ['"anthropic"  x', "open ai", "OpenAI!", "-x"]) {
-      const cfg = config({ runners: { someone: "claude -p" }, labs: { someone: value } })
-      const result = explainAgentLab(cfg, "someone")
-      assert.equal(result.lab, "", value)
-      assert.equal(result.invalid, value)
+      for (const [runner, lab] of [["claude -p", "anthropic"], ["codex exec", "openai"], ["agent -p", ""]]) {
+        const cfg = config({ runners: { someone: runner }, labs: { someone: value } })
+        const result = explainAgentLab(cfg, "someone")
+        assert.equal(result.lab, lab, `${value} with ${runner}`)
+        assert.equal(result.invalid, value)
+      }
     }
-    // A same-lab reviewer with a garbled lab stays same-lab: no lab is same-lab.
-    const cfg = config({ active: ["claude", "claude-reviewer"], runners: { claude: "claude -p", "claude-reviewer": "claude -p" }, labs: { "claude-reviewer": "anthropic x" } })
-    assert.deepEqual(orderCandidates(cfg, { owner: "claude" }).otherLab, [])
+    // A garbled entry on a same-lab reviewer keeps it same-lab, and one on an
+    // other-lab reviewer keeps it other-lab.
+    const cfg = config({
+      active: ["claude", "claude-reviewer", "codex-reviewer"],
+      runners: { claude: "claude -p", "claude-reviewer": "claude -p", "codex-reviewer": "codex exec" },
+      labs: { "claude-reviewer": "openai x", "codex-reviewer": "openai!" },
+    })
+    const result = orderCandidates(cfg, { owner: "claude" })
+    assert.deepEqual(result.otherLab, ["codex-reviewer"])
+    assert.deepEqual(result.sameLab, ["claude-reviewer"])
+    assert.equal(explainAgentLab(cfg, "claude").invalid, undefined)
   })
 
   it("ignores an empty [agents.labs] entry and falls back to the runner", () => {
