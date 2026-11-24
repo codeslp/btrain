@@ -99,6 +99,5 @@ export function createFakeClock({ start = Date.UTC(2026, 10, 23, 12, 0, 0), auto
     /** Sleepers still waiting (manual mode). */
     pendingSleepers: () => sleepers.length,
   }
-  clock.sleep = clock.sleep.bind(clock)
   return clock
 }
