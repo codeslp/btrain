@@ -617,9 +617,9 @@ btrain verifies which agent is speaking:
 
 New and updated collaborator configurations infer these runner commands from common Claude, Codex/GPT, Gemini, and Cursor Agent (`agent` / `cursor-agent`, including `floord-app-dev`) names. Unknown agents receive an explicit `notify` runner so fallback behavior is visible in config. `btrain doctor` warns if an active agent has no runner mapping.
 
-For Cursor Agent runners, loop dispatch adds `--trust` and sets `--workspace` to the repo. It uses `--auto-review` unless the runner config specifies an approval mode. To use `--force`, set it explicitly in the runner config. Use `cursor-agent` for a custom identity. The shorter `agent` command gets Cursor flags for `floord-app-dev` and identities with a `cursor` name token.
+Use `cursor-agent` for a custom identity. The shorter `agent` command gets Cursor flags for `floord-app-dev` and identities with a `cursor` name token. Outside peer review, dispatch adds `--trust`, sets the workspace to the repo by default, and uses `--auto-review` unless the runner config specifies an approval mode.
 
-Cursor runs the local peer review when the lane enters `needs-review`. After the reviewer runs `handoff resolve` and the lane reaches `ready-for-pr`, open the GitHub PR and request bot review.
+In `needs-review`, btrain gives Cursor a committed patch in an isolated temporary workspace. Cursor runs in read-only Ask mode and returns findings. This dispatch uses the configured model and drops other configured arguments. The assigned reviewer records a verdict separately with `handoff resolve` or `handoff request-changes`. Open the GitHub PR or request bot review after local approval.
 
 ### Lane-scoped loop dispatch
 

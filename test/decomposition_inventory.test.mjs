@@ -100,7 +100,7 @@ describe("decomposition inventory, function spans", () => {
     const core = path.join(process.cwd(), "src", "brain_train", "core.mjs")
     const { spans, fileLines } = readFunctionSpans(core)
     assert.equal(spans.find((f) => f.name === "patchHandoff").lines, 585)
-    assert.equal(spans.find((f) => f.name === "runLoop").lines, 422)
+    assert.equal(spans.find((f) => f.name === "runLoop").lines, 440)
     assert.ok(spans.length >= 352, `expected at least the 352 functions the plan measured, got ${spans.length}`)
     const inFunctions = spans.reduce((a, f) => a + f.lines, 0)
     assert.ok(inFunctions > fileLines * 0.8, "most of the file should be inside top-level functions")
