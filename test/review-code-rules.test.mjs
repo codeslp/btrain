@@ -11,7 +11,9 @@ import {
   scanDiff,
   formatSummary,
   reviewCode,
+  SECRET_PATTERNS,
 } from "../src/brain_train/review/code-rules.mjs"
+import { SECRET_PATTERNS as PURE_SECRET_PATTERNS } from "../src/brain_train/review/secret-patterns.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -25,6 +27,8 @@ const FAKE = {
   slack: "xoxb-" + "0".repeat(11),
   bearer: "Bearer " + "z".repeat(24),
   longLiteral: "notarealkey_synthetic_" + "z".repeat(16),
+  githubFineGrained: ["github", "pat", "1".repeat(22), "2".repeat(59)].join("_"),
+  slackWebhook: "https://" + ["hooks.slack.com", "services", "T0000FAKE", "B0000FAKE", "z".repeat(24)].join("/"),
 }
 
 // Synthesize a minimal unified-diff snippet for one file with the given
@@ -161,6 +165,39 @@ describe("hardcoded-secret rule", () => {
     const diff = makeDiff("src/auth.ts", [`headers["Authorization"] = "${FAKE.bearer}"`])
     const { summary } = scanDiff(diff)
     assert.equal(summary.hard, 1)
+  })
+
+  it("flags a GitHub fine-grained token (spec 024 FR-8)", () => {
+    const diff = makeDiff("src/gh.ts", [`const t = "${FAKE.githubFineGrained}"`])
+    const { violations, summary } = scanDiff(diff)
+    assert.equal(summary.hard, 1)
+    assert.match(violations[0].detail, /github-fine-grained-token/)
+  })
+
+  it("flags a Slack webhook URL, with or without its scheme (spec 024 FR-8)", () => {
+    const withScheme = scanDiff(makeDiff("src/hook.ts", [`const url = "${FAKE.slackWebhook}"`]))
+    assert.equal(withScheme.summary.hard, 1)
+    assert.match(withScheme.violations[0].detail, /slack-webhook-url/)
+    const bare = scanDiff(makeDiff("docs/hook.md", [`post to ${FAKE.slackWebhook.slice("https://".length)}`]))
+    assert.equal(bare.summary.hard, 1)
+  })
+
+  it("does not flag the Slack docs host or a short hooks path", () => {
+    const { summary } = scanDiff(makeDiff("docs/slack.md", [
+      "See https://api.slack.com/messaging/webhooks for setup.",
+      "hooks.slack.com/services/ is the prefix",
+    ]))
+    assert.equal(summary.hard, 0)
+  })
+
+  it("exports SECRET_PATTERNS, the same list the Slack scrub reads", () => {
+    assert.equal(SECRET_PATTERNS, PURE_SECRET_PATTERNS)
+    const ids = SECRET_PATTERNS.map((pattern) => pattern.id)
+    assert.ok(ids.includes("slack-webhook-url"))
+    assert.ok(ids.includes("github-fine-grained-token"))
+    for (const pattern of SECRET_PATTERNS) {
+      assert.equal(pattern.regex.global, false, `${pattern.id}: a non-global regex keeps .test() stateless`)
+    }
   })
 
   it("does NOT flag obviously safe lines", () => {

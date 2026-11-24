@@ -852,6 +852,27 @@ describe("dynamic collaborator bootstrap", () => {
     await rmDir(tmpDir)
   })
 
+  it("infers Cursor Agent CLI for floord-app-dev", async () => {
+    const floordDir = await makeTmpDir()
+    try {
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const exec = promisify(execFile)
+      await exec("git", ["init", floordDir])
+      const floordInit = await runBtrain(
+        ["init", floordDir, "--agent", "claude", "--agent", "floord-app-dev", "--agent", "cursor-reviewer", "--agent", "web-app-dev", "--core-only"],
+        floordDir,
+      )
+      assert.equal(floordInit.code, 0, floordInit.stderr)
+      const floordToml = await fs.readFile(path.join(floordDir, ".btrain", "project.toml"), "utf8")
+      assert.ok(floordToml.includes('"floord-app-dev" = "agent -p"'), floordToml)
+      assert.ok(floordToml.includes('"cursor-reviewer" = "agent -p"'), floordToml)
+      assert.ok(floordToml.includes('"web-app-dev" = "notify"'), floordToml)
+    } finally {
+      await rmDir(floordDir)
+    }
+  })
+
   it("scaffolds 2 lanes per configured collaborator and renders their names into docs", async () => {
     const { code, stderr } = await runBtrain(
       [
@@ -6767,16 +6788,25 @@ describe("withFileLock", () => {
     assert.equal(exists, false, "Lockfile should be cleaned up after error")
   })
 
-  it("recovers from stale lockfiles older than 30 seconds", async () => {
+  it("leaves an old-format lockfile in place when it cannot identify its owner", async () => {
     const lockPath = path.join(tmpDir, "stale.lock")
-    // Create a lockfile and backdate it
     await fs.writeFile(lockPath, "stale")
     const past = new Date(Date.now() - 31_000)
     await fs.utimes(lockPath, past, past)
 
-    let entered = false
-    await withFileLock(lockPath, async () => { entered = true })
-    assert.ok(entered, "Should acquire lock after removing stale lockfile")
+    await assert.rejects(withFileLock(lockPath, () => assert.fail("entered with a legacy owner"), { timeoutMs: 150 }), /legacy lockfile/)
+    assert.equal(await fs.readFile(lockPath, "utf8"), "stale")
+    assert.ok(!(await fs.readdir(tmpDir)).some((name) => name.startsWith("stale.lock.pending-")))
+
+    await fs.unlink(lockPath)
+    await withFileLock(lockPath, async () => assert.ok((await fs.stat(lockPath)).isDirectory()))
+  })
+
+  it("acquires a lock after an interrupted release leaves an empty directory", async () => {
+    const lockPath = path.join(tmpDir, "empty.lock")
+    await fs.mkdir(lockPath)
+    await withFileLock(lockPath, async () => assert.equal((await fs.readdir(lockPath)).length, 1))
+    await assert.rejects(fs.stat(lockPath), { code: "ENOENT" })
   })
 })
 

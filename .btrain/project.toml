@@ -13,8 +13,12 @@ active = ["codex", "codex-reviewer", "claude", "claude-reviewer"]
 # Both Codex collaborators pin different model versions. The reviewer also has
 # a fixed reasoning level so review dispatches match the repository's
 # independent-review policy and the requested review profile.
+# 2026-11-23: the reviewer moved from gpt-5.6-sol to gpt-6.1-sol, the newest
+# model this ChatGPT-account Codex accepts. gpt-6.2-sol and gpt-6.2-astra
+# return model_not_found for the account, so the writer stays on gpt-6-astra,
+# the strongest tier it can run.
 "codex" = "codex -m gpt-6-astra"
-"codex-reviewer" = "codex -m gpt-5.6-sol -c model_reasoning_effort=medium"
+"codex-reviewer" = "codex -m gpt-6.1-sol -c model_reasoning_effort=medium"
 # The Claude pair shares one runtime; claude-reviewer is the stand-in review
 # identity used when gh-codex is out of quota (see PR #68). As a cli runner it
 # is dispatched on needs-review like codex-reviewer; pass --no-dispatch to a
