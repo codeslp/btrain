@@ -127,7 +127,7 @@ export function buildCardFields(lane = {}, context = {}) {
   const tier = lane.reviewTier || context.reviewTier || ""
   const raw = {
     repo: context.repoName || "repository",
-    lane: lane.lane || lane.laneId || context.laneId || "",
+    lane: lane.lane || lane.laneId || lane._laneId || context.laneId || "",
     status: displayStatus(lane),
     label: context.label || "",
     task: lane.task || "",
@@ -203,7 +203,7 @@ export function renderBoard(repos = [], context = {}) {
     for (const lane of active) {
       const fields = {}
       for (const [name, value] of Object.entries({
-        lane: lane.lane || lane.laneId || "",
+        lane: lane.lane || lane.laneId || lane._laneId || "",
         status: displayStatus(lane),
         owner: lane.owner || "none",
         reviewer: lane.reviewer || "none",

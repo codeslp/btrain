@@ -81,6 +81,13 @@ describe("templates are data and use only prepared fields", () => {
 })
 
 describe("renderCard", () => {
+  it("uses the identifier returned by the lane state reader in cards and boards", () => {
+    const { lane: _laneId, ...fields } = LANE
+    const state = { ...fields, _laneId }
+    assert.match(renderCard(state, CONTEXT), /^btrain · lane e · needs-review/)
+    assert.match(renderBoard([{ repoName: "btrain", lanes: [state] }], CONTEXT), /lane e · needs-review/)
+  })
+
   it("renders the fields in the FR-6 order with the FR-13 labels", () => {
     assert.equal(renderCard({ ...LANE, display: "in-review", reviewTier: "other-lab" }, CONTEXT), [
       "btrain · lane e · in-review",
