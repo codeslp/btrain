@@ -85,7 +85,7 @@ describe("resolveAgentLab: the FR-1 sources of a lab", () => {
   })
 
   it("never uses an [agents.labs] value that is not a label, and falls back to the runner's lab", () => {
-    for (const value of ['"anthropic"  x', "open ai", "OpenAI!", "-x"]) {
+    for (const value of ['"anthropic"  x', "open ai", "OpenAI!", "-x", "false # invalid lab", "1 # invalid lab"]) {
       for (const [runner, lab] of [["claude -p", "anthropic"], ["codex exec", "openai"], ["agent -p", ""]]) {
         const cfg = config({ runners: { someone: runner }, labs: { someone: value } })
         const result = explainAgentLab(cfg, "someone")

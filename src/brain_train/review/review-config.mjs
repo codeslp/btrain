@@ -53,18 +53,12 @@ function tableOf(value) {
  * The value a TOML line meant when it ended in a comment. The project parser
  * in core.mjs does not strip `# ...` after a value, so `x = "15m"  # note`
  * reaches this module as the text `"15m"  # note`, and `x = []  # note` as
- * `[]  # note`. Recover quoted strings, lists of quoted strings, boolean
- * flags, and unsigned integers. Preserve other values for validation.
+ * `[]  # note`. This returns the quoted string or the list of quoted strings;
+ * any other value is returned unchanged.
  */
 export function stripTomlComment(value) {
   if (typeof value !== "string") {
     return value
-  }
-  const scalar = /^(true|false|\d+)\s*#.*$/.exec(value)
-  if (scalar) {
-    const [, text] = scalar
-    if (text === "true" || text === "false") return text === "true"
-    return text
   }
   const quoted = /^"((?:[^"\\]|\\.)*)"\s*#.*$/.exec(value)
   if (quoted) {
@@ -110,8 +104,9 @@ function readPositiveInteger(table, key, fallback, section, errors) {
   }
   const raw = table[key]
   const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : ""
-  if (/^\d+$/.test(text) && Number(text) > 0 && Number.isSafeInteger(Number(text))) {
-    return Number(text)
+  const limit = Number(/^(\d+)(?:\s*#.*)?$/.exec(text)?.[1])
+  if (Number.isSafeInteger(limit) && limit > 0) {
+    return limit
   }
   errors.push({
     key: `${section}.${key}`,
@@ -128,6 +123,10 @@ function readBoolean(table, key, fallback, section, errors) {
   const raw = table[key]
   if (raw === true || raw === false) {
     return raw
+  }
+  if (typeof raw === "string") {
+    const flag = /^(true|false)\s*#.*$/.exec(raw.trim())
+    if (flag) return flag[1] === "true"
   }
   errors.push({
     key: `${section}.${key}`,
