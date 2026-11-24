@@ -15,7 +15,7 @@
 // Repository name and developer label on every reply are WS5 (T025); the card
 // carries both here, as FR-6 orders its fields.
 
-import { capMessage, prepareAgentText } from "./text.mjs"
+import { capMessage, flattenLines, MAX_MESSAGE_CHARS, prepareAgentText, scrubSecrets } from "./text.mjs"
 import { CARD_REFRESH, KIND_TABLE } from "./events.mjs"
 
 export const DEFAULT_TASK_CHARS = 300
@@ -72,6 +72,8 @@ export const BOARD_FIELDS = Object.freeze(["label", "repo", "stale", "lane", "st
 const INACTIVE_STATUSES = new Set(["", "idle", "resolved"])
 
 const MENTION_ID = /^[UW][A-Z0-9]{2,20}$/
+// More IDs than this in one message is a misconfiguration, not a team.
+const MAX_MENTIONS = 10
 const GITHUB_PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}\/pull\/(\d{1,9})$/
 
 /** The `{name}` placeholders of a template, in order. */
@@ -79,8 +81,20 @@ export function templateFields(template) {
   return [...String(template).matchAll(/\{([A-Za-z]+)\}/g)].map((match) => match[1])
 }
 
+// A second, idempotent guard on every substituted value: a value that came
+// through prepareAgentText is unchanged by it (it holds no secret match, no
+// control character, no `<`, `>`, or `://`), and one that did not, from a
+// caller that built its own fields, still cannot produce markup, a link, a
+// second line, or a secret. `&` is left alone so prepared text is not escaped
+// twice.
+function inert(value) {
+  let text = scrubSecrets(String(value)).text
+  text = flattenLines(text).text
+  return text.replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("://", "[:]//")
+}
+
 function fill(template, fields) {
-  return String(template).replace(/\{([A-Za-z]+)\}/g, (_, name) => (Object.hasOwn(fields, name) ? String(fields[name]) : ""))
+  return String(template).replace(/\{([A-Za-z]+)\}/g, (_, name) => (Object.hasOwn(fields, name) ? inert(fields[name]) : ""))
 }
 
 // Drop the ` · ` segments whose placeholders are all empty.
@@ -139,7 +153,8 @@ export function renderCard(lane, context = {}) {
 
 function mentionPrefix(context) {
   const ids = Array.isArray(context.mention) ? context.mention.map(String).filter((id) => MENTION_ID.test(id)) : []
-  return ids.length > 0 ? `${ids.map((id) => `<@${id}>`).join(" ")} ` : ""
+  const kept = [...new Set(ids)].slice(0, MAX_MENTIONS)
+  return kept.length > 0 ? `${kept.map((id) => `<@${id}>`).join(" ")} ` : ""
 }
 
 function prLink(context) {
@@ -163,7 +178,9 @@ export function renderReply(classified, context = {}) {
   const line = fillSegments(REPLY_TEMPLATES[kind], fields)
   const link = kind === "ready-to-merge" ? prLink(context) : ""
   const mention = classified.mention ? mentionPrefix(context) : ""
-  return capMessage(`${mention}${line}${link}`)
+  // Only the line is cut: the mention and the link are btrain's own markup
+  // and are appended whole, so a cut never lands inside them.
+  return `${mention}${capMessage(line, MAX_MESSAGE_CHARS - mention.length - link.length)}${link}`
 }
 
 /**

@@ -3,10 +3,11 @@
 // decision"); the secret list is review/secret-patterns.mjs, the list
 // `btrain review code` uses.
 //
-// Order (plan, "Text pipeline", with one step added in front):
-//   0. control characters become spaces (and line breaks too, for a
-//      one-line field), so none can hide a secret from the scrub;
-//   1. scrub: every secret match becomes `[redacted]`;
+// Order (plan, "Text pipeline", with one step added after the scrub):
+//   1. scrub: every secret match becomes `[redacted]`, matched through any
+//      control or invisible format character placed inside it;
+//   1a. control characters become spaces (line breaks too, for a one-line
+//      field) and format characters are removed;
 //   2. cut to the field's length on a character boundary;
 //   3. escape `&`, `<`, `>`;
 //   4. rewrite `://` to `[:]//`.
@@ -34,16 +35,74 @@ function asText(value) {
   return typeof value === "string" ? value : String(value)
 }
 
+// Control (Cc) and invisible format (Cf, such as U+200B) characters. An agent
+// can put one inside a secret to break the pattern; the scrub looks through
+// them.
+const HIDDEN_CHAR = /^[\p{Cc}\p{Cf}]$/u
+
+// A view of `input` for matching, with every hidden character replaced by a
+// space (`space`) or removed (`drop`). `map[i]` is the index in `input` of the
+// view's UTF-16 unit `i`.
+function hiddenCharView(input, mode) {
+  let text = ""
+  const map = []
+  let index = 0
+  for (const char of input) {
+    if (HIDDEN_CHAR.test(char)) {
+      if (mode === "space") {
+        text += " "
+        map.push(index)
+      }
+    } else {
+      text += char
+      for (let unit = 0; unit < char.length; unit += 1) map.push(index + unit)
+    }
+    index += char.length
+  }
+  return { text, map }
+}
+
 /**
- * Step 1. Replace every secret match with `[redacted]`, also a secret glued to
- * the word before it.
+ * Step 1. Replace every secret with `[redacted]`: also a secret glued to the
+ * word before it, and one with a control or invisible format character inside
+ * it (`Bearer\u0000…`, a token split by U+200B or a line break). Matches are
+ * found in two views of the text, hidden characters as spaces and hidden
+ * characters removed, and the span of the original text each covers is
+ * redacted.
  */
 export function scrubSecrets(value) {
   const input = asText(value)
-  let text = input
-  for (const regex of globalSecretRegexes({ boundaries: false })) {
-    text = text.replace(regex, REDACTED)
+  const spans = []
+  for (const mode of ["space", "drop"]) {
+    const view = hiddenCharView(input, mode)
+    for (const regex of globalSecretRegexes({ boundaries: false })) {
+      for (const match of view.text.matchAll(regex)) {
+        if (match[0].length === 0) continue
+        const start = view.map[match.index]
+        const end = view.map[match.index + match[0].length - 1] + 1
+        spans.push([start, end])
+      }
+    }
   }
+  if (spans.length === 0) {
+    return { text: input, changed: false }
+  }
+  spans.sort((left, right) => left[0] - right[0] || left[1] - right[1])
+  let text = ""
+  let cursor = 0
+  let open = null
+  for (const [start, end] of spans) {
+    if (open && start <= open[1]) {
+      open[1] = Math.max(open[1], end)
+      continue
+    }
+    if (open) {
+      text += `${input.slice(cursor, open[0])}${REDACTED}`
+      cursor = open[1]
+    }
+    open = [start, end]
+  }
+  text += `${input.slice(cursor, open[0])}${REDACTED}${input.slice(open[1])}`
   return { text, changed: text !== input }
 }
 
@@ -84,32 +143,33 @@ export function defangUrls(value) {
  * break, tab, other control character, and the Unicode line and paragraph
  * separators, so agent text cannot add a line to a card (forging an FR-13
  * `owner:` or `pr:` line) or turn a one-line reply (FR-7) into two. With
- * `keepLineBreaks`, `\n`, `\r`, `\t` and U+2028/U+2029 stay.
+ * `keepLineBreaks`, `\n`, `\r`, `\t` and U+2028/U+2029 stay. Invisible format
+ * characters (U+200B and the rest of Cf) are removed in both modes, so none
+ * can sit unseen inside a posted word or between `:` and `//`.
  *
- * It runs before the scrub. A control character that a secret pattern's `\s`
- * does not match (`\u0000`, `\u0085`, ...) would otherwise hide `Bearer<ctl>
- * <token>` from the scrub and become a matching space here.
+ * It runs after the scrub, which looks through these characters itself.
  */
 export function flattenLines(value, { keepLineBreaks = false } = {}) {
   const input = asText(value)
+  const visible = input.replace(/\p{Cf}+/gu, "")
   const text = keepLineBreaks
     // eslint-disable-next-line no-control-regex
-    ? input.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0085]+/g, " ")
+    ? visible.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+/g, " ")
     // eslint-disable-next-line no-control-regex
-    : input.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ")
+    : visible.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
   return { text, changed: text !== input }
 }
 
 /**
  * The whole pipeline for one agent-written field. `maxChars` is the field's
  * length limit (`[slack].task_chars`, `summary_chars`); without one the field
- * is only flattened, scrubbed, escaped, and defanged. Control characters
- * become spaces first; `singleLine` also flattens line breaks, and every card,
- * reply, and board field uses it.
+ * is only scrubbed, flattened, escaped, and defanged. Control characters
+ * become spaces and format characters are removed; `singleLine` also
+ * flattens line breaks, and every card, reply, and board field uses it.
  */
 export function prepareAgentText(value, { maxChars, singleLine = false } = {}) {
-  let { text } = flattenLines(value, { keepLineBreaks: !singleLine })
-  text = scrubSecrets(text).text
+  let { text } = scrubSecrets(value)
+  text = flattenLines(text, { keepLineBreaks: !singleLine }).text
   text = cutText(text, maxChars).text
   text = escapeSlackText(text).text
   text = defangUrls(text).text

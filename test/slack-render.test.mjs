@@ -191,6 +191,22 @@ describe("renderReply", () => {
     }
   })
 
+  it("never cuts through the mention or the PR link, and caps the whole reply", () => {
+    const ready = classifyWorkflowEvent(event({ status: "pr-review", prNumber: "114" }, { status: "ready-to-merge", prNumber: "114" }))
+    const prUrl = "https://github.com/example-owner/example-repo/pull/114"
+    const mention = Array.from({ length: 156 }, (_, index) => `U${String(index).padStart(20, "A")}`)
+    const reply = renderReply({ ...ready, fields: { ...ready.fields, prNumber: "1".repeat(9) } }, { ...CONTEXT, mention, prUrl })
+    assert.ok(Array.from(reply).length <= 3999)
+    assert.ok(reply.endsWith(`<${prUrl}|PR #114>`), "the link is whole")
+    assert.equal((reply.match(/<@/g) || []).length, 10, "at most ten mentions")
+    assert.equal(reply.replace(/<@U[A-Z0-9]+> /g, "").replace(`<${prUrl}|PR #114>`, "").match(/[<>]|:\/\//), null)
+  })
+
+  it("keeps fields that skipped the pipeline inert", () => {
+    const reply = renderReply({ kind: "claimed", fields: { actor: "<!channel>\nnext https://evil.invalid", lane: `e ${["ghp", "4".repeat(36)].join("_")}` } }, CONTEXT)
+    assert.equal(reply, "&lt;!channel&gt; next https[:]//evil.invalid claimed lane e [redacted]")
+  })
+
   it("is inert for hostile text in every reply of every kind", () => {
     const hostileLane = { ...LANE, owner: HOSTILE, reviewer: HOSTILE, reasonCode: HOSTILE, repairOwner: HOSTILE, prNumber: HOSTILE }
     const shapes = [

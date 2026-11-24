@@ -59,6 +59,26 @@ describe("the four steps, each on its own", () => {
     }
   })
 
+  it("redacts a secret split by an invisible format character or a line break", () => {
+    const pat = ["github", "pat", "A".repeat(22), "B".repeat(59)].join("_")
+    for (const value of [
+      `Bearer\u200b${"y".repeat(30)} rest`,
+      `${pat.slice(0, 15)}\n${pat.slice(15)} rest`,
+      `${pat.slice(0, 15)}\u200b\u2060${pat.slice(15)} rest`,
+      `${GITHUB_CLASSIC.slice(0, 10)}\u00ad${GITHUB_CLASSIC.slice(10)} rest`,
+    ]) {
+      for (const singleLine of [true, false]) {
+        const text = prepareAgentText(value, { maxChars: 300, singleLine })
+        assert.equal(text, "[redacted] rest", `${JSON.stringify(value)} singleLine=${singleLine}`)
+      }
+    }
+  })
+
+  it("removes invisible format characters, so none sits inside a posted word or a scheme separator", () => {
+    assert.equal(prepareAgentText("https:\u200b//evil.invalid", { singleLine: true }), "https[:]//evil.invalid")
+    assert.equal(prepareAgentText("a\u200bb\u2060c"), "abc")
+  })
+
   it("flattenLines keeps line breaks and tabs when asked, and still clears other controls", () => {
     assert.deepEqual(flattenLines("a\nb\tc\u0000d\u0085e\u2028f", { keepLineBreaks: true }), { text: "a\nb\tc d e\u2028f", changed: true })
   })
