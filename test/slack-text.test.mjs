@@ -11,6 +11,8 @@ import {
   prepareAgentText,
   scrubSecrets,
 } from "../src/brain_train/slack/text.mjs"
+import { SECRET_PATTERNS } from "../src/brain_train/review/secret-patterns.mjs"
+import { buildEventFields } from "../src/brain_train/slack/events.mjs"
 
 // Fake values, built at runtime so the source holds no string that matches a
 // secret pattern (`btrain review code` reports those as hardcoded secrets).
@@ -70,6 +72,43 @@ describe("the four steps, each on its own", () => {
       for (const singleLine of [true, false]) {
         const text = prepareAgentText(value, { maxChars: 300, singleLine })
         assert.equal(text, "[redacted] rest", `${JSON.stringify(value)} singleLine=${singleLine}`)
+      }
+    }
+  })
+
+  it("redacts a bearer token that matches only once controls are spaces and format characters are gone", () => {
+    const mixed = `Bearer\u0000${"y".repeat(15)}\u200b${"y".repeat(15)}`
+    for (const singleLine of [true, false]) {
+      assert.equal(prepareAgentText(mixed, { maxChars: 200, singleLine }), "[redacted]", `singleLine=${singleLine}`)
+    }
+    const fields = buildEventFields({ type: "request-changes", actor: "x", before: {}, after: {}, details: { summary: mixed } })
+    for (const [name, value] of Object.entries(fields)) {
+      assert.ok(!SECRET_PATTERNS.some((pattern) => pattern.regex.test(value)), `${name}: ${value}`)
+    }
+  })
+
+  it("never outputs a secret-pattern match for text mixing hidden characters and secret prefixes (seeded property test)", () => {
+    // A small seeded generator, so a failure reproduces.
+    let seed = 0x2024
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff
+      return seed
+    }
+    const pieces = [
+      "Bearer", "bearer", " ", "\t", "\n", "\u0000", "\u001b", "\u007f", "\u0085", "\u200b", "\u200d", "\ufeff", "\u00ad", "\u2028", "\u00a0",
+      "ghp_", "github_pat_", "sk-", "sk-ant-", "sk_live_", "xoxb-", "AKIA", "hooks.slack.com/services/", "HOOKS.SLACK.COM/services/",
+      "y".repeat(8), "Z".repeat(8), "1".repeat(8), "_", "-", "/", "<", ">", "&", "://",
+    ]
+    for (let run = 0; run < 3000; run += 1) {
+      let value = ""
+      const length = 4 + (next() % 30)
+      for (let index = 0; index < length; index += 1) value += pieces[next() % pieces.length]
+      for (const singleLine of [true, false]) {
+        const maxChars = next() % 3 === 0 ? undefined : 1 + (next() % 200)
+        const text = prepareAgentText(value, { maxChars, singleLine })
+        const hit = SECRET_PATTERNS.find((pattern) => pattern.regex.test(text))
+        assert.equal(hit, undefined, `${hit?.id} in ${JSON.stringify(text)} from ${JSON.stringify(value)}`)
+        assert.doesNotMatch(text, /[<>]|:\/\//, JSON.stringify(value))
       }
     }
   })

@@ -170,6 +170,10 @@ export function flattenLines(value, { keepLineBreaks = false } = {}) {
 export function prepareAgentText(value, { maxChars, singleLine = false } = {}) {
   let { text } = scrubSecrets(value)
   text = flattenLines(text, { keepLineBreaks: !singleLine }).text
+  // Flattening can make a third form of the text (controls as spaces, format
+  // characters removed) that neither scrub view saw, so the text as it will be
+  // posted is scrubbed again. Both scrubs come before the cut.
+  text = scrubSecrets(text).text
   text = cutText(text, maxChars).text
   text = escapeSlackText(text).text
   text = defangUrls(text).text
