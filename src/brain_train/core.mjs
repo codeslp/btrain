@@ -8731,12 +8731,6 @@ function isCodexRunnerCommand(command, args) {
   return basename === "codex" || (basename === "npx" && args[0] === "@openai/codex")
 }
 
-/** Cursor Agent CLI: published as `agent` and `cursor-agent`. */
-function isCursorAgentRunnerCommand(command) {
-  const basename = path.basename(command)
-  return basename === "cursor-agent" || basename === "agent"
-}
-
 function hasCodexRepoArg(args) {
   return args.some((token) => token === "-C" || token === "--cd" || token.startsWith("--cd="))
 }
@@ -8878,7 +8872,7 @@ function normalizeLoopCliRunner(runnerValue, {
     if (!placeholderPrompt) {
       args.push(prompt)
     }
-  } else if (isCursorAgentRunnerCommand(command)) {
+  } else if (["agent", "cursor-agent"].includes(path.basename(command))) {
     // Headless Cursor Agent: print mode + trust the lane workspace. Tool
     // approval mirrors Claude's phase allowlists — auto-review for peer
     // review (read), force for write/pr/merge so loop dispatch stays
