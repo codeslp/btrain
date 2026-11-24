@@ -235,6 +235,27 @@ describe("foldReviewRecord", () => {
     assert.equal(recovered.tier, "other-lab")
   })
 
+  it("starts each request with no tier and no fallback reason", () => {
+    const record = foldReviewRecord([
+      claim(), request("r1"),
+      attempt("t1", "claude-reviewer", { tier: "same-lab", reason: "other-lab-unavailable" }),
+      ev("request-changes", { actor: "claude-reviewer", details: { attemptId: "t1" } }),
+      request("r2", "b".repeat(40)),
+    ])
+    assert.equal(record.tier, "")
+    assert.equal(record.fallbackReason, "")
+  })
+
+  it("does not count the fix author's own pickup as the owner's", () => {
+    const record = foldReviewRecord([
+      claim(), request("r1"), attempt("t1", "codex-reviewer"),
+      ev("fix-applied", { actor: "codex-reviewer", details: { attemptId: "t1", fixBase: "a", fixHead: "b", round: 1 } }),
+      ev("review-pickup", { actor: "codex-reviewer", details: { attemptId: "t1", at: at() } }),
+    ], { status: "fix-confirmation" })
+    assert.equal(record.fix.pickedUpAt, "")
+    assert.equal(record.display, "")
+  })
+
   it("counts the owner's pickup that names the attempt of an unconfirmed fix", () => {
     const record = foldReviewRecord([
       claim(), request("r1"), attempt("t1", "codex-reviewer"), pickup("t1", "codex-reviewer"),

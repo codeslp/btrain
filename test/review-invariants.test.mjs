@@ -262,6 +262,11 @@ function createLoopWorld({ clock, owner = AGENTS.owner.name, reviewer = AGENTS.o
         return { exit, tail: () => "You’ve hit your usage limit.", lastOutputAt: () => lastOutputAt }
       }
       if (behavior === "progress") {
+        // Pick up first: output resets the silence clock only after pickup (FR-4).
+        clock.atTime(startedAt + 30_000, () => {
+          events.push({ type: "review-pickup", actor: who, recordedAt: clock.iso(), laneId: "a", details: { attemptId, at: clock.iso() } })
+          lastOutputAt = clock.now()
+        })
         for (let minute = 1; minute <= 60; minute += 1) clock.atTime(startedAt + minute * MIN, () => { lastOutputAt = clock.now() })
       }
       if (behavior && typeof behavior === "object" && typeof behavior.verdictAtMs === "number") {
@@ -414,8 +419,10 @@ describe("spec 023 invariants", () => {
     // While gem's attempt was open, `btrain handoff` showed gem as the reviewer.
     const gemHandoff = (await readFakeRunnerLog(repo.logPath)).find((entry) => entry.kind === "step" && entry.agent === AGENTS.otherLabB.name && entry.do === "handoff")
     assert.ok(gemHandoff, "gem ran btrain handoff")
-    assert.match(gemHandoff.stdout, new RegExp(`reviewer:?\\s*${AGENTS.otherLabB.name}\\b`, "i"))
-    assert.doesNotMatch(gemHandoff.stdout, new RegExp(`reviewer:?\\s*${AGENTS.otherLabA.name}\\b`, "i"))
+    // Anchored to the reviewer line, so a history line naming the earlier
+    // reviewer does not count.
+    assert.match(gemHandoff.stdout, new RegExp(`^\\s*(?:peer )?reviewer:\\s*${AGENTS.otherLabB.name}\\b`, "im"))
+    assert.doesNotMatch(gemHandoff.stdout, new RegExp(`^\\s*(?:peer )?reviewer:\\s*${AGENTS.otherLabA.name}\\b`, "im"))
     const attempts = (await repo.events()).filter((event) => event.type === "review-attempt")
     assert.deepEqual(attempts.map((event) => event.details.reviewer), [AGENTS.otherLabA.name, AGENTS.otherLabB.name])
     for (const event of attempts) {

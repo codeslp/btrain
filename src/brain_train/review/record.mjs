@@ -124,6 +124,9 @@ export function foldReviewRecord(events, { status } = {}) {
         }
         record.requests.push(request)
         record.request = request
+        // Tier and fallback reason belong to one request.
+        record.tier = ""
+        record.fallbackReason = ""
         break
       }
       case "review-attempt": {
@@ -167,9 +170,10 @@ export function foldReviewRecord(events, { status } = {}) {
       case "review-pickup": {
         const at = timeOf(event, details)
         // The owner's pickup of a fix-confirmation lane (WS2, T010): a pickup
-        // that names the fix head, or the attempt that applied an unconfirmed
-        // fix (that attempt has ended, so it is no reviewer pickup).
-        const fixPending = record.fix && !record.fix.confirmed
+        // by anyone but the fix author that names the fix head, or the attempt
+        // that applied an unconfirmed fix (that attempt has ended, so it is no
+        // reviewer pickup).
+        const fixPending = record.fix && !record.fix.confirmed && keyOf(event.actor) !== keyOf(record.fix.author)
         if (fixPending && ((!details.attemptId && details.fixHead) || (details.attemptId && details.attemptId === record.fix.attemptId))) {
           if (!record.fix.pickedUpAt) record.fix.pickedUpAt = at
           break
