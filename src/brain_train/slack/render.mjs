@@ -125,9 +125,9 @@ export function buildCardFields(lane = {}, context = {}) {
   }
   const fields = {}
   for (const [name, value] of Object.entries(raw)) {
-    fields[name] = prepareAgentText(value, { maxChars: name === "task" ? context.taskChars || DEFAULT_TASK_CHARS : 200 })
+    fields[name] = prepareAgentText(value, { maxChars: name === "task" ? context.taskChars || DEFAULT_TASK_CHARS : 200, singleLine: true })
   }
-  fields.tier = tier ? ` (${prepareAgentText(tier, { maxChars: 40 })})` : ""
+  fields.tier = tier ? ` (${prepareAgentText(tier, { maxChars: 40, singleLine: true })})` : ""
   return fields
 }
 
@@ -172,10 +172,10 @@ export function renderReply(classified, context = {}) {
  * state could not be read keeps its last lanes with `stale: true`.
  */
 export function renderBoard(repos = [], context = {}) {
-  const lines = [fill(BOARD_HEADER, { label: prepareAgentText(context.label || "", { maxChars: 80 }) })]
+  const lines = [fill(BOARD_HEADER, { label: prepareAgentText(context.label || "", { maxChars: 80, singleLine: true }) })]
   for (const repo of Array.isArray(repos) ? repos : []) {
     lines.push(fill(BOARD_REPO_LINE, {
-      repo: prepareAgentText(repo?.repoName || "repository", { maxChars: 120 }),
+      repo: prepareAgentText(repo?.repoName || "repository", { maxChars: 120, singleLine: true }),
       stale: repo?.stale ? " (not refreshed)" : "",
     }))
     const active = (Array.isArray(repo?.lanes) ? repo.lanes : []).filter((lane) => !INACTIVE_STATUSES.has(lane?.status || ""))
@@ -192,7 +192,7 @@ export function renderBoard(repos = [], context = {}) {
         reviewer: lane.reviewer || "none",
         pr: lane.prNumber ? `#${lane.prNumber}` : "none",
       })) {
-        fields[name] = prepareAgentText(value, { maxChars: 120 })
+        fields[name] = prepareAgentText(value, { maxChars: 120, singleLine: true })
       }
       lines.push(fill(BOARD_LANE_LINE, fields))
     }

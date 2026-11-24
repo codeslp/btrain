@@ -168,7 +168,7 @@ export function buildEventFields(event, { summaryChars = DEFAULT_SUMMARY_CHARS }
   }
   const fields = {}
   for (const [name, value] of Object.entries(raw)) {
-    fields[name] = prepareAgentText(value, name === "summary" ? { maxChars: summaryChars } : { maxChars: 200 })
+    fields[name] = prepareAgentText(value, name === "summary" ? { maxChars: summaryChars, singleLine: true } : { maxChars: 200, singleLine: true })
   }
   return fields
 }

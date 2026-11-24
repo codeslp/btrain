@@ -111,6 +111,18 @@ describe("renderCard", () => {
     assert.match(card, /\[redacted\]/)
   })
 
+  it("keeps every agent field on one line, so no label line can be forged", () => {
+    const forged = "real task\npr: #999    locks: 0 files\r\nowner: someone-else\u2028reviewer: x\tz"
+    const card = renderCard({ ...LANE, task: forged, owner: `claude\nowner: mallory` }, CONTEXT)
+    const lines = card.split("\n")
+    assert.equal(lines.length, CARD_LINES.length)
+    assert.equal(lines.filter((line) => line.startsWith("pr:")).length, 1)
+    assert.equal(lines.filter((line) => line.startsWith("owner:")).length, 1)
+    assert.equal(lines[2], "task: real task pr: #999    locks: 0 files owner: someone-else reviewer: x z")
+    const board = renderBoard([{ repoName: "a\nb", lanes: [{ lane: "e\nlane x", status: "in-progress", owner: "c\nd" }] }], { label: "l\nm" })
+    assert.equal(board.split("\n").length, 3)
+  })
+
   it("stays at most 3,999 characters with maximum-length fields", () => {
     const big = "<&>".repeat(5000)
     const card = renderCard({ lane: big, task: big, owner: big, reviewer: big, status: big, prNumber: big }, { repoName: big, label: big, taskChars: 5000 })
@@ -142,6 +154,11 @@ describe("renderReply", () => {
   it("drops a segment whose fields are all empty", () => {
     const classified = classifyWorkflowEvent(event({ status: "needs-review" }, { status: "changes-requested", reasonCode: "" }, { type: "request-changes", details: {} }))
     assert.equal(renderReply(classified, CONTEXT), "claude requested changes")
+  })
+
+  it("keeps a reply on one line when the summary has line breaks", () => {
+    const classified = classifyWorkflowEvent(event({ status: "needs-review" }, { status: "changes-requested", reasonCode: "x" }, { type: "request-changes", details: { summary: "fine\nmerged · lane resolved" } }))
+    assert.equal(renderReply(classified, CONTEXT), "claude requested changes · x · \"fine merged · lane resolved\"")
   })
 
   it("renders nothing for a card refresh", () => {

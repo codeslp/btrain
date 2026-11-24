@@ -6,6 +6,7 @@ import {
   cutText,
   defangUrls,
   escapeSlackText,
+  flattenLines,
   MAX_MESSAGE_CHARS,
   prepareAgentText,
   scrubSecrets,
@@ -17,7 +18,7 @@ const GITHUB_PAT = ["github", "pat", "1".repeat(22), "2".repeat(59)].join("_")
 const GITHUB_CLASSIC = ["ghp", "3".repeat(36)].join("_")
 const WEBHOOK_PATH = ["hooks.slack.com", "services", "T0000FAKE", "B0000FAKE", "4".repeat(24)].join("/")
 const WEBHOOK = `https://${WEBHOOK_PATH}`
-const SLACK_TOKEN = ["xoxb", "0000", "fake", "token"].join("-")
+const FAKE_SLACK_BOT = ["xoxb", "0000", "fake", "token"].join("-")
 
 function assertInert(text) {
   assert.doesNotMatch(text, /[<>]/, "no raw angle bracket, so no mention or link markup")
@@ -26,7 +27,7 @@ function assertInert(text) {
 
 describe("the four steps, each on its own", () => {
   it("scrubSecrets replaces every secret match and says so", () => {
-    const input = `a ${GITHUB_PAT} b ${GITHUB_CLASSIC} c ${WEBHOOK} d ${SLACK_TOKEN} e ${GITHUB_CLASSIC}`
+    const input = `a ${GITHUB_PAT} b ${GITHUB_CLASSIC} c ${WEBHOOK} d ${FAKE_SLACK_BOT} e ${GITHUB_CLASSIC}`
     const { text, changed } = scrubSecrets(input)
     assert.equal(changed, true)
     assert.equal(text, "a [redacted] b [redacted] c [redacted] d [redacted] e [redacted]")
@@ -35,6 +36,17 @@ describe("the four steps, each on its own", () => {
 
   it("scrubSecrets catches a webhook URL written without its scheme", () => {
     assert.equal(scrubSecrets(`see ${WEBHOOK_PATH} now`).text, "see [redacted] now")
+  })
+
+  it("scrubSecrets catches a webhook URL whose host is in capitals", () => {
+    assert.equal(scrubSecrets(`see ${WEBHOOK_PATH.toUpperCase()} now`).text, "see [redacted] now")
+  })
+
+  it("flattenLines turns line breaks and control characters into one space", () => {
+    assert.deepEqual(flattenLines("a\r\nb\tc\u2028d\u0000e"), { text: "a b c d e", changed: true })
+    assert.deepEqual(flattenLines("one line"), { text: "one line", changed: false })
+    assert.equal(prepareAgentText("a\nb"), "a\nb", "multi-line text keeps its lines unless asked")
+    assert.equal(prepareAgentText("a\nb", { singleLine: true }), "a b")
   })
 
   it("cutText cuts on a character boundary and counts the ellipsis", () => {

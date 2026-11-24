@@ -17,10 +17,11 @@ export const SECRET_PATTERNS = Object.freeze([
   { id: "anthropic-key", regex: /\bsk-ant-[A-Za-z0-9_-]{32,}\b/, label: "Anthropic key" },
   { id: "slack-token", regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/, label: "Slack token" },
   // Spec 024 FR-8: an incoming-webhook URL is a credential on its own. The
-  // scheme is optional so a URL pasted without it is still caught.
+  // scheme is optional so a URL pasted without it is still caught, and the
+  // match ignores case because a host name does (`HOOKS.SLACK.COM` works).
   {
     id: "slack-webhook-url",
-    regex: /(?:\bhttps?:\/\/)?\bhooks\.slack\.com\/(?:services|workflows|triggers)\/[A-Za-z0-9_/-]{8,}/,
+    regex: /(?:\bhttps?:\/\/)?\bhooks\.slack\.com\/(?:services|workflows|triggers)\/[A-Za-z0-9_/-]{8,}/i,
     label: "Slack webhook URL",
   },
   { id: "bearer-token", regex: /\b[Bb]earer\s+[A-Za-z0-9._-]{20,}\b/, label: "Bearer token" },

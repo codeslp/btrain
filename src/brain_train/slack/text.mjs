@@ -78,12 +78,27 @@ export function defangUrls(value) {
 }
 
 /**
+ * For a one-line field: every line break, tab, other control character, and
+ * the Unicode line and paragraph separators become one space, so agent text
+ * cannot add a line to a card (forging an FR-13 `owner:` or `pr:` line) or
+ * turn a one-line reply (FR-7) into two.
+ */
+export function flattenLines(value) {
+  const input = asText(value)
+  // eslint-disable-next-line no-control-regex
+  const text = input.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ")
+  return { text, changed: text !== input }
+}
+
+/**
  * The whole pipeline for one agent-written field. `maxChars` is the field's
  * length limit (`[slack].task_chars`, `summary_chars`); without one the field
- * is only scrubbed, escaped, and defanged.
+ * is only scrubbed, escaped, and defanged. `singleLine` flattens line breaks
+ * after the scrub; every card, reply, and board field uses it.
  */
-export function prepareAgentText(value, { maxChars } = {}) {
+export function prepareAgentText(value, { maxChars, singleLine = false } = {}) {
   let { text } = scrubSecrets(value)
+  if (singleLine) text = flattenLines(text).text
   text = cutText(text, maxChars).text
   text = escapeSlackText(text).text
   text = defangUrls(text).text
