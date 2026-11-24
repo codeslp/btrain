@@ -7,6 +7,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
+import { getTraceBundleDir, listTraceBundles } from "../src/brain_train/harness/trace-bundle.mjs"
 import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const exec = promisify(execFile)
@@ -283,8 +284,40 @@ describe("needs-review reviewer dispatch", () => {
     }
   })
 
+  it("requires local peer approval before the owner links a PR", async () => {
+    const { tmpDir } = await setupRepo()
+    try {
+      await enablePrFlow(tmpDir)
+      const request = await runBtrain([...needsReviewArgs(tmpDir), "--no-dispatch"], tmpDir)
+      assert.equal(request.code, 0, request.stderr)
+
+      const link = await runBtrain([
+        "handoff", "update", "--repo", tmpDir, "--lane", "a",
+        "--status", "pr-review", "--pr", "123", "--no-diff",
+      ], tmpDir)
+      assert.notEqual(link.code, 0)
+      assert.match(link.stderr, /local peer review/i)
+      const unchanged = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "a"], tmpDir)
+      assert.match(unchanged.stdout, /status: needs-review/)
+
+      const approval = await runBtrain([
+        "handoff", "resolve", "--repo", tmpDir, "--lane", "a", "--summary", "Reviewed independently",
+      ], tmpDir, { BTRAIN_AGENT: "claude", BRAIN_TRAIN_AGENT: "claude" })
+      assert.equal(approval.code, 0, approval.stderr)
+      assert.match(approval.stdout, /status: ready-for-pr/)
+      const approvedLink = await runBtrain([
+        "handoff", "update", "--repo", tmpDir, "--lane", "a", "--status", "pr-review", "--pr", "123",
+      ], tmpDir)
+      assert.equal(approvedLink.code, 0, approvedLink.stderr)
+      assert.match(approvedLink.stdout, /status: pr-review/)
+    } finally {
+      await rmDir(tmpDir)
+    }
+  })
+
   it("reports a Cursor review of the committed patch without changing the lane", async () => {
     const tmpDir = await makeTmpDir()
+    const worktree = path.join(tmpDir, "worktrees", "feature")
     try {
       await exec("git", ["init", tmpDir])
       await exec("git", ["-C", tmpDir, "config", "user.email", "test@example.com"])
@@ -302,11 +335,14 @@ describe("needs-review reviewer dispatch", () => {
       await fs.writeFile(feature, "export const feature = false\n", "utf8")
       await exec("git", ["-C", tmpDir, "add", "src/feature.ts"])
       await exec("git", ["-C", tmpDir, "commit", "-qm", "base"])
-      await fs.writeFile(feature, "export const feature = true\n", "utf8")
-      await fs.writeFile(path.join(tmpDir, "outside.ts"), "unrelated committed change\n", "utf8")
-      await exec("git", ["-C", tmpDir, "add", "outside.ts"])
-      await exec("git", ["-C", tmpDir, "commit", "-qam", "feature"])
-      await fs.writeFile(feature, "uncommitted change\n", "utf8")
+      const { stdout: base } = await exec("git", ["-C", tmpDir, "rev-parse", "HEAD"])
+      await exec("git", ["-C", tmpDir, "worktree", "add", "-b", "feature-lane", worktree])
+      await fs.writeFile(path.join(worktree, "src/feature.ts"), "export const feature = true\n", "utf8")
+      await fs.writeFile(path.join(worktree, "outside.ts"), "unrelated committed change\n", "utf8")
+      await exec("git", ["-C", worktree, "add", "outside.ts"])
+      await exec("git", ["-C", worktree, "commit", "-qam", "feature"])
+      const { stdout: head } = await exec("git", ["-C", worktree, "rev-parse", "HEAD"])
+      await fs.writeFile(path.join(worktree, "src/feature.ts"), "uncommitted change\n", "utf8")
 
       const agentBin = path.join(tmpDir, "bin", "agent")
       await writeExecutable(agentBin, `#!/usr/bin/env node
@@ -334,11 +370,24 @@ console.log("APPROVED")
 
       const argvPath = path.join(tmpDir, "argv.json")
       const args = needsReviewArgs(tmpDir)
-      args[args.indexOf("--base") + 1] = "HEAD^"
-      const result = await runBtrain(args, tmpDir, { REVIEWER_ARGV_PATH: argvPath })
+      args[args.indexOf("--base") + 1] = base.trim()
+      args.splice(args.indexOf("--no-diff"), 1)
+      const emptyDiff = await runBtrain([...args, "--head", base.trim(), "--no-diff"], tmpDir)
+      const diagnostic = "Cursor review needs a committed diff in the lane scope."
+      assert.notEqual(emptyDiff.code, 0)
+      assert.ok(emptyDiff.stderr.includes(diagnostic), emptyDiff.stderr)
+      const { runs: [failedRun] } = await listTraceBundles({ repoRoot: tmpDir, limit: 1 })
+      const resultPath = path.join(getTraceBundleDir(tmpDir, failedRun.runId), "artifacts", "loop-result.json")
+      const failedResult = JSON.parse(await fs.readFile(resultPath, "utf8"))
+      assert.ok(failedResult.stopReason.includes(diagnostic))
+
+      const request = await runBtrain([...args, "--head", "feature-lane", "--no-dispatch"], tmpDir)
+      assert.equal(request.code, 0, request.stderr)
+      await exec("git", ["-C", worktree, "commit", "--allow-empty", "-qm", "later branch tip"])
+      const result = await runBtrain(["loop", "--repo", tmpDir, "--lane", "a"], tmpDir, { REVIEWER_ARGV_PATH: argvPath })
       assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
       assert.match(result.stdout, /dispatch floord-app-dev/)
-      assert.match(result.stdout, /status: needs-review/)
+      assert.ok(result.stdout.includes(head.trim()))
       assert.match(result.stdout, /APPROVED/)
       assert.match(result.stdout, /\+export const feature = true/)
       assert.doesNotMatch(result.stdout, /uncommitted change|unrelated committed change/)
