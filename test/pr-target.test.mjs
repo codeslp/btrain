@@ -577,6 +577,29 @@ describe("the lane's PR repository is pinned, not re-derived", () => {
     })
   })
 
+  it("pins the explicit repository before poll applies a PR adoption", async () => {
+    await withRepo(async ({ repo, home, headA, base }) => {
+      await addGitHubBaseRemote(repo, `https://${OTHER_DEFAULT_REPO}.git`)
+      await handOff(repo, home)
+      await finishPeerReview(repo, home)
+      const gh = await installFakeGh(path.dirname(repo), prOn(base, headA))
+      const options = { lane: "a", pr: `https://${GH_REPO}/pull/7`, actor: "alpha" }
+
+      await withPath(gh.binDir, async () => {
+        await runPrPoll(repo, options)
+        assert.deepEqual(await prAssociationFiles(repo), [])
+        assert.equal((await laneA(repo)).status, "ready-for-pr")
+
+        await runPrPoll(repo, { ...options, apply: true })
+        assert.equal((await laneA(repo)).prNumber, "7")
+        const [file] = await prAssociationFiles(repo)
+        assert.ok(file, "apply should persist the repository for later polls")
+        assert.equal(JSON.parse(await fs.readFile(file, "utf8")).repo, GH_REPO)
+        await runPrPoll(repo, { lane: "a" })
+      })
+    })
+  })
+
   it("does not pin a --pr the lane never linked", async () => {
     await withRepo(async ({ repo, home, headA, base }) => {
       const root = path.dirname(repo)

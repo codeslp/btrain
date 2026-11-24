@@ -1668,6 +1668,13 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
     return "resolved"
   }
 
+  if (!normalizePrNumber(lane.prNumber) && prRepo) {
+    // Publish the repository before the lane carries the number. A concurrent
+    // first adoption of this number must agree with that association.
+    const claim = await currentClaimStamp(repoRoot, laneId)
+    await pinPrRepository(repoRoot, { laneId, prNumber, claim, repo: prRepo, named: prRepo })
+  }
+
   if (status.overall === "feedback") {
     const feedbackBots = status.bots.filter((bot) => bot.state === "feedback").map((bot) => bot.id)
     await patchHandoff(repoRoot, {
@@ -2011,6 +2018,8 @@ export async function runPrCreate(repoRoot, options = {}) {
   const number = normalizePrNumber(url)
   if (!number) throw new Error("GitHub did not return a PR number after creation.")
   requirePrIdentity({ url }, number, repoFlag)
+  // Publish the association before the lane carries the PR number.
+  const prRepo = await resolvePrRepository(repoRoot, { laneId, prNumber: number, url, linked: true })
 
   await patchHandoff(repoRoot, {
     lane: laneId,
@@ -2024,12 +2033,6 @@ export async function runPrCreate(repoRoot, options = {}) {
   })
 
   console.log(url)
-
-  // The URL gh printed says where the PR really landed, and the lane is now
-  // linked to it. Pinning it here is what lets the bot requests below, and
-  // every status, poll and request-review that follows in a later command,
-  // speak to the same repository without deriving it again.
-  const prRepo = await resolvePrRepository(repoRoot, { laneId, prNumber: number, url, linked: true })
 
   const botIds = botsOptionToIds(options.bots, prFlowConfig)
   const posted = await requestReviewComments(repoRoot, number, botIds, prFlowConfig, {
