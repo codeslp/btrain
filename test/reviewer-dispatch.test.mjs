@@ -383,6 +383,10 @@ console.log("APPROVED")
 
       const request = await runBtrain([...args, "--head", "feature-lane", "--no-dispatch"], tmpDir)
       assert.equal(request.code, 0, request.stderr)
+      const repeatedRequest = await runBtrain([
+        "handoff", "update", "--lane", "a", "--status", "needs-review", "--no-diff", "--no-dispatch",
+      ], tmpDir, { BTRAIN_AGENT: "floord-app-dev", BRAIN_TRAIN_AGENT: "floord-app-dev" })
+      assert.equal(repeatedRequest.code, 0, repeatedRequest.stderr)
       await exec("git", ["-C", worktree, "commit", "--allow-empty", "-qm", "later branch tip"])
       const result = await runBtrain(["loop", "--repo", tmpDir, "--lane", "a"], tmpDir, { REVIEWER_ARGV_PATH: argvPath })
       assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)

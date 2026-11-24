@@ -6317,6 +6317,7 @@ async function patchHandoff(repoRoot, options) {
 
   const pinReviewRevision = async (current) => {
     if (options.status !== "needs-review") return
+    if (current.status === "needs-review" && options.head === undefined) return
     const owner = canonicalizeAgentName(configuredAgents, current.owner)
     if (options.head !== undefined && (!owner || resolvedActor !== owner)) {
       throw new BtrainError({ message: "Only the lane owner can set --head." })
@@ -6680,6 +6681,11 @@ async function patchHandoff(repoRoot, options) {
         const publishUpdate = async () => {
           const latestCurrent = await readLaneState(repoRoot, config, laneId)
           validateStructuralTransition(latestCurrent)
+          if (options.status === "needs-review" && (
+            latestCurrent.reviewHead !== existingCurrent.reviewHead || latestCurrent.reviewBase !== existingCurrent.reviewBase
+          )) {
+            throw new BtrainError({ message: "The lane review range changed. Read the lane and retry." })
+          }
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
         await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
@@ -7307,12 +7313,14 @@ async function resolveHandoff(repoRoot, options) {
       if (
         latestCurrent.owner !== existingCurrent.owner
         || latestCurrent.reviewer !== existingCurrent.reviewer
+        || latestCurrent.reviewHead !== existingCurrent.reviewHead
+        || latestCurrent.reviewBase !== existingCurrent.reviewBase
         || !samePathList(latestCurrent.lockedFiles, retainedFiles)
       ) {
         throw new BtrainError({
           message: `Lane ${laneId || "(single)"} changed while the review approval was waiting to publish.`,
-          reason: "The lane owner, reviewer, or locked files no longer match the state that was reviewed.",
-          fix: `Re-read lane ${laneId || "(single)"}, verify its current owner, reviewer, and files, then run the resolve command again.`,
+          reason: "The lane owner, reviewer, locked files, or review range changed.",
+          fix: `Re-read lane ${laneId || "(single)"}, verify the current review range and lane scope, then run the resolve command again.`,
         })
       }
       const peerTransition = applyTransition(latestCurrent, "handoff resolve", {
