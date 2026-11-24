@@ -9,16 +9,23 @@ Before claiming a workstream, run `btrain locks` from a session that is not
 lane-scoped. The files other lanes held on 2026-11-23 are named on the tasks
 that need them.
 
-**Status 2026-11-23:** WS0 is in progress on lane j. Nothing else is started.
+**Status 2026-11-23:** WS0 is in PR #117 (lane j). WS1 is in lane f: T003 to
+T005 are done, and T006 is done except its last step, removing the skip from
+invariant 5, which waits for PR #117 to merge (the invariant test file is in
+that PR). WS1 adds one file outside `slack/` and `review/code-rules.mjs`:
+`review/secret-patterns.mjs`, which holds the secret list with no imports.
+`code-rules.mjs` imports `core.mjs`, so `slack/text.mjs` could not import the
+list from it without `slack/` reaching `core.mjs`; `code-rules.mjs` now
+imports and re-exports the list as `SECRET_PATTERNS`.
 
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [ ] T001 [WS0] Write the fake Slack `fetch` in `test/helpers/fake-slack.mjs` and its preload in `test/helpers/fake-slack-preload.mjs`. It records every call, returns a `ts` for a post, and on demand returns any Slack error, an HTTP 429 with `Retry-After`, a network error, or never resolves. Scripted responses are keyed by Slack method name. Test it in `test/slack-fake-harness.test.mjs`.
 - [ ] T002 [WS0] Add the eight invariant tests of the plan to `test/slack-invariants.test.mjs`, each skipped and naming the workstream that enables it. Every test that creates a repository sets `BRAIN_TRAIN_HOME` to a temporary directory. `npm test` gives the same result as `main`.
-- [ ] T003 [WS1] Write the text pipeline in `src/brain_train/slack/text.mjs` as one exported function: scrub, cut, escape `&`, `<`, `>`, rewrite `://` to `[:]//`. Export each step on its own as well, returning the text and whether it changed. Add the 3,999-character cap for a finished message. Test in `test/slack-text.test.mjs`: `<!channel>`, `<@U123>`, `&`, a bare URL, a webhook URL, a `github_pat_` token, a secret that crosses the cut point, and a message built from maximum-length fields.
-- [ ] T004 [WS1] Export `SECRET_PATTERNS` from `src/brain_train/review/code-rules.mjs` and add a Slack webhook URL pattern and a GitHub fine-grained token pattern. Add a case for each to `test/review-code-rules.test.mjs`. State in the handoff that `btrain review code` now reports both.
-- [ ] T005 [WS1] Write the kind table as data and the classifier in `src/brain_train/slack/events.mjs`: a workflow event to `{kind, reply, mention, fields}`, first matching row wins. Test every row of the plan's kind table from a real event shape, a metadata-only update (card refresh, no reply), and a status change no named row covers (`status-changed`) in `test/slack-events.test.mjs`.
-- [ ] T006 [WS1] Write the card, one template for each kind, and the board grouped by repository in `src/brain_train/slack/render.mjs`. Templates are data. Test in `test/slack-render.test.mjs` that no template uses a field that skipped the text pipeline. Remove the skip from invariant 5.
+- [x] T003 [WS1] Write the text pipeline in `src/brain_train/slack/text.mjs` as one exported function: scrub, cut, escape `&`, `<`, `>`, rewrite `://` to `[:]//`. Export each step on its own as well, returning the text and whether it changed. Add the 3,999-character cap for a finished message. Test in `test/slack-text.test.mjs`: `<!channel>`, `<@U123>`, `&`, a bare URL, a webhook URL, a `github_pat_` token, a secret that crosses the cut point, and a message built from maximum-length fields.
+- [x] T004 [WS1] Export `SECRET_PATTERNS` from `src/brain_train/review/code-rules.mjs` and add a Slack webhook URL pattern and a GitHub fine-grained token pattern. Add a case for each to `test/review-code-rules.test.mjs`. State in the handoff that `btrain review code` now reports both.
+- [x] T005 [WS1] Write the kind table as data and the classifier in `src/brain_train/slack/events.mjs`: a workflow event to `{kind, reply, mention, fields}`, first matching row wins. Test every row of the plan's kind table from a real event shape, a metadata-only update (card refresh, no reply), and a status change no named row covers (`status-changed`) in `test/slack-events.test.mjs`.
+- [ ] T006 [WS1] Write the card, one template for each kind, and the board grouped by repository in `src/brain_train/slack/render.mjs`. Templates are data. Test in `test/slack-render.test.mjs` that no template uses a field that skipped the text pipeline. Remove the skip from invariant 5. (Render and its tests are done in lane f; the skip waits for PR #117.)
 
 **Independent check:** every kind and every text rule has a test, and agent-written text cannot produce a mention or a link. No file outside `slack/`, `review/code-rules.mjs`, and `test/` changes.
 
