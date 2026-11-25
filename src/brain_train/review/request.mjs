@@ -166,8 +166,11 @@ export async function runReviewRequest({
   // finishing its own steps after the verdict and is left to exit.
   let verdictBy = ""
   const verdict = async (status) => {
-    // The actor of the latest event that set the lane's status.
-    const last = (await readEvents()).findLast((event) => event?.after?.status || event?.type === "resolve" || event?.type === "request-changes")
+    // The actor of the latest event that changed the lane's status. An update
+    // records whole before/after snapshots, so one that left the status as it
+    // was (a metadata-only update) is not a transition.
+    const changedStatus = (event) => Boolean(event?.after?.status) && event.after.status !== event.before?.status
+    const last = (await readEvents()).findLast((event) => changedStatus(event) || event?.type === "resolve" || event?.type === "request-changes")
     verdictBy = keyOf(last?.actor)
     return { outcome: "verdict", status }
   }
@@ -324,6 +327,11 @@ export async function runReviewRequest({
       // recorded reviewer is dispatched, again at each silence limit.
       if (lane.prNumber) {
         if (windowPassed) return escalate(lane, record, ESCALATION_REASONS.PR_LINKED)
+        // FR-8's same-lab round limit holds for a linked PR too; an other-lab
+        // reviewer stays eligible.
+        if (!laneOnOtherLab && record.sameLabChangeRequests >= SAME_LAB_CHANGE_REQUEST_LIMIT) {
+          return escalate(lane, record, ESCALATION_REASONS.SAME_LAB_LIMIT)
+        }
         const previous = attemptsOf(lane.reviewer).at(-1)
         const endedAt = toMs(previous?.endedAt)
         if (!previous || (endedAt !== null && t - endedAt >= limits.silenceLimitMs)) {
