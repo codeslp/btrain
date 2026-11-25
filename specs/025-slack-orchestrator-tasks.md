@@ -30,8 +30,10 @@ whole content.
 T012 is done: `slack/config.mjs` reads the `slack_listen` toggle by the same
 explicit-only rule as `slack`, the listener's settings in `slack.json`, and
 `[slack.orchestrator]`, each with the spec's defaults, and computes the
-served repositories from the registered ones its caller reads. Adding
-`slack_listen` to `FEATURES` in `repo_mode.mjs` stays T011, with lane a.
+served repositories from the registered ones its caller reads. T011 is done
+too: `slack_listen` is in `FEATURES` as explicit-only, with spec 024's
+`slack`, so a repository with no `[features]` table has it off and `btrain
+features` shows it off.
 
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
@@ -50,7 +52,7 @@ served repositories from the registered ones its caller reads. Adding
 
 ## Phase 2: Toggle, state, and the poll loop (WS2, WS3)
 
-- [ ] T011 [WS2] Add `slack_listen` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Test that a repository with no `[features]` table has it off and that `btrain features` shows it off. Needs 024 T007. Held on 2026-11-23: `repo_mode.mjs` (lane a).
+- [x] T011 [WS2] Add `slack_listen` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Test that a repository with no `[features]` table has it off and that `btrain features` shows it off. Needs 024 T007. Held on 2026-11-23: `repo_mode.mjs` (lane a).
 - [x] T012 [WS2] Extend `src/brain_train/slack/config.mjs`: the `orchestrator` object of `slack.json`, `[slack.orchestrator]` of `project.toml`, the spec's defaults, and the served repositories (registered, both toggles on, a channel from the map or the catch-all). An empty `runner` means no model. Needs 024 T009.
 - [x] T013 [WS2] Write `src/brain_train/slack/inbox.mjs`: load, change, and write `inbox.json` by temporary file and rename with mode 0600; drop `handled` entries after 48 hours and old window times; refuse `approvalMinutes` above 24 hours; keep 20 results for each repository. Test a round trip and that a half-written temporary file is never read.
 - [x] T014 [WS2] Write `src/brain_train/slack/lease.mjs` over `slack/lock.mjs`: take and release the listener lease, touch it on a 15-second timer, and read its nonce again with synchronous calls as the last thing before each rename of `inbox.json`; the stop flag; the pause flag. Test that a second lease for one btrain home is refused with the holder named, and that a lease untouched for 60 seconds is taken over. Needs 024 T012.
