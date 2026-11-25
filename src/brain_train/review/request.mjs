@@ -166,9 +166,9 @@ export async function runReviewRequest({
   // finishing its own steps after the verdict and is left to exit.
   let verdictBy = ""
   const verdict = async (status) => {
-    // The latest event that set a status, if it is this verdict.
+    // The actor of the latest event that set the lane's status.
     const last = (await readEvents()).findLast((event) => event?.after?.status || event?.type === "resolve" || event?.type === "request-changes")
-    verdictBy = last && (!last.after?.status || last.after.status === status) ? keyOf(last.actor) : ""
+    verdictBy = keyOf(last?.actor)
     return { outcome: "verdict", status }
   }
 
@@ -430,8 +430,7 @@ export async function runReviewRequest({
     // takes the lane back. The one exception is the runner of the reviewer
     // that gave the verdict, which may still be finishing its own steps.
     for (const [attemptId, entry] of [...running.entries()]) {
-      if (entry.exited || (verdictBy && keyOf(entry.reviewer) === verdictBy)) continue
-      stopRunner(attemptId)
+      if (keyOf(entry.reviewer) !== verdictBy) stopRunner(attemptId)
     }
   }
 }

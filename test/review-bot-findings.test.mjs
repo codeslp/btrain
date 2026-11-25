@@ -205,7 +205,7 @@ describe("gh-codex findings on #125", () => {
 
   // gh-codex, #125 at 202e2f1: colocated tests by runner naming convention.
   it("classifies colocated test files by their runner naming convention", () => {
-    for (const file of ["pkg/foo_test.go", "src/FooTest.java", "app/foo_test.py", "lib/foo-test.js", "src/foo.spec.ts", "app/test_foo.py", "web/__tests__/foo.js", "crate/tests/it.rs"]) {
+    for (const file of ["pkg/foo_test.go", "src/FooTest.java", "app/foo_test.py", "lib/foo-test.js", "src/foo.spec.ts", "app/test_foo.py", "web/__tests__/foo.js", "crate/tests/it.rs", "test/helpers/fake-clock.mjs", "specs/tla/Review.tla"]) {
       assert.equal(isTestPath(file), true, file)
     }
     for (const file of ["pkg/foo.go", "src/Foo.java", "app/latest.py", "src/contest.js"]) {
