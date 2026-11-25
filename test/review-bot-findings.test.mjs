@@ -132,6 +132,40 @@ describe("gh-codex findings on #125", () => {
     assert.ok(sameLab.at >= 45 * MIN + POLICY.silenceLimitMs, `no same-lab dispatch within silence_limit of A's last output (at ${sameLab.at / MIN} min)`)
   })
 
+  // gh-codex, #125 at 202e2f1: a verdict return left live runners running.
+  it("stops a live runner when the lane leaves needs-review while it runs", async () => {
+    const clock = createFakeClock()
+    let changed = false
+    const signals = []
+    const w = world(clock, {
+      onSleep: () => {
+        if (changed) return
+        changed = true
+        // The owner takes the lane back while the reviewer still runs.
+        w.lane.status = "changes-requested"
+      },
+    })
+    const runAttempt = w.runAttempt
+    w.runAttempt = async (args) => {
+      signals.push(args.signal)
+      return runAttempt(args)
+    }
+    const result = await runReviewRequest({ candidates: { otherLab: [A, B], sameLab: [SAME] }, policy: POLICY, newId, pollIntervalMs: 15_000, maxAttempts: 2, ...w })
+    assert.deepEqual(result, { outcome: "verdict", status: "changes-requested" })
+    assert.equal(signals.length, 1)
+    assert.equal(signals[0].aborted, true, "the runner is stopped before the request returns")
+  })
+
+  // gh-codex, #125 at 202e2f1: colocated tests by runner naming convention.
+  it("classifies colocated test files by their runner naming convention", () => {
+    for (const file of ["pkg/foo_test.go", "src/FooTest.java", "app/foo_test.py", "lib/foo-test.js", "src/foo.spec.ts", "app/test_foo.py", "web/__tests__/foo.js", "crate/tests/it.rs"]) {
+      assert.equal(isTestPath(file), true, file)
+    }
+    for (const file of ["pkg/foo.go", "src/Foo.java", "app/latest.py", "src/contest.js"]) {
+      assert.equal(isTestPath(file), false, file)
+    }
+  })
+
   it("classifies shared configuration that holds test settings as test configuration", () => {
     for (const file of ["package.json", "web/package.json", "pyproject.toml", "setup.cfg", ".coveragerc", "codecov.yml", "vitest.workspace.mts", ".nycrc.json"]) {
       assert.equal(isTestPath(file), true, file)
