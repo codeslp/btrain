@@ -389,7 +389,8 @@ const CANDIDATE_REASON_LABELS = new Map([
   // not candidates: the idle-lane legacy paths (spec 015 L2, and the idle
   // source of L6 and L10) are enforced since 2026-10-13 (README ledger entry
   // 13), so an implementation that accepts one again is an unknown
-  // divergence and fails the run.
+  // divergence and fails the run. `approve-uncovered-lane` (L9, retired by
+  // spec 023 WS3, ledger entry 14) is not a candidate either.
   // spec 002 resolve authority: a repeat resolve, by any actor, is accepted
   // with an L14 record during the FR-5 window.
   ["resolve-from-resolved", "resolve-repeat"],
@@ -1114,9 +1115,16 @@ test("doctor resync conflict: a failed resync of a repair-needed lane tallies re
 const xInReview = { t: "update", lane: "x", actorSel: "owner", status: "needs-review" }
 for (const { name, modes = ["contract", "implementation"], steps, x } of [
   {
-    name: "a ready-for-pr lane re-acquired by the peer resolve",
-    modes: ["implementation"],
-    steps: [xInReview, { t: "dropRegistry", lane: "x" }, { t: "resolve", lane: "x", actorSel: "reviewer", final: false }],
+    // L9 is retired (spec 023 WS3, ledger entry 14): the peer resolve of the
+    // uncovered lane is refused in both modes (witness below), so coverage
+    // comes back only through the owner's resync, and then the approval goes through.
+    name: "a ready-for-pr lane approved after the owner's resync",
+    steps: [
+      xInReview,
+      { t: "dropRegistry", lane: "x" },
+      { t: "rescope", lane: "x", actorSel: "owner", files: ["src/a/"] },
+      { t: "resolve", lane: "x", actorSel: "reviewer", final: false },
+    ],
     x: { status: "ready-for-pr", reasonCode: "", registry: ["src/a/"] },
   },
   {
@@ -1154,6 +1162,29 @@ for (const { name, modes = ["contract", "implementation"], steps, x } of [
       assert.deepEqual({ status: real.status, reasonCode: real.reasonCode, registry: real.registry }, x)
     })
   }
+}
+
+// Regression witness for ledger entry 14 (spec 023 WS3, L9 retired): the
+// reviewer's approval of a review lane whose registry entries are gone is
+// refused in both modes, re-acquires nothing, and leaves the lane in review.
+for (const mode of ["contract", "implementation"]) {
+  test(`uncovered review lane: the reviewer's approval is refused until the owner's resync (${mode} mode)`, { skip: !ENABLED }, async () => {
+    const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      xInReview,
+      { t: "dropRegistry", lane: "x" },
+      { t: "resolve", lane: "x", actorSel: "reviewer", final: false },
+    ])
+    assert.equal(designatedTally.size, 0, "no designated drift")
+    assert.equal(candidateTally.size, 0, `no candidate finding: ${[...candidateTally.keys()].join(", ")}`)
+    const refused = trace.at(-1)
+    assert.equal(refused.realOk, false)
+    assert.equal(refused.modelOk, false)
+    assert.equal(refused.modelReason, "approve-uncovered-lane")
+    assert.match(refused.realError, /L9, enforced/)
+    assert.equal(refused.realState.x.status, "needs-review")
+    assert.deepEqual(refused.realState.x.registry, [])
+  })
 }
 
 // Regression witnesses for ledger entry 13 (spec 015 FR-5 enforcement,
