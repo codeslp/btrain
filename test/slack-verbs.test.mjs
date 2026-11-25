@@ -114,6 +114,8 @@ describe("value checks", () => {
     for (const [files, reason] of [
       ["../secret", /\.\./],
       ["src/../../x", /\.\./],
+      // Resolves inside the repository, so only the explicit rule refuses it.
+      ["src/../test/x.mjs", /\.\./],
       ["/etc/passwd", /not a relative path/],
       ["~/x", /not a relative path/],
       ["src\\x", /backslash/],

@@ -73,7 +73,9 @@ export function parseCommandBlock(block) {
   const head = first.trimStart().slice(COMMAND_PREFIX.length).trim()
   if (!head) return { ok: false, reason: "the btrain> line names no verb" }
   const [verbName, ...words] = head.split(/\s+/)
-  const args = {}
+  // Null-prototype dictionaries: a key such as `__proto__` or `constructor`
+  // must become an own key, so the unknown-key and duplicate checks see it.
+  const args = Object.create(null)
   for (const word of words) {
     const split = word.indexOf("=")
     if (split <= 0) return { ok: false, reason: `"${word}" is not key=value` }
@@ -81,7 +83,7 @@ export function parseCommandBlock(block) {
     if (Object.hasOwn(args, key)) return { ok: false, reason: `${key} is given twice` }
     args[key] = word.slice(split + 1)
   }
-  const fields = {}
+  const fields = Object.create(null)
   for (const line of rest) {
     const split = line.indexOf(":")
     if (split <= 0) return { ok: false, reason: `"${line.trim()}" is not a key: value line` }

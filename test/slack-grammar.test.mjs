@@ -74,6 +74,21 @@ describe("rejections, each with a reason", () => {
     })
   }
 
+  for (const [who, parse] of [["an operator's", parseOperatorCommand], ["a model's", parseModelCommand]]) {
+    it(`rejects ${who} command with an object-prototype key, given once or twice`, () => {
+      for (const text of [
+        "btrain> status __proto__=unexpected",
+        "btrain> status __proto__=first __proto__=second",
+        "btrain> status constructor=x",
+        "btrain> poll-pr lane=e hasOwnProperty=x",
+      ]) {
+        const result = parse(text, CHANNEL)
+        assert.equal(result.ok, false, text)
+        assert.match(result.reason, /takes no argument|given twice/, text)
+      }
+    })
+  }
+
   it("rejects a value holding a control character", () => {
     const result = checkCommand(parseCommandBlock(["btrain> start owner=codex", "task: a\u0007b", "files: a"]), CHANNEL)
     assert.equal(result.ok, false)
