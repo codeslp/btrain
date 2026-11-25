@@ -68,13 +68,16 @@ export const TRANSITION_ROWS = Object.freeze([
   row("L6", "legacy", ["handoff update --files", "doctor repair"], "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope and resync designations (Q2)", "advisory", "legacy", ["idle"]),
   row("L7", "legacy", "handoff resolve", ["repair-needed"], "resolved", "any", "row 15 guard unmet", "release", "forbidden by 006 FR-29", "advisory", "legacy"),
   row("L8", "legacy", "handoff resolve", ["needs-review"], ["ready-for-pr", "resolved"], "any", "actor is not the recorded reviewer", "retain or release", "forbidden by 002 PR-flow row 1", "advisory", "legacy"),
-  row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "advisory", "legacy"),
+  // spec 023 WS3 (T014): L9 and L15 are retired. The FR-5 registry audit of
+  // 2026-11-25 found no advisory event for either row in any registered
+  // repository (test/formal/README.md, ledger entry 14).
+  row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "enforced", "legacy", "$all"),
   row("L10", "legacy", "handoff update --reassign", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 005 FR-5 reassignment (Q8)", "advisory", "legacy", ["idle"]),
   row("L11", "legacy", "handoff resolve", ["in-progress", "changes-requested"], "resolved", "any", "actor unchecked", "release", "forbidden by 002 CLI Commands resolve authority (Q5)", "advisory", "legacy"),
   row("L12", "legacy", "handoff update --metadata", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 002 CLI Commands update authority", "advisory", "legacy"),
   row("L13", "legacy", "handoff claim", "$any", "in-progress", "any-agent", "single-handoff overwrite", "none", "forbidden by 002 CLI Commands claim authority", "advisory", "legacy"),
   row("L14", "legacy", "handoff resolve", ["resolved"], "resolved", "any", "repeat resolve", "none", "forbidden by 002 CLI Commands resolve authority", "advisory", "legacy"),
-  row("L15", "legacy", "handoff request-changes", ["needs-review"], "changes-requested", "any", "reviewer absent or unverified", "retain", "forbidden by 002 CLI Commands and 005 FR-8", "advisory", "legacy"),
+  row("L15", "legacy", "handoff request-changes", ["needs-review"], "changes-requested", "any", "reviewer absent or unverified", "retain", "forbidden by 002 CLI Commands and 005 FR-8", "enforced", "legacy", "$all"),
   row("L16", "WatchdogLockRelease", "watchdog-lock-release", "$any", "$same", "system", "stale or expired lock", "release", "006 FR-2 safe repair", "designated", "system"),
 ])
 
@@ -258,6 +261,8 @@ function enforcedRejection(row, state, event, input) {
   const fixes = {
     L3: "Have the lane owner request peer review.",
     L5: "Complete peer review and link the PR from ready-for-pr before polling.",
+    L9: "A force-release suspended this lane's coverage. Have the owner resync it first (`btrain handoff update --lane <id> --files \"<the lane's locked files>\"`), then approve again.",
+    L15: "Only the lane's recorded reviewer can request changes, as a verified actor: set BTRAIN_AGENT to that reviewer (or pass --actor), and assign a reviewer first if the lane has none.",
   }
   return {
     rowId: row.id,
