@@ -112,6 +112,10 @@ export async function runReviewRequest({
   const otherLab = Array.isArray(candidates.otherLab) ? candidates.otherLab : []
   const sameLab = Array.isArray(candidates.sameLab) ? candidates.sameLab : []
   const running = new Map()
+  // The last stream output of each attempt this process ran, kept after the
+  // attempt ends: FR-4's fallback needs every other-lab attempt's progress
+  // within the last silence limit, not only that of live runners.
+  const lastOutputAt = new Map()
   // When each candidate last failed its presence probe, by lower-case name.
   const probeFailedAt = new Map()
   // The start of the current pass over the other-lab list. A candidate is
@@ -129,12 +133,31 @@ export async function runReviewRequest({
     details: { ...details, by: "btrain-system" },
   })
 
-  const endAttempt = async (lane, attempt, outcome, detail = "") => {
-    const entry = running.get(attempt.id)
-    if (entry) {
-      entry.controller.abort()
-      running.delete(attempt.id)
+  // Stop a runner this process started and forget its handle, keeping its
+  // last output time.
+  const stopRunner = (attemptId) => {
+    const entry = running.get(attemptId)
+    if (!entry) return null
+    const outputAt = toMs(entry.handle?.lastOutputAt?.())
+    if (outputAt !== null) lastOutputAt.set(attemptId, outputAt)
+    entry.controller.abort()
+    running.delete(attemptId)
+    return entry
+  }
+
+  // Runners whose attempt is no longer the active one, because a lane agent
+  // changed the reviewer or a verdict ended it, are stopped before anything
+  // else is watched or dispatched, so a superseded reviewer never works
+  // alongside its replacement.
+  const reconcile = (record) => {
+    const activeId = activeAttempt(record)?.id || ""
+    for (const attemptId of [...running.keys()]) {
+      if (attemptId !== activeId) stopRunner(attemptId)
     }
+  }
+
+  const endAttempt = async (lane, attempt, outcome, detail = "") => {
+    const entry = stopRunner(attempt.id)
     await writeEvent(systemEvent(lane, "review-attempt-ended", { attemptId: attempt.id, outcome, detail }))
     return { mine: Boolean(entry), tier: attempt.tier }
   }
@@ -162,7 +185,7 @@ export async function runReviewRequest({
     const startedAt = toMs(attempt.startedAt) ?? now()
     const pickedUpAt = toMs(attempt.pickedUpAt)
     const progressAt = toMs(attempt.lastProgressAt)
-    const outputAt = toMs(running.get(attempt.id)?.handle?.lastOutputAt?.())
+    const outputAt = toMs(running.get(attempt.id)?.handle?.lastOutputAt?.()) ?? lastOutputAt.get(attempt.id) ?? null
     const last = pickedUpAt === null ? null : Math.max(pickedUpAt, progressAt ?? pickedUpAt, outputAt ?? pickedUpAt)
     return { startedAt, pickedUpAt, last }
   }
@@ -247,6 +270,7 @@ export async function runReviewRequest({
       return { outcome: "verdict", status: lane.status }
     }
     const record = foldReviewRecord(await readEvents(), { status: lane.status })
+    reconcile(record)
     if (!record.request) {
       await writeRequest(lane)
       continue

@@ -63,6 +63,7 @@ import {
   readProjectConfig,
 } from "../core.mjs"
 import { SECRET_PATTERNS } from "./secret-patterns.mjs"
+import { JS_TEST_CONFIG_BASENAME, PYTHON_TEST_CONFIG_BASENAME } from "./test-config-files.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -146,10 +147,8 @@ const PYTHON_FILE = /\.pyi?$/
 // Files whose comments start with `#`; every other file uses // and /* */.
 const HASH_COMMENT_FILE =
   /(?:\.(?:py|pyi|rb|sh|bash|zsh|toml|ya?ml|ini|cfg|conf|mk|r|pl)|(?:^|\/)(?:Makefile|makefile|GNUmakefile|justfile|Justfile|Dockerfile|\.coveragerc))$/
-// Test-runner and coverage config. `exclude` counts only in the JS ones.
-const JS_TEST_CONFIG_BASENAME =
-  /^(?:(?:jest|vitest|vite|playwright|cypress|karma|wdio|ava|mocha)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|karma\.conf\.[cm]?js|\.(?:mocharc|nycrc|c8rc)(?:\.(?:json|ya?ml|[cm]?js))?|package\.json)$/
-const PYTHON_TEST_CONFIG_BASENAME = /^(?:\.coveragerc|\.?codecov\.ya?ml|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|conftest\.py)$/
+// Test-runner and coverage config (test-config-files.mjs, shared with the
+// spec 023 fix rules). `exclude` counts only in the JS ones.
 // Config shared with non-test tools (vite optimizeDeps, package.json
 // fields). There `exclude` counts only under one of these parent keys.
 const SHARED_CONFIG_BASENAME = /^(?:(?:vite|vitest)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|package\.json)$/

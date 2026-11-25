@@ -20,6 +20,8 @@
 //   round                      this fix's number since the lane's claim (1 for the first)
 //   limits                     { maxFiles, maxChangedLines, maxRounds } from [review.fixes]
 
+import { isTestConfigBasename } from "./test-config-files.mjs"
+
 export const FIX_RULES = Object.freeze([
   {
     id: "tier",
@@ -132,10 +134,14 @@ const TEST_PATH_PATTERNS = [
   /(^|\/)test_[^/]+\.py$/,
 ]
 
-/** True for a test file or a test configuration file. */
+/**
+ * True for a test file or a test configuration file. Configuration is the list
+ * `btrain review code` uses (test-config-files.mjs), shared files that carry
+ * test settings (package.json, pyproject.toml, setup.cfg) included.
+ */
 export function isTestPath(file) {
   const target = normalizePath(file)
-  return TEST_PATH_PATTERNS.some((pattern) => pattern.test(target))
+  return TEST_PATH_PATTERNS.some((pattern) => pattern.test(target)) || isTestConfigBasename(target.split("/").pop())
 }
 
 /**
