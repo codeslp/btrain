@@ -22,7 +22,10 @@ T004 are for a person with the real app and the real CLI.
 uses only the low-level call of 024 T013 and the fake read calls of T001, so
 it does not wait for T006 to T015. Reads the budget defers keep their cursor
 and resume, so a long history or thread finishes across minutes instead of
-restarting.
+restarting. T014 is done too: `slack/lease.mjs` needs only 024 T012. The lease
+file is a JSON record that names its holder (process ID, operator, start
+time), so `lock.mjs` now takes an optional `nonce`, which is the lock file's
+whole content.
 
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
@@ -44,7 +47,7 @@ restarting.
 - [ ] T011 [WS2] Add `slack_listen` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Test that a repository with no `[features]` table has it off and that `btrain features` shows it off. Needs 024 T007. Held on 2026-11-23: `repo_mode.mjs` (lane a).
 - [ ] T012 [WS2] Extend `src/brain_train/slack/config.mjs`: the `orchestrator` object of `slack.json`, `[slack.orchestrator]` of `project.toml`, the spec's defaults, and the served repositories (registered, both toggles on, a channel from the map or the catch-all). An empty `runner` means no model. Needs 024 T009.
 - [x] T013 [WS2] Write `src/brain_train/slack/inbox.mjs`: load, change, and write `inbox.json` by temporary file and rename with mode 0600; drop `handled` entries after 48 hours and old window times; refuse `approvalMinutes` above 24 hours; keep 20 results for each repository. Test a round trip and that a half-written temporary file is never read.
-- [ ] T014 [WS2] Write `src/brain_train/slack/lease.mjs` over `slack/lock.mjs`: take and release the listener lease, touch it on a 15-second timer, and read its nonce again with synchronous calls as the last thing before each rename of `inbox.json`; the stop flag; the pause flag. Test that a second lease for one btrain home is refused with the holder named, and that a lease untouched for 60 seconds is taken over. Needs 024 T012.
+- [x] T014 [WS2] Write `src/brain_train/slack/lease.mjs` over `slack/lock.mjs`: take and release the listener lease, touch it on a 15-second timer, and read its nonce again with synchronous calls as the last thing before each rename of `inbox.json`; the stop flag; the pause flag. Test that a second lease for one btrain home is refused with the holder named, and that a lease untouched for 60 seconds is taken over. Needs 024 T012.
 - [ ] T015 [WS2] Add `btrain slack whois [--channel <id>]` to `slack/cli.mjs` (author fields, no message text), add `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (the predicate of `enteredChangesRequestedViaPrPoll` over the lane's event log), and the CLI path to the readers object the `slack` block in `cli.mjs` passes, add the help lines, and ship `docs/slack-app-manifest-listen.json` with the publisher's scopes plus `channels:history` and `groups:history`. Remove the skips from invariants 1 and 12. Held on 2026-11-23: `cli.mjs` (lane c).
 - [x] T016 [WS3] Write `src/brain_train/slack/read-client.mjs` over the low-level call of `slack/client.mjs`: the two read calls as GET requests, paging, the 60-second overlap, and the read budget of 30 a minute for a channel and 40 a minute for a method. Test six open threads on one channel and a 429 not retried before `Retry-After`. Needs 024 T013.
 - [ ] T017 [WS3] Write the cycle in `src/brain_train/slack/listen.mjs` and the `btrain slack listen` command: the seven steps of the plan, record before act, refusal to start with no `operator`, no served repository, or a live lease. In this workstream a mention gets the one-line note that the model is off and a command gets a note that commands are not built yet.

@@ -93,4 +93,25 @@ describe("delivery lock", () => {
     await second.lock.release()
     await assert.rejects(fs.stat(target), /ENOENT/)
   })
+
+  it("writes a caller's nonce as the lock's whole content, and checks ownership against it (the spec 025 lease)", async () => {
+    const target = await lockPath()
+    const content = JSON.stringify({ nonce: "fake-nonce-1", pid: 1 })
+    const { lock, reason } = await tryAcquireLock(target, { nonce: content })
+    assert.equal(reason, "acquired")
+    assert.equal(lock.nonce, content)
+    assert.equal(await fs.readFile(target, "utf8"), content)
+    assert.equal(await lock.stillMine(), true)
+    await fs.writeFile(target, JSON.stringify({ nonce: "fake-nonce-2", pid: 2 }))
+    assert.equal(await lock.stillMine(), false)
+    assert.equal(await lock.touch(), false)
+  })
+
+  it("rejects a nonce that is not a non-empty string before touching the file", async () => {
+    const target = await lockPath()
+    for (const nonce of ["", 42, null]) {
+      await assert.rejects(tryAcquireLock(target, { nonce }), TypeError)
+    }
+    await assert.rejects(fs.stat(target), /ENOENT/)
+  })
 })

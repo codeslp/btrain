@@ -57,9 +57,15 @@ export async function acquireLock(lockPath, options = {}) {
 /**
  * Like `acquireLock`, with the reason for a miss: `{ lock, reason }`, where
  * `reason` is `acquired`, `taken-over`, `held`, or `remove-failed`.
+ *
+ * `nonce` is the lock file's whole content and the proof of ownership. It
+ * defaults to a random UUID. The spec 025 lease passes a record that holds a
+ * random UUID and names its holder; it must be unique to this holder.
  */
-export async function tryAcquireLock(lockPath, { now = Date.now, staleMs = LOCK_STALE_MS } = {}) {
-  const nonce = randomUUID()
+export async function tryAcquireLock(lockPath, { now = Date.now, staleMs = LOCK_STALE_MS, nonce = randomUUID() } = {}) {
+  if (typeof nonce !== "string" || nonce === "") {
+    throw new TypeError("The lock nonce must be a non-empty string.")
+  }
   if (await createLock(lockPath, nonce)) {
     return { lock: makeHandle(lockPath, nonce, now), reason: "acquired" }
   }
