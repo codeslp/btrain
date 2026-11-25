@@ -201,6 +201,29 @@ describe("thread and board maps", () => {
     assert.deepEqual(seen, ["home.lock.8"], "the stale generation 7 was superseded by 8")
   })
 
+  it("does not send when its generation was re-created by another holder (pins mutant G4)", async (t) => {
+    const { sendOnChannel } = await import("../src/brain_train/slack/threads.mjs")
+    const home = path.dirname(path.dirname(await tempDir()))
+    const dir = path.join(home, "slack")
+    const readFile = fs.readFile
+    let replaced = false
+    // While the holder reads the channel state, its generation file is
+    // deleted and created again by another process: same name, another nonce.
+    fs.readFile = async (...args) => {
+      if (!replaced && String(args[0]).endsWith(path.join("slack", "channels.json"))) {
+        replaced = true
+        const own = (await fs.readdir(dir)).find((name) => /^home\.lock\.\d+$/.test(name))
+        await fs.rm(path.join(dir, own))
+        await fs.writeFile(path.join(dir, own), "another-holder", "utf8")
+      }
+      return readFile(...args)
+    }
+    t.after(() => { fs.readFile = readFile })
+    let sends = 0
+    const outcome = await sendOnChannel(home, "C0000FAKE", { now: Date.now, intervalMs: 1000 }, async () => { sends += 1; return { ok: true } })
+    assert.deepEqual([outcome, sends], [{ busy: true }, 0])
+  })
+
   it("forgets a thread whose card is gone", async () => {
     const { deleteThread } = await import("../src/brain_train/slack/threads.mjs")
     const slackDir = await tempDir()
