@@ -10,6 +10,7 @@ import { promisify } from "node:util"
 import { getStartupSnapshot, readProjectConfig } from "../src/brain_train/core.mjs"
 import {
   FEATURE_IDS,
+  FEATURES,
   applyFeatureAnswer,
   getDefaultFeatureMap,
   isFeatureEnabled,
@@ -359,9 +360,10 @@ describe("feature toggles", () => {
     assert.equal(await exists(path.join(repo, ".btrain")), false)
   })
 
-  it("repos without a [features] table keep every feature on", () => {
+  it("repos without a [features] table keep every feature on, except the explicit-only ones", () => {
     for (const id of FEATURE_IDS) {
-      assert.equal(isFeatureEnabled({ name: "legacy" }, id), true)
+      const explicitOnly = FEATURES.find((feature) => feature.id === id).explicitOnly === true
+      assert.equal(isFeatureEnabled({ name: "legacy" }, id), !explicitOnly, id)
     }
     assert.equal(isFeatureEnabled({ features: { formal: false } }, "formal"), false)
     assert.equal(isFeatureEnabled({ features: { formal: false } }, "cgraph"), true)

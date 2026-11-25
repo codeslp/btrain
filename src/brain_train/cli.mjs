@@ -1792,7 +1792,8 @@ async function run() {
       console.log(`repo: ${repoRoot}`)
       console.log(`storage: ${getStorageMode(config)}`)
       if (!hasFeaturesTable(config)) {
-        console.log("features: no [features] table, so every feature is on (pre-022 behavior)")
+        const explicitOnly = FEATURES.filter((feature) => feature.explicitOnly).map((feature) => feature.id)
+        console.log(`features: no [features] table, so every feature except ${explicitOnly.join(" and ")} is on (pre-022 behavior); those are on only when set to true`)
       }
       for (const feature of FEATURES) {
         console.log(`  [${currentMap[feature.id] ? "x" : " "}] ${feature.id.padEnd(16)} ${feature.label} — ${feature.description}`)
