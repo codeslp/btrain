@@ -139,6 +139,27 @@ describe("thread and board maps", () => {
     assert.ok((await reserveChannelSend(home, "C0000OTHR", { now, intervalMs: 1000 })).slotAt === now, "another channel is not held")
   })
 
+  it("does not send when its home lock was taken over before the send (pins mutant S2)", async (t) => {
+    const { sendOnChannel } = await import("../src/brain_train/slack/threads.mjs")
+    const home = path.dirname(path.dirname(await tempDir()))
+    const homeLock = path.join(home, "slack", "home.lock")
+    const readFile = fs.readFile
+    let displaced = false
+    // While the holder reads the channel state, another process replaces its lock.
+    fs.readFile = async (...args) => {
+      if (!displaced && String(args[0]).endsWith(path.join("slack", "channels.json"))) {
+        displaced = true
+        await fs.writeFile(homeLock, "another-process", "utf8")
+      }
+      return readFile(...args)
+    }
+    t.after(() => { fs.readFile = readFile })
+    let sends = 0
+    const outcome = await sendOnChannel(home, "C0000FAKE", { now: Date.now, intervalMs: 1000 }, async () => { sends += 1; return { ok: true } })
+    assert.deepEqual([outcome, sends], [{ busy: true }, 0])
+    assert.equal(await readFile(homeLock, "utf8"), "another-process", "the other holder's lock is left alone")
+  })
+
   it("forgets a thread whose card is gone", async () => {
     const { deleteThread } = await import("../src/brain_train/slack/threads.mjs")
     const slackDir = await tempDir()
