@@ -329,8 +329,13 @@ describe("runReviewRequest with a real runner process", () => {
     assert.equal(result.outcome, "escalation")
     await Promise.all(children.map((child) => new Promise((resolve) => (child.exitCode !== null || child.signalCode ? resolve() : child.on("close", resolve)))))
     assert.ok(children.length >= 2, `re-probed at the silence limit: ${children.length} starts`)
+    // Each runner ended by the abort's SIGTERM: a slow machine may kill it
+    // before node has installed its handler (signal SIGTERM) or after (the
+    // fake logs it and exits 143). None stayed silent until the test ended.
+    for (const child of children) {
+      assert.ok(child.signalCode === "SIGTERM" || child.exitCode === 143, `ended by the abort: ${child.signalCode} ${child.exitCode}`)
+    }
     const exits = (await readFakeRunnerLog(logPath)).filter((entry) => entry.kind === "exit")
-    assert.equal(exits.length, children.length)
-    assert.ok(exits.every((entry) => entry.reason === "SIGTERM"), "every runner was stopped, none was left running")
+    assert.ok(exits.every((entry) => entry.reason === "SIGTERM"), "no runner ended for another reason")
   })
 })

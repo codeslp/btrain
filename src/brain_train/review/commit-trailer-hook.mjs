@@ -11,7 +11,7 @@
 // T037 and lands with the core.mjs work.
 
 export const COMMIT_MSG_HOOK_MARKER = "# btrain:commit-msg-hook"
-export const TRAILER_KEY = "Btrain-Agent"
+export const AGENT_TRAILER = "Btrain-Agent"
 
 /**
  * The managed `commit-msg` hook. The agent name is reduced to the characters
@@ -22,7 +22,7 @@ export function renderCommitMsgHook() {
   return [
     "#!/bin/sh",
     COMMIT_MSG_HOOK_MARKER,
-    `# Appends "${TRAILER_KEY}: <agent>" naming the committing btrain agent (spec 023 FR-13).`,
+    `# Appends "${AGENT_TRAILER}: <agent>" naming the committing btrain agent (spec 023 FR-13).`,
     "# Installed by: btrain init --hooks",
     "# Skipped by: git commit --no-verify (handoff fix then refuses the commit)",
     "",
@@ -30,10 +30,10 @@ export function renderCommitMsgHook() {
     '[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0',
     'AGENT=$(printf "%s" "${BTRAIN_AGENT:-$BRAIN_TRAIN_AGENT}" | tr -cd "A-Za-z0-9._-")',
     '[ -n "$AGENT" ] || exit 0',
-    `if grep -qi "^${TRAILER_KEY}[[:space:]]*:" "$MSG_FILE"; then`,
+    `if grep -qi "^${AGENT_TRAILER}[[:space:]]*:" "$MSG_FILE"; then`,
     "  exit 0",
     "fi",
-    `git interpret-trailers --in-place --trailer "${TRAILER_KEY}: $AGENT" "$MSG_FILE"`,
+    `git interpret-trailers --in-place --trailer "${AGENT_TRAILER}: $AGENT" "$MSG_FILE"`,
     "",
   ].join("\n")
 }
@@ -43,6 +43,6 @@ export function renderCommitMsgHook() {
  * Only a trailer line counts: `Btrain-Agent:` at the start of a line.
  */
 export function readTrailerAgent(message) {
-  const matches = [...String(message || "").matchAll(new RegExp(`^${TRAILER_KEY}[ \\t]*:[ \\t]*([A-Za-z0-9._-]+)[ \\t]*$`, "gim"))]
+  const matches = [...String(message || "").matchAll(new RegExp(`^${AGENT_TRAILER}[ \\t]*:[ \\t]*([A-Za-z0-9._-]+)[ \\t]*$`, "gim"))]
   return matches.length > 0 ? matches.at(-1)[1] : ""
 }
