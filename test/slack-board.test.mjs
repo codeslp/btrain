@@ -154,6 +154,15 @@ describe("the board in a channel (T022)", () => {
     assert.equal(c.pins().length, 1)
   })
 
+  it("counts already_pinned as pinned", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    c.fake.queue("pins.add", { error: "already_pinned" })
+    await api.queue("a", "claimed")
+    assert.equal((await api.run()).status, "done")
+    assert.deepEqual(await boardStatus(api.homeDir, CHANNEL), { posted: true, pinned: true, pinError: "" })
+  })
+
   it("posts a new board and pins it when the old message is gone", async () => {
     const c = await channelFixture()
     const api = c.repo("api")
