@@ -4,6 +4,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { runReviewRequest } from "../src/brain_train/review/request.mjs"
 import { isTestPath } from "../src/brain_train/review/fix-rules.mjs"
+import { scanDiff } from "../src/brain_train/review/code-rules.mjs"
 import { createFakeClock } from "./helpers/fake-clock.mjs"
 
 const MIN = 60_000
@@ -221,4 +222,23 @@ describe("gh-codex findings on #125", () => {
       assert.equal(isTestPath(file), false, file)
     }
   })
+})
+
+// codex-reviewer, lane e at fc0d26c: mutant M13. isTestPath's test-directory
+// rule masked removal of the shared path patterns; the scanner uses them
+// directly. Its proposed tests.
+describe("shared path-named test patterns in the scanner", () => {
+  for (const file of ["web/__tests__/plain.js", "crate/tests/integration.rs"]) {
+    it(`keeps path-named tests in the scanner: ${file}`, () => {
+      const diff = `diff --git a/${file} b/${file}
+deleted file mode 100644
+index 1111111..0000000
+--- a/${file}
++++ /dev/null
+@@ -1 +0,0 @@
+-assert(true)
+`
+      assert.equal(scanDiff(diff).violations.filter((v) => v.rule === "deleted-test-file").length, 1)
+    })
+  }
 })
