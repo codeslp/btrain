@@ -3096,14 +3096,14 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.equal(claim.code, 0, claim.stderr)
     const review = await runBtrain(laneNeedsReviewArgs(tmpDir, "b", "writer"), tmpDir)
     assert.equal(review.code, 0, review.stderr)
+    const before = await readLaneEvents(tmpDir, "b")
     const anonymous = await runBtrain(
       ["handoff", "request-changes", "--repo", tmpDir, "--lane", "b", "--reason-code", "spec-mismatch", "--summary", "who am I"],
       tmpDir,
     )
     assert.notEqual(anonymous.code, 0, "an unverified actor cannot request changes")
     assert.match(anonymous.stderr + anonymous.stdout, /L15, enforced/)
-    const events = await readLaneEvents(tmpDir, "b")
-    assert.notEqual(events.at(-1).type, "request-changes", "nothing was recorded")
+    assert.deepEqual(await readLaneEvents(tmpDir, "b"), before, "the refused request records nothing")
     const status = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
     assert.match(status.stdout, /status: needs-review/)
   })
