@@ -362,8 +362,7 @@ describe("spec 024 publisher invariants", () => {
     assert.ok(!(await fs.readFile(fixture.logPath, "utf8")).includes(TOKEN))
   })
 
-  // btrain-allow: skipped-test
-  it("5. agent-written text cannot produce a mention or a link", { skip: "enabled in WS1" }, async () => {
+  it("5. agent-written text cannot produce a mention or a link", async () => {
     const text = await slackModule("text.mjs")
     const events = await slackModule("events.mjs")
     const render = await slackModule("render.mjs")
