@@ -85,42 +85,57 @@ export async function boardOwed(homeDir, channel, label) {
 
 // ---- Board work cut off by the delivery budget ----
 //
-// A note in the repository's own Slack state (written under its delivery
-// lock, never the shared home lock), so board work the budget cut off is
-// neither lost nor done twice:
-// - `owed`: this repository's lines were not written to the board map; a later
+// Two notes, so board work the budget cut off is neither lost nor done twice.
+// Neither waits for the shared home lock.
+// - The owed note, in the repository's own Slack state (under its delivery
+//   lock): this repository's lines were not written to the board map; a later
 //   run publishes them, even one with no queued entries.
-// - `ts` and `text`: a board message was posted but its record could not be
-//   written; the next holder of the board lock adopts it instead of posting
-//   another.
+// - The posted note, in the btrain home next to the board lock and written
+//   only by its holder: a board message was posted but its record was not
+//   written. The next holder, from any repository, adopts it instead of
+//   posting another. `replaces` is the message it replaced ("" for a first
+//   board), so it is adopted while the record still names that one.
 export const BOARD_PENDING_FILENAME = "board-pending.json"
 
 function pendingPath(slackDir) {
   return path.join(slackDir, BOARD_PENDING_FILENAME)
 }
 
-/** The pending board note for `channel`, or null. A note for another channel is ignored. */
+/** The owed note for `channel`, or null. A note for another channel is ignored. */
 export async function readBoardPending(slackDir, channel) {
   const note = await readJsonOr(pendingPath(slackDir), null)
   if (!note || typeof note !== "object" || note.channel !== String(channel)) return null
   return note
 }
 
-/** Merge `fields` into the note for `channel`; a note left with nothing pending is removed. */
-export async function updateBoardPending(slackDir, channel, fields) {
-  const current = (await readBoardPending(slackDir, channel)) || { channel: String(channel) }
-  const next = { ...current, ...fields, channel: String(channel) }
-  if (!next.owed) delete next.owed
-  if (!next.ts) {
-    delete next.ts
-    delete next.text
-  }
-  if (Object.keys(next).length === 1) {
+/** Write the owed note for `channel` (`{ owed: true }`), or remove it (`{ owed: false }`). */
+export async function updateBoardPending(slackDir, channel, { owed }) {
+  if (!owed) {
     await fs.rm(pendingPath(slackDir), { force: true })
     return null
   }
-  await writeJsonAtomic(pendingPath(slackDir), next)
-  return next
+  const note = { channel: String(channel), owed: true }
+  await writeJsonAtomic(pendingPath(slackDir), note)
+  return note
+}
+
+function postedPath(homeDir, channel) {
+  return path.join(homeDir, "slack", `board-${channel}.posted.json`)
+}
+
+/** The posted note for `channel`: `{ ts, text, replaces }`, or null. Read under the board lock. */
+export async function readPostedNote(homeDir, channel) {
+  const note = await readJsonOr(postedPath(homeDir, channel), null)
+  return note && typeof note === "object" && typeof note.ts === "string" && note.ts ? note : null
+}
+
+/** Write (or with null, remove) the posted note. Only the board-lock holder calls this. */
+export async function writePostedNote(homeDir, channel, note) {
+  if (!note) {
+    await fs.rm(postedPath(homeDir, channel), { force: true })
+    return
+  }
+  await writeJsonAtomic(postedPath(homeDir, channel), { ts: String(note.ts), text: String(note.text || ""), replaces: String(note.replaces || "") })
 }
 
 /**

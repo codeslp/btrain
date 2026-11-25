@@ -45,7 +45,7 @@
 
 import path from "node:path"
 import { addPin, classifySlackError, DEFAULT_CALL_TIMEOUT_MS, ERROR_CLASSES, postMessage, updateMessage } from "./client.mjs"
-import { boardOwed, boardText, hasActiveLanes, readBoardPending, updateBoardPending, writeRepoEntry } from "./board.mjs"
+import { boardOwed, boardText, hasActiveLanes, readBoardPending, readPostedNote, updateBoardPending, writePostedNote, writeRepoEntry } from "./board.mjs"
 import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
 import { prefixReply, renderCard, renderReply } from "./render.mjs"
@@ -563,23 +563,26 @@ async function writeBoardState(run, write) {
   }
 }
 
-// A board message this repository posted but could not record (its note's
-// `ts`): adopted into the record when the board has no message, so it is
-// pinned and updated instead of posted again; dropped when another
-// repository's board is recorded meanwhile. Returns "" or a stop.
+// A board message posted but not recorded (the posted note): adopted into
+// the record while the record still names the message it replaced (none for
+// a first board), so it is pinned and updated instead of posted again;
+// dropped when the record names another board. Runs under the board lock.
+// Returns "" or a stop.
 async function adoptPendingPost(run) {
-  const note = await readBoardPending(run.slackDir, run.channel)
-  if (!note?.ts) return ""
+  const note = await readPostedNote(run.homeDir, run.channel)
+  if (!note) return ""
   const record = await getBoard(run.homeDir, run.channel)
-  if (!record?.ts) {
+  if (String(record?.ts || "") === note.replaces) {
     const lost = await lostBoardLocks(run)
     if (lost) return lost
     const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, {
-      ts: note.ts, text: String(note.text || ""), pinned: false, pinError: "",
+      ts: note.ts, text: note.text, pinned: false, pinError: "",
     }, options))
     if (written) return written
   }
-  await updateBoardPending(run.slackDir, run.channel, { ts: "" })
+  const lost = await lostBoardLocks(run)
+  if (lost) return lost
+  await writePostedNote(run.homeDir, run.channel, null)
   return ""
 }
 
@@ -622,15 +625,18 @@ async function publishBoardLocked(run) {
       if (!ts) return boardFailure(run, { error: "unknown_response" })
       pinned = false
       pinError = ""
-      // Until its record is written, the new message is kept in the note, so
-      // a run cut off now adopts it next time instead of posting another.
-      await updateBoardPending(run.slackDir, run.channel, { ts, text })
+      // Until its record is written, the new message is kept in the posted
+      // note, so the next holder, from any repository, adopts it instead of
+      // posting another.
+      const lost = await lostBoardLocks(run)
+      if (lost) return lost
+      await writePostedNote(run.homeDir, run.channel, { ts, text, replaces: String(record.ts || "") })
     }
     const lost = await lostBoardLocks(run)
     if (lost) return lost
     const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, { ts, text, pinned, pinError }, options))
     if (written) return written
-    await updateBoardPending(run.slackDir, run.channel, { ts: "" })
+    await writePostedNote(run.homeDir, run.channel, null)
   }
 
   // Pin once. A failure is recorded for `btrain slack status` and not retried

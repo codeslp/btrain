@@ -7,7 +7,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { deliver } from "../src/brain_train/slack/deliver.mjs"
-import { boardLanes, boardOwed, boardStatus, boardText, repoKey, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
+import { boardLanes, boardOwed, boardStatus, boardText, readPostedNote, repoKey, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
 import { writeEntry } from "../src/brain_train/slack/outbox.mjs"
 import { getBoard, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
@@ -103,6 +103,7 @@ describe("the board in a channel (T022)", () => {
     assert.ok(boardTs)
     assert.equal(c.pins()[0].body.timestamp, boardTs)
     assert.deepEqual(await boardStatus(api.homeDir, CHANNEL), { posted: true, pinned: true, pinError: "" })
+    assert.equal(await readPostedNote(api.homeDir, CHANNEL), null, "a recorded post leaves no posted note")
 
     // Unchanged state: no board call at all.
     c.clock.at += 5000
