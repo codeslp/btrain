@@ -275,16 +275,31 @@ export async function sendOnChannel(homeDir, channel, { now, intervalMs, waitMs 
     const result = await send()
     if (result?.skipped) return { result }
     const endedAt = clock()
-    const updated = { ...entry, lastSentAt: endedAt }
+    const record = { lastSentAt: endedAt }
     if (result?.status === 429 || result?.error === "ratelimited") {
-      updated.retryUntil = Math.max(retryUntil, endedAt + Math.max(Number(result.retryAfterMs) || 0, intervalMs))
+      record.retryUntil = endedAt + Math.max(Number(result.retryAfterMs) || 0, intervalMs)
     }
-    all[String(channel)] = updated
-    await writeJsonAtomic(channelsPath(homeDir), all)
+    // The send may have outlived the lock's lease, and a new holder may have
+    // written the map meanwhile: merge this channel's record into the map as
+    // it is now, under a lock that is ours. A holder that lost the lock takes
+    // it again for the merge; if it cannot, the record is lost, never the new
+    // holder's.
+    if (await lock.stillMine()) await mergeChannelRecord(homeDir, channel, record)
+    else await withHomeLock(homeDir, { waitMs }, () => mergeChannelRecord(homeDir, channel, record)).catch(() => {})
     return { result }
   } finally {
     await lock.release()
   }
+}
+
+// Fold one send's record into a channel's entry: times only move forward.
+async function mergeChannelRecord(homeDir, channel, record) {
+  const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
+  const entry = objectOr(all[String(channel)])
+  const merged = { ...entry, lastSentAt: Math.max(Number(entry.lastSentAt) || 0, record.lastSentAt) }
+  if (record.retryUntil) merged.retryUntil = Math.max(Number(entry.retryUntil) || 0, record.retryUntil)
+  all[String(channel)] = merged
+  await writeJsonAtomic(channelsPath(homeDir), all)
 }
 
 /** Hold a channel until `retryUntil` after a 429, for every repository. */

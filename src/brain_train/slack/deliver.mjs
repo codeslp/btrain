@@ -171,6 +171,7 @@ export async function deliver(options = {}) {
       deadline,
       lock,
       state,
+      savedCards: JSON.stringify(state.cards),
       summary,
       renderContext: { ...context, repoName: context.repoName || repo.name || path.basename(String(repo.path || "")) },
     }
@@ -283,13 +284,24 @@ function recordFailure(run, entry, result) {
   return "stop-lane"
 }
 
+// Remove sent or dropped entries. A card refresh they made owed is written to
+// disk first: a process that stops after the removal must not lose it, since
+// nothing else would bring the card up to date. Returns false, removing
+// nothing, when the lock was lost before that write.
 async function removeItems(run, items, counter) {
+  const cards = JSON.stringify(run.state.cards)
+  if (cards !== run.savedCards) {
+    if (!(await run.lock.stillMine())) return false
+    await writeDeliveryState(run.slackDir, run.state)
+    run.savedCards = cards
+  }
   for (const item of items) {
     await removeEntry(run.slackDir, item.name)
     if (item.entry?.id) delete run.state.entries[item.entry.id]
   }
   run.summary[counter] += items.length
   run.state.counters[counter] += items.length
+  return true
 }
 
 // A lane state that may be rendered on the card of claim `claimKey`: the
@@ -365,6 +377,7 @@ async function deliverLane(run, laneId, laneState, items) {
 
   // Entries that do not parse cannot be sent: drop them (FR-10).
   const broken = items.filter((item) => !item.entry)
+  // This run has owed no card yet, so removeItems has nothing to write first.
   if (broken.length > 0) await removeItems(run, broken, "dropped")
   const pending = items.filter((item) => item.entry)
 
@@ -381,10 +394,8 @@ async function deliverLane(run, laneId, laneState, items) {
     }
     const newest = old[old.length - 1].entry
     const result = await sendReply(newest, collapsedReplyText(old.length))
-    if (result.ok) {
-      await removeItems(run, old, "collapsed")
-    } else if (result.drop) {
-      await removeItems(run, old, "dropped")
+    if (result.ok || result.drop) {
+      if (!(await removeItems(run, old, result.ok ? "collapsed" : "dropped"))) return "lost-lock"
     } else {
       const retry = run.state.entries[String(newest.id || "")]
       if (retry) {
@@ -404,12 +415,8 @@ async function deliverLane(run, laneId, laneState, items) {
     }
     const text = entry.reply ? renderReply({ kind: entry.kind, mention: Boolean(entry.mention), fields: entry.fields || {} }, run.renderContext) : ""
     const result = await sendReply(entry, text)
-    if (result.ok) {
-      await removeItems(run, [item], "sent")
-      continue
-    }
-    if (result.drop) {
-      await removeItems(run, [item], "dropped")
+    if (result.ok || result.drop) {
+      if (!(await removeItems(run, [item], result.ok ? "sent" : "dropped"))) return "lost-lock"
       continue
     }
     run.summary.deferred += fresh.length - index
