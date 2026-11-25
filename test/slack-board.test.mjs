@@ -7,7 +7,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { deliver } from "../src/brain_train/slack/deliver.mjs"
-import { boardLanes, boardOwed, boardStatus, boardText, readPostedNote, repoKey, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
+import { boardLanes, boardOwed, boardStatus, boardText, readPostedNote, repoKey, writePostedNote, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
 import { writeEntry } from "../src/brain_train/slack/outbox.mjs"
 import { getBoard, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
@@ -506,6 +506,54 @@ describe("unrecorded board posts (codex-reviewer on 3d3d3da)", () => {
     const record = await getBoard(api.homeDir, CHANNEL)
     assert.notEqual(record.ts, old.ts, "the replacement must supersede the deleted board record")
     assert.equal(c.boardPosts().length, 2)
+  })
+})
+
+// codex-reviewer's guard tests on a3b8e1f: each passes on that head and
+// fails with the mutant named.
+describe("board recovery guards (codex-reviewer on a3b8e1f)", () => {
+  it("does not replace a newer board with a stale posted note (M1)", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    await api.run()
+    const current = await getBoard(api.homeDir, CHANNEL)
+    await writePostedNote(api.homeDir, CHANNEL, { ts: "111.222", text: "stale board", replaces: "already-replaced" })
+    c.clock.at += 5000
+    await api.queue("a", "card-refresh")
+    await api.run()
+    assert.equal((await getBoard(api.homeDir, CHANNEL)).ts, current.ts)
+    assert.equal(await readPostedNote(api.homeDir, CHANNEL), null)
+    assert.equal(c.boardPosts().length, 1)
+  })
+
+  it("cleans an already adopted note without undoing the pin (M1)", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    await api.run()
+    const current = await getBoard(api.homeDir, CHANNEL)
+    await writePostedNote(api.homeDir, CHANNEL, { ts: current.ts, text: current.text, replaces: "" })
+    c.clock.at += 5000
+    await api.queue("a", "card-refresh")
+    await api.run()
+    assert.deepEqual(await getBoard(api.homeDir, CHANNEL), current)
+    assert.equal(await readPostedNote(api.homeDir, CHANNEL), null)
+    assert.equal(c.pins().length, 1)
+  })
+
+  it("writes no stale board lines once the budget has expired, even with the home lock free (M10)", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: "api", lanes: [lane("a")] })
+    const before = await getBoard(api.homeDir, CHANNEL)
+    const deadline = c.clock.at + 2000
+    const result = await api.run({ budgetMs: 2000, readLanes: async () => {
+      c.clock.at = deadline
+      throw new Error("unreadable")
+    } })
+    assert.equal(result.status, "error")
+    assert.deepEqual(await getBoard(api.homeDir, CHANNEL), before)
   })
 })
 
