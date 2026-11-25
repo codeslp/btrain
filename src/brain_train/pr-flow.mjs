@@ -1570,7 +1570,6 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   if (!lane) throw new Error(`Unknown lane: ${laneId}`)
   const target = context.prRepo || ""
   const { headRefOid, headRefName, headRepo, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber, target)
-  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), { lane, laneId, stage: "Requesting bot review", headSha: headRefOid })
   if (!FULL_OBJECT_ID_PATTERN.test(headRefOid)) {
     throw new Error(`GitHub did not report a head revision for PR #${prNumber}, so no bot review can be authorized.`)
   }
@@ -1606,6 +1605,7 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   }
 
   context = { ...context, headSha: headRefOid }
+  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), { lane, laneId, stage: "Requesting bot review", headSha: headRefOid })
   const posted = []
   for (const botId of botIds) {
     const bot = prFlowConfig.bots[botId]

@@ -460,12 +460,22 @@ describe("Head validation", () => {
       // about whether the PR head is the selected one.
       await gh.setPr({ ...prOn(base, ghHead), ...headIn("fork") })
       await withPath(gh.binDir, async () => {
+        await assert.rejects(
+          runPrRequestReview(repo, { lane: "a", bots: "all" }),
+          new RegExp(`peer approval covers ${headA}, but the PR head is ${ghHead}.*Hand the new head back for review`),
+          "the fork head must be the revision covered by peer approval",
+        )
+      })
+      assert.equal(await gh.posted(), "")
+
+      await gh.setPr({ ...prOn(base, headA), ...headIn("fork") })
+      await withPath(gh.binDir, async () => {
         assert.ok(
           (await runPrRequestReview(repo, { lane: "a", bots: "all" })).length > 0,
           "a matching name in another repository does not stand in for the fork",
         )
       })
-      assert.match(await gh.posted(), new RegExp(`head=${ghHead}`))
+      assert.match(await gh.posted(), new RegExp(`head=${headA}`))
     })
   })
 })
