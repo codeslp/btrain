@@ -392,6 +392,36 @@ console.log(JSON.stringify({ registered: repos.length, withEvents, snapshotEvent
 JS
 ```
 
+14. Spec 023 WS3 (T012, T014 in part): L9 and L15 retired, 2026-11-25.
+    The audit command above, run at 2026-11-25T08:50:57Z, found 37
+    registrations, 17 with event directories, and one preserved snapshot
+    event. Its 12 gaps are the 11 `btrain-cursor-rt-` fixtures and the lane
+    g reviewer fixture that the 2026-11-24 reconciliation explains.
+
+    | Row | Advisory events | Latest (UTC) | Seven-day bound (UTC) | Repository |
+    | --- | --- | --- | --- | --- |
+    | L4 | 212 | 2026-11-25 07:05:01 | 2026-12-02 07:05:01 | btrain |
+    | L8 | 225 | 2026-11-22 03:47:36 | 2026-11-29 03:47:36 | ai_sales |
+    | L9 | 0 | none | none | none |
+    | L15 | 0 | none | none | none |
+
+    L9 and L15 have no advisory event in any registered repository, so FR-5
+    quiescence holds and both rows are enforced as whole rows
+    (`enforced: "$all"`). `applyTransition` refuses the reviewer's approval
+    of a lane whose coverage a force-release suspended, naming the owner's
+    resync, and `acquireLocks` rolls the approval's re-acquire back. It
+    refuses a request for changes with no recorded reviewer or no verified
+    actor. The mirror rejects the first as `approve-uncovered-lane` in both
+    modes; its request-changes already required the recorded reviewer.
+
+    L8 waits for its bound. L4 is retired in slices (spec 023 T013 and T015),
+    and FR-5 measures the whole row. Its latest events are owners moving
+    `pr-review` or `ready-to-merge` lanes to `changes-requested` with
+    `handoff update --status` to address bot feedback. Every such move
+    restarts L4's seven days. `btrain pr poll --apply` records bot feedback
+    through row 9 and writes no L4 event. Run a fresh audit before merging
+    either retirement.
+
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a
 `validation_mismatch` that was a stale double, not a regression. Fixed on
