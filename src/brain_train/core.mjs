@@ -4779,13 +4779,10 @@ async function readJsonLinesSnapshot(filePath) {
 }
 
 async function writeJsonLinesSnapshot(filePath, rows) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  const tmpPath = `${filePath}.tmp`
   const content = rows.length > 0
     ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
     : ""
-  await fs.writeFile(tmpPath, content, "utf8")
-  await fs.rename(tmpPath, filePath)
+  await writeText(filePath, content)
 }
 
 async function appendCgraphTelemetryRows(repoRoot, rows) {
