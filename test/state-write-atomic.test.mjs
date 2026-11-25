@@ -210,4 +210,43 @@ describe("state file writes", () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  it("refuse to write when resolving a dangling link's parent fails for a reason other than a missing directory", () => withStateDir(async (repoRoot, stateDir) => {
+    const link = path.join(stateDir, "locks.json")
+    await fs.symlink("actual.json", link)
+    const realpath = fs.realpath
+    fs.realpath = async (candidate, ...rest) => {
+      if (candidate === stateDir) throw Object.assign(new Error("EACCES: injected"), { code: "EACCES" })
+      return realpath(candidate, ...rest)
+    }
+    try {
+      await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["src/"]), { code: "EACCES" })
+    } finally {
+      fs.realpath = realpath
+    }
+    assert.equal(await fs.readlink(link), "actual.json")
+    await assert.rejects(fs.stat(path.join(stateDir, "actual.json")), { code: "ENOENT" })
+    assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
+  }))
+
+  it("keep the committed file and remove the temporary file when the write fails partway", () => withStateDir(async (repoRoot, stateDir) => {
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    const target = path.join(stateDir, "locks.json")
+    const before = await fs.readFile(target, "utf8")
+    const writeFile = fs.writeFile
+    fs.writeFile = async (candidate, ...rest) => {
+      if (path.basename(String(candidate)).startsWith(".btrain-write-")) {
+        await writeFile(candidate, "partial")
+        throw Object.assign(new Error("ENOSPC: injected"), { code: "ENOSPC" })
+      }
+      return writeFile(candidate, ...rest)
+    }
+    try {
+      await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["other/"]), { code: "ENOSPC" })
+    } finally {
+      fs.writeFile = writeFile
+    }
+    assert.equal(await fs.readFile(target, "utf8"), before)
+    assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
+  }))
 })
