@@ -2602,16 +2602,16 @@ describe("spec 016 WS3: repair decisions and the FR-5 advisory stage", () => {
     await rmDir(tmpDir)
   })
 
-  it("keeps the reviewer when the reviewer hands off (FR-9) and records the L3 advisory", async () => {
+  it("refuses an in-progress handoff from the reviewer and keeps the assigned peer", async () => {
     const result = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "reviewer"), tmpDir)
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /warning: transition-advisory L3: only the lane owner should move `in-progress -> needs-review`/)
-    assert.match(result.stdout, /peer reviewer: reviewer/)
-    assert.match(result.stdout, /active agent: writer/)
-    const events = await readLaneEvents(tmpDir, "a")
-    const update = lastEventOfType(events, "update")
-    assert.equal(update.details["transition-advisory"], "L3")
-    assert.equal(update.after.reviewer, "reviewer")
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /spec 015 L3, enforced/)
+    const beforeApproval = await readLaneEvents(tmpDir, "a")
+    assert.equal(lastEventOfType(beforeApproval, "update"), undefined)
+    const owner = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "writer"), tmpDir)
+    assert.equal(owner.code, 0, owner.stderr)
+    assert.match(owner.stdout, /peer reviewer: reviewer/)
+    assert.match(owner.stdout, /active agent: writer/)
   })
 
   it("records self-repair-audit only when the owner declares repair on their own lane (Q7)", async () => {
@@ -2853,15 +2853,20 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     await rmDir(tmpDir)
   })
 
-  it("resolves an idle lane with the L2 advisory during the FR-5 window", async () => {
+  it("rejects resolving an idle lane now that L2 is enforced (spec 002 resolve authority)", async () => {
+    // Until 2026-10-13 this resolve was accepted with a `transition-advisory:
+    // L2` record (spec 015 FR-5 window). test/handoff-idle-lane.test.mjs
+    // covers the full idle-lane retirement; this keeps the CLI-level witness.
     const result = await runBtrain(
       ["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "nothing here", "--actor", "writer"],
       tmpDir,
     )
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /warning: transition-advisory L2: handoff resolve `idle -> resolved`/)
-    const events = await readLaneEvents(tmpDir, "b")
-    assert.equal(lastEventOfType(events, "resolve").details["transition-advisory"], "L2")
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /is idle/)
+    assert.match(result.stderr, /spec 015 L2/)
+    assert.doesNotMatch(result.stdout + result.stderr, /transition-advisory L2/)
+    const status = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
+    assert.match(status.stdout, /status: idle/)
   })
 
   it("scopes the FR-18 repair budget to the current task (Q4)", async () => {

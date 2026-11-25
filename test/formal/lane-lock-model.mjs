@@ -241,6 +241,10 @@ export class LaneLockModel {
   reassign({ lane, actor, owner, reviewer }) {
     const s = this.lane(lane)
     if (this.mode === "implementation" && !s.fileExists) return this.#reject("no-handoff-file")
+    // spec 015 FR-5 enforcement (2026-10-13): the idle source of L10 is
+    // retired. An unclaimed lane has no roles to reassign (spec 005 FR-5), and
+    // the transition gate rejects it in the implementation, so both modes do.
+    if (s.status === "idle") return this.#reject("reassign-from-idle")
     if (s.status === "resolved") return this.#reject("resolved-via-update-forbidden")
     const newOwner = owner ?? s.owner
     const newReviewer = reviewer ?? s.reviewer
@@ -376,13 +380,14 @@ export class LaneLockModel {
       return this.#reject("lock-state-mismatch")
     }
 
-    // Implementation mirror: patchHandoff validates the target status name,
-    // the lock-state sync, and reason codes — but not the source status and
-    // not the acting agent. Any modeled target is accepted from any status.
-    // On a never-claimed lane it crashes reading the missing handoff file.
+    // The implementation mirror enforces the L3 retirement for in-progress.
+    // Other legacy updates keep their advisory behavior and lock checks.
     if (this.mode === "implementation") {
       if (!s.fileExists) return this.#reject("no-handoff-file")
       if (this.#coverageMismatch(lane)) return this.#reject("lock-state-mismatch")
+      if (s.status === "in-progress" && status === "needs-review" && actor !== s.owner) {
+        return this.#reject("needs-review-requires-owner")
+      }
       // Every modeled update target is an active status: patchHandoff
       // requires locked files and re-acquires them from the handoff record.
       if (s.lockedFiles.length === 0) return this.#reject("active-status-needs-locks")
@@ -513,11 +518,14 @@ export class LaneLockModel {
   // ready-for-pr and locks are retained. Terminal resolved releases locks.
   resolve({ lane, actor, final }) {
     const s = this.lane(lane)
-    // The implementation still resolves from statuses outside the designated
-    // review path, including idle and resolved. During L8's advisory window,
-    // implementation mode also accepts non-reviewer approval while contract
-    // mode rejects it.
-    if (this.mode === "contract" && s.status === "idle") {
+    // spec 002 CLI Commands resolve authority: resolving an idle lane is
+    // rejected. The implementation enforced it on 2026-10-13 (spec 015 L2
+    // retired; the transition gate rejects it), so both modes reject it. The
+    // implementation still resolves from other statuses outside the
+    // designated review path, including resolved. During L8's advisory
+    // window, implementation mode also accepts non-reviewer approval while
+    // contract mode rejects it.
+    if (s.status === "idle") {
       return this.#reject("resolve-from-idle")
     }
     // spec 002 CLI Commands resolve authority (designated 2026-09-09):
@@ -645,6 +653,7 @@ export class LaneLockModel {
     }
 
     if (this.mode === "implementation") {
+      if (s.status === "in-progress") return this.#reject("pr-outcome-from-invalid-status")
       // Non-terminal outcomes route through patchHandoff and inherit its
       // guards: crash on a missing handoff file, rejection while the handoff
       // record and registry disagree, locked files required for every active
@@ -691,8 +700,13 @@ export class LaneLockModel {
   rescope({ lane, actor, files }) {
     const s = this.lane(lane)
     const normalized = files.map(normalizePath).filter(Boolean)
+    if (this.mode === "implementation" && !s.fileExists) return this.#reject("no-handoff-file")
+    // spec 015 FR-5 enforcement (2026-10-13): the idle source of L6 is
+    // retired. A rescope is an update on an active lane (spec 014), and the
+    // transition gate rejects an idle one before patchHandoff's inactive
+    // branch can release records, so both modes reject it.
+    if (s.status === "idle") return this.#reject("rescope-from-idle")
     if (this.mode === "implementation") {
-      if (!s.fileExists) return this.#reject("no-handoff-file")
       if (s.status === "resolved") {
         // patchHandoff computes nextStatus from the current status when
         // --status is absent, and rejects resolved outright.

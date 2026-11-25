@@ -1536,7 +1536,7 @@ describe("PR review flow classification", () => {
 })
 
 describe("PR review flow handoff application", () => {
-  it("records L5 when a non-terminal outcome with an explicit PR lands on a lane outside the PR flow (spec 015 finding 9)", async () => {
+  it("refuses a non-terminal PR outcome from in-progress even with an explicit PR (spec 015 finding 9)", async () => {
     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-pr-apply-l5-"))
     const previousHome = process.env.BRAIN_TRAIN_HOME
     const previousAgent = process.env.BTRAIN_AGENT
@@ -1555,20 +1555,21 @@ describe("PR review flow handoff application", () => {
         files: "README.md",
       })
 
-      const warnings = []
-      await applyPrStatusToHandoff(repoRoot, { lane: "a", pr: "31", onEvent: (line) => warnings.push(line) }, {
-        overall: "waiting",
-        bots: [{ id: "codex", state: "waiting" }],
-        pr: { number: 31 },
-      })
+      for (const overall of ["waiting", "feedback", "ready-to-merge"]) {
+        await assert.rejects(
+          () => applyPrStatusToHandoff(repoRoot, { lane: "a", pr: "31" }, {
+            overall,
+            bots: [],
+            pr: { number: 31 },
+          }),
+          { rowId: "L5" },
+        )
+      }
 
       const handoff = await checkHandoff(repoRoot)
       const lane = handoff.lanes.find((candidate) => candidate._laneId === "a")
-      assert.equal(lane.status, "pr-review")
-      const events = (await fs.readFile(path.join(repoRoot, ".btrain", "events", "lane-a.jsonl"), "utf8"))
-        .split("\n").filter(Boolean).map((line) => JSON.parse(line))
-      const update = [...events].reverse().find((event) => event.type === "update")
-      assert.equal(update.details["transition-advisory"], "L5")
+      assert.equal(lane.status, "in-progress")
+      assert.equal(lane.prNumber, "")
     } finally {
       if (previousHome === undefined) delete process.env.BRAIN_TRAIN_HOME
       else process.env.BRAIN_TRAIN_HOME = previousHome
