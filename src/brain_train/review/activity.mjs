@@ -67,7 +67,7 @@ function elapsedSince(iso, nowMs) {
  * The event this call writes, or null. Pure: decides from the lane, its
  * events, the caller, and the time.
  */
-export function planReviewActivity({ kind, agentName, lane, events, now }) {
+function planReviewActivity({ kind, agentName, lane, events, now }) {
   const agent = keyOf(agentName)
   if (!agent || !lane) return null
   const status = String(lane.status || "")
