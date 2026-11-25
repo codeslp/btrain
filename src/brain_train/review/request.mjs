@@ -162,6 +162,16 @@ export async function runReviewRequest({
     return { mine: Boolean(entry), tier: attempt.tier }
   }
 
+  // The reviewer whose verdict ended the request: its runner may still be
+  // finishing its own steps after the verdict and is left to exit.
+  let verdictBy = ""
+  const verdict = async (status) => {
+    // The latest event that set a status, if it is this verdict.
+    const last = (await readEvents()).findLast((event) => event?.after?.status || event?.type === "resolve" || event?.type === "request-changes")
+    verdictBy = last && (!last.after?.status || last.after.status === status) ? keyOf(last.actor) : ""
+    return { outcome: "verdict", status }
+  }
+
   const escalate = async (lane, record, reason) => {
     await writeEvent(systemEvent(lane, "review-escalation", { requestId: record.request?.id || "", reason }))
     return { outcome: "escalation", reason }
@@ -198,7 +208,7 @@ export async function runReviewRequest({
       // A runner that gave a verdict exits after writing it: read the lane
       // again before calling the exit a failure.
       const latest = await readLane()
-      if (latest.status !== "needs-review") return { outcome: "verdict", status: latest.status }
+      if (latest.status !== "needs-review") return verdict(latest.status)
       const executable = entry.handle.executable || executableOf(attempt.reviewer) || ""
       const classified = classifyExit({
         executable,
@@ -248,7 +258,7 @@ export async function runReviewRequest({
     }
     started += 1
     const controller = new AbortController()
-    const entry = { controller, handle: null, exited: null }
+    const entry = { controller, handle: null, exited: null, reviewer }
     running.set(attemptId, entry)
     try {
       entry.handle = await runAttempt({ attemptId, reviewer, tier, sameLab: tier === "same-lab", head: record.request.head, signal: controller.signal })
@@ -263,153 +273,165 @@ export async function runReviewRequest({
     return null
   }
 
-  for (;;) {
-    // Rule 1: a verdict ends the request.
-    const lane = await readLane()
-    if (lane.status !== "needs-review") {
-      return { outcome: "verdict", status: lane.status }
-    }
-    const record = foldReviewRecord(await readEvents(), { status: lane.status })
-    reconcile(record)
-    if (!record.request) {
-      await writeRequest(lane)
-      continue
-    }
-
-    // Rule 2: the owner moved the head.
-    if (lane.head && record.request.head && lane.head !== record.request.head && !lane.headMovedByReviewer) {
-      const open = activeAttempt(record)
-      if (open) await endAttempt(lane, open, "superseded", "new-head")
-      probeFailedAt.clear()
-      passStart = -Infinity
-      await writeRequest(lane)
-      continue
-    }
-
-    // Rules 3 and 4: watch the open attempt.
-    const open = activeAttempt(record)
-    if (open) {
-      const result = await watch(lane, record, open)
-      if (result?.outcome) return result
-      if (result?.ended) {
-        if (result.ended.mine && result.ended.tier === "same-lab") return { outcome: "same-lab-ended" }
-        if (result.ended.mine && started >= maxAttempts) return { outcome: "attempts-done" }
+  try {
+    for (;;) {
+      // Rule 1: a verdict ends the request.
+      const lane = await readLane()
+      if (lane.status !== "needs-review") {
+        // Awaited here, so verdictBy is set before the cleanup below runs.
+        return await verdict(lane.status)
+      }
+      const record = foldReviewRecord(await readEvents(), { status: lane.status })
+      reconcile(record)
+      if (!record.request) {
+        await writeRequest(lane)
         continue
       }
-      await sleep(pollIntervalMs)
-      continue
-    }
-    if (started >= maxAttempts) return { outcome: "attempts-done" }
 
-    const t = now()
-    const requestedAt = toMs(record.request.requestedAt) ?? t
-    const windowPassed = t - requestedAt >= limits.otherLabWindowMs
-    const attempts = attemptsForCurrentRequest(record)
-    const attemptsOf = (name) => attempts.filter((attempt) => keyOf(attempt.reviewer) === keyOf(name))
-    const laneOnOtherLab = includesName(otherLab, lane.reviewer)
+      // Rule 2: the owner moved the head.
+      if (lane.head && record.request.head && lane.head !== record.request.head && !lane.headMovedByReviewer) {
+        const open = activeAttempt(record)
+        if (open) await endAttempt(lane, open, "superseded", "new-head")
+        probeFailedAt.clear()
+        passStart = -Infinity
+        await writeRequest(lane)
+        continue
+      }
 
-    // Short case: a linked PR. Row 20 refuses a reassignment, so only the
-    // recorded reviewer is dispatched, again at each silence limit.
-    if (lane.prNumber) {
-      if (windowPassed) return escalate(lane, record, ESCALATION_REASONS.PR_LINKED)
-      const previous = attemptsOf(lane.reviewer).at(-1)
-      const endedAt = toMs(previous?.endedAt)
-      if (!previous || (endedAt !== null && t - endedAt >= limits.silenceLimitMs)) {
-        const result = await dispatch(lane, record, {
-          reviewer: lane.reviewer,
-          reason: "",
-          tier: laneOnOtherLab ? "other-lab" : "same-lab",
-        })
+      // Rules 3 and 4: watch the open attempt.
+      const open = activeAttempt(record)
+      if (open) {
+        const result = await watch(lane, record, open)
+        if (result?.outcome) return result
+        if (result?.ended) {
+          if (result.ended.mine && result.ended.tier === "same-lab") return { outcome: "same-lab-ended" }
+          if (result.ended.mine && started >= maxAttempts) return { outcome: "attempts-done" }
+          continue
+        }
+        await sleep(pollIntervalMs)
+        continue
+      }
+      if (started >= maxAttempts) return { outcome: "attempts-done" }
+
+      const t = now()
+      const requestedAt = toMs(record.request.requestedAt) ?? t
+      const windowPassed = t - requestedAt >= limits.otherLabWindowMs
+      const attempts = attemptsForCurrentRequest(record)
+      const attemptsOf = (name) => attempts.filter((attempt) => keyOf(attempt.reviewer) === keyOf(name))
+      const laneOnOtherLab = includesName(otherLab, lane.reviewer)
+
+      // Short case: a linked PR. Row 20 refuses a reassignment, so only the
+      // recorded reviewer is dispatched, again at each silence limit.
+      if (lane.prNumber) {
+        if (windowPassed) return escalate(lane, record, ESCALATION_REASONS.PR_LINKED)
+        const previous = attemptsOf(lane.reviewer).at(-1)
+        const endedAt = toMs(previous?.endedAt)
+        if (!previous || (endedAt !== null && t - endedAt >= limits.silenceLimitMs)) {
+          const result = await dispatch(lane, record, {
+            reviewer: lane.reviewer,
+            reason: "",
+            tier: laneOnOtherLab ? "other-lab" : "same-lab",
+          })
+          if (result) return result
+          continue
+        }
+        await sleep(pollIntervalMs)
+        continue
+      }
+
+      // Rule 5: the next other-lab reviewer. The lane's current reviewer goes
+      // first when it is an other-lab candidate.
+      const ordered = laneOnOtherLab
+        ? [otherLab.find((name) => keyOf(name) === keyOf(lane.reviewer)), ...otherLab.filter((name) => keyOf(name) !== keyOf(lane.reviewer))]
+        : [...otherLab]
+      const lastTry = (name) => {
+        const tries = [
+          ...attemptsOf(name).map((attempt) => toMs(attempt.startedAt)).filter((value) => value !== null),
+          ...(probeFailedAt.has(keyOf(name)) ? [probeFailedAt.get(keyOf(name))] : []),
+        ]
+        return tries.length > 0 ? Math.max(...tries) : null
+      }
+      const untried = ordered.filter((name) => {
+        const last = lastTry(name)
+        return last === null || last < passStart
+      })
+      const otherLabReason = (name) => {
+        if (keyOf(name) === keyOf(lane.reviewer)) return ""
+        return includesName(sameLab, lane.reviewer) || record.tier === "same-lab"
+          ? FALLBACK_REASONS.OTHER_LAB_RECOVERED
+          : FALLBACK_REASONS.NEXT_OTHER_LAB
+      }
+      const tryOtherLab = async (name) => {
+        if (!(await probe(name))) {
+          probeFailedAt.set(keyOf(name), now())
+          return null
+        }
+        const result = await dispatch(lane, record, { reviewer: name, reason: otherLabReason(name), tier: "other-lab" })
+        return result || "dispatched"
+      }
+
+      if (untried.length > 0) {
+        const result = await tryOtherLab(untried[0])
+        if (result && result !== "dispatched") return result
+        continue
+      }
+
+      const otherLabAttempts = attempts.filter((attempt) => includesName(otherLab, attempt.reviewer))
+      const progressing = otherLabAttempts.some((attempt) => {
+        const { last } = signals(attempt)
+        return last !== null && t - last < limits.silenceLimitMs
+      })
+
+      // Rules 6 and 7: the same-lab tier, or an escalation.
+      if (otherLab.length === 0 || (windowPassed && !progressing)) {
+        if (record.sameLabChangeRequests >= SAME_LAB_CHANGE_REQUEST_LIMIT) {
+          return escalate(lane, record, ESCALATION_REASONS.SAME_LAB_LIMIT)
+        }
+        let reviewer = ""
+        for (const name of sameLab) {
+          if (probeFailedAt.has(keyOf(name))) continue
+          if (await probe(name)) {
+            reviewer = name
+            break
+          }
+          probeFailedAt.set(keyOf(name), now())
+        }
+        if (!reviewer) return escalate(lane, record, ESCALATION_REASONS.NO_REVIEWER)
+        const reason = otherLab.length === 0
+          ? FALLBACK_REASONS.NO_OTHER_LAB_CONFIGURED
+          : FALLBACK_REASONS.OTHER_LAB_UNAVAILABLE
+        const result = await dispatch(lane, record, { reviewer, reason, tier: "same-lab" })
         if (result) return result
         continue
       }
-      await sleep(pollIntervalMs)
-      continue
-    }
 
-    // Rule 5: the next other-lab reviewer. The lane's current reviewer goes
-    // first when it is an other-lab candidate.
-    const ordered = laneOnOtherLab
-      ? [otherLab.find((name) => keyOf(name) === keyOf(lane.reviewer)), ...otherLab.filter((name) => keyOf(name) !== keyOf(lane.reviewer))]
-      : [...otherLab]
-    const lastTry = (name) => {
-      const tries = [
-        ...attemptsOf(name).map((attempt) => toMs(attempt.startedAt)).filter((value) => value !== null),
-        ...(probeFailedAt.has(keyOf(name)) ? [probeFailedAt.get(keyOf(name))] : []),
-      ]
-      return tries.length > 0 ? Math.max(...tries) : null
-    }
-    const untried = ordered.filter((name) => {
-      const last = lastTry(name)
-      return last === null || last < passStart
-    })
-    const otherLabReason = (name) => {
-      if (keyOf(name) === keyOf(lane.reviewer)) return ""
-      return includesName(sameLab, lane.reviewer) || record.tier === "same-lab"
-        ? FALLBACK_REASONS.OTHER_LAB_RECOVERED
-        : FALLBACK_REASONS.NEXT_OTHER_LAB
-    }
-    const tryOtherLab = async (name) => {
-      if (!(await probe(name))) {
-        probeFailedAt.set(keyOf(name), now())
-        return null
-      }
-      const result = await dispatch(lane, record, { reviewer: name, reason: otherLabReason(name), tier: "other-lab" })
-      return result || "dispatched"
-    }
-
-    if (untried.length > 0) {
-      const result = await tryOtherLab(untried[0])
-      if (result && result !== "dispatched") return result
-      continue
-    }
-
-    const otherLabAttempts = attempts.filter((attempt) => includesName(otherLab, attempt.reviewer))
-    const progressing = otherLabAttempts.some((attempt) => {
-      const { last } = signals(attempt)
-      return last !== null && t - last < limits.silenceLimitMs
-    })
-
-    // Rules 6 and 7: the same-lab tier, or an escalation.
-    if (otherLab.length === 0 || (windowPassed && !progressing)) {
-      if (record.sameLabChangeRequests >= SAME_LAB_CHANGE_REQUEST_LIMIT) {
-        return escalate(lane, record, ESCALATION_REASONS.SAME_LAB_LIMIT)
-      }
-      let reviewer = ""
-      for (const name of sameLab) {
-        if (probeFailedAt.has(keyOf(name))) continue
-        if (await probe(name)) {
-          reviewer = name
-          break
+      // Rule 5, re-probe: every other-lab reviewer has been tried and the
+      // window is still open. Once the last pass ended a silence limit ago,
+      // start a new pass: every candidate is untried again and is visited in
+      // order, so one that keeps failing its probe cannot starve the others.
+      if (!windowPassed) {
+        const ends = [
+          ...otherLabAttempts.map((attempt) => toMs(attempt.endedAt)).filter((value) => value !== null),
+          ...ordered.map((name) => probeFailedAt.get(keyOf(name))).filter((value) => value !== undefined),
+        ]
+        const lastEnd = ends.length > 0 ? Math.max(...ends) : requestedAt
+        if (t - lastEnd >= limits.silenceLimitMs) {
+          passStart = t
+          continue
         }
-        probeFailedAt.set(keyOf(name), now())
       }
-      if (!reviewer) return escalate(lane, record, ESCALATION_REASONS.NO_REVIEWER)
-      const reason = otherLab.length === 0
-        ? FALLBACK_REASONS.NO_OTHER_LAB_CONFIGURED
-        : FALLBACK_REASONS.OTHER_LAB_UNAVAILABLE
-      const result = await dispatch(lane, record, { reviewer, reason, tier: "same-lab" })
-      if (result) return result
-      continue
-    }
 
-    // Rule 5, re-probe: every other-lab reviewer has been tried and the
-    // window is still open. Once the last pass ended a silence limit ago,
-    // start a new pass: every candidate is untried again and is visited in
-    // order, so one that keeps failing its probe cannot starve the others.
-    if (!windowPassed) {
-      const ends = [
-        ...otherLabAttempts.map((attempt) => toMs(attempt.endedAt)).filter((value) => value !== null),
-        ...ordered.map((name) => probeFailedAt.get(keyOf(name))).filter((value) => value !== undefined),
-      ]
-      const lastEnd = ends.length > 0 ? Math.max(...ends) : requestedAt
-      if (t - lastEnd >= limits.silenceLimitMs) {
-        passStart = t
-        continue
-      }
+      // Rule 8: wait.
+      await sleep(pollIntervalMs)
     }
-
-    // Rule 8: wait.
-    await sleep(pollIntervalMs)
+  } finally {
+    // Nobody watches a runner after the request returns, so every runner
+    // still alive is stopped: a reviewer never keeps working after the owner
+    // takes the lane back. The one exception is the runner of the reviewer
+    // that gave the verdict, which may still be finishing its own steps.
+    for (const [attemptId, entry] of [...running.entries()]) {
+      if (entry.exited || (verdictBy && keyOf(entry.reviewer) === verdictBy)) continue
+      stopRunner(attemptId)
+    }
   }
 }

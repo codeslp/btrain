@@ -20,7 +20,7 @@
 //   round                      this fix's number since the lane's claim (1 for the first)
 //   limits                     { maxFiles, maxChangedLines, maxRounds } from [review.fixes]
 
-import { isTestConfigBasename } from "./test-config-files.mjs"
+import { isNamedTestFile, isTestConfigBasename } from "./test-files.mjs"
 
 export const FIX_RULES = Object.freeze([
   {
@@ -123,25 +123,23 @@ export function inLockedFiles(file, lockedFiles) {
   })
 }
 
-// Test files and test configuration, for the caller that counts the existing
-// lines a fix removes or changes.
-const TEST_PATH_PATTERNS = [
-  /(^|\/)(test|tests|__tests__|spec|specs\/tla)\//,
-  /\.(test|spec)\.[cm]?[jt]sx?$/,
-  /(^|\/)(jest|vitest|playwright|karma|cypress)\.config\.[cm]?[jt]s$/,
-  /(^|\/)\.mocharc(\.[a-z]+)?$/,
-  /(^|\/)(pytest\.ini|conftest\.py|tox\.ini)$/,
-  /(^|\/)test_[^/]+\.py$/,
-]
+// Files under a test directory, for the caller that counts the existing lines
+// a fix removes or changes. Named test files and test configuration come from
+// test-files.mjs.
+const TEST_DIR_PATTERN = /(^|\/)(test|tests|__tests__|spec|specs\/tla)\//
 
 /**
- * True for a test file or a test configuration file. Configuration is the list
- * `btrain review code` uses (test-config-files.mjs), shared files that carry
- * test settings (package.json, pyproject.toml, setup.cfg) included.
+ * True for a test file or a test configuration file. Test files and
+ * configuration are the lists `btrain review code` uses (test-files.mjs):
+ * colocated tests by runner naming convention (foo_test.go, FooTest.java),
+ * and shared files that carry test settings (package.json, pyproject.toml,
+ * setup.cfg).
  */
 export function isTestPath(file) {
   const target = normalizePath(file)
-  return TEST_PATH_PATTERNS.some((pattern) => pattern.test(target)) || isTestConfigBasename(target.split("/").pop())
+  return TEST_DIR_PATTERN.test(target)
+    || isNamedTestFile(target)
+    || isTestConfigBasename(target.split("/").pop())
 }
 
 /**

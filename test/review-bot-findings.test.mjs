@@ -156,6 +156,53 @@ describe("gh-codex findings on #125", () => {
     assert.equal(signals[0].aborted, true, "the runner is stopped before the request returns")
   })
 
+  it("leaves the runner of the reviewer that gave the verdict to finish its own steps", async () => {
+    const clock = createFakeClock()
+    let changed = false
+    const signals = []
+    const w = world(clock, {
+      onSleep: () => {
+        if (changed) return
+        changed = true
+        // A resolves and is still running (for example, its PR steps).
+        w.events.push({ type: "resolve", actor: A, recordedAt: clock.iso(), laneId: "a", before: { status: "needs-review" }, after: { status: "ready-for-pr" } })
+        w.lane.status = "ready-for-pr"
+      },
+    })
+    const runAttempt = w.runAttempt
+    w.runAttempt = async (args) => {
+      signals.push(args.signal)
+      return runAttempt(args)
+    }
+    const result = await runReviewRequest({ candidates: { otherLab: [A, B], sameLab: [SAME] }, policy: POLICY, newId, pollIntervalMs: 15_000, maxAttempts: 2, ...w })
+    assert.deepEqual(result, { outcome: "verdict", status: "ready-for-pr" })
+    assert.equal(signals[0].aborted, false)
+  })
+
+  it("stops a live runner when the owner's update, not the reviewer, ended the request", async () => {
+    const clock = createFakeClock()
+    let changed = false
+    const signals = []
+    const w = world(clock, {
+      onSleep: () => {
+        if (changed) return
+        changed = true
+        // An earlier round's resolve by A is in the log; the owner's update
+        // is the latest status change.
+        w.events.push({ type: "resolve", actor: A, recordedAt: clock.iso(), laneId: "a", before: { status: "needs-review" }, after: { status: "ready-for-pr" } })
+        w.events.push({ type: "update", actor: OWNER, recordedAt: clock.iso(), laneId: "a", before: { status: "ready-for-pr" }, after: { status: "changes-requested" } })
+        w.lane.status = "changes-requested"
+      },
+    })
+    const runAttempt = w.runAttempt
+    w.runAttempt = async (args) => {
+      signals.push(args.signal)
+      return runAttempt(args)
+    }
+    await runReviewRequest({ candidates: { otherLab: [A, B], sameLab: [SAME] }, policy: POLICY, newId, pollIntervalMs: 15_000, maxAttempts: 2, ...w })
+    assert.equal(signals[0].aborted, true)
+  })
+
   // gh-codex, #125 at 202e2f1: colocated tests by runner naming convention.
   it("classifies colocated test files by their runner naming convention", () => {
     for (const file of ["pkg/foo_test.go", "src/FooTest.java", "app/foo_test.py", "lib/foo-test.js", "src/foo.spec.ts", "app/test_foo.py", "web/__tests__/foo.js", "crate/tests/it.rs"]) {
