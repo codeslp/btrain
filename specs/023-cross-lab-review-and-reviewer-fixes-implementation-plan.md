@@ -662,7 +662,11 @@ way `Resync` is for `Doctor`: the owner stays the owner, the reviewer
 changes under the row's guards, and `lastActor` becomes the owner. The
 mirror gets the same action. The second PR is code.
 
-1. `request-lock.mjs` and `request.mjs`, as described above.
+1. `request-lock.mjs` and `request.mjs`, as described above. When the
+   request returns, it stops every runner it started that is still alive,
+   except the runner of the reviewer whose verdict moved the lane out of
+   review. The reviewer whose verdict moved the lane out of review is not a
+   late reviewer, and it needs to finish its PR steps.
 2. `executeLoopCliRunnerWithStreaming`: the optional `AbortSignal`.
    `buildLoopRunnerEnv`: the optional allowlist. `normalizeLoopCliRunner`:
    the fresh-session flags for a same-lab attempt.

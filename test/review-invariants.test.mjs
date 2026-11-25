@@ -279,7 +279,12 @@ function createLoopWorld({ clock, owner = AGENTS.owner.name, reviewer = AGENTS.o
       return { exit, tail: () => "", lastOutputAt: () => lastOutputAt }
     },
     now: clock.now,
-    sleep: clock.sleep,
+    // A request loop that never returns would run on the fake clock forever;
+    // after six simulated hours this sleep throws so the test fails instead.
+    sleep: async (ms) => {
+      if (clock.elapsed() > 6 * 60 * MIN) throw new Error("runaway request loop: six simulated hours")
+      return clock.sleep(ms)
+    },
   }
 }
 
@@ -312,7 +317,7 @@ describe("the invariant harness itself", () => {
 })
 
 describe("spec 023 invariants", () => {
-  it("1. a same-lab reviewer is assigned only by override, or after the window with every other-lab reviewer tried and none progressing", { skip: "WS5: the request loop (T028)" }, async () => { // btrain-allow: skipped-test
+  it("1. a same-lab reviewer is assigned only by override, or after the window with every other-lab reviewer tried and none progressing", async () => {
     const { runReviewRequest } = await reviewModule("request.mjs")
     const clock = createFakeClock()
     const world = createLoopWorld({ clock, behaviors: { [AGENTS.otherLabA.name]: "silent", [AGENTS.otherLabB.name]: "silent" } })
@@ -583,7 +588,7 @@ describe("spec 023 invariants", () => {
     })
   })
 
-  it("11. handoff fix is refused, with its own message, for each FR-11 condition that fails", { skip: "WS7: fix-rules.mjs (T033, T039)" }, async () => { // btrain-allow: skipped-test
+  it("11. handoff fix is refused, with its own message, for each FR-11 condition that fails", async () => {
     const { evaluateFixRules } = await reviewModule("fix-rules.mjs")
     const head = "a".repeat(40)
     const good = {

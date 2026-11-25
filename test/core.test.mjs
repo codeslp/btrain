@@ -2602,16 +2602,16 @@ describe("spec 016 WS3: repair decisions and the FR-5 advisory stage", () => {
     await rmDir(tmpDir)
   })
 
-  it("keeps the reviewer when the reviewer hands off (FR-9) and records the L3 advisory", async () => {
+  it("refuses an in-progress handoff from the reviewer and keeps the assigned peer", async () => {
     const result = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "reviewer"), tmpDir)
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /warning: transition-advisory L3: only the lane owner should move `in-progress -> needs-review`/)
-    assert.match(result.stdout, /peer reviewer: reviewer/)
-    assert.match(result.stdout, /active agent: writer/)
-    const events = await readLaneEvents(tmpDir, "a")
-    const update = lastEventOfType(events, "update")
-    assert.equal(update.details["transition-advisory"], "L3")
-    assert.equal(update.after.reviewer, "reviewer")
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /spec 015 L3, enforced/)
+    const beforeApproval = await readLaneEvents(tmpDir, "a")
+    assert.equal(lastEventOfType(beforeApproval, "update"), undefined)
+    const owner = await runBtrain(laneNeedsReviewArgs(tmpDir, "a", "writer"), tmpDir)
+    assert.equal(owner.code, 0, owner.stderr)
+    assert.match(owner.stdout, /peer reviewer: reviewer/)
+    assert.match(owner.stdout, /active agent: writer/)
   })
 
   it("records self-repair-audit only when the owner declares repair on their own lane (Q7)", async () => {
@@ -2853,15 +2853,20 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     await rmDir(tmpDir)
   })
 
-  it("resolves an idle lane with the L2 advisory during the FR-5 window", async () => {
+  it("rejects resolving an idle lane now that L2 is enforced (spec 002 resolve authority)", async () => {
+    // Until 2026-10-13 this resolve was accepted with a `transition-advisory:
+    // L2` record (spec 015 FR-5 window). test/handoff-idle-lane.test.mjs
+    // covers the full idle-lane retirement; this keeps the CLI-level witness.
     const result = await runBtrain(
       ["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "nothing here", "--actor", "writer"],
       tmpDir,
     )
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /warning: transition-advisory L2: handoff resolve `idle -> resolved`/)
-    const events = await readLaneEvents(tmpDir, "b")
-    assert.equal(lastEventOfType(events, "resolve").details["transition-advisory"], "L2")
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /is idle/)
+    assert.match(result.stderr, /spec 015 L2/)
+    assert.doesNotMatch(result.stdout + result.stderr, /transition-advisory L2/)
+    const status = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
+    assert.match(status.stdout, /status: idle/)
   })
 
   it("scopes the FR-18 repair budget to the current task (Q4)", async () => {
@@ -3039,7 +3044,7 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.equal(release.code, 0, release.stderr)
   })
 
-  it("records L9 when the reviewer approves a lane whose coverage was force-released (spec 002 Force-release override)", async () => {
+  it("refuses the reviewer's approval of a lane whose coverage was force-released until the owner's resync (L9 retired)", async () => {
     const claim = await runBtrain(
       ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "WS4 L9", "--owner", "writer", "--reviewer", "reviewer", "--files", "docs/"],
       tmpDir,
@@ -3057,12 +3062,23 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     const locks = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
     assert.doesNotMatch(locks.stdout, /b: docs\//)
 
-    const approve = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "approved anyway", "--actor", "reviewer"], tmpDir)
+    const refused = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "approved anyway", "--actor", "reviewer"], tmpDir)
+    assert.notEqual(refused.code, 0, "the approval is refused while coverage is suspended")
+    assert.match(refused.stderr + refused.stdout, /L9, enforced/)
+    assert.match(refused.stderr + refused.stdout, /resync/)
+    const stillReleased = await runBtrain(["locks", "--repo", tmpDir], tmpDir)
+    assert.doesNotMatch(stillReleased.stdout, /b: docs\//, "a refused approval re-acquires nothing")
+    const status = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
+    assert.match(status.stdout, /status: needs-review/)
+
+    // The owner's resync (row 17: the same set) restores coverage; then the approval goes through.
+    const resync = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "b", "--files", "docs/", "--actor", "writer"], tmpDir)
+    assert.equal(resync.code, 0, resync.stderr)
+    const approve = await runBtrain(["handoff", "resolve", "--repo", tmpDir, "--lane", "b", "--summary", "approved after resync", "--actor", "reviewer"], tmpDir)
     assert.equal(approve.code, 0, approve.stderr)
-    assert.match(approve.stdout, /warning: transition-advisory L9/)
     assert.match(approve.stdout, /status: ready-for-pr/)
     const events = await readLaneEvents(tmpDir, "b")
-    assert.equal(lastEventOfType(events, "resolve").details["transition-advisory"], "L9")
+    assert.equal(lastEventOfType(events, "resolve").details["transition-advisory"], undefined)
 
     // Leave lane b free for the next test: link a PR and let a closed outcome terminate it.
     const link = await runBtrain(["handoff", "update", "--repo", tmpDir, "--lane", "b", "--status", "pr-review", "--pr", "9", "--actor", "writer", "--no-dispatch"], tmpDir)
@@ -3072,7 +3088,7 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.match(done.stdout, /transition-advisory L1/)
   })
 
-  it("records L15 when request-changes runs without a verifiable reviewer actor", async () => {
+  it("refuses request-changes without a verifiable reviewer actor (L15 retired)", async () => {
     const claim = await runBtrain(
       ["handoff", "claim", "--repo", tmpDir, "--lane", "b", "--task", "WS4 L15", "--owner", "writer", "--reviewer", "reviewer", "--files", "docs/"],
       tmpDir,
@@ -3080,14 +3096,16 @@ describe("spec 016 WS4: designated rows and the remaining advisory legacy rows",
     assert.equal(claim.code, 0, claim.stderr)
     const review = await runBtrain(laneNeedsReviewArgs(tmpDir, "b", "writer"), tmpDir)
     assert.equal(review.code, 0, review.stderr)
+    const before = await readLaneEvents(tmpDir, "b")
     const anonymous = await runBtrain(
       ["handoff", "request-changes", "--repo", tmpDir, "--lane", "b", "--reason-code", "spec-mismatch", "--summary", "who am I"],
       tmpDir,
     )
-    assert.equal(anonymous.code, 0, anonymous.stderr)
-    assert.match(anonymous.stdout, /warning: transition-advisory L15/)
-    const events = await readLaneEvents(tmpDir, "b")
-    assert.equal(lastEventOfType(events, "request-changes").details["transition-advisory"], "L15")
+    assert.notEqual(anonymous.code, 0, "an unverified actor cannot request changes")
+    assert.match(anonymous.stderr + anonymous.stdout, /L15, enforced/)
+    assert.deepEqual(await readLaneEvents(tmpDir, "b"), before, "the refused request records nothing")
+    const status = await runBtrain(["handoff", "--repo", tmpDir, "--lane", "b"], tmpDir)
+    assert.match(status.stdout, /status: needs-review/)
   })
 })
 

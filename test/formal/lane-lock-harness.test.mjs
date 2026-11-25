@@ -41,6 +41,7 @@ import {
   BtrainError,
 } from "../../src/brain_train/core.mjs"
 import { applyPrStatusToHandoff } from "../../src/brain_train/pr-flow.mjs"
+import { TransitionRejection } from "../../src/brain_train/transitions.mjs"
 import { LaneLockModel } from "./lane-lock-model.mjs"
 
 const ENABLED = process.env.BTRAIN_FORMAL === "1"
@@ -133,6 +134,13 @@ async function makeRepo() {
   }
   process.env.BRAIN_TRAIN_HOME = path.join(root, "home")
   return { root, repo }
+}
+
+// A refusal from the real entry points is a BtrainError, or, since the spec
+// 015 FR-5 retirements of 2026-10-13, the transition gate's own
+// TransitionRejection (an enforced legacy row). Anything else is a crash.
+function isRejection(error) {
+  return error instanceof BtrainError || error instanceof TransitionRejection
 }
 
 async function asAgent(agent, fn) {
@@ -377,7 +385,12 @@ function applyModel(model, cmd, actor) {
 // rejected, the implementation accepted) or "state" (both accepted, states
 // diverged).
 const CANDIDATE_REASON_LABELS = new Map([
-  ["resolve-from-idle", "resolve-from-idle"],
+  // `resolve-from-idle`, `rescope-from-idle`, and `reassign-from-idle` are
+  // not candidates: the idle-lane legacy paths (spec 015 L2, and the idle
+  // source of L6 and L10) are enforced since 2026-10-13 (README ledger entry
+  // 13), so an implementation that accepts one again is an unknown
+  // divergence and fails the run. `approve-uncovered-lane` (L9, retired by
+  // spec 023 WS3, ledger entry 14) is not a candidate either.
   // spec 002 resolve authority: a repeat resolve, by any actor, is accepted
   // with an L14 record during the FR-5 window.
   ["resolve-from-resolved", "resolve-repeat"],
@@ -458,7 +471,7 @@ async function executeSequence(mode, cmds) {
         try {
           await runReal(repo, cmd, actor)
         } catch (error) {
-          if (!(error instanceof BtrainError) && error?.code !== "ENOENT") throw error
+          if (!isRejection(error) && error?.code !== "ENOENT") throw error
         }
         const snapNow = await realSnapshot(repo, config)
         model.adoptReal(cmd.lane, snapNow.lanes[cmd.lane])
@@ -478,7 +491,7 @@ async function executeSequence(mode, cmds) {
       try {
         await runReal(repo, cmd, actor)
       } catch (error) {
-        if (error instanceof BtrainError) {
+        if (isRejection(error)) {
           realOk = false
           realError = error.message
         } else if (error?.code === "ENOENT") {
@@ -1102,9 +1115,16 @@ test("doctor resync conflict: a failed resync of a repair-needed lane tallies re
 const xInReview = { t: "update", lane: "x", actorSel: "owner", status: "needs-review" }
 for (const { name, modes = ["contract", "implementation"], steps, x } of [
   {
-    name: "a ready-for-pr lane re-acquired by the peer resolve",
-    modes: ["implementation"],
-    steps: [xInReview, { t: "dropRegistry", lane: "x" }, { t: "resolve", lane: "x", actorSel: "reviewer", final: false }],
+    // L9 is retired (spec 023 WS3, ledger entry 14): the peer resolve of the
+    // uncovered lane is refused in both modes (witness below), so coverage
+    // comes back only through the owner's resync, and then the approval goes through.
+    name: "a ready-for-pr lane approved after the owner's resync",
+    steps: [
+      xInReview,
+      { t: "dropRegistry", lane: "x" },
+      { t: "rescope", lane: "x", actorSel: "owner", files: ["src/a/"] },
+      { t: "resolve", lane: "x", actorSel: "reviewer", final: false },
+    ],
     x: { status: "ready-for-pr", reasonCode: "", registry: ["src/a/"] },
   },
   {
@@ -1142,6 +1162,69 @@ for (const { name, modes = ["contract", "implementation"], steps, x } of [
       assert.deepEqual({ status: real.status, reasonCode: real.reasonCode, registry: real.registry }, x)
     })
   }
+}
+
+// Regression witness for ledger entry 14 (spec 023 WS3, L9 retired): the
+// reviewer's approval of a review lane whose registry entries are gone is
+// refused in both modes, re-acquires nothing, and leaves the lane in review.
+for (const mode of ["contract", "implementation"]) {
+  test(`uncovered review lane: the reviewer's approval is refused until the owner's resync (${mode} mode)`, { skip: !ENABLED }, async () => {
+    const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      xInReview,
+      { t: "dropRegistry", lane: "x" },
+      { t: "resolve", lane: "x", actorSel: "reviewer", final: false },
+    ])
+    assert.equal(designatedTally.size, 0, "no designated drift")
+    assert.equal(candidateTally.size, 0, `no candidate finding: ${[...candidateTally.keys()].join(", ")}`)
+    const refused = trace.at(-1)
+    assert.equal(refused.realOk, false)
+    assert.equal(refused.modelOk, false)
+    assert.equal(refused.modelReason, "approve-uncovered-lane")
+    assert.match(refused.realError, /L9, enforced/)
+    assert.equal(refused.realState.x.status, "needs-review")
+    assert.deepEqual(refused.realState.x.registry, [])
+  })
+}
+
+// Regression witnesses for ledger entry 13 (spec 015 FR-5 enforcement,
+// 2026-10-13): a lane nobody has claimed refuses resolve (L2), --files (the
+// idle source of L6), and --owner/--reviewer (the idle source of L10). Seed
+// 1167269621 tallied all three; the transition gate now rejects them before
+// any write, so model and implementation agree in both modes, the lane stays
+// idle with no records, and it is still claimable afterwards.
+for (const mode of ["contract", "implementation"]) {
+  test(`idle lane: rejected resolve, rescope, and reassign preserve lane/event state and registry contents (${mode} mode)`, { skip: !ENABLED }, async () => {
+    const { designatedTally, candidateTally, trace } = await executeSequence(mode, [
+      { t: "resolve", lane: "x", actorSel: "owner", final: false },
+      { t: "resolve", lane: "x", actorSel: "third", final: true },
+      { t: "rescope", lane: "x", actorSel: "owner", files: ["src/a/"] },
+      { t: "rescope", lane: "x", actorSel: "reviewer", files: ["src/", "docs/"] },
+      { t: "reassign", lane: "x", actorSel: "owner", owner: "beta" },
+      { t: "reassign", lane: "x", actorSel: "third", owner: "alpha", reviewer: "beta" },
+      { t: "reassign", lane: "x", actorSel: "reviewer", reviewer: "gamma" },
+      { t: "claim", lane: "x", owner: "alpha", reviewer: "beta", files: ["src/a/"] },
+      { t: "rescope", lane: "x", actorSel: "owner", files: ["src/b/"] },
+    ])
+    assert.equal(designatedTally.size, 0, "no designated drift on the idle chain")
+    assert.equal(candidateTally.size, 0, `no candidate finding on the idle chain: ${[...candidateTally.keys()].join(", ")}`)
+    for (const step of trace.slice(0, 7)) {
+      assert.equal(step.realOk, false, `step ${step.i} ${step.cmd.t} is rejected`)
+      assert.equal(step.modelOk, false, `step ${step.i} ${step.cmd.t} is modeled as rejected`)
+      assert.match(step.realError, /is idle/, `step ${step.i} names the idle lane`)
+      assert.equal(step.realState.x.status, "idle")
+      assert.deepEqual(step.realState.x.registry, [])
+      assert.deepEqual(step.realState.x.lockedFiles, [])
+    }
+    assert.deepEqual(
+      trace.slice(0, 7).map((step) => step.modelReason),
+      ["resolve-from-idle", "resolve-from-idle", "rescope-from-idle", "rescope-from-idle", "reassign-from-idle", "reassign-from-idle", "reassign-from-idle"],
+    )
+    assert.equal(trace.at(-2).realOk, true, "the lane is still claimable")
+    assert.equal(trace.at(-1).realOk, true, "and the owner can rescope it once claimed (row 16)")
+    assert.equal(trace.at(-1).realState.x.status, "in-progress")
+    assert.deepEqual(trace.at(-1).realState.x.registry, ["src/b/"])
+  })
 }
 
 // Regression witness for ledger finding 12 (spec 015 row 19): a lane agent's

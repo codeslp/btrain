@@ -20,9 +20,14 @@ const PRIMARY_STATUSES_BY_ACTION = Object.freeze({
   RepairClear: ["repair-needed"],
 })
 
-function row(id, action, event, from, to, actor, guard, locks, owner, state, kind = "contract") {
+// `enforced` is the spec 015 FR-5 retirement record of a legacy row: null
+// while the whole row is in its advisory window, "$all" once the row is
+// retired, or the list of source statuses whose slice is retired while the
+// rest of the row stays advisory. A retired match is rejected by
+// applyTransition instead of being accepted with a record.
+function row(id, action, event, from, to, actor, guard, locks, owner, state, kind = "contract", enforced = null) {
   const primary = Object.freeze([...(PRIMARY_STATUSES_BY_ACTION[action] || [])])
-  return Object.freeze({ id, action, event, from, to, actor, guard, locks, owner, state, kind, primary })
+  return Object.freeze({ id, action, event, from, to, actor, guard, locks, owner, state, kind, primary, enforced })
 }
 
 export const TRANSITION_ROWS = Object.freeze([
@@ -48,20 +53,31 @@ export const TRANSITION_ROWS = Object.freeze([
   row("20", "Reassign", "handoff update --reassign", ["in-progress", "needs-review", "changes-requested"], "$same", "reassign authority", "distinct owner and reviewer; no prior author as reviewer; no linked PR", "unchanged", "005 FR-5 reassignment (Q8, swap policy A-i)", "designated"),
 
   row("L1", "legacy", "handoff resolve", [...PR_FLOW_STATUSES, "changes-requested"], "resolved", "any", "PR flow or linked changes-requested", "release", "forbidden by 002 Lock Enforcement", "advisory", "legacy"),
-  row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "advisory", "legacy"),
-  row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy"),
+  // spec 015 FR-5 retirements (2026-10-13; test/formal/README.md ledger entry
+  // 13): L2 as a whole, and the idle source of L6 and L10. A lane nobody has
+  // claimed has no owner, reviewer, or locks, so spec 002 (resolve authority),
+  // spec 014 (rescope on an active lane), and spec 005 FR-5 (reassign in
+  // in-progress, needs-review, or changes-requested) leave it nothing to act
+  // on. The complete registry audit and FR-5 merge bounds are recorded in
+  // ledger entry 13. Recheck them before merging this enforcement change.
+  // The active-status slices of L6 and L10 stay advisory.
+  row("L2", "legacy", "handoff resolve", ["idle"], "resolved", "any", "none", "none", "forbidden by 002 CLI Commands", "enforced", "legacy", "$all"),
+  row("L3", "legacy", "handoff update --status", ACTIVE_STATUSES, "needs-review", "any", "actor unchecked", "retain", "forbidden by 005 FR-5 and FR-7", "advisory", "legacy", ["in-progress"]),
   row("L4", "legacy", "handoff update --status", "$any", "$any", "any", "valid status", "per target", "forbidden by 002 and 014", "advisory", "legacy"),
-  row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "advisory", "legacy"),
-  row("L6", "legacy", ["handoff update --files", "doctor repair"], "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope and resync designations (Q2)", "advisory", "legacy"),
+  row("L5", "legacy", "pr-poll", "$any", "$any", "system", "linked PR or stale locks", "retain", "forbidden by 002 PR-flow states", "advisory", "legacy", ["in-progress"]),
+  row("L6", "legacy", ["handoff update --files", "doctor repair"], "$any", "$same", "any", "current behavior", "replace or release", "forbidden by 014 rescope and resync designations (Q2)", "advisory", "legacy", ["idle"]),
   row("L7", "legacy", "handoff resolve", ["repair-needed"], "resolved", "any", "row 15 guard unmet", "release", "forbidden by 006 FR-29", "advisory", "legacy"),
   row("L8", "legacy", "handoff resolve", ["needs-review"], ["ready-for-pr", "resolved"], "any", "actor is not the recorded reviewer", "retain or release", "forbidden by 002 PR-flow row 1", "advisory", "legacy"),
-  row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "advisory", "legacy"),
-  row("L10", "legacy", "handoff update --reassign", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 005 FR-5 reassignment (Q8)", "advisory", "legacy"),
+  // spec 023 WS3 (T014): L9 and L15 are retired. The FR-5 registry audit of
+  // 2026-11-25 found no advisory event for either row in any registered
+  // repository (test/formal/README.md, ledger entry 14).
+  row("L9", "legacy", "handoff resolve", ["needs-review"], "ready-for-pr", "reviewer", "lane uncovered", "reacquire", "forbidden by 002 Force-release override", "enforced", "legacy", "$all"),
+  row("L10", "legacy", "handoff update --reassign", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 005 FR-5 reassignment (Q8)", "advisory", "legacy", ["idle"]),
   row("L11", "legacy", "handoff resolve", ["in-progress", "changes-requested"], "resolved", "any", "actor unchecked", "release", "forbidden by 002 CLI Commands resolve authority (Q5)", "advisory", "legacy"),
   row("L12", "legacy", "handoff update --metadata", "$any", "$same", "any", "actor unchecked", "unchanged", "forbidden by 002 CLI Commands update authority", "advisory", "legacy"),
   row("L13", "legacy", "handoff claim", "$any", "in-progress", "any-agent", "single-handoff overwrite", "none", "forbidden by 002 CLI Commands claim authority", "advisory", "legacy"),
   row("L14", "legacy", "handoff resolve", ["resolved"], "resolved", "any", "repeat resolve", "none", "forbidden by 002 CLI Commands resolve authority", "advisory", "legacy"),
-  row("L15", "legacy", "handoff request-changes", ["needs-review"], "changes-requested", "any", "reviewer absent or unverified", "retain", "forbidden by 002 CLI Commands and 005 FR-8", "advisory", "legacy"),
+  row("L15", "legacy", "handoff request-changes", ["needs-review"], "changes-requested", "any", "reviewer absent or unverified", "retain", "forbidden by 002 CLI Commands and 005 FR-8", "enforced", "legacy", "$all"),
   row("L16", "WatchdogLockRelease", "watchdog-lock-release", "$any", "$same", "system", "stale or expired lock", "release", "006 FR-2 safe repair", "designated", "system"),
 ])
 
@@ -218,12 +234,55 @@ function rowMatches(candidate, state, event, input) {
     && guardMatches(candidate.guard, state, input)
 }
 
+// spec 015 FR-5, second step: "Then it rejects." A retired legacy match is
+// refused here, so every caller refuses it before writing anything. The
+// message has BtrainError's shape (what, why, fix); the class is separate
+// because this module is a leaf that core.mjs imports.
+export class TransitionRejection extends Error {
+  constructor({ rowId, message, reason, fix }) {
+    super([`✖ ${message}`, `  ↳ Why: ${reason}`, `  ✦ Fix: ${fix}`].join("\n"))
+    this.name = "TransitionRejection"
+    this.rowId = rowId
+  }
+}
+
+function legacyRowEnforced(row, status) {
+  if (!row || row.kind !== "legacy" || !row.enforced) return false
+  if (row.enforced === "$all") return true
+  return asArray(row.enforced).includes(status)
+}
+
+function enforcedRejection(row, state, event, input) {
+  const from = state.status || "idle"
+  const target = input.to ?? from
+  const move = target !== from ? `\`${from} -> ${target}\`` : `\`${from}\``
+  const actor = input.actor || "unknown"
+  const idle = from === "idle"
+  const fixes = {
+    L3: "Have the lane owner request peer review.",
+    L5: "Complete peer review and link the PR from ready-for-pr before polling.",
+    L9: "A force-release suspended this lane's coverage. Have the owner resync it first (`btrain handoff update --lane <id> --files \"<the lane's locked files>\"`), then approve again.",
+    L15: "Only the lane's recorded reviewer can request changes, as a verified actor: set BTRAIN_AGENT to that reviewer (or pass --actor), and assign a reviewer first if the lane has none.",
+  }
+  return {
+    rowId: row.id,
+    message: `${idle ? "Lane is idle: " : ""}${event} ${move} by \`${actor}\` is outside the designated contract (spec 015 ${row.id}, enforced).`,
+    reason: `${idle ? "An idle lane has no owner, reviewer, task, or locks; " : ""}${row.owner}.`,
+    fix: idle
+      ? 'Claim the lane first: btrain handoff claim --lane <id> --task "..." --owner <agent> --reviewer <agent> --files "..."'
+      : fixes[row.id] || "Use the designated command for this transition (`btrain transitions` lists the rows).",
+  }
+}
+
 export function applyTransition(state, event, input = {}) {
   const current = state && typeof state === "object" ? state : {}
   const target = input.to ?? current.status
   const candidate = TRANSITION_ROWS.find((entry) => rowMatches(entry, current, event, input))
   if (!candidate) {
     throw new Error(`No transition row matches ${event}: ${current.status || "(unknown)"} -> ${target || "(unknown)"}`)
+  }
+  if (legacyRowEnforced(candidate, current.status)) {
+    throw new TransitionRejection(enforcedRejection(candidate, current, event, input))
   }
   return {
     row: candidate,
@@ -237,10 +296,13 @@ export function applyTransition(state, event, input = {}) {
 
 // spec 015 FR-5: a legacy row in advisory mode is still accepted, but the
 // caller records `transition-advisory: <row id>` on the workflow event and
-// warns. Since spec 016 WS4 every remaining legacy row is in advisory (L8 was
-// first, WS3 added L3 and L7).
+// warns. Since spec 016 WS4 every legacy row entered advisory (L8 was first,
+// WS3 added L3 and L7); the first retirements landed on 2026-10-13 (L2, and
+// the idle source of L6 and L10), which applyTransition rejects outright.
 export function advisoryRowId(row, state = {}, input = {}) {
   if (!row || row.kind !== "legacy") return ""
+  // A retired slice never reaches a caller (applyTransition rejects it).
+  if (legacyRowEnforced(row, state.status)) return ""
   const target = input.to ?? state.status
   // spec 006 FR-29: the only exits from repair-needed are RepairClear (row
   // 14) and RepairResolve (row 15). Any legacy status change leaving

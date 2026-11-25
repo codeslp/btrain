@@ -8,6 +8,7 @@ import path from "node:path"
 import { LaneLockModel } from "./formal/lane-lock-model.mjs"
 import {
   TRANSITION_ROWS,
+  TransitionRejection,
   advisoryRowId,
   applyTransition,
   classifyTransitionEvent,
@@ -264,19 +265,18 @@ describe("lane transition contract", () => {
     )
   })
 
-  it("preserves legacy request-changes when actor detection is unavailable", () => {
-    const result = applyTransition(
+  // spec 023 WS3 (T014): L15 is retired. A request for changes with no
+  // verifiable actor, or no recorded reviewer, is refused.
+  it("rejects request-changes when actor detection is unavailable (L15 retired)", () => {
+    for (const state of [
       { status: "needs-review", owner: "codex", reviewer: "claude" },
-      "handoff request-changes",
-      {
-        to: "changes-requested",
-        actor: "",
-        reasonCode: "spec-mismatch",
-      },
-    )
-
-    assert.equal(result.row.id, "L15")
-    assert.equal(result.next.status, "changes-requested")
+      { status: "needs-review", owner: "codex", reviewer: "" },
+    ]) {
+      assert.throws(
+        () => applyTransition(state, "handoff request-changes", { to: "changes-requested", actor: "", reasonCode: "spec-mismatch" }),
+        (error) => error instanceof TransitionRejection && error.rowId === "L15" && /recorded reviewer/.test(error.message),
+      )
+    }
   })
 
   it("revalidates lane transitions inside the registry publication lock", async () => {
@@ -298,14 +298,31 @@ describe("lane transition contract", () => {
     assert.equal(result.next.status, "ready-to-merge")
   })
 
-  it("marks every contract row designated and every legacy row advisory after spec 016 WS3 and WS4", () => {
+  it("marks every contract row designated and every legacy row advisory or enforced after spec 016 WS3 and WS4", () => {
     const byId = new Map(TRANSITION_ROWS.map((row) => [row.id, row]))
     for (const row of TRANSITION_ROWS) {
       if (row.kind === "contract" || row.kind === "system") {
         assert.equal(row.state, "designated", `row ${row.id}`)
       } else {
-        assert.equal(row.state, "advisory", `row ${row.id}`)
+        assert.ok(["advisory", "enforced"].includes(row.state), `row ${row.id}: ${row.state}`)
       }
+    }
+    // FR-5 retirement covers the complete L2 row and selected source states.
+    assert.equal(byId.get("L2").state, "enforced")
+    assert.equal(byId.get("L2").enforced, "$all")
+    assert.deepEqual(byId.get("L3").enforced, ["in-progress"])
+    assert.deepEqual(byId.get("L5").enforced, ["in-progress"])
+    assert.deepEqual(byId.get("L6").enforced, ["idle"])
+    assert.deepEqual(byId.get("L10").enforced, ["idle"])
+    assert.equal(byId.get("L6").state, "advisory")
+    assert.equal(byId.get("L10").state, "advisory")
+    // spec 023 WS3 (ledger entry 14): L9 and L15 retired as whole rows.
+    for (const id of ["L9", "L15"]) {
+      assert.equal(byId.get(id).state, "enforced", id)
+      assert.equal(byId.get(id).enforced, "$all", id)
+    }
+    for (const row of TRANSITION_ROWS) {
+      if (!["L2", "L3", "L5", "L6", "L9", "L10", "L15"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
     }
     assert.equal(byId.get("20").actor, "reassign authority")
     assert.deepEqual(byId.get("8").from, ["pr-review", "ready-to-merge", "changes-requested"])
@@ -313,9 +330,13 @@ describe("lane transition contract", () => {
 
   it("classifies advisory legacy matches, including the FR-29 repair cases on L4", () => {
     const lane = { status: "in-progress", owner: "codex", reviewer: "claude" }
-    const reviewerHandoff = applyTransition(lane, "handoff update --status", { to: "needs-review", actor: "claude" })
-    assert.equal(reviewerHandoff.row.id, "L3")
-    assert.equal(advisoryRowId(reviewerHandoff.row, lane, { to: "needs-review" }), "L3")
+    assert.throws(
+      () => applyTransition(lane, "handoff update --status", { to: "needs-review", actor: "claude" }),
+      { rowId: "L3" },
+    )
+    const changesRequested = { ...lane, status: "changes-requested" }
+    const reviewerHandoff = applyTransition(changesRequested, "handoff update --status", { to: "needs-review", actor: "claude" })
+    assert.equal(advisoryRowId(reviewerHandoff.row, changesRequested, { to: "needs-review" }), "L3")
 
     const repairExit = applyTransition(
       { status: "repair-needed", owner: "codex", reviewer: "claude" },
@@ -367,7 +388,10 @@ describe("lane transition contract", () => {
     assert.equal(applyTransition(linked, "pr-poll", { to: "ready-to-merge", actor: "system", ...prFlow }).row.id, "10")
     assert.equal(applyTransition(linked, "pr-poll", { to: "pr-review", actor: "system", prLinked: true, prFlowChangesRequested: false }).row.id, "L5")
     assert.equal(applyTransition({ status: "ready-to-merge", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "8")
-    assert.equal(applyTransition({ status: "in-progress", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "L5")
+    assert.throws(
+      () => applyTransition({ status: "in-progress", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }),
+      { rowId: "L5" },
+    )
 
     const lane = { status: "in-progress", owner: "codex", reviewer: "claude" }
     assert.equal(applyTransition(lane, "handoff update --reassign", { actor: "codex", ownerChanged: true, distinctReviewer: true }).row.id, "20")
@@ -394,16 +418,64 @@ describe("lane transition contract", () => {
     assert.equal(applyTransition({ status: "ready-for-pr", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "L5")
     // An unlinked changes-requested abandon by a third party is L11, not L1.
     assert.equal(applyTransition({ status: "changes-requested", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "resolved", actor: "gemini", prFlowEnabled: true }).row.id, "L11")
-    // L9: peer approval on a lane whose coverage was force-released.
-    assert.equal(applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: false }).row.id, "L9")
+    // L9 is retired (spec 023 WS3): peer approval on a lane whose coverage
+    // was force-released is refused until the owner's resync.
+    assert.throws(
+      () => applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: false }),
+      (error) => error instanceof TransitionRejection && error.rowId === "L9" && /resync/.test(error.message),
+    )
     assert.equal(applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: true }).row.id, "4")
     assert.equal(applyTransition(review, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "L6")
     assert.equal(applyTransition(lane, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "17")
     assert.equal(applyTransition(review, "handoff update --files", { actor: "claude", filesChanged: false }).row.id, "L6")
     assert.equal(applyTransition(lane, "handoff resolve", { to: "resolved", actor: "claude", prFlowEnabled: true }).row.id, "6")
     assert.equal(applyTransition(lane, "handoff resolve", { to: "resolved", actor: "gemini", prFlowEnabled: true }).row.id, "L11")
-    assert.equal(applyTransition({ status: "idle" }, "handoff resolve", { to: "resolved", actor: "codex", prFlowEnabled: true }).row.id, "L2")
+    // L2 is enforced since 2026-10-13: the gate rejects instead of matching.
+    assert.throws(
+      () => applyTransition({ status: "idle" }, "handoff resolve", { to: "resolved", actor: "codex", prFlowEnabled: true }),
+      (error) => error instanceof TransitionRejection && error.rowId === "L2",
+    )
     assert.equal(applyTransition({ status: "pr-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "resolved", actor: "codex", prFlowEnabled: true, prLinked: true }).row.id, "L1")
+  })
+
+  // spec 015 FR-5 enforcement (2026-10-13): L2 (resolve from idle) and the
+  // idle source of L6 (--files) and L10 (--owner/--reviewer) are rejected by
+  // the gate itself, so every caller in core.mjs refuses them before any
+  // write. The active-status slices of L6 and L10 stay advisory.
+  it("rejects the retired idle-lane legacy paths with a TransitionRejection", () => {
+    const idle = { status: "idle", owner: "", reviewer: "" }
+    const rejects = (fn, rowId) =>
+      assert.throws(fn, (error) => {
+        assert.ok(error instanceof TransitionRejection, `${rowId}: ${error?.constructor?.name}`)
+        assert.equal(error.rowId, rowId)
+        assert.equal(error.name, "TransitionRejection")
+        assert.match(error.message, /^✖ /)
+        assert.match(error.message, /Why: /)
+        assert.match(error.message, /Fix: .*btrain handoff claim --lane <id>/)
+        assert.match(error.message, new RegExp(`spec 015 ${rowId}`))
+        return true
+      })
+    rejects(() => applyTransition(idle, "handoff resolve", { to: "resolved", actor: "codex", prFlowEnabled: true }), "L2")
+    rejects(() => applyTransition(idle, "handoff resolve", { to: "resolved", actor: "", prFlowEnabled: false }), "L2")
+    rejects(() => applyTransition(idle, "handoff update --files", { actor: "codex", filesChanged: true }), "L6")
+    rejects(() => applyTransition(idle, "handoff update --files", { actor: "", filesChanged: false }), "L6")
+    rejects(() => applyTransition(idle, "handoff update --reassign", { actor: "codex", ownerChanged: true, distinctReviewer: true }), "L10")
+    rejects(() => applyTransition(idle, "handoff update --reassign", { actor: "codex", ownerChanged: false }), "L10")
+    assert.equal(advisoryRowId(TRANSITION_ROWS.find((row) => row.id === "L2"), idle, { to: "resolved" }), "")
+    assert.equal(advisoryRowId(TRANSITION_ROWS.find((row) => row.id === "L6"), idle, { to: "idle" }), "")
+    assert.equal(advisoryRowId(TRANSITION_ROWS.find((row) => row.id === "L10"), idle, { to: "idle" }), "")
+
+    // The rest of L6 and L10 is untouched: an active-status miss still matches
+    // the advisory row and records it.
+    const review = { status: "needs-review", owner: "codex", reviewer: "claude" }
+    const l6 = applyTransition(review, "handoff update --files", { actor: "codex", filesChanged: true })
+    assert.equal(l6.row.id, "L6")
+    assert.equal(advisoryRowId(l6.row, review, { to: "needs-review" }), "L6")
+    const l10 = applyTransition({ ...review, status: "pr-review" }, "handoff update --reassign", { actor: "codex", ownerChanged: false, prLinked: true })
+    assert.equal(l10.row.id, "L10")
+    assert.equal(advisoryRowId(l10.row, { ...review, status: "pr-review" }, { to: "pr-review" }), "L10")
+    // Metadata-only updates on an idle lane are row 19 / L12 territory, not L6 or L10.
+    assert.equal(applyTransition(idle, "handoff update --metadata", { actor: "codex" }).row.id, "L12")
   })
 
   it("classifies combined updates by the mutation that changes workflow state", () => {

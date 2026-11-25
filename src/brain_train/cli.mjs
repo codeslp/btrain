@@ -227,6 +227,7 @@ Handoff/Lane Options:
   --bots <list>     PR review bots to request. Defaults to all configured required bots.
   --apply           For \`btrain pr poll\`, update the lane status from the PR classification.
   --final           For \`handoff resolve\`, fully resolve instead of advancing local approval into PR flow.
+  --head <ref>      Pin a local lane commit for needs-review. Defaults to the selected checkout HEAD.
   --no-dispatch     For \`handoff update --status needs-review\`, write the lane but do not spawn the reviewer runner.
 
 Environment:

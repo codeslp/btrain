@@ -183,9 +183,10 @@ const CASES = [
   // re-acquire cases run in implementation mode only: the contract model does
   // not re-acquire on request-changes or peer resolve (the runtime's L9).
   {
-    name: "a ready-for-pr lane re-acquired by the peer resolve is left alone",
-    modes: ["implementation"],
-    steps: [update("alpha", "needs-review"), dropRegistry("x"), resolveX("beta"), doctorRepair],
+    // L9 is retired (spec 023 WS3): the peer resolve of the uncovered lane is
+    // refused, so the approval follows the owner's resync.
+    name: "a ready-for-pr lane approved after the owner's resync is left alone",
+    steps: [update("alpha", "needs-review"), dropRegistry("x"), rescopeX(["src/a/"]), resolveX("beta"), doctorRepair],
     x: { ...coveredX, status: "ready-for-pr" },
     y: idleY,
     disposeReason: "dispose-requires-repair-needed",
