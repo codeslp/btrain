@@ -10,7 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { clearPause, collapsedReplyText, deliver, DELIVERY_LOCK_FILENAME, MAX_UNKNOWN_ATTEMPTS } from "../src/brain_train/slack/deliver.mjs"
 import { listEntries, outboxDir, readDeliveryState, writeEntry } from "../src/brain_train/slack/outbox.mjs"
-import { claimChannelSend, getThread, holdChannel, readChannelState, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
+import { getThread, holdChannel, readChannelState, reserveChannelSend, sendOnChannel } from "../src/brain_train/slack/threads.mjs"
 import { tryAcquireLock } from "../src/brain_train/slack/lock.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
 
@@ -403,14 +403,43 @@ describe("deliver", () => {
     assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
   })
 
-  it("claims the channel at send time: a claim that must wait records nothing", async () => {
+  it("sends under the home lock and records when the send ended; a send that must wait records nothing", async () => {
     const t = await setup()
     const homeDir = path.join(t.root, "home")
-    const at = t.clock.at
-    assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at, intervalMs: 1000 }), { claimed: at })
-    assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at + 400, intervalMs: 1000 }), { waitUntil: at + 1000 })
-    assert.equal((await readChannelState(homeDir, CHANNEL)).lastSentAt, at, "the waiting claim left no trace")
-    assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at + 1000, intervalMs: 1000 }), { claimed: at + 1000 })
+    const start = t.clock.at
+    const ok = async () => ({ ok: true })
+    // The call takes 1.5 seconds: the channel's last send is when it ended.
+    const slow = await sendOnChannel(homeDir, CHANNEL, { now: () => t.clock.at, intervalMs: 1000 }, async () => {
+      t.clock.at += 1500
+      return { ok: true }
+    })
+    assert.deepEqual(slow, { result: { ok: true } })
+    assert.equal((await readChannelState(homeDir, CHANNEL)).lastSentAt, start + 1500)
+    t.clock.at += 400
+    assert.deepEqual(await sendOnChannel(homeDir, CHANNEL, { now: () => t.clock.at, intervalMs: 1000 }, ok), { waitUntil: start + 2500 })
+    assert.equal((await readChannelState(homeDir, CHANNEL)).lastSentAt, start + 1500, "the waiting send left no trace")
+    t.clock.at = start + 2500
+    assert.deepEqual(await sendOnChannel(homeDir, CHANNEL, { now: () => t.clock.at, intervalMs: 1000 }, ok), { result: { ok: true } })
+    const skipped = await sendOnChannel(homeDir, CHANNEL, { now: () => t.clock.at + 5000, intervalMs: 1000 }, async () => ({ skipped: "budget" }))
+    assert.deepEqual(skipped, { result: { skipped: "budget" } })
+    assert.equal((await readChannelState(homeDir, CHANNEL)).lastSentAt, start + 2500, "a skipped send records nothing")
+  })
+
+  it("keeps two repositories a second apart when the first one's send or its file I/O is slow", async () => {
+    const homeDir = path.join((await setup()).root, "shared-home")
+    let at = Date.parse("2026-11-23T21:00:00.000Z")
+    const sends = []
+    const clock = () => at
+    // Every read of the clock inside the first send costs 1.5 s (slow reads,
+    // slow renames, a slow call): the second send must still wait 1 s after
+    // the first one ended.
+    await sendOnChannel(homeDir, CHANNEL, { now: () => { at += 1500; return at }, intervalMs: 1000 }, async () => { sends.push(at); return { ok: true } })
+    const second = await sendOnChannel(homeDir, CHANNEL, { now: clock, intervalMs: 1000 }, async () => { sends.push(at); return { ok: true } })
+    assert.ok(second.waitUntil > at, "the second repository must wait")
+    at = second.waitUntil
+    await sendOnChannel(homeDir, CHANNEL, { now: clock, intervalMs: 1000 }, async () => { sends.push(at); return { ok: true } })
+    assert.equal(sends.length, 2)
+    assert.ok(sends[1] - sends[0] >= 1000, `${sends[1] - sends[0]} ms apart`)
   })
 
   it("gives up a send for this run, without sending, when other senders keep taking the channel", async () => {
@@ -420,9 +449,9 @@ describe("deliver", () => {
     // Another repository sends on the channel every time this one wakes.
     const busySleep = async (ms) => {
       t.clock.at += ms
-      await claimChannelSend(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 })
+      await sendOnChannel(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 }, async () => ({ ok: true }))
     }
-    await claimChannelSend(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 })
+    await sendOnChannel(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 }, async () => ({ ok: true }))
     const result = await t.run({ sleep: busySleep })
     assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
     assert.equal((await listEntries(t.slackDir)).length, 1, "the entry waits for a later run")

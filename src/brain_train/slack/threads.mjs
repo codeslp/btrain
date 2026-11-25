@@ -66,8 +66,9 @@ export async function getBoard(homeDir, channel) {
 // developer, so their read-merge-write runs under a short lock in the btrain
 // home. Unlike the delivery lock this one waits, briefly: each holder only
 // reads, merges, and renames one small file. A lock left by a process that
-// died is taken over after HOME_LOCK_STALE_MS.
-export const HOME_LOCK_STALE_MS = 10_000
+// died is taken over after HOME_LOCK_STALE_MS, which is longer than a send
+// held under it (sendOnChannel: one Slack call, at most 10 seconds).
+export const HOME_LOCK_STALE_MS = 30_000
 const HOME_LOCK_WAIT_MS = 5_000
 export const CHANNELS_RELATIVE = path.join("slack", "channels.json")
 
@@ -161,19 +162,23 @@ export async function reserveChannelSend(homeDir, channel, { now, intervalMs, no
 }
 
 /**
- * Claim the channel for a send happening now, for every repository of this
- * developer. The claim is made at send time, under the home lock, so a
- * sender that slept longer than planned can never send alongside another
- * one: it finds the newer send and waits again. Returns `{ blockedUntil }`
- * while a Retry-After holds the channel, `{ waitUntil }` when the last send
- * was less than `intervalMs` ago (nothing is recorded), or `{ claimed }`
- * with the time recorded as the channel's last send.
+ * Send on a channel, for every repository of this developer, holding the
+ * home lock for the whole send: FR-10's one message a second to a channel,
+ * and a 429's Retry-After, hold across repositories with no gap between a
+ * check and the send it allows. Under the lock: the clock is read, a channel
+ * held by a Retry-After returns `{ blockedUntil }`, a channel whose last send
+ * ended less than `intervalMs` ago returns `{ waitUntil }`, and otherwise
+ * `send()` runs. Its result is returned as `{ result }`, and the channel's
+ * last send is recorded as the clock *after* it returned, so the next send
+ * starts at least `intervalMs` after this one ended, however long the call
+ * or the file writes took. A `send()` that returns `{ skipped }` sent
+ * nothing, and nothing is recorded. A result with HTTP 429 or a `ratelimited`
+ * error holds the channel for its Retry-After (at least `intervalMs`).
  *
- * `now` is a clock function (a number is accepted for a fixed time). It is
- * read after the home lock is taken: a claim that waited for the lock must
- * record when it actually sends, not when it started waiting.
+ * `now` is a clock function (a number is accepted for a fixed time).
+ * `waitMs` bounds the wait for the home lock.
  */
-export async function claimChannelSend(homeDir, channel, { now, intervalMs, waitMs }) {
+export async function sendOnChannel(homeDir, channel, { now, intervalMs, waitMs }, send) {
   const clock = typeof now === "function" ? now : () => now
   return withHomeLock(homeDir, { waitMs }, async () => {
     const at = clock()
@@ -183,9 +188,16 @@ export async function claimChannelSend(homeDir, channel, { now, intervalMs, wait
     if (retryUntil > at) return { blockedUntil: retryUntil }
     const freeAt = (Number(entry.lastSentAt) || 0) + intervalMs
     if (freeAt > at) return { waitUntil: freeAt }
-    all[String(channel)] = { ...entry, lastSentAt: at }
+    const result = await send()
+    if (result?.skipped) return { result }
+    const endedAt = clock()
+    const updated = { ...entry, lastSentAt: endedAt }
+    if (result?.status === 429 || result?.error === "ratelimited") {
+      updated.retryUntil = Math.max(retryUntil, endedAt + Math.max(Number(result.retryAfterMs) || 0, intervalMs))
+    }
+    all[String(channel)] = updated
     await writeJsonAtomic(channelsPath(homeDir), all)
-    return { claimed: at }
+    return { result }
   })
 }
 
