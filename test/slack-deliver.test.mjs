@@ -10,7 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { clearPause, collapsedReplyText, deliver, DELIVERY_LOCK_FILENAME, MAX_UNKNOWN_ATTEMPTS } from "../src/brain_train/slack/deliver.mjs"
 import { listEntries, outboxDir, readDeliveryState, writeEntry } from "../src/brain_train/slack/outbox.mjs"
-import { getThread, readChannelState, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
+import { claimChannelSend, getThread, holdChannel, readChannelState, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
 import { tryAcquireLock } from "../src/brain_train/slack/lock.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
 
@@ -393,6 +393,24 @@ describe("deliver", () => {
     const result = await t.run()
     assert.equal(result.status, "ratelimited")
     assert.equal(Object.keys((await readDeliveryState(t.slackDir)).cards).length, 1, "the card stays owed")
+  })
+
+  it("reports a budget too short for any call as budget, before it looks at the channel (pins mutant M4)", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    await holdChannel(path.join(t.root, "home"), CHANNEL, t.clock.at + 60_000)
+    const result = await t.run({ budgetMs: 500 })
+    assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
+  })
+
+  it("claims the channel at send time: a claim that must wait records nothing", async () => {
+    const t = await setup()
+    const homeDir = path.join(t.root, "home")
+    const at = t.clock.at
+    assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at, intervalMs: 1000 }), { claimed: at })
+    assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at + 400, intervalMs: 1000 }), { waitUntil: at + 1000 })
+    assert.equal((await readChannelState(homeDir, CHANNEL)).lastSentAt, at, "the waiting claim left no trace")
+    assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at + 1000, intervalMs: 1000 }), { claimed: at + 1000 })
   })
 
   it("keeps the one-message-a-second pace across runs", async () => {

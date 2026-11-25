@@ -21,8 +21,8 @@
 //   unknown error is retried for 5 attempts, then dropped.
 // - Entries older than 24 hours collapse into one reply for their lane.
 // - At most one message a second goes to a channel, across runs and across
-//   repositories: each send reserves its slot in `channels.json` in the
-//   btrain home (threads.mjs). When keeping that pace, or starting a call with
+//   repositories: each send claims the channel in `channels.json` in the
+//   btrain home (threads.mjs) at the moment it sends. When keeping that pace, or starting a call with
 //   too little time left, would pass the budget, delivery stops and leaves
 //   the rest for later.
 // - The lock is touched before every call, and a holder whose lock was taken
@@ -39,7 +39,7 @@ import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
 import { renderCard, renderReply } from "./render.mjs"
 import { btrainHome } from "./credentials.mjs"
-import { deleteThread, getThread, holdChannel, readChannelState, reserveChannelSend, setThread, threadKey } from "./threads.mjs"
+import { claimChannelSend, deleteThread, getThread, holdChannel, setThread, threadKey } from "./threads.mjs"
 
 export const DELIVERY_LOCK_FILENAME = "delivery.lock"
 export const COLLAPSE_AGE_MS = 24 * 60 * 60 * 1000
@@ -51,6 +51,9 @@ export const MAX_CARD_ATTEMPTS = 5
 // A call is not started with less time than this left in the budget: one cut
 // off by the deadline may already have posted, and would be sent again.
 export const MIN_CALL_MS = 750
+// How many times one send waits for its channel before it gives up for this
+// run (other senders keep taking the channel first).
+const MAX_CLAIM_TRIES = 20
 const BACKOFF_BASE_MS = 30_000
 const BACKOFF_MAX_MS = 15 * 60 * 1000
 // A card update that fails like this means the card is gone: forget the
@@ -211,35 +214,37 @@ export async function deliver(options = {}) {
 // `{ stop }` with `budget`, `ratelimited`, or `lost-lock`.
 async function send(run, channel, call) {
   const minCall = Math.min(MIN_CALL_MS, run.callTimeoutMs)
-  if (run.now() + minCall > run.deadline) return { stop: "budget" }
-  let reservation
-  try {
-    reservation = await reserveChannelSend(run.homeDir, channel, {
-      now: run.now(),
-      intervalMs: CHANNEL_INTERVAL_MS,
-      // Reserve only a slot that still leaves a whole call inside the budget.
-      notAfter: run.deadline - minCall,
-      waitMs: Math.min(5000, run.deadline - run.now()),
-    })
-  } catch {
-    // The home lock was not free within the budget.
-    return { stop: "budget" }
-  }
-  if (reservation.blockedUntil) {
-    run.rateLimited = true
-    return { stop: "ratelimited" }
-  }
-  if (reservation.tooLate) return { stop: "budget" }
-  const wait = reservation.slotAt - run.now()
-  if (wait > 0) {
-    await run.sleep(wait)
-    // Another repository may have been told to wait (a 429) while this one
-    // slept: check the channel again before sending.
-    if ((await readChannelState(run.homeDir, channel)).retryUntil > run.now()) {
+  // Claim the channel at send time. A claim that must wait records nothing,
+  // so a send the budget cannot make leaves no trace, and a sender that woke
+  // late finds any newer send and waits again.
+  let claimed = false
+  for (let tries = 0; tries < MAX_CLAIM_TRIES && !claimed; tries += 1) {
+    if (run.now() + minCall > run.deadline) return { stop: "budget" }
+    let claim
+    try {
+      claim = await claimChannelSend(run.homeDir, channel, {
+        now: run.now(),
+        intervalMs: CHANNEL_INTERVAL_MS,
+        waitMs: Math.min(5000, run.deadline - run.now()),
+      })
+    } catch {
+      // The home lock was not free within the budget.
+      return { stop: "budget" }
+    }
+    if (claim.blockedUntil) {
       run.rateLimited = true
       return { stop: "ratelimited" }
     }
+    if (claim.claimed !== undefined) {
+      claimed = true
+      break
+    }
+    const wait = claim.waitUntil - run.now()
+    if (run.now() + wait + minCall > run.deadline) return { stop: "budget" }
+    await run.sleep(Math.max(1, wait))
   }
+  // Other senders kept taking the channel first: leave this one for later.
+  if (!claimed) return { stop: "budget" }
   if (!(await run.lock.touch())) return { stop: "lost-lock" }
   const timeoutMs = Math.min(run.callTimeoutMs, run.deadline - run.now())
   if (!(timeoutMs >= minCall)) return { stop: "budget" }

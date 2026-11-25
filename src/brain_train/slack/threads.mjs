@@ -160,6 +160,29 @@ export async function reserveChannelSend(homeDir, channel, { now, intervalMs, no
   })
 }
 
+/**
+ * Claim the channel for a send happening now, for every repository of this
+ * developer. The claim is made at send time, under the home lock, so a
+ * sender that slept longer than planned can never send alongside another
+ * one: it finds the newer send and waits again. Returns `{ blockedUntil }`
+ * while a Retry-After holds the channel, `{ waitUntil }` when the last send
+ * was less than `intervalMs` ago (nothing is recorded), or `{ claimed }`
+ * with the time recorded as the channel's last send.
+ */
+export async function claimChannelSend(homeDir, channel, { now, intervalMs, waitMs }) {
+  return withHomeLock(homeDir, { waitMs }, async () => {
+    const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
+    const entry = objectOr(all[String(channel)])
+    const retryUntil = Number(entry.retryUntil) || 0
+    if (retryUntil > now) return { blockedUntil: retryUntil }
+    const freeAt = (Number(entry.lastSentAt) || 0) + intervalMs
+    if (freeAt > now) return { waitUntil: freeAt }
+    all[String(channel)] = { ...entry, lastSentAt: now }
+    await writeJsonAtomic(channelsPath(homeDir), all)
+    return { claimed: now }
+  })
+}
+
 /** Hold a channel until `retryUntil` after a 429, for every repository. */
 export async function holdChannel(homeDir, channel, retryUntil, { waitMs } = {}) {
   return withHomeLock(homeDir, { waitMs }, async () => {
