@@ -340,7 +340,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve", "local-review"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -2902,11 +2902,11 @@ async function grantOverride(repoRoot, options = {}) {
     })
   }
 
-  if (action === "needs-review" && laneConfigs && !laneId) {
+  if (["needs-review", "local-review"].includes(action) && laneConfigs && !laneId) {
     throw new BtrainError({
-      message: "`btrain override grant --action needs-review` requires --lane when [lanes] is enabled.",
-      reason: "The needs-review override must target a specific lane in multi-lane repos.",
-      fix: `btrain override grant --action needs-review --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
+      message: `\`btrain override grant --action ${action}\` requires --lane when [lanes] is enabled.`,
+      reason: `The ${action} override must target a specific lane in multi-lane repos.`,
+      fix: `btrain override grant --action ${action} --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
     })
   }
   if (action === "push" && laneId) {
@@ -3018,6 +3018,27 @@ async function consumeOverride(repoRoot, options = {}) {
         reason: "The override's lane scope does not match the requested lane.",
         fix: `Use --lane ${record.laneId || ""} to match the override, or grant a new override for lane ${laneId}.`,
       })
+    }
+
+    if (action === "local-review") {
+      // Check inside the override lock for both the gate and hand-run consumption.
+      const { isLocalReviewGrantCurrent } = await import("./local_review.mjs")
+      const events = await readWorkflowEvents(repoRoot, config, record.laneId || "")
+      if (!isLocalReviewGrantCurrent(events, record)) {
+        await appendWorkflowEvent(repoRoot, config, {
+          type: "override-retired",
+          actor: actorLabel,
+          laneId: record.laneId || "",
+          details: { overrideId: record.id, action, scope: record.scope, reason: "stale-local-review-grant" },
+        })
+        await fs.rm(record.path, { force: true })
+        throw new Error(
+          "The local-review grant is stale: new claim, change request, watchdog repair, or any non-PR status after the grant; or missing grant event. "
+          + "The stale grant was retired without authorization. A new grant is needed. Grant from a PR status. "
+          + `Run btrain override grant --action local-review${record.laneId ? ` --lane ${record.laneId}` : ""} `
+          + '--requested-by <agent> --confirmed-by <human> --reason "...".'
+        )
+      }
     }
 
     await fs.rm(record.path, { force: true })

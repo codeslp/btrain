@@ -20,6 +20,7 @@ import {
   resolveHandoff,
 } from "./core.mjs"
 import { applyTransition } from "./transitions.mjs"
+import { enforceLocalReview } from "./local_review.mjs"
 import {
   appendComments,
   fetchAllComments,
@@ -1563,6 +1564,10 @@ async function localBranchIsPrHead(repoRoot, branchName, headRepo, headRefName) 
 
 // Use the current GitHub revision in each review request.
 async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, context = {}) {
+  if (botIds.length === 0) return []
+  const laneId = context.laneId || ""
+  const lane = findLane(await checkHandoff(repoRoot), laneId)
+  if (!lane) throw new Error(`Unknown lane: ${laneId}`)
   const target = context.prRepo || ""
   const { headRefOid, headRefName, headRepo, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber, target)
   if (!FULL_OBJECT_ID_PATTERN.test(headRefOid)) {
@@ -1600,6 +1605,7 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   }
 
   context = { ...context, headSha: headRefOid }
+  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), { lane, laneId, stage: "Requesting bot review", headSha: headRefOid })
   const posted = []
   for (const botId of botIds) {
     const bot = prFlowConfig.bots[botId]
@@ -1685,7 +1691,7 @@ export async function applyPrStatusToHandoff(repoRoot, options, status) {
       "reason-code": "pr-review-feedback",
       "reason-tag": feedbackBots,
       transitionEvent: "pr-poll",
-      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}, push, then run \`btrain pr request-review --lane ${laneId} --bots all\` and \`btrain handoff update --lane ${laneId} --status pr-review --actor "${actorLabel}"\`.`,
+      next: `Address ${feedbackBots.join(", ")} feedback on PR #${prNumber}. Commit and push the fix, then return the lane to needs-review. After local peer approval, relink the PR and request bot review.`,
     })
     return "changes-requested"
   }
@@ -1745,6 +1751,9 @@ export async function runPrPoll(repoRoot, options = {}) {
         || !shaMatches(status.pr.baseSha, target.baseRefOid)) {
         throw new Error(`PR #${prNumber}'s base changed since bot review was checked. Poll again before applying clearance.`)
       }
+      await enforceLocalReview(repoRoot, config, {
+        lane: current.lane, laneId, stage: "Applying bot clearance", headSha: target.headRefOid,
+      })
     }
     const nextStatus = await applyPrStatusToHandoff(repoRoot, options, status)
     console.log(`handoff updated: ${nextStatus}`)
@@ -1938,12 +1947,12 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
 
   validatePrCreateTransition(lane, options.actor || lane.owner || "btrain")
-
   const branch = await gitText(["branch", "--show-current"], repoRoot)
   if (!branch || ["main", "master"].includes(branch)) {
     throw new Error("Create a feature branch before running `btrain pr create`.")
   }
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
+  await enforceLocalReview(repoRoot, config, { lane, laneId, stage: "Creating a PR", headSha })
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.
