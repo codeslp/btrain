@@ -363,6 +363,45 @@ describe("board work left by the budget or by another repository (codex-reviewer
   })
 })
 
+// codex-reviewer's repros on af2ad90, committed before the fix: the board's
+// writes to the shared home lock must fit the delivery budget.
+describe("the board within the delivery budget (codex-reviewer on af2ad90)", () => {
+  async function budgetFixture(fn) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-board-budget-"))
+    try {
+      const homeDir = path.join(root, "home")
+      const repoPath = path.join(root, "repo")
+      await writeRepoEntry(homeDir, CHANNEL, { repoPath, name: "repo", lanes: [lane("a")] })
+      // Another repository holds the shared home lock for a slow Slack call.
+      await fs.writeFile(path.join(homeDir, "slack", "home.lock.1"), "other-repository")
+      await fn({ homeDir, repoPath, slackDir: path.join(repoPath, ".btrain", "slack") })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }
+  const options = (f, readLanes) => ({
+    slackDir: f.slackDir, homeDir: f.homeDir, repo: { name: "repo", path: f.repoPath }, channel: CHANNEL,
+    token: FAKE_BOT, budgetMs: 2000, readLanes,
+    fetchImpl: async () => { throw new Error("must not send while the home lock is held") },
+  })
+
+  it("bounds the board entry write by the two-second budget", async () => budgetFixture(async (f) => {
+    const started = performance.now()
+    const result = await deliver(options(f, async () => [lane("a")]))
+    const elapsed = performance.now() - started
+    assert.ok(elapsed < 2500, `a two-second delivery took ${elapsed} ms`)
+    assert.equal(result.status, "budget")
+  }))
+
+  it("does not wait for the home lock after readLanes used up the budget", async () => budgetFixture(async (f) => {
+    const started = performance.now()
+    const result = await deliver(options(f, () => new Promise(() => {})))
+    const elapsed = performance.now() - started
+    assert.ok(elapsed < 2500, `a timed-out read and the board write took ${elapsed} ms`)
+    assert.equal(result.status, "error")
+  }))
+})
+
 describe("shared channels (T025)", () => {
   it("gives two repositories of one developer one board and separate threads", async () => {
     const c = await channelFixture()
