@@ -422,6 +422,16 @@ JS
     through row 9 and writes no L4 event. Run a fresh audit before merging
     either retirement.
 
+    Later on 2026-11-25, an L4 event restarted the window. At
+    2026-11-25T15:26:03.628Z, lane f moved from `ready-for-pr` to
+    `in-progress` with `handoff update --status`. The lane's PR (spec 025
+    T016) was approved on a branch stacked on PR #124. Then #124 was
+    squash-merged, so the branch was rebuilt on main, and the merge rule
+    needs a new approval at the new head. No designated row leads from
+    `ready-for-pr` back to review, so the re-review was recorded as L4 by
+    decision. It is not routed around. L4's earliest bound is now
+    2026-12-02T15:26:03Z, or later if more L4 events occur.
+
 Mirror maintenance: after PR #33 the implementation mirror still accepted
 terminal PR outcomes from any status, so implementation mode reported a
 `validation_mismatch` that was a stale double, not a regression. Fixed on
