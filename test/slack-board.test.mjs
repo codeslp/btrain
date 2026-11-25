@@ -188,7 +188,10 @@ describe("the board in a channel (T022)", () => {
     await api.queue("a", "claimed")
     // The card post succeeds; the board post fails with a transient error.
     c.fake.queue("chat.postMessage", null, null, { error: "internal_error" })
-    await api.run()
+    // A failed board call is not a delivery status: the run is done, and
+    // the board is owed to a later run (codex-reviewer M15 on 167c5bd).
+    assert.equal((await api.run()).status, "done")
+    assert.equal(await boardOwed(api.homeDir, CHANNEL, "dev-a"), true)
     assert.equal((await getBoard(api.homeDir, CHANNEL)).ts ?? "", "")
     c.clock.at += 5000
     await api.run()
