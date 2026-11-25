@@ -188,6 +188,13 @@ describe("[slack.orchestrator] in project.toml (spec 025)", () => {
     assert.deepEqual(getRepoOrchestratorOptions({ slack: { orchestrator: { auto: [] } } }).auto, [], "an empty list makes every proposal wait for approval")
   })
 
+  it("refuses a whole number too large to hold exactly (codex-reviewer M16)", () => {
+    const options = getRepoOrchestratorOptions({ slack: { orchestrator: { max_rounds: "9007199254740993", max_active: "9007199254740991" } } })
+    assert.equal(options.maxRounds, 4, "an unsafe integer takes the default")
+    assert.equal(options.maxActive, 9007199254740991, "the largest safe integer is kept")
+    assert.deepEqual(options.errors.map((error) => error.key), ["slack.orchestrator.max_rounds"])
+  })
+
   it("refuses start and pause in auto, drops unknown verbs, and reports each", () => {
     const options = getRepoOrchestratorOptions({ slack: { orchestrator: { auto: ["status", "start", "pause", "merge", "status"], max_rounds: "zero" } } })
     assert.deepEqual(options.auto, ["status"])
@@ -214,6 +221,14 @@ describe("served repositories (spec 025 FR-1)", () => {
       { repoPath: "/work/misc", name: "misc", channel: "C0002FAKE", source: "default" },
     ])
     assert.deepEqual(served[0].options, getRepoOrchestratorOptions(on))
+  })
+
+  it("carries each served repository's own [slack.orchestrator] options (codex-reviewer M15)", () => {
+    const own = { ...on, slack: { orchestrator: { auto: [], max_active: "2", retry_review_per_hour: "1 # rarely" } } }
+    const [served] = servedRepositories([{ path: "/work/api", name: "api", config: own }], settings)
+    assert.deepEqual(served.options.auto, [], "an empty auto list is kept, not replaced by the default")
+    assert.equal(served.options.maxActive, 2)
+    assert.equal(served.options.retryReviewPerHour, 1)
   })
 
   it("serves nothing without a channel from the map or the catch-all", () => {
