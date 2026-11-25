@@ -92,6 +92,35 @@ describe("gh-codex findings on #125", () => {
     assert.ok(abortOfA >= 0 && abortOfA < dispatchOfB, `the superseded runner was aborted first: ${JSON.stringify(w.log)}`)
   })
 
+  // codex-reviewer, lane e round after 25b1ba7: pin for mutant M7 (a stopped
+  // runner left in the running map), taken from its proposed test.
+  it("does not read a stopped runner's handle after a lane agent superseded its attempt", async () => {
+    const clock = createFakeClock()
+    let changed = false
+    let disposedReads = 0
+    const w = world(clock, {
+      onSleep: () => {
+        if (changed) return
+        changed = true
+        w.events.push({ type: "update", actor: OWNER, recordedAt: clock.iso(), laneId: "a", before: { reviewer: A }, after: { reviewer: B } })
+        w.lane.reviewer = B
+      },
+    })
+    const runAttempt = w.runAttempt
+    w.runAttempt = async (args) => {
+      const handle = await runAttempt(args)
+      return {
+        ...handle,
+        lastOutputAt: () => {
+          if (args.signal.aborted) disposedReads += 1
+          return handle.lastOutputAt()
+        },
+      }
+    }
+    await runReviewRequest({ candidates: { otherLab: [A, B], sameLab: [SAME] }, policy: POLICY, newId, pollIntervalMs: 15_000, maxAttempts: 2, ...w })
+    assert.equal(disposedReads, 0, "a stopped runner leaves the running map")
+  })
+
   it("counts an attempt's last stream output toward FR-4's progress check after the attempt ends", async () => {
     const clock = createFakeClock()
     // A keeps printing every minute until minute 60, so at attempt_max
