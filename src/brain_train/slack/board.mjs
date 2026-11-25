@@ -51,15 +51,15 @@ export function boardText(record, label) {
  * the entry keeps its last lanes and is marked "not refreshed"; a repository
  * the board has never shown gets no entry then.
  */
-export async function writeRepoEntry(homeDir, channel, { repoPath, name, lanes, stale = false }) {
+export async function writeRepoEntry(homeDir, channel, { repoPath, name, lanes, stale = false }, { waitMs } = {}) {
   const key = repoKey(repoPath)
   if (stale) {
     const record = (await getBoard(homeDir, channel)) || { repos: {} }
     const existing = record.repos?.[key]
     if (!existing) return record
-    return updateBoard(homeDir, channel, { repos: { [key]: { ...existing, stale: true } } })
+    return updateBoard(homeDir, channel, { repos: { [key]: { ...existing, stale: true } } }, { waitMs })
   }
-  return updateBoard(homeDir, channel, { repos: { [key]: { name: String(name || ""), lanes: boardLanes(lanes), stale: false } } })
+  return updateBoard(homeDir, channel, { repos: { [key]: { name: String(name || ""), lanes: boardLanes(lanes), stale: false } } }, { waitMs })
 }
 
 /** Whether any repository of the record shows an active lane. */

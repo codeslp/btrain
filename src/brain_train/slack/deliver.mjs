@@ -516,9 +516,10 @@ function boardLockPath(homeDir, channel) {
 // the stop of a call: `budget`, `ratelimited`, `lost-lock`, or `paused`.
 async function publishBoard(run, lanes, { stale = false } = {}) {
   if (!(await run.lock.stillMine())) return "lost-lock"
-  await writeRepoEntry(run.homeDir, run.channel, {
+  const written = await writeBoardState(run, (options) => writeRepoEntry(run.homeDir, run.channel, {
     repoPath: run.repoPath, name: run.renderContext.repoName, lanes, stale,
-  })
+  }, options))
+  if (written) return written
   // Every repository of this developer publishes the one board of the
   // channel, so reading the record, deciding, sending, and recording run under
   // the board lock: two first publishers must not both post a board. This
@@ -541,6 +542,21 @@ async function publishBoard(run, lanes, { stale = false } = {}) {
   } finally {
     run.boardLock = null
     await boardLock.release()
+  }
+}
+
+// A write to the board map, under the home lock, within the delivery budget:
+// the wait for the lock is bounded by the time left, and a run with none left
+// writes nothing. Returns "" when written, or "budget": the board stays owed.
+async function writeBoardState(run, write) {
+  const waitMs = Number.isFinite(run.deadline) ? run.deadline - run.now() : undefined
+  if (waitMs !== undefined && waitMs <= 0) return "budget"
+  try {
+    await write(waitMs === undefined ? {} : { waitMs })
+    return ""
+  } catch (error) {
+    if (/locked by another btrain process/.test(String(error?.message))) return "budget"
+    throw error
   }
 }
 
@@ -584,7 +600,8 @@ async function publishBoardLocked(run) {
     }
     const lost = await lostBoardLocks(run)
     if (lost) return lost
-    await updateBoard(run.homeDir, run.channel, { ts, text, pinned, pinError })
+    const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, { ts, text, pinned, pinError }, options))
+    if (written) return written
   }
 
   // Pin once. A failure is recorded for `btrain slack status` and not retried
@@ -596,10 +613,12 @@ async function publishBoardLocked(run) {
     const lost = await lostBoardLocks(run)
     if (lost) return lost
     if (result.ok || result.error === "already_pinned") {
-      await updateBoard(run.homeDir, run.channel, { pinned: true, pinError: "" })
+      const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, { pinned: true, pinError: "" }, options))
+      if (written) return written
     } else {
       run.state.lastError = `${result.error} (board pin)`
-      await updateBoard(run.homeDir, run.channel, { pinned: false, pinError: String(result.error || "unknown") })
+      const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, { pinned: false, pinError: String(result.error || "unknown") }, options))
+      if (written) return written
       if (run.rateLimited) return "ratelimited"
     }
   }
