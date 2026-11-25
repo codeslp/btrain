@@ -46,7 +46,7 @@ export function isLocalReviewGrantCurrent(events, record) {
 }
 
 // Local events record workflow decisions. GitHub enforces repository access.
-function hasLocalReviewDecision(events, lane, laneId) {
+function localReviewDecision(events, lane, laneId) {
   const owner = String(lane.owner || "").trim().toLowerCase()
   const reviewer = String(lane.reviewer || "").trim().toLowerCase()
 
@@ -57,30 +57,43 @@ function hasLocalReviewDecision(events, lane, laneId) {
 
     // Consumption has no status snapshot. Only an earlier snapshot proves
     // it occurred inside this PR cycle, after all withdrawal checks above.
-    if (consumedOverride && status) return true
+    if (consumedOverride && status) return "override"
 
     if (event?.type === "override-consumed" && event.details?.action === "local-review"
       && (event.laneId || "") === (laneId || "")
       && event.details.scope === (laneId ? "lane" : "repo")) consumedOverride = true
 
     if (event?.type === "resolve" && event.after?.status === "ready-for-pr") {
-      return Boolean(owner && reviewer && owner !== reviewer)
+      const approved = Boolean(owner && reviewer && owner !== reviewer)
         && event.before?.status === "needs-review"
         && event.details?.localReviewApproved === true
         && !event.details["transition-advisory"]
         && String(event.actor || "").trim().toLowerCase() === reviewer
         && String(event.before.reviewer || "").trim().toLowerCase() === reviewer
         && String(event.before.owner || "").trim().toLowerCase() === owner
+      return approved ? "peer" : false
     }
   }
 
   return false
 }
 
-export async function enforceLocalReview(repoRoot, config, { lane, laneId, stage }) {
+export async function enforceLocalReview(repoRoot, config, { lane, laneId, stage, headSha }) {
   const laneLabel = laneId || "(single)"
   if (PR_STATUSES.has(lane.status)) {
-    if (hasLocalReviewDecision(await readLaneEvents(repoRoot, laneId), lane, laneId)) return
+    const decision = localReviewDecision(await readLaneEvents(repoRoot, laneId), lane, laneId)
+    if (decision === "override") return
+    if (decision === "peer") {
+      const reviewedHead = String(lane.reviewHead || "").trim().toLowerCase()
+      const targetHead = String(headSha || "").trim().toLowerCase()
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(reviewedHead) || reviewedHead !== targetHead) {
+        throw new Error(
+          `${stage} refused for lane ${laneLabel}: peer approval covers ${reviewedHead || "(missing)"}, `
+          + `but the PR head is ${targetHead || "(missing)"}. Hand the new head back for review.`,
+        )
+      }
+      return
+    }
 
     const pending = (await listActiveOverrides(repoRoot)).find((record) => record.action === "local-review"
       && (record.laneId || "") === (laneId || "")

@@ -94,6 +94,11 @@ bot review requests, and application of bot clearance require a current
 recorded peer approval in a PR-flow state. The approval comes from a resolve
 by the assigned reviewer, on a lane in `needs-review` under its current claim.
 An advisory resolve or approval by the owner does not count.
+Peer approval applies only to `reviewHead`, the commit recorded at the
+`needs-review` handoff. PR creation, bot review requests, and bot clearance
+require that head. A missing or different head requires another peer review.
+The audited `local-review` override is not bound to a head. It applies to one
+uninterrupted PR cycle, subject to the withdrawal rules below.
 
 A new claim, a request for changes, or a move out of the PR flow withdraws the
 approval. A bookkeeping event without a status snapshot leaves the approval

@@ -180,6 +180,49 @@ describe("local peer-review workflow", () => {
     })
   })
 
+  for (const stage of ["create", "request", "clearance"]) {
+    it(`refuses ${stage} when peer approval covers a different head`, async () => {
+      await withRepo(async ({ repo, home, headA, baseSha, bare }) => {
+        await handOff(repo, home)
+        await finishPeerReview(repo, home)
+        const headB = await commit(repo, "export const feature = 2\n")
+        if (stage !== "create") {
+          await git(repo, "remote", "add", "upstream", "https://github.com/o/r.git")
+          await linkPr(repo, home)
+        }
+        await withGitHub(repo, headB, baseSha, async ({ posts, setReview }) => {
+          await setReview("APPROVED")
+          const act = () => {
+            if (stage === "create") return runPrCreate(repo, { lane: "a", actor: "alpha", bots: "all" })
+            if (stage === "request") return request(repo)
+            return poll(repo, { apply: true })
+          }
+          await assert.rejects(act, (error) => {
+            assert.ok(error.message.includes(headA), error.message)
+            assert.ok(error.message.includes(headB), error.message)
+            assert.match(error.message, /hand.*back for review/i)
+            return true
+          })
+          assert.equal(await posts(), "")
+          assert.equal((await laneA(repo)).status, stage === "create" ? "ready-for-pr" : "pr-review")
+          if (stage === "create") await assert.rejects(git(bare, "show-ref", "--verify", "refs/heads/feat/gate"))
+        })
+      })
+    })
+  }
+
+  for (const reviewHead of ["", undefined]) {
+    it(`refuses peer approval with ${reviewHead === "" ? "empty" : "missing"} reviewHead`, async () => {
+      await withRepo(async ({ repo, home, headA }) => {
+        await handOff(repo, home)
+        await finishPeerReview(repo, home)
+        await assert.rejects(enforceLocalReview(repo, await readProjectConfig(repo), {
+          lane: { ...await laneA(repo), reviewHead }, laneId: "a", stage: "Creating a PR", headSha: headA,
+        }), /hand.*back for review/i)
+      })
+    })
+  }
+
   it("refuses an owner advisory resolve before creating or pushing a PR", async () => {
     await withRepo(async ({ repo, home, bare }) => {
       await handOff(repo, home)
@@ -263,7 +306,9 @@ describe("local peer-review workflow", () => {
       const resolve = await btrain(["handoff", "resolve", "--lane", "a", "--summary", "Owner update"], { cwd: repo, home })
       assert.equal(resolve.code, 0, resolve.stderr)
       await grantLocalReview(repo, home)
-      await withGitHub(repo, headA, baseSha, async ({ posts, setReview }) => {
+      const headB = await commit(repo, "export const feature = 2\n")
+      assert.equal((await laneA(repo)).reviewHead, headA)
+      await withGitHub(repo, headB, baseSha, async ({ posts, setReview }) => {
         await runPrCreate(repo, { lane: "a", actor: "alpha", bots: "all" })
         assert.equal((await listActiveOverrides(repo)).length, 0)
         await request(repo)
@@ -573,7 +618,7 @@ async function grantLocalReview(repo, home, lane = "a") {
 
 async function gate(repo) {
   return enforceLocalReview(repo, await readProjectConfig(repo), {
-    lane: await laneA(repo), laneId: "a", stage: "Requesting bot review",
+    lane: await laneA(repo), laneId: "a", stage: "Requesting bot review", headSha: await git(repo, "rev-parse", "HEAD"),
   })
 }
 

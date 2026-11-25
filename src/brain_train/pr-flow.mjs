@@ -1568,12 +1568,9 @@ async function requestReviewComments(repoRoot, prNumber, botIds, prFlowConfig, c
   const laneId = context.laneId || ""
   const lane = findLane(await checkHandoff(repoRoot), laneId)
   if (!lane) throw new Error(`Unknown lane: ${laneId}`)
-  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), {
-    lane, laneId, stage: "Requesting bot review",
-  })
-
   const target = context.prRepo || ""
   const { headRefOid, headRefName, headRepo, baseRefName, baseRefOid, repo: prRepo } = await fetchAuthoritativePrHead(repoRoot, prNumber, target)
+  await enforceLocalReview(repoRoot, await readProjectConfig(repoRoot), { lane, laneId, stage: "Requesting bot review", headSha: headRefOid })
   if (!FULL_OBJECT_ID_PATTERN.test(headRefOid)) {
     throw new Error(`GitHub did not report a head revision for PR #${prNumber}, so no bot review can be authorized.`)
   }
@@ -1755,7 +1752,7 @@ export async function runPrPoll(repoRoot, options = {}) {
         throw new Error(`PR #${prNumber}'s base changed since bot review was checked. Poll again before applying clearance.`)
       }
       await enforceLocalReview(repoRoot, config, {
-        lane: current.lane, laneId, stage: "Applying bot clearance",
+        lane: current.lane, laneId, stage: "Applying bot clearance", headSha: target.headRefOid,
       })
     }
     const nextStatus = await applyPrStatusToHandoff(repoRoot, options, status)
@@ -1950,14 +1947,12 @@ export async function runPrCreate(repoRoot, options = {}) {
   }
 
   validatePrCreateTransition(lane, options.actor || lane.owner || "btrain")
-  await enforceLocalReview(repoRoot, config, { lane, laneId, stage: "Creating a PR" })
-
-
   const branch = await gitText(["branch", "--show-current"], repoRoot)
   if (!branch || ["main", "master"].includes(branch)) {
     throw new Error("Create a feature branch before running `btrain pr create`.")
   }
   const headSha = await gitText(["rev-parse", "HEAD"], repoRoot)
+  await enforceLocalReview(repoRoot, config, { lane, laneId, stage: "Creating a PR", headSha })
 
   // Lane Base fields often hold diff refs ("origin/main") or prose, but
   // `gh pr create --base` only accepts a branch name on the remote.
