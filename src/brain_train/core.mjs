@@ -3020,6 +3020,27 @@ async function consumeOverride(repoRoot, options = {}) {
       })
     }
 
+    if (action === "local-review") {
+      // Check inside the override lock for both the gate and hand-run consumption.
+      const { isLocalReviewGrantCurrent } = await import("./local_review.mjs")
+      const events = await readWorkflowEvents(repoRoot, config, record.laneId || "")
+      if (!isLocalReviewGrantCurrent(events, record)) {
+        await appendWorkflowEvent(repoRoot, config, {
+          type: "override-retired",
+          actor: actorLabel,
+          laneId: record.laneId || "",
+          details: { overrideId: record.id, action, scope: record.scope, reason: "stale-local-review-grant" },
+        })
+        await fs.rm(record.path, { force: true })
+        throw new Error(
+          "The local-review grant predates the current claim or a change request, or its grant event is missing. "
+          + "The stale grant was retired without authorization. A new grant is needed. "
+          + `Run btrain override grant --action local-review${record.laneId ? ` --lane ${record.laneId}` : ""} `
+          + '--requested-by <agent> --confirmed-by <human> --reason "...".'
+        )
+      }
+    }
+
     await fs.rm(record.path, { force: true })
     await appendWorkflowEvent(repoRoot, config, {
       type: "override-consumed",

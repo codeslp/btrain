@@ -54,7 +54,7 @@ async function commit(repo, text) {
 // A PR-flow repo with lane a claimed by alpha and reviewed by beta, and a
 // real bare `origin` carrying `main`. The gate reads the base off the remote
 // on every path, so a repo without one cannot exercise it.
-async function withRepo(fn) {
+async function withRepo(fn, { single = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-local-review-")))
   const home = path.join(root, "home")
   const repo = path.join(root, "repo")
@@ -68,6 +68,10 @@ async function withRepo(fn) {
     const init = await btrain(["init", repo, "--tracked", "--agent", "alpha", "--agent", "beta", "--core-only", "--no-hooks"], { cwd: repo, home })
     assert.equal(init.code, 0, init.stderr)
     await fs.appendFile(path.join(repo, ".btrain", "project.toml"), '\n[pr_flow]\nenabled = true\nbase = "main"\n')
+    if (single) {
+      const configPath = path.join(repo, ".btrain", "project.toml")
+      await fs.writeFile(configPath, (await fs.readFile(configPath, "utf8")).replace("[lanes]\nenabled = true", "[lanes]\nenabled = false"))
+    }
     await commit(repo, "export const feature = 0\n")
     await exec("git", ["init", "-q", "--bare", "-b", "main", bare])
     await git(repo, "remote", "add", "origin", bare)
@@ -76,7 +80,7 @@ async function withRepo(fn) {
     // what the needs-review evidence gate requires.
     await git(repo, "checkout", "-q", "-b", "feat/gate")
 
-    const claim = await btrain(["handoff", "claim", "--lane", "a", "--task", "gate lane", "--owner", "alpha", "--reviewer", "beta", "--files", "src/a/"], { cwd: repo, home })
+    const claim = await btrain(["handoff", "claim", ...(single ? [] : ["--lane", "a"]), "--task", "gate lane", "--owner", "alpha", "--reviewer", "beta", "--files", "src/a/"], { cwd: repo, home })
     assert.equal(claim.code, 0, `${claim.stdout}\n${claim.stderr}`)
     const headA = await commit(repo, "export const feature = 1\n")
 
@@ -127,16 +131,18 @@ async function withGitHub(repo, headA, baseSha, fn) {
   const bin = path.join(root, "bin")
   const posted = path.join(root, "posted")
   const reviews = path.join(root, "reviews.json")
+  const pullFile = path.join(root, "pull.json")
   const pull = JSON.stringify({
     number: 7, url: "https://github.com/o/r/pull/7", headRefName: "feat/gate",
     headRefOid: headA, baseRefName: "main", baseRefOid: baseSha,
   })
+  await fs.writeFile(pullFile, pull)
   await fs.mkdir(bin)
   await fs.writeFile(reviews, "[]")
   await fs.writeFile(path.join(bin, "gh"), `#!/bin/sh
 case "$1 $2" in
   "--version ") echo "gh version 2";;
-  "pr view") echo '${pull}';;
+  "pr view") cat ${JSON.stringify(pullFile)};;
   "pr create") echo "https://github.com/o/r/pull/7";;
   "pr comment") printf '%s\\n' "$*" >> ${JSON.stringify(posted)};;
   "api repos/o/r/pulls/7/reviews") cat ${JSON.stringify(reviews)};;
@@ -152,6 +158,7 @@ esac
   ))
   return withPath(bin, () => fn({
     setReview,
+    setState: (state) => fs.writeFile(pullFile, JSON.stringify({ ...JSON.parse(pull), state })),
     posts: () => fs.readFile(posted, "utf8").catch(() => ""),
   }))
 }
@@ -307,6 +314,172 @@ describe("local peer-review workflow", () => {
     }
   }
 
+  for (const withdrawal of ["claim", "request-changes", "watchdog-repair", "resolved", "missing-grant"]) {
+    it(`retires a pending grant after ${withdrawal} without authorizing the owner`, async () => {
+      await withRepo(async ({ repo, home }) => {
+        if (withdrawal === "request-changes") await handOff(repo, home)
+        await grantLocalReview(repo, home)
+        const [pending] = await listActiveOverrides(repo)
+        const log = path.join(getRepoPaths(repo).eventsDir, "lane-a.jsonl")
+        if (withdrawal === "claim") {
+          const abandon = await btrain(["handoff", "update", "--lane", "a", "--status", "idle"], { cwd: repo, home })
+          assert.equal(abandon.code, 0, abandon.stderr)
+          const result = await btrain(["handoff", "claim", "--lane", "a", "--task", "unrelated work",
+            "--owner", "alpha", "--reviewer", "beta", "--files", "src/a/"], { cwd: repo, home })
+          assert.equal(result.code, 0, result.stderr)
+        } else if (withdrawal === "request-changes") {
+          const result = await btrain(["handoff", "request-changes", "--lane", "a", "--summary", "Fix it",
+            "--reason-code", "regression-risk"], { cwd: repo, home, agent: "beta" })
+          assert.equal(result.code, 0, result.stderr)
+        } else if (withdrawal === "missing-grant") {
+          const events = (await readLaneEvents(repo, "a")).filter((event) => event.type !== "override-granted")
+          await fs.writeFile(log, events.map(JSON.stringify).join("\n") + "\n")
+        } else {
+          // No status and reversed clocks must not hide a withdrawal.
+          await fs.appendFile(log, JSON.stringify({ type: withdrawal === "resolved" ? "resolve" : withdrawal,
+            laneId: "a", at: "1900-01-01T00:00:00Z",
+            ...(withdrawal === "resolved" ? { after: { status: "resolved" } } : {}),
+          }) + "\n")
+        }
+        await handOff(repo, home)
+        const ownerResolve = await btrain(["handoff", "resolve", "--lane", "a", "--summary", "Owner route"], { cwd: repo, home })
+        assert.equal(ownerResolve.code, 0, ownerResolve.stderr)
+        assert.equal((await laneA(repo)).status, "ready-for-pr")
+        await assert.rejects(gate(repo), /grant.*(predates|missing).*new grant/i)
+        assert.equal((await listActiveOverrides(repo)).length, 0)
+        const events = await readLaneEvents(repo, "a")
+        assert.equal(events.filter((event) => event.type === "override-consumed").length, 0)
+        assert.ok(events.some((event) => event.type === "override-retired" && event.details.overrideId === pending.id))
+        await assert.rejects(gate(repo), noPeerReview)
+        await grantLocalReview(repo, home)
+        await gate(repo)
+      })
+    })
+  }
+
+  for (const status of ["idle", "in-progress", "needs-review", "changes-requested", "repair-needed", "resolved", "ready-for-pr", "pr-review", "ready-to-merge"]) {
+    it(`checks hand-run consumption at ${status}`, async () => {
+      await withRepo(async ({ repo, home }) => {
+        await setFixtureStatus(repo, home, status)
+        await grantLocalReview(repo, home)
+        const consumed = await btrain(["override", "consume", "--action", "local-review", "--lane", "a"], { cwd: repo, home })
+        assert.equal(consumed.code, 0, consumed.stderr)
+        if (["ready-for-pr", "pr-review", "ready-to-merge"].includes(status)) await gate(repo)
+        else {
+          await assert.rejects(gate(repo), noPeerReview)
+          const ready = await btrain(["handoff", "update", "--lane", "a", "--status", "ready-for-pr", "--files", "src/a/"], { cwd: repo, home })
+          assert.equal(ready.code, 0, ready.stderr)
+          await linkPr(repo, home)
+          await assert.rejects(gate(repo), noPeerReview)
+        }
+      })
+    })
+
+    it(`retires a stale hand-run grant at ${status}`, async () => {
+      await withRepo(async ({ repo, home }) => {
+        await setFixtureStatus(repo, home, status)
+        await grantLocalReview(repo, home)
+        await fs.appendFile(path.join(getRepoPaths(repo).eventsDir, "lane-a.jsonl"), JSON.stringify({ type: "claim", laneId: "a" }) + "\n")
+        const consumed = await btrain(["override", "consume", "--action", "local-review", "--lane", "a"], { cwd: repo, home })
+        assert.equal(consumed.code, 1, consumed.stderr)
+        assert.match(consumed.stderr, /stale grant was retired without authorization/)
+        assert.equal((await listActiveOverrides(repo)).length, 0)
+        const ready = await btrain(["handoff", "update", "--lane", "a", "--status", "ready-for-pr", "--files", "src/a/"], { cwd: repo, home })
+        assert.equal(ready.code, 0, ready.stderr)
+        await linkPr(repo, home)
+        await assert.rejects(gate(repo), noPeerReview)
+      })
+    })
+  }
+
+  it("rejects an idle-lane grant after the lane is claimed", async () => {
+    await withRepo(async ({ repo, home }) => {
+      const idle = await btrain(["handoff", "update", "--lane", "a", "--status", "idle"], { cwd: repo, home })
+      assert.equal(idle.code, 0, idle.stderr)
+      await grantLocalReview(repo, home)
+      const claim = await btrain(["handoff", "claim", "--lane", "a", "--task", "new work", "--owner", "alpha", "--reviewer", "beta", "--files", "src/a/"], { cwd: repo, home })
+      assert.equal(claim.code, 0, claim.stderr)
+      await linkPr(repo, home)
+      await assert.rejects(gate(repo), /new grant is needed/)
+    })
+  })
+
+  for (const field of ["owner", "reviewer"]) {
+    it(`keeps a same-claim work grant after ${field} reassignment`, async () => {
+      await withRepo(async ({ repo, home }) => {
+        await linkPr(repo, home)
+        await grantLocalReview(repo, home)
+        const update = await btrain(["handoff", "update", "--lane", "a", `--${field}`, field === "owner" ? "beta" : "alpha"], { cwd: repo, home })
+        assert.equal(update.code, 0, update.stderr)
+        await gate(repo)
+        await gate(repo)
+        assert.equal((await readLaneEvents(repo, "a")).filter((event) => event.type === "override-consumed").length, 1)
+      })
+    })
+  }
+
+  it("allows only one pending grant even with concurrent requests", async () => {
+    await withRepo(async ({ repo, home }) => {
+      const args = ["override", "grant", "--action", "local-review", "--lane", "a", "--requested-by", "alpha", "--confirmed-by", "human", "--reason", "Same work"]
+      const results = await Promise.all([btrain(args, { cwd: repo, home }), btrain(args, { cwd: repo, home })])
+      assert.deepEqual(results.map((result) => result.code).sort(), [0, 1])
+      assert.match(results.find((result) => result.code === 1).stderr, /active override already exists/)
+      assert.equal((await listActiveOverrides(repo)).length, 1)
+    })
+  })
+
+  it("uses and withdraws a repo-scoped grant in a single-lane repository", async () => {
+    await withRepo(async ({ repo, home }) => {
+      const update = await btrain(["handoff", "update", "--status", "ready-for-pr", "--files", "src/a/"], { cwd: repo, home })
+      assert.equal(update.code, 0, update.stderr)
+      const grant = await btrain(["override", "grant", "--action", "local-review", "--requested-by", "alpha", "--confirmed-by", "human", "--reason", "Single work"], { cwd: repo, home })
+      assert.equal(grant.code, 0, grant.stderr)
+      const singleGate = async () => enforceLocalReview(repo, await readProjectConfig(repo), { lane: await laneA(repo), laneId: "", stage: "Create PR" })
+      await singleGate()
+      await singleGate()
+      const events = await readLaneEvents(repo)
+      assert.ok(events.some((event) => event.type === "override-granted" && event.details.scope === "repo"))
+      await fs.appendFile(path.join(getRepoPaths(repo).eventsDir, "repo.jsonl"), JSON.stringify({ type: "request-changes" }) + "\n")
+      await assert.rejects(singleGate(), noPeerReview)
+    }, { single: true })
+  })
+
+  for (const transition of ["needs-review"]) {
+    it(`checks a consumed grant after ${transition}`, async () => {
+      await withRepo(async ({ repo, home }) => {
+        await linkPr(repo, home)
+        await grantLocalReview(repo, home)
+        await gate(repo)
+        if (transition === "needs-review") await handOff(repo, home)
+        const ready = await btrain(["handoff", "update", "--lane", "a", "--status", "ready-for-pr", "--files", "src/a/"], { cwd: repo, home })
+        assert.equal(ready.code, 0, ready.stderr)
+        await linkPr(repo, home)
+        await assert.rejects(gate(repo), noPeerReview)
+      })
+    })
+  }
+
+  for (const consumed of [false, true]) {
+    it(`withdraws a ${consumed ? "consumed" : "pending"} grant after PR close and re-claim`, async () => {
+      await withRepo(async ({ repo, home, headA, baseSha }) => {
+        await git(repo, "remote", "add", "upstream", "https://github.com/o/r.git")
+        await linkPr(repo, home)
+        await grantLocalReview(repo, home)
+        if (consumed) await gate(repo)
+        await withGitHub(repo, headA, baseSha, async ({ setState }) => {
+          await setState("CLOSED")
+          await poll(repo, { apply: true })
+          assert.equal((await laneA(repo)).status, "resolved")
+          await setState("OPEN")
+          const claim = await btrain(["handoff", "claim", "--lane", "a", "--task", "Reopened work", "--owner", "alpha", "--reviewer", "beta", "--files", "src/a/"], { cwd: repo, home })
+          assert.equal(claim.code, 0, claim.stderr)
+          await linkPr(repo, home)
+          await assert.rejects(gate(repo), consumed ? noPeerReview : /new grant is needed/)
+        })
+      })
+    })
+  }
+
   it("requires a lane when granting a local-review override in a multi-lane repo", async () => {
     await withRepo(async ({ repo, home }) => {
       const result = await btrain(["override", "grant", "--action", "local-review", "--requested-by", "alpha",
@@ -358,4 +531,14 @@ async function gate(repo) {
   return enforceLocalReview(repo, await readProjectConfig(repo), {
     lane: await laneA(repo), laneId: "a", stage: "Requesting bot review",
   })
+}
+
+async function setFixtureStatus(repo, home, status) {
+  if (status === "needs-review") return handOff(repo, home)
+  const result = await btrain(status === "resolved"
+    ? ["handoff", "resolve", "--lane", "a", "--final", "--summary", "Abandoned work"]
+    : ["handoff", "update", "--lane", "a", "--status", status,
+      ...(["changes-requested", "repair-needed"].includes(status) ? ["--reason-code", status === "repair-needed" ? "state-conflict" : "regression-risk"] : []),
+      ...(status === "pr-review" ? ["--pr", "7"] : [])], { cwd: repo, home })
+  assert.equal(result.code, 0, result.stderr)
 }

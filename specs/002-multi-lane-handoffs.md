@@ -111,6 +111,25 @@ An override consumed in any other status never counts after a later transition.
 Later stages use that decision without another grant. A new
 claim, request for changes, watchdog repair, or status outside the PR flow
 withdraws either decision. Repo-scoped overrides do not apply to lanes.
+A pending grant must have a matching `override-granted` event in the lane log.
+The event records `overrideId`, `action`, and `scope` in `details`, and the lane
+in `laneId`. Single-lane repositories use `repo.jsonl` and repo scope.
+The gate uses log order, not timestamps. A later claim, request for changes,
+watchdog repair, or status outside the PR flow invalidates a pending grant.
+This also rejects grants issued while idle before a later claim.
+Owner or reviewer reassignment within the same claim preserves the work grant.
+Closing a PR through the workflow resolves the lane. Reopening requires a fresh
+claim and approval or grant.
+
+Both the gate and `btrain override consume --action local-review --lane <id>`
+retire stale grants. Retirement records `override-retired`, never
+`override-consumed`, and refuses authorization. It frees the pending slot.
+After retirement, obtain a new human confirmation and run
+`btrain override grant --action local-review --lane <id> --requested-by <agent> --confirmed-by <human> --reason "..."`.
+Omit `--lane <id>` in single-lane repositories. Only one pending grant per
+action and lane is allowed. Manual consumption outside a PR status does not
+authorize a later PR cycle.
+
 The repository, head, and base checks still run.
 
 ### `handoff resolve --final`

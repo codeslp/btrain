@@ -32,6 +32,19 @@ export async function readLaneEvents(repoRoot, laneId = "") {
     .filter(Boolean)
 }
 
+// Log order, rather than timestamps, binds a pending grant to uninterrupted work.
+export function isLocalReviewGrantCurrent(events, record) {
+  let current = false
+  for (const event of events) {
+    if (event?.type === "override-granted" && event.details?.overrideId === record.id
+      && event.details.action === "local-review" && event.details.scope === record.scope
+      && (event.laneId || "") === (record.laneId || "")) current = true
+    if (WITHDRAWAL_EVENTS.has(event?.type)
+      || (event?.after?.status && !PR_STATUSES.has(event.after.status))) current = false
+  }
+  return current
+}
+
 // Local events record workflow decisions. GitHub enforces repository access.
 function hasLocalReviewDecision(events, lane, laneId) {
   const owner = String(lane.owner || "").trim().toLowerCase()
