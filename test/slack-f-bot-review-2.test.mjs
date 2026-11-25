@@ -149,3 +149,38 @@ test("a superseded sender does not write the channel map while a live holder has
   const channels = await fs.readFile(path.join(root, CHANNELS_RELATIVE), "utf8").catch(() => null)
   assert.equal(channels, null, `nothing is written under another holder's lock: ${channels}`)
 })
+
+// codex-reviewer, lane f at d33b9d5: the lock check must not depend on a
+// card change. The second reply owes the same card as the first, so its
+// owed-card record is unchanged.
+test("a second reply that lost the delivery lock keeps its entry although its owed card did not change", async () => {
+  const root = await tempRoot()
+  const slackDir = path.join(root, ".btrain", "slack")
+  const lanes = [{ lane: "a", task: "Task A", owner: "claude", reviewer: "codex-reviewer", status: "needs-review", lockedFiles: [], lastUpdated: "claude 2026-11-23T21:00:00.000Z" }]
+  await setThread(slackDir, "a", "claim-a", { channel: CHANNEL, cardTs: "1.1" })
+  await writeEntry(slackDir, { laneId: "a", claimKey: "claim-a", kind: "changes-requested", reply: true, fields: { actor: "claude", lane: "a" } })
+  await writeEntry(slackDir, { laneId: "a", claimKey: "claim-a", kind: "changes-requested", reply: true, fields: { actor: "claude", lane: "a" } })
+  let replies = 0
+  const fake = createFakeSlack({
+    expectedToken: FAKE_BOT,
+    onCall: (call) => {
+      if (call.method === "chat.postMessage" && call.body.thread_ts) {
+        replies += 1
+        // The lock is taken over while the second reply is in flight.
+        if (replies === 2) writeFileSync(path.join(slackDir, DELIVERY_LOCK_FILENAME), "another-process-nonce", "utf8")
+      }
+    },
+  })
+  const result = await deliver({
+    slackDir,
+    homeDir: path.join(root, "home"),
+    repo: { name: "fixture-repo", path: root },
+    channel: CHANNEL,
+    token: FAKE_BOT,
+    fetchImpl: fake.fetch,
+    readLanes: async () => lanes,
+  })
+  assert.equal(replies, 2)
+  assert.equal(result.status, "lost-lock")
+  assert.equal((await listEntries(slackDir)).length, 1, "the second entry waits for the new holder")
+})

@@ -269,7 +269,10 @@ describe("deliver", () => {
     assert.equal(result.status, "lost-lock")
     const replies = fake.calls.filter((call) => call.body.thread_ts)
     assert.equal(replies.length, 1, "the first holder sent one reply and stopped")
-    assert.equal((await listEntries(t.slackDir)).length, 2)
+    // A holder that lost the lock removes nothing: the entry it sent waits
+    // for the new holder, which sends it again (the one entry sent twice) and
+    // owes its card the refresh.
+    assert.equal((await listEntries(t.slackDir)).length, 3)
     assert.equal((await readDeliveryState(t.slackDir)).counters.sent, 99, "the stopped holder did not overwrite the new holder's state")
   })
 

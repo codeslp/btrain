@@ -284,14 +284,15 @@ function recordFailure(run, entry, result) {
   return "stop-lane"
 }
 
-// Remove sent or dropped entries. A card refresh they made owed is written to
-// disk first: a process that stops after the removal must not lose it, since
-// nothing else would bring the card up to date. Returns false, removing
-// nothing, when the lock was lost before that write.
+// Remove sent or dropped entries, only while the delivery lock is ours: a
+// holder that lost it leaves them for the new holder. Returns false, removing
+// nothing, when the lock is gone. A card refresh the entries made owed is
+// written to disk first: a process that stops after the removal must not lose
+// it, since nothing else would bring the card up to date.
 async function removeItems(run, items, counter) {
+  if (!(await run.lock.stillMine())) return false
   const cards = JSON.stringify(run.state.cards)
   if (cards !== run.savedCards) {
-    if (!(await run.lock.stillMine())) return false
     await writeDeliveryState(run.slackDir, run.state)
     run.savedCards = cards
   }
@@ -377,8 +378,7 @@ async function deliverLane(run, laneId, laneState, items) {
 
   // Entries that do not parse cannot be sent: drop them (FR-10).
   const broken = items.filter((item) => !item.entry)
-  // This run has owed no card yet, so removeItems has nothing to write first.
-  if (broken.length > 0) await removeItems(run, broken, "dropped")
+  if (broken.length > 0 && !(await removeItems(run, broken, "dropped"))) return "lost-lock"
   const pending = items.filter((item) => item.entry)
 
   // Entries older than 24 hours become one reply (FR-4).
