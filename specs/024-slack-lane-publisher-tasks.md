@@ -19,6 +19,15 @@ list with no imports, because `code-rules.mjs` imports `core.mjs` and `slack/`
 must not reach it. `config.mjs` decides the toggle for `slack/` itself; T007
 puts the same explicit-only rule into `repo_mode.mjs`.
 
+**Status 2026-11-25:** WS3 merged in PR #126. Two WS5 tasks run ahead of
+WS4, because neither needs a file lane a holds. T027 is done:
+`test/slack-no-real-ids.test.mjs` scans every tracked file, and a finding
+masks its value. T023 is partly done: `slack/remote.mjs` takes the text of
+`git config --get-regexp` and returns the PR link, in the order
+`resolveBaseRemote` uses and in the shape `render.mjs` accepts. Passing that
+link to the `ready-to-merge` reply belongs to WS4's `index.mjs`, which waits
+for lane a.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Write the fake Slack `fetch` in `test/helpers/fake-slack.mjs` and its preload in `test/helpers/fake-slack-preload.mjs`. It records every call, returns a `ts` for a post, and on demand returns any Slack error, an HTTP 429 with `Retry-After`, a network error, or never resolves. Scripted responses are keyed by Slack method name. Test it in `test/slack-fake-harness.test.mjs`.
@@ -69,7 +78,7 @@ Held on 2026-11-23: `README.md` (lane h).
 - [ ] T024 [WS5] Mention a person for `repair-needed` only when the repair has escalated, and for `dispatch-failed` until WS7. Test that a first `repair-needed` has no mention, its escalation has one, and `merged` has neither a link nor a mention.
 - [ ] T025 [WS5] Shared channels: the repository name on every card and reply, the developer label on every message, the path-keyed channel map, and the catch-all. Test two repositories of one developer sharing a board with separate threads, and two developer labels in one channel with separate threads and boards.
 - [ ] T026 [WS5] Ship `docs/slack-app-manifest.json` and the README section: scopes, setup, the commands, and what is never posted.
-- [ ] T027 [WS5] Add a test that searches the repository and finds no real Slack token, workspace ID, channel ID, or user ID outside fixtures with obviously fake values.
+- [x] T027 [WS5] Add a test that searches the repository and finds no real Slack token, workspace ID, channel ID, or user ID outside fixtures with obviously fake values.
 
 **Independent check:** two repositories and two developer labels share one fake channel correctly, and another developer can set the publisher up from the README alone.
 
