@@ -181,7 +181,9 @@ describe("thread and board maps", () => {
     assert.equal(maximum, 1)
     assert.equal(outcomes.filter((outcome) => outcome.result?.ok).length, 10)
     const left = (await fs.readdir(path.join(home, "slack"))).filter((name) => name.startsWith("home.lock"))
-    assert.deepEqual(left, [], "every holder released its generation")
+    assert.equal(left.length, 1, "only the highest generation is left")
+    assert.equal(await fs.readFile(path.join(home, "slack", left[0]), "utf8"), "released")
+    assert.equal(left[0], "home.lock.10", "ten holders took ten generations, never one twice")
   })
 
   it("supersedes a stale lock with the next generation, leaving no live lock moved or deleted", async () => {

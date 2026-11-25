@@ -85,10 +85,14 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // - A stale lock (its holder died) is never moved or deleted to take it over:
 //   the next generation simply supersedes it. So no live lock's path is ever
 //   vacated, and nobody can slip in while a lock is being recovered.
-// - Release deletes the holder's own file. After acquiring, a holder deletes
-//   the generations below its own; their holders, if still alive, find before
+// - Release marks the holder's own file released; it is not deleted, so the
+//   highest generation always exists and numbers only grow. A generation is
+//   never created twice, so a contender's old observation can only ever
+//   point at a superseded generation. After acquiring, a holder deletes the
+//   generations below its own; their holders, if still alive, find before
 //   they send that they no longer hold the lock.
 const HOME_LOCK_NAME = /^home\.lock(?:\.(\d+))?$/
+const RELEASED = "released"
 
 async function homeLockGenerations(dir) {
   let names = []
@@ -120,8 +124,9 @@ async function acquireHomeLock(homeDir, waitMs) {
       try {
         const seen = await fs.stat(top.file)
         free = Math.abs(Date.now() - seen.mtimeMs) > HOME_LOCK_STALE_MS
+          || (await fs.readFile(top.file, "utf8")) === RELEASED
       } catch {
-        // Released between the listing and the stat: look again.
+        // Superseded between the listing and the read: look again.
         continue
       }
     }
@@ -157,11 +162,13 @@ function makeHomeLock(dir, file, generation, nonce) {
         return false
       }
     },
+    // Mark the generation released and keep the file: the highest
+    // generation must always exist, so numbers never restart.
     async release() {
       try {
-        if ((await fs.readFile(file, "utf8")) === nonce) await fs.unlink(file)
+        if ((await fs.readFile(file, "utf8")) === nonce) await fs.writeFile(file, RELEASED, "utf8")
       } catch {
-        // Already gone.
+        // Already superseded.
       }
     },
   }
