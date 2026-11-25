@@ -19,6 +19,24 @@ lists the samples still missing. Two lanes never hold one file at once, so the
 tasks that edit `core.mjs` or `pr-flow.mjs` land one workstream at a time, in
 order.
 
+**Status 2026-11-24:** T021, T022 and T033 are done (lane e, second PR):
+`review/request-lock.mjs`, `review/request.mjs` (`runReviewRequest`, all
+dependencies injected), and `review/fix-rules.mjs` (`evaluateFixRules`).
+Invariants 1 and 11 no longer skip. Two tasks are partly done:
+
+- T007: `review/doctor.mjs` returns the findings (`collectReviewDoctorFindings`);
+  appending them in `doctorRepo` edits `core.mjs`, held by lane h (PR #122).
+- T037: `review/commit-trailer-hook.mjs` renders the managed `commit-msg` hook
+  and parses the trailer; adding it to `managedHookSpecs` and the
+  `fix-confirmation` rule in `renderPreCommitHook` edit `core.mjs` (lane h,
+  PR #122).
+
+`runReviewRequest` compares the head that `readLane()` reports with the
+request's head; it does not decide which commit that is. The plan resolves
+the request's branch ref (section "Head"), while PR #122 pins a `reviewHead`
+in lane state at `needs-review`. WS5 wiring has to settle which one the lane's
+head is before T024.
+
 ## Phase 1: Foundations that change no behavior (WS0, WS1, WS2)
 
 - [x] T001 [WS0] Write the fake runner in `test/helpers/fake-runner.mjs`: an executable a test names in `[agents.runners]`, driven by a scenario file. It can run `btrain handoff`, print lines at given times, stay silent, exit with a code and text, commit a file with or without the `Btrain-Agent` trailer, and run a verdict or `handoff fix`.
@@ -56,8 +74,8 @@ with a TLC run, then the gate.
 - [ ] T018 [WS4] Refuse an explicit reviewer that is same-lab or has no lab in `claimHandoff` and `resolveReassignInputs` when an other-lab agent with a `cli` runner is configured, with the FR-3 text. Add the `reviewerLabAllowed` guard input to rows 1 and 20. `resolveReassignInputs` returns it in a `gateFacts` object, and `patchHandoff` gains one spread line in each of its two gate inputs; change the pinned 585 in `test/decomposition_inventory.test.mjs` to 587 and state both numbers in the handoff. Test the refusal, `--reviewer any-other`, the case with no other-lab agent, a `notify` reviewer with no lab, the same refusal in a repository without lanes, and that a reassignment making a lane author the reviewer is still refused.
 - [ ] T019 [WS4] Add `same-lab-review` to `VALID_OVERRIDE_ACTIONS`, require `--lane` for it in `grantOverride`, and consume it on the claim or reassignment it permits. Test that the override is spent after one use.
 - [ ] T020 [WS5, PR 1] Prose and model for the system reassignment: add it to spec 005 FR-5, re-pin with `python3 scripts/tla_pin.py`, add a separate system reassignment action to `specs/tla/LaneLock.tla` and `test/formal/lane-lock-model.mjs`, with no agent parameter, quantified the way `Resync` is for `Doctor`: the owner stays, the reviewer changes under row 20's guards, and `lastActor` becomes the owner. Run TLC.
-- [ ] T021 [WS5] Write `src/brain_train/review/request-lock.mjs`: one heartbeat lock for each lane request, with the 60-second liveness rule, a touch on a 15-second timer for the whole life of the loop, and a nonce the holder reads again before every dispatch. Test that a second process finds a live lock and does not dispatch, and that a ten-minute attempt keeps the lock.
-- [ ] T022 [WS5] Write the attempt loop `runReviewRequest` in `src/brain_train/review/request.mjs` with injected `readEvents`, `writeEvent`, `readLane`, `startAttempt`, `runAttempt`, `now`, and `sleep`, applying the plan's eight rules in order and its three short cases. `runAttempt` starts the runner and returns a handle, so the loop polls while it runs. The loop can be asked for one attempt only.
+- [x] T021 [WS5] Write `src/brain_train/review/request-lock.mjs`: one heartbeat lock for each lane request, with the 60-second liveness rule, a touch on a 15-second timer for the whole life of the loop, and a nonce the holder reads again before every dispatch. Test that a second process finds a live lock and does not dispatch, and that a ten-minute attempt keeps the lock.
+- [x] T022 [WS5] Write the attempt loop `runReviewRequest` in `src/brain_train/review/request.mjs` with injected `readEvents`, `writeEvent`, `readLane`, `startAttempt`, `runAttempt`, `now`, and `sleep`, applying the plan's eight rules in order and its three short cases. `runAttempt` starts the runner and returns a handle, so the loop polls while it runs. The loop can be asked for one attempt only.
 - [ ] T023 [WS5] In `core.mjs`: give `executeLoopCliRunnerWithStreaming` an optional `AbortSignal` that stops the process group, give `buildLoopRunnerEnv` an optional allowlist, and make `normalizeLoopCliRunner` add the fresh-session flags and reject the resume flags for a same-lab attempt.
 - [ ] T024 [WS5] Make `dispatchNeedsReviewReviewer` call `runReviewRequest`. `startAttempt` sets the lane's reviewer and records `review-attempt` in one `updateHandoff` write, with the owner as the event's actor and `btrain-system` in its details: it calls `applyTransition` for row 20 with actor `btrain-system` and `systemEvent`, and writes only when the matched row is 20, because a refused row 20 otherwise matches legacy row L10. Make `reassign authority` in `actorMatches` accept `systemEvent` only when the owner does not change, and make `getCanonicalWorkflowActor` read a `review-attempt` that changed the reviewer.
 - [ ] T025 [WS5] Bind verdicts to attempts: add an optional `precondition` to `updateHandoff`, called inside the handoff lock before the write. `requestChangesHandoff` and `resolveHandoff` pass `attemptMatches` to rows 3, 4, and 5, pass a precondition that requires the attempt to still be the active one, and record `attemptId` and `tier` on the verdict event. The lane's head is the branch recorded on `review-request`, so a verdict from another worktree works. A reviewer that has committed since the attempt's head cannot resolve or request changes, and a verdict with no open attempt is refused with the command to run. In `review/activity.mjs`, open an attempt at pickup, at the request's head, for a recorded reviewer that was not dispatched, only when a dispatch of that reviewer would be allowed, and for a request from a detached checkout only from a checkout at the recorded commit.
@@ -73,7 +91,7 @@ with a TLC run, then the gate.
 
 - [ ] T031 [WS7, PR 1] Prose and model for the fix path: edit spec 002 `CLI Commands` and `PR-flow states and actors` and spec 005 `Proposed Status Model` and FR-5, re-pin, and in `LaneLock.tla` and the mirror add `fix-confirmation`, `ReviewerFix`, `ConfirmFix`, `AmendFix`, `fixAuthors`, and `FixSeparation`, and restate `PrFlowEntryByReviewer`. Exclude `fix-confirmation` from `RepairEnter`. `ReviewerFix` sets `peerApproved` and `approver`, and `ConfirmFix` leaves both. Run TLC and record the state count and run time before and after.
 - [ ] T032 [WS7] Add `fix-confirmation` to the status sets in `core.mjs` and `transitions.mjs` and the three rows to `TRANSITION_ROWS`, with `ConfirmFix` as the status's primary row. Exclude it from the sources of rows 13 and L3, and retire L4 for it as a source and as a target.
-- [ ] T033 [WS7] Write `src/brain_train/review/fix-rules.mjs`: one check and one message for each FR-11 condition. Test each refusal in `test/review-fix-rules.test.mjs`.
+- [x] T033 [WS7] Write `src/brain_train/review/fix-rules.mjs`: one check and one message for each FR-11 condition. Test each refusal in `test/review-fix-rules.test.mjs`.
 - [ ] T034 [WS7] Export `updateHandoff` from `core.mjs`, regenerate the export baseline, and change the four 72s to 73 and the 71 to 72 in the inventory test. Write `fixHandoff` and `confirmFixHandoff` in `src/brain_train/review/fixes.mjs`, and route `btrain handoff fix` and `btrain handoff confirm-fix` to them in `cli.mjs`. `resolveHandoff` reads the internal `transitionEvent` option for its terminal transition, so `confirm-fix` with PR flow off writes `fix-confirmed` and then resolves the lane and releases its locks.
 - [ ] T035 [WS7] The owner's hand-off from `fix-confirmation`: `resolveReassignInputs` adds `commitAfterFixHead` to `gateFacts`, so `AmendFix` requires a commit after `fixHead` also when an override ID skips `validateNeedsReviewTransition`; `finishPatchWithReviewerDispatch` writes `fix-confirmed` with `how: amend`, and the new attempt reviews the commits after `fixHead`.
 - [ ] T036 [WS7] Make `resolveHandoff` refuse when the head holds a commit that `fix-applied` recorded for the resolving reviewer and no `fix-confirmed` covers it.
