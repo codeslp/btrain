@@ -446,6 +446,10 @@ async function refreshCards(run, lanes) {
       return "paused"
     }
     if (CARD_GONE_ERRORS.has(result.error)) {
+      // The lock may have been taken over during the update, and the new
+      // holder may have recorded its own card for this lane task: a holder
+      // that lost the lock must not touch the thread map.
+      if (!(await run.lock.stillMine())) return "lost-lock"
       await deleteThread(run.slackDir, owed.laneId, owed.claimKey)
       delete run.state.cards[key]
       continue
