@@ -11766,4 +11766,7 @@ export {
   syncTemplates,
   waitForHandoffStateChange,
   withFileLock,
+  appendWorkflowEvent,
+  readWorkflowEvents,
+  detectCurrentAgent,
 }
