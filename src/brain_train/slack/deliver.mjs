@@ -29,17 +29,24 @@
 //   over stops at its next call and writes no state.
 // - Every error is caught: `deliver` resolves with a summary and never throws.
 //
+// - After the replies and cards, the developer's board in the channel (FR-9,
+//   board.mjs) gets this repository's lines and is updated in place, or posted
+//   and pinned once when it has no message yet. A failed pin is recorded for
+//   `btrain slack status` and blocks nothing. When lane state cannot be read,
+//   this repository's last lines are kept and marked "not refreshed".
+//
 // Replies are at-least-once (FR-10): a process that stops between Slack's
 // answer and the entry's removal sends that reply again next time. The card is
 // rewritten whole, so it is always right.
 
 import path from "node:path"
-import { classifySlackError, DEFAULT_CALL_TIMEOUT_MS, ERROR_CLASSES, postMessage, updateMessage } from "./client.mjs"
+import { addPin, classifySlackError, DEFAULT_CALL_TIMEOUT_MS, ERROR_CLASSES, postMessage, updateMessage } from "./client.mjs"
+import { boardOwed, boardText, hasActiveLanes, writeRepoEntry } from "./board.mjs"
 import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
-import { renderCard, renderReply } from "./render.mjs"
+import { prefixReply, renderCard, renderReply } from "./render.mjs"
 import { btrainHome } from "./credentials.mjs"
-import { deleteThread, getThread, sendOnChannel, setThread, threadKey } from "./threads.mjs"
+import { deleteThread, getThread, sendOnChannel, setThread, threadKey, updateBoard } from "./threads.mjs"
 
 export const DELIVERY_LOCK_FILENAME = "delivery.lock"
 export const COLLAPSE_AGE_MS = 24 * 60 * 60 * 1000
@@ -152,11 +159,8 @@ export async function deliver(options = {}) {
     if (state.paused) return { ...summary, status: "paused", reason: String(state.paused.error || "") }
 
     const entries = await listEntries(slackDir)
-    if (entries.length === 0 && Object.keys(state.cards).length === 0) return summary
-
-    const read = await readLanesWithin(readLanes, deadline, now)
-    if (read.error) return { ...summary, status: "error", reason: read.error }
-    const lanes = read.lanes
+    const label = String(context.label || "")
+    if (entries.length === 0 && Object.keys(state.cards).length === 0 && !(await boardOwed(homeDir, channel, label))) return summary
 
     const run = {
       slackDir,
@@ -174,7 +178,16 @@ export async function deliver(options = {}) {
       savedCards: JSON.stringify(state.cards),
       summary,
       renderContext: { ...context, repoName: context.repoName || repo.name || path.basename(String(repo.path || "")) },
+      repoPath: String(repo.path || slackDir),
     }
+
+    const read = await readLanesWithin(readLanes, deadline, now)
+    if (read.error) {
+      // This repository's board lines stay as they were, marked stale.
+      await publishBoard(run, [], { stale: true }).catch(() => {})
+      return { ...summary, status: "error", reason: read.error }
+    }
+    const lanes = read.lanes
 
     const groups = new Map()
     for (const item of entries) {
@@ -192,7 +205,12 @@ export async function deliver(options = {}) {
       }
     }
     const outcome = await refreshCards(run, lanes)
-    if (outcome !== "next") summary.status = outcome
+    if (outcome !== "next") {
+      summary.status = outcome
+      return summary
+    }
+    const boardOutcome = await publishBoard(run, lanes)
+    if (boardOutcome !== "next") summary.status = boardOutcome
     return summary
   } catch (error) {
     return { ...summary, status: "error", reason: String(error?.message || error) }
@@ -393,7 +411,7 @@ async function deliverLane(run, laneId, laneState, items) {
       return "next"
     }
     const newest = old[old.length - 1].entry
-    const result = await sendReply(newest, collapsedReplyText(old.length))
+    const result = await sendReply(newest, prefixReply(collapsedReplyText(old.length), run.renderContext))
     if (result.ok || result.drop) {
       if (!(await removeItems(run, old, result.ok ? "collapsed" : "dropped"))) return "lost-lock"
     } else {
@@ -475,5 +493,77 @@ async function refreshCards(run, lanes) {
       else run.state.cards[key] = { ...owed, attempts }
     }
   }
+  return "next"
+}
+
+// The board (FR-9): write this repository's lines, then post or update the
+// developer's board in the run's channel and pin it once. Returns "next", or
+// the stop of a call: `budget`, `ratelimited`, `lost-lock`, or `paused`.
+async function publishBoard(run, lanes, { stale = false } = {}) {
+  const label = String(run.renderContext.label || "")
+  if (!(await run.lock.stillMine())) return "lost-lock"
+  const record = await writeRepoEntry(run.homeDir, run.channel, {
+    repoPath: run.repoPath, name: run.renderContext.repoName, lanes, stale,
+  })
+  let ts = String(record.ts || "")
+  // A board is first posted when some repository has an active lane; one
+  // that exists is kept up to date, down to "no active lanes".
+  if (!ts && !hasActiveLanes(record)) return "next"
+  const text = boardText(record, label)
+  let pinned = Boolean(record.pinned)
+  let pinError = String(record.pinError || "")
+
+  if (!ts || text !== record.text) {
+    if (ts) {
+      const sent = await send(run, run.channel, (options) => updateMessage({ ...options, channel: run.channel, ts, text }))
+      if (sent.stop) return sent.stop
+      if (!sent.result.ok) {
+        if (!CARD_GONE_ERRORS.has(sent.result.error)) return boardFailure(run, sent.result)
+        // The board message is gone: post a new one and pin it.
+        ts = ""
+      }
+    }
+    if (!ts) {
+      const sent = await send(run, run.channel, (options) => postMessage({ ...options, channel: run.channel, text }))
+      if (sent.stop) return sent.stop
+      if (!sent.result.ok) return boardFailure(run, sent.result)
+      ts = String(sent.result.body?.ts || "")
+      if (!ts) return boardFailure(run, { error: "unknown_response" })
+      pinned = false
+      pinError = ""
+    }
+    if (!(await run.lock.stillMine())) return "lost-lock"
+    await updateBoard(run.homeDir, run.channel, { ts, text, pinned, pinError })
+  }
+
+  // Pin once. A failure is recorded for `btrain slack status` and not retried
+  // for this message; the board works unpinned.
+  if (ts && !pinned && !pinError) {
+    const sent = await send(run, run.channel, (options) => addPin({ ...options, channel: run.channel, timestamp: ts }))
+    if (sent.stop) return sent.stop
+    const result = sent.result
+    if (!(await run.lock.stillMine())) return "lost-lock"
+    if (result.ok || result.error === "already_pinned") {
+      await updateBoard(run.homeDir, run.channel, { pinned: true, pinError: "" })
+    } else {
+      run.state.lastError = `${result.error} (board pin)`
+      await updateBoard(run.homeDir, run.channel, { pinned: false, pinError: String(result.error || "unknown") })
+      if (run.rateLimited) return "ratelimited"
+    }
+  }
+  return "next"
+}
+
+// A failed board post or update. The board stays owed (its text differs from
+// what was posted), so a later run retries it; a configuration error pauses
+// delivery as it does for replies and cards.
+function boardFailure(run, result) {
+  const errorClass = result.errorClass || classifySlackError(result.error)
+  run.state.lastError = `${result.error} (board)`
+  if (errorClass === ERROR_CLASSES.CONFIGURATION) {
+    run.state.paused = { error: result.error, at: iso(run.now()) }
+    return "paused"
+  }
+  if (run.rateLimited) return "ratelimited"
   return "next"
 }
