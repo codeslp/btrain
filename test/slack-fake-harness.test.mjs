@@ -212,12 +212,12 @@ describe("fake Slack: recording", () => {
     assert.deepEqual(unknown, { ok: false, error: "unknown_method" })
 
     // A method with no built-in body can still be scripted by name.
-    fake.setDefault("conversations.history", { ok: true, messages: [{ ts: "1.000001", text: "hi" }] })
-    fake.queue("conversations.history", { retryAfter: 3 })
-    assert.equal((await post(fake, "conversations.history", { channel: "C0000FAKE" })).status, 429)
-    assert.deepEqual(await (await post(fake, "conversations.history", { channel: "C0000FAKE" })).json(), {
+    fake.setDefault("conversations.info", { ok: true, channel: { id: "C0000FAKE", name: "fake" } })
+    fake.queue("conversations.info", { retryAfter: 3 })
+    assert.equal((await post(fake, "conversations.info", { channel: "C0000FAKE" })).status, 429)
+    assert.deepEqual(await (await post(fake, "conversations.info", { channel: "C0000FAKE" })).json(), {
       ok: true,
-      messages: [{ ts: "1.000001", text: "hi" }],
+      channel: { id: "C0000FAKE", name: "fake" },
     })
 
     await assert.rejects(
