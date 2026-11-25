@@ -285,14 +285,22 @@ describe("local peer-review workflow", () => {
           await grantLocalReview(repo, home)
           const consumed = await btrain(["override", "consume", "--action", "local-review", "--lane", "a"], { cwd: repo, home })
           assert.equal(consumed.code, 0, consumed.stderr)
-          if (target === "pr-review") {
-            await linkPr(repo, home)
-          } else {
-            const update = await btrain(["handoff", "update", "--lane", "a", "--status", target], { cwd: repo, home })
-            assert.equal(update.code, 0, update.stderr)
-          }
-          assert.equal((await laneA(repo)).status, target)
+          const update = await btrain([
+            "handoff", "update", "--lane", "a", "--status", target,
+            ...(target === "pr-review" ? ["--pr", "7"] : []),
+          ], { cwd: repo, home })
           assert.equal((await listActiveOverrides(repo)).length, 0)
+          if (status === "needs-review" && target === "pr-review") {
+            // The status-update guard rejects this route before the gate runs.
+            assert.equal(update.code, 1, update.stderr)
+            assert.match(update.stderr, /Local peer review must finish before linking a PR\./)
+            assert.equal((await laneA(repo)).status, status)
+            return
+          }
+          assert.equal(update.code, 0, update.stderr)
+          assert.equal((await laneA(repo)).status, target)
+          // These CLI routes still reach the event fold, preserving coverage
+          // of overrides consumed before the lane entered its PR cycle.
           await assert.rejects(gate(repo), noPeerReview)
         })
       })

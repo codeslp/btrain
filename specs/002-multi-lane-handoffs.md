@@ -84,6 +84,11 @@ Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-neede
 
 ### Local peer review before GitHub bot review
 
+This gate supersedes the earlier `changes-requested` row and paragraph where
+they say local approval survives GitHub feedback. Bot feedback withdraws the
+decision for this gate. Direct relinking does not restore it. The CLI also
+rejects direct relinking from `needs-review` before this gate runs.
+
 The PR workflow reads the lane's current status and workflow log. PR creation,
 bot review requests, and application of bot clearance require a current
 recorded peer approval in a PR-flow state. The approval comes from a resolve
