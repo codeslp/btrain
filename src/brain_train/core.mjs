@@ -3033,8 +3033,8 @@ async function consumeOverride(repoRoot, options = {}) {
         })
         await fs.rm(record.path, { force: true })
         throw new Error(
-          "The local-review grant predates the current claim or a change request, or its grant event is missing. "
-          + "The stale grant was retired without authorization. A new grant is needed. "
+          "The local-review grant is stale: new claim, change request, watchdog repair, or any non-PR status after the grant; or missing grant event. "
+          + "The stale grant was retired without authorization. A new grant is needed. Grant from a PR status. "
           + `Run btrain override grant --action local-review${record.laneId ? ` --lane ${record.laneId}` : ""} `
           + '--requested-by <agent> --confirmed-by <human> --reason "...".'
         )

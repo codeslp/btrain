@@ -405,7 +405,7 @@ describe("local peer-review workflow", () => {
   })
 
   for (const field of ["owner", "reviewer"]) {
-    it(`keeps a same-claim work grant after ${field} reassignment`, async () => {
+    it(`keeps a same-claim work grant after ${field} reassignment during pr-review`, async () => {
       await withRepo(async ({ repo, home }) => {
         await linkPr(repo, home)
         await grantLocalReview(repo, home)
@@ -417,6 +417,50 @@ describe("local peer-review workflow", () => {
       })
     })
   }
+
+  for (const status of ["in-progress", "needs-review"]) {
+    for (const field of ["owner", "reviewer"]) {
+      it(`retires a pending grant after ${field} reassignment during ${status}`, async () => {
+        await withRepo(async ({ repo, home }) => {
+          await setFixtureStatus(repo, home, status)
+          await grantLocalReview(repo, home)
+          const [pending] = await listActiveOverrides(repo)
+          const update = await btrain(["handoff", "update", "--lane", "a", `--${field}`,
+            field === "owner" ? "beta" : "alpha"], { cwd: repo, home })
+          assert.equal(update.code, 0, update.stderr)
+          const ready = await btrain(["handoff", "update", "--lane", "a", "--status", "ready-for-pr"], { cwd: repo, home })
+          assert.equal(ready.code, 0, ready.stderr)
+          await assert.rejects(gate(repo), (error) => {
+            assert.match(error.message, /new claim, change request, watchdog repair, or any non-PR status after the grant/)
+            assert.match(error.message, /missing grant event/)
+            assert.match(error.message, /Grant from a PR status/)
+            return true
+          })
+          assert.equal((await listActiveOverrides(repo)).length, 0)
+          const events = await readLaneEvents(repo, "a")
+          assert.ok(events.some((event) => event.type === "override-retired" && event.details.overrideId === pending.id))
+          assert.equal(events.filter((event) => event.type === "override-consumed").length, 0)
+          await assert.rejects(gate(repo), noPeerReview)
+        })
+      })
+    }
+  }
+
+  // M1. Earlier claim/status events masked a fail-open initial state when only the grant event was removed.
+  it("retires and denies a pending grant when the entire lane event log is absent", async () => {
+    await withRepo(async ({ repo, home }) => {
+      await linkPr(repo, home)
+      await grantLocalReview(repo, home)
+      const [pending] = await listActiveOverrides(repo)
+      await fs.rm(path.join(getRepoPaths(repo).eventsDir, "lane-a.jsonl"))
+      await assert.rejects(gate(repo), /stale grant was retired without authorization/)
+      assert.equal((await listActiveOverrides(repo)).length, 0)
+      const events = await readLaneEvents(repo, "a")
+      assert.ok(events.some((event) => event.type === "override-retired" && event.details.overrideId === pending.id))
+      assert.equal(events.filter((event) => event.type === "override-consumed").length, 0)
+      await assert.rejects(gate(repo), noPeerReview)
+    })
+  })
 
   it("allows only one pending grant even with concurrent requests", async () => {
     await withRepo(async ({ repo, home }) => {

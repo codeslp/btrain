@@ -115,9 +115,11 @@ A pending grant must have a matching `override-granted` event in the lane log.
 The event records `overrideId`, `action`, and `scope` in `details`, and the lane
 in `laneId`. Single-lane repositories use `repo.jsonl` and repo scope.
 The gate uses log order, not timestamps. A later claim, request for changes,
-watchdog repair, or status outside the PR flow invalidates a pending grant.
+watchdog repair, or any non-PR status snapshot after the grant invalidates it.
+This includes metadata-only updates that keep the same non-PR status.
 This also rejects grants issued while idle before a later claim.
-Owner or reviewer reassignment within the same claim preserves the work grant.
+Grant after the lane enters a PR status. Owner or reviewer reassignment within
+the same claim preserves the grant only while the lane stays in a PR status.
 Closing a PR through the workflow resolves the lane. Reopening requires a fresh
 claim and approval or grant.
 
