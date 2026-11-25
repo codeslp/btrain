@@ -186,4 +186,28 @@ describe("state file writes", () => {
     assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
     await assert.rejects(fs.stat(path.join(stateDir, "actual.json")), { code: "ENOENT" })
   }))
+
+  // Red-team case from the round-3 review (and the PR #138 bot): a relative
+  // dangling link must resolve against the directory the filesystem follows,
+  // not the lexical path through a symlinked parent.
+  it("resolve a dangling relative link from its physical parent directory", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-parent-link-"))
+    try {
+      const repo = path.join(root, "repo")
+      const external = path.join(root, "external")
+      await fs.mkdir(repo)
+      await fs.mkdir(path.join(external, "state"), { recursive: true })
+      await fs.symlink(path.join(external, "state"), path.join(repo, ".btrain"))
+      await fs.symlink("../registry.json", path.join(external, "state", "locks.json"))
+
+      await acquireLocks(repo, "a", "claude", ["src/"])
+
+      assert.equal((await readLockRegistry(repo)).locks.length, 1, "the acquired lock must be visible to other agents")
+      assert.equal(JSON.parse(await fs.readFile(path.join(external, "registry.json"), "utf8")).locks.length, 1)
+      assert.equal(await fs.readlink(path.join(external, "state", "locks.json")), "../registry.json")
+      await assert.rejects(fs.stat(path.join(repo, "registry.json")), { code: "ENOENT" })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 })
