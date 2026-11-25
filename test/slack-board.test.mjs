@@ -402,6 +402,64 @@ describe("the board within the delivery budget (codex-reviewer on af2ad90)", () 
   }))
 })
 
+// codex-reviewer's repros on 8d95794, committed before the fix: board work
+// cut off at the budget boundary must not be lost or done twice.
+describe("board work at the budget boundary (codex-reviewer on 8d95794)", () => {
+  it("retries changed board lines when the last card update uses the remaining budget", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    await api.run()
+    c.clock.at += 5000
+    api.state.lanes = [lane("a", { status: "needs-review" })]
+    await api.queue("a", "sent-to-review")
+    const deadline = c.clock.at + 2000
+    const fetchImpl = async (url, init) => {
+      const response = await c.fake.fetch(url, init)
+      if (String(url).endsWith("chat.update") && !JSON.parse(init.body).text.startsWith("board")) c.clock.at = deadline
+      return response
+    }
+    assert.equal((await api.run({ budgetMs: 2000, fetchImpl })).status, "budget")
+    c.clock.at += 5000
+    await api.run()
+    assert.match((await getBoard(api.homeDir, CHANNEL)).text, /lane a · needs-review/)
+  })
+
+  it("keeps a successful first board post when its answer reaches the deadline", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: "api", lanes: [lane("a")] })
+    const deadline = c.clock.at + 2000
+    const fetchImpl = async (url, init) => {
+      const response = await c.fake.fetch(url, init)
+      if (String(url).endsWith("chat.postMessage")) c.clock.at = deadline
+      return response
+    }
+    assert.equal((await api.run({ budgetMs: 2000, fetchImpl })).status, "budget")
+    c.clock.at += 5000
+    await api.run()
+    assert.equal(c.boardPosts().length, 1, "a successful post must be kept across the budget boundary")
+    assert.equal((await boardStatus(api.homeDir, CHANNEL)).pinned, true)
+  })
+
+  it("recovers a successful pin whose answer reaches the deadline", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: "api", lanes: [lane("a")] })
+    const deadline = c.clock.at + 2000
+    const fetchImpl = async (url, init) => {
+      const response = await c.fake.fetch(url, init)
+      if (String(url).endsWith("pins.add")) c.clock.at = deadline
+      return response
+    }
+    await api.run({ budgetMs: 2000, fetchImpl })
+    c.clock.at += 5000
+    await api.run()
+    assert.equal((await boardStatus(api.homeDir, CHANNEL)).pinned, true)
+    assert.equal(c.boardPosts().length, 1)
+  })
+})
+
 describe("shared channels (T025)", () => {
   it("gives two repositories of one developer one board and separate threads", async () => {
     const c = await channelFixture()
