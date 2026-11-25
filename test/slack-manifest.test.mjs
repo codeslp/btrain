@@ -8,7 +8,9 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const DOCS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs")
-const read = (name) => JSON.parse(fs.readFileSync(path.join(DOCS, name), "utf8"))
+function read(name) {
+  return JSON.parse(fs.readFileSync(path.join(DOCS, name), "utf8"))
+}
 
 const PUBLISHER_SCOPES = ["chat:write", "pins:write"]
 const READ_SCOPES = ["channels:history", "groups:history"]
