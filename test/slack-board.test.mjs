@@ -460,6 +460,54 @@ describe("board work at the budget boundary (codex-reviewer on 8d95794)", () => 
   })
 })
 
+// codex-reviewer's repros on 3d3d3da, committed before the fix: an unrecorded
+// post must be adopted by any repository, and a replacement must supersede
+// a deleted board's record.
+describe("unrecorded board posts (codex-reviewer on 3d3d3da)", () => {
+  it("adopts an unrecorded post when another repository runs first", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    const web = c.repo("web")
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: "api", lanes: [lane("a")] })
+    const deadline = c.clock.at + 2000
+    const fetchImpl = async (url, init) => {
+      const response = await c.fake.fetch(url, init)
+      if (String(url).endsWith("chat.postMessage")) c.clock.at = deadline
+      return response
+    }
+    assert.equal((await api.run({ budgetMs: 2000, fetchImpl })).status, "budget")
+    c.clock.at += 5000
+    await web.run()
+    await api.run()
+    assert.equal(c.boardPosts().length, 1, "a different repository must adopt the successful post")
+  })
+  
+  it("adopts an unrecorded replacement when the old board was deleted", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    await api.run()
+    const old = await getBoard(api.homeDir, CHANNEL)
+    c.clock.at += 5000
+    // Force an update of the deleted board, then a successful replacement at the deadline.
+    api.state.lanes = [lane("a", { status: "needs-review" })]
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: "api", lanes: api.state.lanes })
+    c.fake.queue("chat.update", { error: "message_not_found" })
+    const deadline = c.clock.at + 2000
+    const fetchImpl = async (url, init) => {
+      const response = await c.fake.fetch(url, init)
+      if (String(url).endsWith("chat.postMessage")) c.clock.at = deadline
+      return response
+    }
+    assert.equal((await api.run({ budgetMs: 2000, fetchImpl })).status, "budget")
+    c.clock.at += 5000
+    await api.run()
+    const record = await getBoard(api.homeDir, CHANNEL)
+    assert.notEqual(record.ts, old.ts, "the replacement must supersede the deleted board record")
+    assert.equal(c.boardPosts().length, 2)
+  })
+})
+
 describe("shared channels (T025)", () => {
   it("gives two repositories of one developer one board and separate threads", async () => {
     const c = await channelFixture()
