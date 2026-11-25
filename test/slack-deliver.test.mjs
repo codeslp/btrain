@@ -279,7 +279,8 @@ describe("deliver", () => {
     const result = await t.run({ budgetMs: 2000, now: Date.now, sleep: undefined })
     const took = Date.now() - started
     assert.ok(took < 2600, `delivery took ${took} ms`)
-    assert.equal(result.status, "done")
+    assert.equal(result.status, "budget", "a call cut off by the budget is a budget stop, not a failure")
+    assert.deepEqual((await readDeliveryState(t.slackDir)).entries, {}, "no backoff is recorded for it")
     assert.equal((await listEntries(t.slackDir)).length, 1, "the entry stays queued")
   })
 
@@ -306,6 +307,121 @@ describe("deliver", () => {
     assert.ok((await probed) < 60_000, "the lock was fresh more than 60 seconds into the flush")
   })
 
+  it("holds the whole channel after a 429 and ends the run", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    t.clock.at += 1
+    await t.queue("b", "claimed")
+    t.fake.queue("chat.postMessage", null, { retryAfter: 90 })
+    const result = await t.run()
+    assert.equal(result.status, "ratelimited")
+    assert.equal(t.fake.calls.length, 2, "lane b is not tried inside the Retry-After window")
+    t.clock.at += 30_000
+    const early = await t.run()
+    assert.deepEqual([early.status, t.fake.calls.length], ["ratelimited", 2])
+    t.clock.at += 61_000
+    const later = await t.run()
+    assert.equal(later.status, "done")
+    assert.equal(later.sent, 2)
+  })
+
+  it("keeps the one-message-a-second pace across runs", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    await t.run()
+    await t.queue("a", "sent-to-review")
+    const before = t.clock.at
+    await t.run()
+    const [first, second] = t.fake.calls.slice(-2)
+    assert.ok(second.at - first.at >= 1000 || t.clock.at - before >= 0)
+    const times = t.fake.calls.map((call) => call.at)
+    for (let index = 1; index < times.length; index += 1) assert.ok(times[index] - times[index - 1] >= 1000, `${index}: ${times[index] - times[index - 1]} ms`)
+  })
+
+  it("counts only unknown errors toward the drop, not transient ones", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    t.fake.queue("chat.postMessage", null, { status: 503 }, { status: 503 }, { status: 503 }, { status: 503 }, { error: "brand_new_error" }, null)
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await t.run()
+      t.clock.at += 2 * HOUR
+    }
+    assert.ok(t.replies().some((call) => call.body.text === "claude claimed lane a"))
+    assert.equal((await readDeliveryState(t.slackDir)).counters.sent, 1, "the entry was sent after four 503s and one unknown error")
+  })
+
+  it("does not undo a clearPause made while a run stopped at the pause", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    t.fake.queue("chat.postMessage", { error: "invalid_auth" })
+    await t.run()
+    const stamp = (await fs.stat(path.join(t.slackDir, "delivery-state.json"))).mtimeMs
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const stopped = await t.run()
+    assert.equal(stopped.status, "paused")
+    assert.equal((await fs.stat(path.join(t.slackDir, "delivery-state.json"))).mtimeMs, stamp, "a run that changed nothing writes nothing")
+  })
+
+  it("never throws, also with no options or a readLanes that misbehaves", async () => {
+    assert.equal((await deliver()).status, "skipped")
+    assert.equal((await deliver({ token: FAKE_BOT, channel: CHANNEL })).reason, "no-state-dir")
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const notList = await t.run({ readLanes: async () => ({ lanes: [] }) })
+    assert.deepEqual([notList.status, t.fake.calls.length], ["error", 0])
+    const thrown = await t.run({ readLanes: async () => { throw new Error("state locked") } })
+    assert.deepEqual([thrown.status, thrown.reason, t.fake.calls.length], ["error", "state locked", 0])
+    assert.equal((await listEntries(t.slackDir)).length, 1, "the entry waits for a run that can read the lane")
+  })
+
+  it("bounds a slow readLanes by the budget", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const started = Date.now()
+    const result = await t.run({ now: Date.now, sleep: undefined, budgetMs: 200, readLanes: () => new Promise((resolve) => setTimeout(() => resolve([]), 3000)) })
+    assert.ok(Date.now() - started < 1000)
+    assert.equal(result.status, "error")
+  })
+
+  it("does not read lane state when there is nothing to send", async () => {
+    const t = await setup()
+    let reads = 0
+    const result = await t.run({ readLanes: async () => { reads += 1; return [] } })
+    assert.deepEqual([result.status, reads, t.fake.calls.length], ["done", 0, 0])
+  })
+
+  it("forgets a deleted card, so the lane's next event posts a new one", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    await t.run()
+    await t.queue("a", "sent-to-review")
+    t.fake.queue("chat.update", { error: "message_not_found" })
+    await t.run()
+    assert.equal(await getThread(t.slackDir, "a", "claim-a"), null)
+    await t.queue("a", "changes-requested")
+    await t.run()
+    assert.ok(await getThread(t.slackDir, "a", "claim-a"), "a new card was posted")
+  })
+
+  it("never renders a newer claim's state on an older claim's card", async () => {
+    const t = await setup({ lanes: [{ ...LANES[0], claimKey: "claim-new", task: "NEW task" }] })
+    await t.queue("a", "claimed", {}, { claimKey: "claim-old" })
+    t.clock.at += 1
+    await t.queue("a", "claimed", {}, { claimKey: "claim-new" })
+    await t.run()
+    const cards = t.posts().filter((call) => !call.body.thread_ts).map((call) => call.body.text)
+    assert.equal(cards.length, 2)
+    assert.doesNotMatch(cards[0], /NEW task/)
+    assert.match(cards[1], /NEW task/)
+  })
+
+  it("does not start a call with less than the floor left in the budget", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const result = await t.run({ budgetMs: 500 })
+    assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
+  })
+
   it("makes no call with no token or no channel", async () => {
     const t = await setup()
     await t.queue("a", "claimed")
@@ -329,9 +445,9 @@ describe("deliver", () => {
       await t.queue("a", "sent-to-review")
     }
     const startedAt = t.clock.at
-    const result = await t.run({ budgetMs: 1500 })
+    const result = await t.run({ budgetMs: 2500 })
     assert.equal(result.status, "budget")
-    assert.ok(t.clock.at - startedAt <= 1500)
+    assert.ok(t.clock.at - startedAt <= 2500)
     const times = t.fake.calls.map((call) => call.at)
     for (let index = 1; index < times.length; index += 1) assert.ok(times[index] - times[index - 1] >= 1000 || times[index] === times[index - 1])
   })

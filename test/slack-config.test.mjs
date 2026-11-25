@@ -22,6 +22,9 @@ after(async () => Promise.all(roots.map((root) => fs.rm(root, { recursive: true,
 describe("the toggle (FR-1)", () => {
   it("is on only when [features].slack is exactly true", () => {
     assert.equal(isSlackEnabled({ features: { slack: true } }), true)
+    // The project TOML parser keeps a comment after an unquoted value.
+    assert.equal(isSlackEnabled({ features: { slack: "true # on" } }), true)
+    assert.equal(isSlackEnabled({ features: { slack: "false # off" } }), false)
     for (const config of [{}, null, { features: {} }, { features: { slack: false } }, { features: { slack: "true" } }, { features: { slack: "1" } }]) {
       assert.equal(isSlackEnabled(config), false, JSON.stringify(config))
     }
@@ -75,6 +78,10 @@ describe("channel for a repository (FR-16)", () => {
     assert.deepEqual(channelForRepo({}, "/elsewhere"), { channel: "", source: "" })
     assert.deepEqual(channelForRepo({ defaultChannel: "#general" }, "/elsewhere"), { channel: "", source: "" })
     assert.deepEqual(channelForRepo({ channels: { "/r": "not-a-channel" } }, "/r"), { channel: "", source: "" })
+  })
+
+  it("ignores a relative key, which would match against the current directory", () => {
+    assert.deepEqual(channelForRepo({ channels: { ".": "C0000AAAA", btrain: "C0000BBBB" } }, process.cwd()), { channel: "", source: "" })
   })
 
   it("lists the channel map with the repositories each channel carries", () => {

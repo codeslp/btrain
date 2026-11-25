@@ -128,24 +128,15 @@ export async function callSlack({
   const headers = { Authorization: `Bearer ${token}` }
   if (!isGet) headers["Content-Type"] = "application/json; charset=utf-8"
 
-  // A fetch that ignores its signal must not hold the caller past the limit,
-  // so the call races the abort itself.
-  const aborted = new Promise((resolve) => {
-    controller.signal.addEventListener("abort", () => resolve(ABORTED), { once: true })
-  })
-  try {
-    const response = await Promise.race([
-      fetchImpl(isGet ? buildUrl(method, args) : buildUrl(method), {
-        method: isGet ? "GET" : "POST",
-        headers,
-        ...(isGet ? {} : { body: JSON.stringify(args) }),
-        signal: controller.signal,
-      }),
-      aborted,
-    ])
-    if (response === ABORTED) {
-      return failure(0, "timeout")
-    }
+  // The whole exchange, the response body included, races the abort: a fetch
+  // or a body that ignores its signal must not hold the caller past the limit.
+  const exchange = async () => {
+    const response = await fetchImpl(isGet ? buildUrl(method, args) : buildUrl(method), {
+      method: isGet ? "GET" : "POST",
+      headers,
+      ...(isGet ? {} : { body: JSON.stringify(args) }),
+      signal: controller.signal,
+    })
     const status = Number(response?.status) || 0
     if (status === 429) {
       return failure(status, "ratelimited", { retryAfterMs: retryAfterMs(response.headers) })
@@ -163,6 +154,13 @@ export async function callSlack({
       return failure(status, body.error, { retryAfterMs: retryAfterMs(response.headers) })
     }
     return failure(status, status >= 500 || status === 0 ? "http_error" : "unknown_response")
+  }
+  const aborted = new Promise((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(ABORTED), { once: true })
+  })
+  try {
+    const result = await Promise.race([exchange(), aborted])
+    return result === ABORTED ? failure(0, "timeout") : result
   } catch (error) {
     if (controller.signal.aborted) {
       return failure(0, "timeout")

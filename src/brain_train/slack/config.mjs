@@ -31,7 +31,10 @@ function tableOf(value) {
 
 /** FR-1: on only when `[features].slack` is exactly `true`. */
 export function isSlackEnabled(projectConfig) {
-  return stripTomlComment(tableOf(projectConfig?.features).slack) === true
+  const value = stripTomlComment(tableOf(projectConfig?.features).slack)
+  // The project TOML parser keeps a comment after an unquoted value:
+  // `slack = true # on` arrives as the text "true # on".
+  return value === true || (typeof value === "string" && /^true\s+#/.test(value))
 }
 
 function readPositive(table, key, fallback, errors) {
@@ -77,7 +80,9 @@ export function channelForRepo(settings, repoPath) {
   const channels = tableOf(settings?.channels)
   const wanted = new Set([path.resolve(String(repoPath || "")), realOrResolved(String(repoPath || ""))])
   for (const [key, value] of Object.entries(channels)) {
-    if (!key) continue
+    // Keys are registered paths; a relative key would match against the
+    // current directory, so it is ignored.
+    if (!key || !path.isAbsolute(key)) continue
     if ((wanted.has(path.resolve(key)) || wanted.has(realOrResolved(key))) && CHANNEL_ID.test(String(value))) {
       return { channel: String(value), source: "mapped" }
     }

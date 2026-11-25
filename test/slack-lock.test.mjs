@@ -59,6 +59,14 @@ describe("delivery lock", () => {
     assert.equal((await tryAcquireLock(target)).reason, "held")
   })
 
+  it("takes over a lock touched more than 60 seconds in the future (a clock set back)", async () => {
+    const target = await lockPath()
+    await tryAcquireLock(target)
+    const future = new Date(Date.now() + LOCK_STALE_MS + 60_000)
+    await fs.utimes(target, future, future)
+    assert.equal((await tryAcquireLock(target)).reason, "taken-over")
+  })
+
   it("skips when a stale lock cannot be removed", async () => {
     const target = await lockPath()
     await tryAcquireLock(target)

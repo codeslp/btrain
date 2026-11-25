@@ -27,12 +27,12 @@ async function tempDir() {
 }
 
 describe("outbox", () => {
-  it("names an entry <stamp>-<uuid>.json with no colon, sortable by time", async () => {
+  it("names an entry <stamp>-<sequence>-<uuid>.json with no colon, sortable by time", async () => {
     assert.equal(formatStamp("2026-11-23T21:45:00.123Z"), "20261123T214500123Z")
     const slackDir = await tempDir()
     let clock = Date.parse("2026-11-23T21:45:00.000Z")
     const { name, entry } = await writeEntry(slackDir, { laneId: "e", claimKey: "c1", kind: "claimed", reply: true, mention: false, fields: { actor: "claude" } }, { now: () => clock })
-    assert.match(name, /^20261123T214500000Z-[0-9a-f-]{36}\.json$/)
+    assert.match(name, /^20261123T214500000Z-\d{10}-[0-9a-f-]{36}\.json$/)
     assert.ok(!name.includes(":"))
     assert.equal(entry.queuedAt, "2026-11-23T21:45:00.000Z")
     assert.match(entry.id, /^[0-9a-f-]{36}$/)
@@ -44,6 +44,25 @@ describe("outbox", () => {
     assert.deepEqual(listed.map((item) => item.entry.kind + item.entry.laneId), ["claimedf", "claimede", "sent-to-reviewe"])
     const stored = JSON.parse(await fs.readFile(path.join(outboxDir(slackDir), name), "utf8"))
     assert.deepEqual(stored, entry)
+  })
+
+  it("keeps queue order for entries queued in the same millisecond", async () => {
+    const slackDir = await tempDir()
+    const at = Date.parse("2026-11-23T21:45:00.000Z")
+    for (let index = 0; index < 50; index += 1) await writeEntry(slackDir, { laneId: "e", kind: `k${index}` }, { now: () => at })
+    assert.deepEqual((await listEntries(slackDir)).map((item) => item.entry.kind), Array.from({ length: 50 }, (_, index) => `k${index}`))
+  })
+
+  it("leaves out an entry it cannot read now, rather than drop it", async () => {
+    const slackDir = await tempDir()
+    const { name } = await writeEntry(slackDir, { laneId: "e", kind: "claimed" })
+    await fs.chmod(path.join(outboxDir(slackDir), name), 0o000)
+    try {
+      assert.deepEqual(await listEntries(slackDir), [])
+    } finally {
+      await fs.chmod(path.join(outboxDir(slackDir), name), 0o600)
+    }
+    assert.equal((await listEntries(slackDir)).length, 1)
   })
 
   it("never lists a half-written entry, and lists one that does not parse as broken", async () => {
@@ -82,7 +101,7 @@ describe("outbox", () => {
 
   it("reads and writes the delivery state, with defaults for anything missing", async () => {
     const slackDir = await tempDir()
-    assert.deepEqual(await readDeliveryState(slackDir), { entries: {}, paused: null, counters: { sent: 0, dropped: 0, collapsed: 0 }, lastError: "" })
+    assert.deepEqual(await readDeliveryState(slackDir), { entries: {}, cards: {}, channels: {}, paused: null, counters: { sent: 0, dropped: 0, collapsed: 0 }, lastError: "" })
     const state = await readDeliveryState(slackDir)
     state.entries.abc = { attempts: 2, nextTryAt: "2026-11-23T22:00:00.000Z", lastError: "ratelimited" }
     state.paused = { error: "channel_not_found", at: "2026-11-23T21:00:00.000Z" }
@@ -104,6 +123,15 @@ describe("thread and board maps", () => {
     assert.deepEqual(await getThread(slackDir, "e", "c1"), { channel: "C0000FAKE", cardTs: "1.1" })
     assert.deepEqual(await getThread(slackDir, "e", "c2"), { channel: "C0000FAKE", cardTs: "2.2" })
     assert.deepEqual(Object.keys(await readThreads(slackDir)).sort(), ["e@c1", "e@c2"])
+  })
+
+  it("forgets a thread whose card is gone", async () => {
+    const { deleteThread } = await import("../src/brain_train/slack/threads.mjs")
+    const slackDir = await tempDir()
+    await setThread(slackDir, "e", "c1", { channel: "C0000FAKE", cardTs: "1.1" })
+    await deleteThread(slackDir, "e", "c1")
+    await deleteThread(slackDir, "e", "c1")
+    assert.equal(await getThread(slackDir, "e", "c1"), null)
   })
 
   it("keeps the board map in the btrain home, one record per channel, merging repositories", async () => {

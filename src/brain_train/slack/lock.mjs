@@ -73,7 +73,9 @@ export async function tryAcquireLock(lockPath, { now = Date.now, staleMs = LOCK_
     }
     return { lock: null, reason: "held" }
   }
-  if (now() - stat.mtimeMs < staleMs) {
+  // A lock touched in the future (the clock was set back) is no proof of a
+  // live holder either.
+  if (Math.abs(now() - stat.mtimeMs) < staleMs) {
     return { lock: null, reason: "held" }
   }
   try {
