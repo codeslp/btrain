@@ -168,18 +168,24 @@ export async function reserveChannelSend(homeDir, channel, { now, intervalMs, no
  * while a Retry-After holds the channel, `{ waitUntil }` when the last send
  * was less than `intervalMs` ago (nothing is recorded), or `{ claimed }`
  * with the time recorded as the channel's last send.
+ *
+ * `now` is a clock function (a number is accepted for a fixed time). It is
+ * read after the home lock is taken: a claim that waited for the lock must
+ * record when it actually sends, not when it started waiting.
  */
 export async function claimChannelSend(homeDir, channel, { now, intervalMs, waitMs }) {
+  const clock = typeof now === "function" ? now : () => now
   return withHomeLock(homeDir, { waitMs }, async () => {
+    const at = clock()
     const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
     const entry = objectOr(all[String(channel)])
     const retryUntil = Number(entry.retryUntil) || 0
-    if (retryUntil > now) return { blockedUntil: retryUntil }
+    if (retryUntil > at) return { blockedUntil: retryUntil }
     const freeAt = (Number(entry.lastSentAt) || 0) + intervalMs
-    if (freeAt > now) return { waitUntil: freeAt }
-    all[String(channel)] = { ...entry, lastSentAt: now }
+    if (freeAt > at) return { waitUntil: freeAt }
+    all[String(channel)] = { ...entry, lastSentAt: at }
     await writeJsonAtomic(channelsPath(homeDir), all)
-    return { claimed: now }
+    return { claimed: at }
   })
 }
 

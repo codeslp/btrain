@@ -223,7 +223,8 @@ async function send(run, channel, call) {
     let claim
     try {
       claim = await claimChannelSend(run.homeDir, channel, {
-        now: run.now(),
+        // The clock itself: the claim reads it once it holds the home lock.
+        now: run.now,
         intervalMs: CHANNEL_INTERVAL_MS,
         waitMs: Math.min(5000, run.deadline - run.now()),
       })
@@ -237,6 +238,8 @@ async function send(run, channel, call) {
     }
     if (claim.claimed !== undefined) {
       claimed = true
+      // The wait for the home lock may have used up the budget.
+      if (run.now() + minCall > run.deadline) return { stop: "budget" }
       break
     }
     const wait = claim.waitUntil - run.now()
