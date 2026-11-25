@@ -269,3 +269,30 @@ describe("inLockedFiles agrees with the hook's path_matches_lock", () => {
     })
   }
 })
+
+// gh-codex, #125 at 308a499: with a linked PR, a recorded reviewer the caller
+// left out of both candidate lists (a notify runner, or no cli runner) is
+// never dispatched; it keeps manual pickup, and the window's end escalates.
+describe("linked PR with a reviewer that is not a candidate", () => {
+  it("does not dispatch a notify reviewer and escalates at the window's end", async () => {
+    const clock = createFakeClock()
+    const NOTIFY = "human-notify"
+    const w = world(clock, { reviewer: NOTIFY })
+    w.lane.prNumber = "42"
+    const starts = []
+    const startAttempt = w.startAttempt
+    w.startAttempt = async (args) => { starts.push(args.reviewer); return startAttempt(args) }
+    const result = await runReviewRequest({ candidates: { otherLab: [], sameLab: [] }, policy: POLICY, newId, pollIntervalMs: 15_000, maxAttempts: 2, ...w })
+    assert.deepEqual(result, { outcome: "escalation", reason: "pr-linked" })
+    assert.deepEqual(starts, [], "no attempt is started for a reviewer that cannot be launched")
+    assert.equal(w.log.filter((item) => item.kind === "dispatch").length, 0)
+  })
+
+  it("still dispatches a linked PR's recorded reviewer when it is a candidate", async () => {
+    const clock = createFakeClock()
+    const w = world(clock, { reviewer: A })
+    w.lane.prNumber = "42"
+    await runReviewRequest({ candidates: { otherLab: [A], sameLab: [] }, policy: POLICY, newId, pollIntervalMs: 15_000, maxAttempts: 1, ...w })
+    assert.equal(w.log.filter((item) => item.kind === "dispatch" && item.reviewer === A).length, 1)
+  })
+})
