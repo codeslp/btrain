@@ -83,18 +83,17 @@ export async function enforceLocalReview(repoRoot, config, { lane, laneId, stage
   if (PR_STATUSES.has(lane.status)) {
     const decision = localReviewDecision(await readLaneEvents(repoRoot, laneId), lane, laneId)
     if (decision === "override") return
+    let headMismatch = ""
     if (decision === "peer") {
       const reviewedHead = String(lane.reviewHead || "").trim().toLowerCase()
       const targetHead = String(headSha || "").trim().toLowerCase()
-      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(reviewedHead) || reviewedHead !== targetHead) {
-        throw new Error(
-          `${stage} refused for lane ${laneLabel}: peer approval covers ${reviewedHead || "(missing)"}, `
-          + `but the PR head is ${targetHead || "(missing)"}. Hand the new head back for review.`,
-        )
-      }
-      return
+      if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(reviewedHead) && reviewedHead === targetHead) return
+      headMismatch = `${stage} refused for lane ${laneLabel}: peer approval covers ${reviewedHead || "(missing)"}, `
+        + `but the PR head is ${targetHead || "(missing)"}. Hand the new head back for review.`
     }
 
+    // The audited override is not bound to a head, so a pending grant also
+    // covers a head the peer did not review.
     const pending = (await listActiveOverrides(repoRoot)).find((record) => record.action === "local-review"
       && (record.laneId || "") === (laneId || "")
       && record.scope === (laneId ? "lane" : "repo"))
@@ -104,6 +103,7 @@ export async function enforceLocalReview(repoRoot, config, { lane, laneId, stage
       })
       return
     }
+    if (headMismatch) throw new Error(headMismatch)
   }
 
   const message = `${stage} needs a current local peer review for lane ${laneLabel}.`

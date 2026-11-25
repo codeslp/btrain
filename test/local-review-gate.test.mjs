@@ -223,6 +223,80 @@ describe("local peer-review workflow", () => {
     })
   }
 
+  it("lets a pending override authorize a head after the peer-approved one", async () => {
+    await withRepo(async ({ repo, home, headA }) => {
+      await handOff(repo, home)
+      await finishPeerReview(repo, home)
+      const headB = await commit(repo, "export const feature = 2\n")
+      const enforce = async (stage) => enforceLocalReview(repo, await readProjectConfig(repo), {
+        lane: await laneA(repo), laneId: "a", stage, headSha: headB,
+      })
+      // Without a grant, the new head still needs another peer review.
+      await assert.rejects(enforce("Creating a PR"), (error) => {
+        assert.ok(error.message.includes(headA) && error.message.includes(headB), error.message)
+        return true
+      })
+      await grantLocalReview(repo, home)
+      assert.equal((await laneA(repo)).reviewHead, headA)
+      for (const stage of ["Creating a PR", "Requesting bot review", "Applying bot clearance"]) await enforce(stage)
+      assert.equal((await listActiveOverrides(repo)).length, 0)
+      const consumed = (await readLaneEvents(repo, "a")).filter((event) => event.type === "override-consumed")
+      assert.equal(consumed.length, 1)
+    })
+  })
+
+  for (const reviewHead of ["", undefined, "bad-head", "a".repeat(39), "a".repeat(41), "a".repeat(65), "g".repeat(40)]) {
+    it(`lets a pending override replace peer approval with invalid reviewHead ${reviewHead}`, async () => {
+      await withRepo(async ({ repo, home, headA }) => {
+        await handOff(repo, home)
+        await finishPeerReview(repo, home)
+        const enforce = async () => enforceLocalReview(repo, await readProjectConfig(repo), {
+          lane: { ...await laneA(repo), reviewHead }, laneId: "a", stage: "Creating a PR",
+          headSha: reviewHead || headA,
+        })
+        await assert.rejects(enforce(), /peer approval covers .*but the PR head is/)
+        await grantLocalReview(repo, home)
+        await enforce()
+        await enforce()
+        assert.equal((await listActiveOverrides(repo)).length, 0)
+        const consumed = (await readLaneEvents(repo, "a")).filter((event) => event.type === "override-consumed")
+        assert.equal(consumed.length, 1)
+        assert.equal(consumed[0].details.action, "local-review")
+      })
+    })
+  }
+
+  for (const scope of ["another lane", "repo"]) {
+    it(`keeps a peer head mismatch refused with a pending grant for ${scope}`, async () => {
+      await withRepo(async ({ repo, home, headA }) => {
+        await handOff(repo, home)
+        await finishPeerReview(repo, home)
+        const headB = await commit(repo, "export const feature = 2\n")
+        if (scope === "another lane") await grantLocalReview(repo, home, "b")
+        else {
+          // Simulate an older repo grant, which the multi-lane CLI no longer issues.
+          await fs.mkdir(getRepoPaths(repo).overridesDir, { recursive: true })
+          await fs.writeFile(path.join(getRepoPaths(repo).overridesDir, "repo-scope.json"), JSON.stringify({
+            id: "repo-scope", action: "local-review", scope: "repo", laneId: "",
+            requestedBy: "alpha", confirmedBy: "human", reason: "Old repo grant",
+          }))
+        }
+        const pending = await listActiveOverrides(repo)
+        for (const stage of ["Creating a PR", "Requesting bot review", "Applying bot clearance"]) {
+          await assert.rejects(enforceLocalReview(repo, await readProjectConfig(repo), {
+            lane: await laneA(repo), laneId: "a", stage, headSha: headB,
+          }), (error) => {
+            assert.match(error.message, /peer approval covers .*but the PR head is/)
+            assert.ok(error.message.includes(headA) && error.message.includes(headB), error.message)
+            return true
+          })
+        }
+        assert.deepEqual(await listActiveOverrides(repo), pending)
+        assert.equal((await readLaneEvents(repo, "a")).filter((event) => event.type === "override-consumed").length, 0)
+      })
+    })
+  }
+
   it("refuses an owner advisory resolve before creating or pushing a PR", async () => {
     await withRepo(async ({ repo, home, bare }) => {
       await handOff(repo, home)
