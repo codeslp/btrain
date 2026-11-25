@@ -104,6 +104,13 @@ then pushes, relinks the existing PR, and requests another bot review.
 The gate fails closed without peer approval. A human-confirmed override can
 replace approval for one lane and PR cycle:
 `btrain override grant --action local-review --lane <id> --requested-by <agent> --confirmed-by <human> --reason "..."`.
+
+All override actions are audited, not authenticated. The CLI records the names
+supplied with `--requested-by` and `--confirmed-by` without verifying who ran
+the command. Any agent with CLI access can record a grant that names a human.
+The event log makes such a grant visible afterwards but does not prevent it.
+Authenticated confirmation is a planned follow-up.
+
 The first gated stage consumes the override and records the audit event in
 the lane log. Consumption counts only while the lane is already in a PR
 status (`ready-for-pr`, `pr-review`, or `ready-to-merge`) in the current cycle.
