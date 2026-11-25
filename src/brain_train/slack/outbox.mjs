@@ -119,12 +119,12 @@ export async function removeEntry(slackDir, name) {
 
 /**
  * `entries`: retry state of failed entries, by entry id. `cards`: cards whose
- * refresh is still owed, by thread key. `channels`: the earliest next send to
- * each channel (pace and Retry-After). `paused`: the configuration error that
- * paused delivery.
+ * refresh is still owed, by thread key. `paused`: the configuration error that
+ * paused delivery. The channel pace is shared across repositories, so it
+ * lives in the btrain home (threads.mjs), not here.
  */
 export function emptyDeliveryState() {
-  return { entries: {}, cards: {}, channels: {}, paused: null, counters: { sent: 0, dropped: 0, collapsed: 0 }, lastError: "" }
+  return { entries: {}, cards: {}, paused: null, counters: { sent: 0, dropped: 0, collapsed: 0 }, lastError: "" }
 }
 
 /** The delivery state, with defaults for anything missing. */
@@ -132,7 +132,7 @@ export async function readDeliveryState(slackDir) {
   const stored = await readJsonOr(path.join(slackDir, DELIVERY_STATE_FILENAME), null)
   const state = emptyDeliveryState()
   if (!stored || typeof stored !== "object") return state
-  for (const key of ["entries", "cards", "channels"]) {
+  for (const key of ["entries", "cards"]) {
     if (stored[key] && typeof stored[key] === "object" && !Array.isArray(stored[key])) state[key] = { ...stored[key] }
   }
   if (stored.paused && typeof stored.paused === "object") state.paused = { ...stored.paused }

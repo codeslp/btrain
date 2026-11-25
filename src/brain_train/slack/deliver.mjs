@@ -14,14 +14,17 @@
 //   delivery state until a `chat.update` from current state succeeds, so a
 //   failed or unsent refresh is retried by a later run (FR-6).
 // - A transient error records the entry's earliest next try. A 429 also holds
-//   the whole channel until its Retry-After and ends the run. A configuration
+//   the whole channel, for every repository of the developer, until its
+//   Retry-After, and ends the run. A configuration
 //   error pauses delivery for the repository until `clearPause`
 //   (`btrain slack test`). An error about one message drops that entry. An
 //   unknown error is retried for 5 attempts, then dropped.
 // - Entries older than 24 hours collapse into one reply for their lane.
-// - At most one message a second goes to a channel, also across runs. When
-//   keeping that pace, or starting a call with too little time left, would
-//   pass the budget, delivery stops and leaves the rest for later.
+// - At most one message a second goes to a channel, across runs and across
+//   repositories: each send reserves its slot in `channels.json` in the
+//   btrain home (threads.mjs). When keeping that pace, or starting a call with
+//   too little time left, would pass the budget, delivery stops and leaves
+//   the rest for later.
 // - The lock is touched before every call, and a holder whose lock was taken
 //   over stops at its next call and writes no state.
 // - Every error is caught: `deliver` resolves with a summary and never throws.
@@ -35,12 +38,16 @@ import { classifySlackError, DEFAULT_CALL_TIMEOUT_MS, ERROR_CLASSES, postMessage
 import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
 import { renderCard, renderReply } from "./render.mjs"
-import { deleteThread, getThread, setThread, threadKey } from "./threads.mjs"
+import { btrainHome } from "./credentials.mjs"
+import { deleteThread, getThread, holdChannel, reserveChannelSend, setThread, threadKey } from "./threads.mjs"
 
 export const DELIVERY_LOCK_FILENAME = "delivery.lock"
 export const COLLAPSE_AGE_MS = 24 * 60 * 60 * 1000
 export const CHANNEL_INTERVAL_MS = 1000
 export const MAX_UNKNOWN_ATTEMPTS = 5
+// An owed card refresh that keeps failing with an unknown error is given up
+// after this many runs; the next event on the lane owes a new one.
+export const MAX_CARD_ATTEMPTS = 5
 // A call is not started with less time than this left in the budget: one cut
 // off by the deadline may already have posted, and would be sent again.
 export const MIN_CALL_MS = 750
@@ -125,6 +132,7 @@ export async function deliver(options = {}) {
       callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS,
       now = Date.now,
       sleep = defaultSleep,
+      homeDir = btrainHome(process.env),
     } = options
     if (!slackDir) return { ...summary, status: "skipped", reason: "no-state-dir" }
     if (!token) return { ...summary, status: "skipped", reason: "no-token" }
@@ -149,10 +157,12 @@ export async function deliver(options = {}) {
 
     const run = {
       slackDir,
+      homeDir,
       channel,
       token,
       fetchImpl,
       callTimeoutMs,
+      rateLimited: false,
       now,
       sleep,
       deadline,
@@ -194,14 +204,27 @@ export async function deliver(options = {}) {
   }
 }
 
-// One Slack call under the run's rules: budget, the channel's pace and
+// One Slack call under the run's rules: budget, the channel's shared pace and
 // Retry-After, the lock heartbeat. Returns `{ result }`, or `{ stop }` with
 // `budget`, `ratelimited`, or `lost-lock`.
 async function send(run, call) {
   if (run.now() >= run.deadline) return { stop: "budget" }
-  const channelState = run.state.channels[run.channel] || {}
-  if (timeOf(channelState.retryUntil) > run.now()) return { stop: "ratelimited" }
-  const wait = timeOf(channelState.lastSentAt) + CHANNEL_INTERVAL_MS - run.now()
+  let reservation
+  try {
+    reservation = await reserveChannelSend(run.homeDir, run.channel, {
+      now: run.now(),
+      intervalMs: CHANNEL_INTERVAL_MS,
+      waitMs: Math.min(5000, run.deadline - run.now()),
+    })
+  } catch {
+    // The home lock was not free within the budget.
+    return { stop: "budget" }
+  }
+  if (reservation.blockedUntil) {
+    run.rateLimited = true
+    return { stop: "ratelimited" }
+  }
+  const wait = reservation.slotAt - run.now()
   if (wait > 0) {
     if (run.now() + wait >= run.deadline) return { stop: "budget" }
     await run.sleep(wait)
@@ -210,12 +233,10 @@ async function send(run, call) {
   const timeoutMs = Math.min(run.callTimeoutMs, run.deadline - run.now())
   if (!(timeoutMs >= Math.min(MIN_CALL_MS, run.callTimeoutMs))) return { stop: "budget" }
   const result = await call({ token: run.token, fetchImpl: run.fetchImpl, timeoutMs })
-  const sentAt = run.now()
-  const updated = { ...channelState, lastSentAt: iso(sentAt) }
   if (result.status === 429 || result.error === "ratelimited") {
-    updated.retryUntil = iso(sentAt + Math.max(result.retryAfterMs || 0, CHANNEL_INTERVAL_MS))
+    run.rateLimited = true
+    await holdChannel(run.homeDir, run.channel, run.now() + Math.max(result.retryAfterMs || 0, CHANNEL_INTERVAL_MS)).catch(() => {})
   }
-  run.state.channels[run.channel] = updated
   // Cut off by the budget, not by the call's own limit: not a failure of the
   // entry. It stays queued with no backoff.
   if (result.error === "timeout" && timeoutMs < run.callTimeoutMs) return { stop: "budget" }
@@ -284,7 +305,7 @@ function failureOutcome(run, entry, result) {
   if (failure === "pause") return { outcome: "paused" }
   if (failure === "drop") return { outcome: "next", drop: true }
   // A 429 holds the channel: end the run rather than try other lanes.
-  if (timeOf(run.state.channels[run.channel]?.retryUntil) > run.now()) return { outcome: "ratelimited" }
+  if (run.rateLimited) return { outcome: "ratelimited" }
   return { outcome: "next" }
 }
 
@@ -325,17 +346,23 @@ async function deliverLane(run, laneId, laneState, items) {
   const fresh = pending.filter((item) => !old.includes(item))
 
   if (old.length > 0) {
-    const newest = old[old.length - 1].entry
-    if (timeOf(run.state.entries[String(newest.id || "")]?.nextTryAt) > run.now()) {
+    // The set grows as entries age past 24 hours, so its retry time is the
+    // latest of its members': a newly aged entry never resets the wait.
+    if (old.some((item) => timeOf(run.state.entries[String(item.entry.id || "")]?.nextTryAt) > run.now())) {
       run.summary.deferred += pending.length
       return "next"
     }
+    const newest = old[old.length - 1].entry
     const result = await sendReply(newest, collapsedReplyText(old.length))
     if (result.ok) {
       await removeItems(run, old, "collapsed")
     } else if (result.drop) {
       await removeItems(run, old, "dropped")
     } else {
+      const retry = run.state.entries[String(newest.id || "")]
+      if (retry) {
+        for (const item of old) run.state.entries[String(item.entry.id || "")] = { ...retry }
+      }
       run.summary.deferred += pending.length
       return result.outcome
     }
@@ -395,12 +422,19 @@ async function refreshCards(run, lanes) {
       delete run.state.cards[key]
       continue
     }
-    if (timeOf(run.state.channels[run.channel]?.retryUntil) > run.now()) return "ratelimited"
+    if (run.rateLimited) return "ratelimited"
     if (errorClass === ERROR_CLASSES.ENTRY) {
       // The card's own text was refused: retrying it would fail the same way.
       delete run.state.cards[key]
+      continue
     }
-    // Transient and unknown errors leave the card owed for a later run.
+    // Transient errors leave the card owed for a later run; unknown ones do
+    // too, up to MAX_CARD_ATTEMPTS.
+    if (errorClass === ERROR_CLASSES.UNKNOWN) {
+      const attempts = (Number(owed.attempts) || 0) + 1
+      if (attempts >= MAX_CARD_ATTEMPTS) delete run.state.cards[key]
+      else run.state.cards[key] = { ...owed, attempts }
+    }
   }
   return "next"
 }

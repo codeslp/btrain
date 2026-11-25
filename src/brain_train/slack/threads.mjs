@@ -62,21 +62,22 @@ export async function getBoard(homeDir, channel) {
   return board && typeof board === "object" ? board : null
 }
 
-// The board map is shared by every repository of one developer, so its
-// read-merge-write runs under a short lock in the btrain home. Unlike the
-// delivery lock this one waits, briefly: each holder only reads, merges, and
-// renames one small file. A lock left by a process that died is taken over
-// after BOARD_LOCK_STALE_MS.
-export const BOARD_LOCK_STALE_MS = 10_000
-const BOARD_LOCK_WAIT_MS = 5_000
+// The board map and the channel pace are shared by every repository of one
+// developer, so their read-merge-write runs under a short lock in the btrain
+// home. Unlike the delivery lock this one waits, briefly: each holder only
+// reads, merges, and renames one small file. A lock left by a process that
+// died is taken over after HOME_LOCK_STALE_MS.
+export const HOME_LOCK_STALE_MS = 10_000
+const HOME_LOCK_WAIT_MS = 5_000
+export const CHANNELS_RELATIVE = path.join("slack", "channels.json")
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function withBoardLock(homeDir, fn) {
-  const lockPath = `${boardsPath(homeDir)}.lock`
+async function withHomeLock(homeDir, { waitMs = HOME_LOCK_WAIT_MS } = {}, fn) {
+  const lockPath = path.join(homeDir, "slack", "home.lock")
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
   const nonce = randomUUID()
-  const deadline = Date.now() + BOARD_LOCK_WAIT_MS
+  const deadline = Date.now() + Math.max(0, waitMs)
   for (;;) {
     try {
       await fs.writeFile(lockPath, nonce, { flag: "wx", mode: 0o600 })
@@ -86,7 +87,7 @@ async function withBoardLock(homeDir, fn) {
     }
     try {
       const stat = await fs.stat(lockPath)
-      if (Math.abs(Date.now() - stat.mtimeMs) > BOARD_LOCK_STALE_MS) {
+      if (Math.abs(Date.now() - stat.mtimeMs) > HOME_LOCK_STALE_MS) {
         await fs.unlink(lockPath).catch(() => {})
         continue
       }
@@ -94,7 +95,7 @@ async function withBoardLock(homeDir, fn) {
       continue
     }
     if (Date.now() >= deadline) {
-      throw new Error("The Slack board map is locked by another btrain process.")
+      throw new Error("The Slack state in the btrain home is locked by another btrain process.")
     }
     await pause(5 + Math.floor(Math.random() * 20))
   }
@@ -111,14 +112,56 @@ async function withBoardLock(homeDir, fn) {
 
 /**
  * Merge `update` into one channel's board record and write the map, under the
- * board lock, so concurrent repositories never lose each other's lines.
+ * home lock, so concurrent repositories never lose each other's lines.
  */
 export async function updateBoard(homeDir, channel, update) {
-  return withBoardLock(homeDir, async () => {
+  return withHomeLock(homeDir, {}, async () => {
     const boards = await readBoards(homeDir)
     const current = objectOr(boards[String(channel)])
     boards[String(channel)] = { ...current, ...update, repos: { ...objectOr(current.repos), ...objectOr(update.repos) } }
     await writeJsonAtomic(boardsPath(homeDir), boards)
     return boards[String(channel)]
+  })
+}
+
+function channelsPath(homeDir) {
+  return path.join(homeDir, CHANNELS_RELATIVE)
+}
+
+/** The channel's shared send state: `{ lastSentAt, retryUntil }` (ms since the epoch). */
+export async function readChannelState(homeDir, channel) {
+  const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
+  const entry = objectOr(all[String(channel)])
+  return { lastSentAt: Number(entry.lastSentAt) || 0, retryUntil: Number(entry.retryUntil) || 0 }
+}
+
+/**
+ * Reserve the next send to a channel, for every repository of this developer
+ * (FR-10: at most one message a second to a channel; a 429 holds the
+ * channel). Returns `{ blockedUntil }` while a Retry-After holds the channel,
+ * else `{ slotAt }`: the time this send may go, at least `intervalMs` after
+ * the last reserved one. The slot is recorded at once, so two processes never
+ * get the same one. `waitMs` bounds the wait for the home lock.
+ */
+export async function reserveChannelSend(homeDir, channel, { now, intervalMs, waitMs }) {
+  return withHomeLock(homeDir, { waitMs }, async () => {
+    const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
+    const entry = objectOr(all[String(channel)])
+    const retryUntil = Number(entry.retryUntil) || 0
+    if (retryUntil > now) return { blockedUntil: retryUntil }
+    const slotAt = Math.max(now, (Number(entry.lastSentAt) || 0) + intervalMs)
+    all[String(channel)] = { ...entry, lastSentAt: slotAt }
+    await writeJsonAtomic(channelsPath(homeDir), all)
+    return { slotAt }
+  })
+}
+
+/** Hold a channel until `retryUntil` after a 429, for every repository. */
+export async function holdChannel(homeDir, channel, retryUntil, { waitMs } = {}) {
+  return withHomeLock(homeDir, { waitMs }, async () => {
+    const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
+    const entry = objectOr(all[String(channel)])
+    all[String(channel)] = { ...entry, retryUntil: Math.max(Number(entry.retryUntil) || 0, retryUntil) }
+    await writeJsonAtomic(channelsPath(homeDir), all)
   })
 }

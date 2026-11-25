@@ -50,6 +50,8 @@ async function setup({ lanes = LANES, start = Date.now() } = {}) {
     context: { label: "test-dev", mention: [] },
     now,
     sleep,
+    // Each test has its own btrain home: the channel pace lives there.
+    homeDir: path.join(root, "home"),
     ...options,
   })
   const posts = () => fake.calls.filter((call) => call.method === "chat.postMessage")
@@ -323,6 +325,39 @@ describe("deliver", () => {
     const later = await t.run()
     assert.equal(later.status, "done")
     assert.equal(later.sent, 2)
+  })
+
+  it("holds a channel after a 429 for every repository of the developer", async () => {
+    const first = await setup()
+    const second = await setup()
+    const homeDir = path.join(first.root, "shared-home")
+    second.clock.at = first.clock.at
+    await first.queue("a", "claimed")
+    await second.queue("a", "claimed")
+    first.fake.queue("chat.postMessage", null, { retryAfter: 60 })
+    const limited = await first.run({ homeDir })
+    assert.equal(limited.status, "ratelimited")
+    second.clock.at = first.clock.at + 10_000
+    const other = await second.run({ homeDir })
+    assert.deepEqual([other.status, second.fake.calls.length], ["ratelimited", 0], "the other repository waits out the same Retry-After")
+    second.clock.at = first.clock.at + 61_000
+    const later = await second.run({ homeDir })
+    assert.equal(later.status, "done")
+    assert.equal(later.sent, 1)
+  })
+
+  it("gives up an owed card refresh after five unknown errors", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    await t.run()
+    await t.queue("a", "sent-to-review")
+    t.fake.setDefault("chat.update", { error: "brand_new_error" })
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await t.run()
+      t.clock.at += 2 * HOUR
+    }
+    assert.equal(t.fake.calls.filter((call) => call.method === "chat.update").length, 5)
+    assert.deepEqual((await readDeliveryState(t.slackDir)).cards, {})
   })
 
   it("keeps the one-message-a-second pace across runs", async () => {

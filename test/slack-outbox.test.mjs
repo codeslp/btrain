@@ -101,7 +101,7 @@ describe("outbox", () => {
 
   it("reads and writes the delivery state, with defaults for anything missing", async () => {
     const slackDir = await tempDir()
-    assert.deepEqual(await readDeliveryState(slackDir), { entries: {}, cards: {}, channels: {}, paused: null, counters: { sent: 0, dropped: 0, collapsed: 0 }, lastError: "" })
+    assert.deepEqual(await readDeliveryState(slackDir), { entries: {}, cards: {}, paused: null, counters: { sent: 0, dropped: 0, collapsed: 0 }, lastError: "" })
     const state = await readDeliveryState(slackDir)
     state.entries.abc = { attempts: 2, nextTryAt: "2026-11-23T22:00:00.000Z", lastError: "ratelimited" }
     state.paused = { error: "channel_not_found", at: "2026-11-23T21:00:00.000Z" }
@@ -123,6 +123,20 @@ describe("thread and board maps", () => {
     assert.deepEqual(await getThread(slackDir, "e", "c1"), { channel: "C0000FAKE", cardTs: "1.1" })
     assert.deepEqual(await getThread(slackDir, "e", "c2"), { channel: "C0000FAKE", cardTs: "2.2" })
     assert.deepEqual(Object.keys(await readThreads(slackDir)).sort(), ["e@c1", "e@c2"])
+  })
+
+  it("gives concurrent senders to one channel distinct slots a second apart, and holds the channel after a 429", async () => {
+    const { reserveChannelSend, holdChannel, readChannelState } = await import("../src/brain_train/slack/threads.mjs")
+    const home = path.dirname(path.dirname(await tempDir()))
+    const now = Date.parse("2026-11-23T21:00:00.000Z")
+    const slots = await Promise.all(Array.from({ length: 10 }, () => reserveChannelSend(home, "C0000FAKE", { now, intervalMs: 1000 })))
+    const times = slots.map((slot) => slot.slotAt).sort((a, b) => a - b)
+    assert.equal(new Set(times).size, 10)
+    for (let index = 1; index < times.length; index += 1) assert.ok(times[index] - times[index - 1] >= 1000)
+    await holdChannel(home, "C0000FAKE", now + 60_000)
+    assert.deepEqual(await reserveChannelSend(home, "C0000FAKE", { now: now + 1000, intervalMs: 1000 }), { blockedUntil: now + 60_000 })
+    assert.equal((await readChannelState(home, "C0000FAKE")).retryUntil, now + 60_000)
+    assert.ok((await reserveChannelSend(home, "C0000OTHR", { now, intervalMs: 1000 })).slotAt === now, "another channel is not held")
   })
 
   it("forgets a thread whose card is gone", async () => {

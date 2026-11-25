@@ -28,7 +28,7 @@ async function cardCase(t, options = {}) {
   let at = Date.now()
   let updates = 0
   let fail = true
-  const run = (extra={})=>deliver({slackDir:dir,channel:'CFAKE',token:'fixture',
+  const run = (extra={})=>deliver({slackDir:dir,homeDir:path.join(dir,'home'),channel:'CFAKE',token:'fixture',
     now:()=>at,sleep:async ms=>{at+=ms},readLanes:async()=>[{lane:'f',status:'needs-review',task:'current task'}],
     fetchImpl:async url=>{
       if(url.endsWith('chat.update')) { updates++; if(fail) return {status:429,headers:{get:()=> '120'}} }
