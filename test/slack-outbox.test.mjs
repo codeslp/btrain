@@ -142,10 +142,11 @@ describe("thread and board maps", () => {
   it("does not send when its home lock was taken over before the send (pins mutant S2)", async (t) => {
     const { sendOnChannel } = await import("../src/brain_train/slack/threads.mjs")
     const home = path.dirname(path.dirname(await tempDir()))
-    const homeLock = path.join(home, "slack", "home.lock")
+    const homeLock = path.join(home, "slack", "home.lock.99")
     const readFile = fs.readFile
     let displaced = false
-    // While the holder reads the channel state, another process replaces its lock.
+    // While the holder reads the channel state, another process supersedes
+    // its lock with a higher generation.
     fs.readFile = async (...args) => {
       if (!displaced && String(args[0]).endsWith(path.join("slack", "channels.json"))) {
         displaced = true
@@ -158,6 +159,46 @@ describe("thread and board maps", () => {
     const outcome = await sendOnChannel(home, "C0000FAKE", { now: Date.now, intervalMs: 1000 }, async () => { sends += 1; return { ok: true } })
     assert.deepEqual([outcome, sends], [{ busy: true }, 0])
     assert.equal(await readFile(homeLock, "utf8"), "another-process", "the other holder's lock is left alone")
+  })
+
+  it("lets one sender at a time hold the home lock, however many contend", async () => {
+    const { sendOnChannel } = await import("../src/brain_train/slack/threads.mjs")
+    const home = path.dirname(path.dirname(await tempDir()))
+    let active = 0
+    let maximum = 0
+    let at = Date.parse("2026-11-23T21:00:00.000Z")
+    const send = async () => {
+      active += 1
+      maximum = Math.max(maximum, active)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      active -= 1
+      return { ok: true }
+    }
+    // A clock that jumps a second per read, so the one-a-second pace never
+    // makes a sender wait: only the lock keeps them apart.
+    const now = () => (at += 1000)
+    const outcomes = await Promise.all(Array.from({ length: 10 }, () => sendOnChannel(home, "C0000FAKE", { now, intervalMs: 1000, waitMs: 5000 }, send)))
+    assert.equal(maximum, 1)
+    assert.equal(outcomes.filter((outcome) => outcome.result?.ok).length, 10)
+    const left = (await fs.readdir(path.join(home, "slack"))).filter((name) => name.startsWith("home.lock"))
+    assert.deepEqual(left, [], "every holder released its generation")
+  })
+
+  it("supersedes a stale lock with the next generation, leaving no live lock moved or deleted", async () => {
+    const { sendOnChannel } = await import("../src/brain_train/slack/threads.mjs")
+    const home = path.dirname(path.dirname(await tempDir()))
+    const dir = path.join(home, "slack")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "home.lock.7"), "dead-holder", "utf8")
+    const old = new Date(Date.now() - 60_000)
+    await fs.utimes(path.join(dir, "home.lock.7"), old, old)
+    let seen = []
+    const outcome = await sendOnChannel(home, "C0000FAKE", { now: Date.now, intervalMs: 1000, waitMs: 500 }, async () => {
+      seen = (await fs.readdir(dir)).filter((name) => name.startsWith("home.lock"))
+      return { ok: true }
+    })
+    assert.deepEqual(outcome, { result: { ok: true } })
+    assert.deepEqual(seen, ["home.lock.8"], "the stale generation 7 was superseded by 8")
   })
 
   it("forgets a thread whose card is gone", async () => {

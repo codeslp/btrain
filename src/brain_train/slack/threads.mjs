@@ -66,7 +66,7 @@ export async function getBoard(homeDir, channel) {
 // developer, so their read-merge-write runs under a short lock in the btrain
 // home. Unlike the delivery lock this one waits, briefly: each holder only
 // reads, merges, and renames one small file. A lock left by a process that
-// died is taken over after HOME_LOCK_STALE_MS, which is longer than a send
+// died is superseded after HOME_LOCK_STALE_MS, which is longer than a send
 // held under it (sendOnChannel: one Slack call, at most 10 seconds).
 export const HOME_LOCK_STALE_MS = 30_000
 const HOME_LOCK_WAIT_MS = 5_000
@@ -74,78 +74,97 @@ export const CHANNELS_RELATIVE = path.join("slack", "channels.json")
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// The home lock is a series of generation files in `<home>/slack/`:
+// `home.lock.<n>`, n = 1, 2, ... (an older `home.lock` counts as generation 0).
+// The highest generation is the lock. A holder owns it while its file is the
+// highest and still holds its nonce.
+//
+// - To acquire, a process creates the next generation, one above the highest
+//   it sees, with an exclusive create, when the highest is gone or stale. Two
+//   processes that race for one generation cannot both create it.
+// - A stale lock (its holder died) is never moved or deleted to take it over:
+//   the next generation simply supersedes it. So no live lock's path is ever
+//   vacated, and nobody can slip in while a lock is being recovered.
+// - Release deletes the holder's own file. After acquiring, a holder deletes
+//   the generations below its own; their holders, if still alive, find before
+//   they send that they no longer hold the lock.
+const HOME_LOCK_NAME = /^home\.lock(?:\.(\d+))?$/
+
+async function homeLockGenerations(dir) {
+  let names = []
+  try {
+    names = await fs.readdir(dir)
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error
+  }
+  const generations = []
+  for (const name of names) {
+    const match = HOME_LOCK_NAME.exec(name)
+    if (match) generations.push({ generation: match[1] === undefined ? 0 : Number(match[1]), file: path.join(dir, name) })
+  }
+  return generations.sort((left, right) => left.generation - right.generation)
+}
+
 // Take the home lock, waiting up to `waitMs`. Returns a handle, or null when
 // another live holder kept it for the whole wait.
-//
-// A stale lock (its holder died) is taken over by renaming it to a name of our
-// own and checking that the file we moved is the one we judged stale: same
-// inode, same modification time. Two processes can both judge one lock
-// stale; when the first has already replaced it with a fresh lock, the second
-// moves that fresh lock instead, sees the mismatch, and puts it back, so a
-// fresh lock is never removed on the strength of an old observation.
 async function acquireHomeLock(homeDir, waitMs) {
-  const lockPath = path.join(homeDir, "slack", "home.lock")
-  await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  const dir = path.join(homeDir, "slack")
+  await fs.mkdir(dir, { recursive: true })
   const nonce = randomUUID()
   const deadline = Date.now() + Math.max(0, waitMs)
   for (;;) {
-    try {
-      await fs.writeFile(lockPath, nonce, { flag: "wx", mode: 0o600 })
-      return {
-        async stillMine() {
-          try {
-            return (await fs.readFile(lockPath, "utf8")) === nonce
-          } catch {
-            return false
-          }
-        },
-        async release() {
-          try {
-            if ((await fs.readFile(lockPath, "utf8")) === nonce) await fs.unlink(lockPath)
-          } catch {
-            // Already gone.
-          }
-        },
+    const generations = await homeLockGenerations(dir)
+    const top = generations.at(-1) || null
+    let free = !top
+    if (top) {
+      try {
+        const seen = await fs.stat(top.file)
+        free = Math.abs(Date.now() - seen.mtimeMs) > HOME_LOCK_STALE_MS
+      } catch {
+        // Released between the listing and the stat: look again.
+        continue
       }
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error
     }
-    let seen = null
-    try {
-      seen = await fs.stat(lockPath)
-    } catch {
-      continue
-    }
-    if (Math.abs(Date.now() - seen.mtimeMs) > HOME_LOCK_STALE_MS) {
-      await breakStaleLock(lockPath, seen, nonce)
-      continue
+    if (free) {
+      const generation = (top ? top.generation : 0) + 1
+      const file = path.join(dir, `home.lock.${generation}`)
+      try {
+        await fs.writeFile(file, nonce, { flag: "wx", mode: 0o600 })
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error
+        // Another process took this generation first.
+        continue
+      }
+      // Superseded generations: a stale one's holder is gone, and a live one
+      // finds before it sends that it no longer holds the lock.
+      for (const older of generations) await fs.unlink(older.file).catch(() => {})
+      return makeHomeLock(dir, file, generation, nonce)
     }
     if (Date.now() >= deadline) return null
     await pause(5 + Math.floor(Math.random() * 20))
   }
 }
 
-async function breakStaleLock(lockPath, seen, nonce) {
-  const moved = `${lockPath}.stale-${nonce}`
-  try {
-    await fs.rename(lockPath, moved)
-  } catch {
-    // Someone else moved or removed it first.
-    return
+function makeHomeLock(dir, file, generation, nonce) {
+  return {
+    /** True while this holder's generation is the highest and holds its nonce. */
+    async stillMine() {
+      try {
+        if ((await fs.readFile(file, "utf8")) !== nonce) return false
+        const top = (await homeLockGenerations(dir)).at(-1)
+        return Boolean(top && top.generation === generation)
+      } catch {
+        return false
+      }
+    },
+    async release() {
+      try {
+        if ((await fs.readFile(file, "utf8")) === nonce) await fs.unlink(file)
+      } catch {
+        // Already gone.
+      }
+    },
   }
-  let found = null
-  try {
-    found = await fs.stat(moved)
-  } catch {
-    return
-  }
-  if (found.ino !== seen.ino || found.mtimeMs !== seen.mtimeMs) {
-    // We moved a fresh lock that replaced the stale one: put it back. A link
-    // fails if the path was taken meanwhile; the displaced holder then sees,
-    // before it sends, that the lock is no longer its own.
-    await fs.link(moved, lockPath).catch(() => {})
-  }
-  await fs.unlink(moved).catch(() => {})
 }
 
 async function withHomeLock(homeDir, { waitMs = HOME_LOCK_WAIT_MS } = {}, fn) {

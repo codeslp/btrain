@@ -41,7 +41,9 @@ test('third sender cannot enter while stale observer moves a live lock', async t
   });
   await started.promise;
   interceptMove=true; resume.resolve();
-  await moved.promise;
+  // Adapted for the generation lock, which never moves a lock: the stale
+  // observer finishes instead of renaming. The attack and assertion are unchanged.
+  await Promise.race([moved.promise, observer]);
   await sendOnChannel(root,'CFAKE',options,send);
   restore.resolve();
   await observer;
