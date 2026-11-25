@@ -78,6 +78,7 @@ import {
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
 import { needsReviewGateScope } from "./needs_review_gate.mjs"
+import { collectReviewDoctorFindings } from "./review/doctor.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 
@@ -11649,6 +11650,13 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     }
   }
 
+  // Spec 023 T007: every agent's lab and the review settings. A missing lab
+  // is a warning and never changes the exit code; a review setting that does
+  // not parse is an issue (its default applies meanwhile).
+  const review = collectReviewDoctorFindings(config)
+  warnings.push(...review.warnings)
+  issues.push(...review.errors)
+
   return {
     repoRoot,
     healthy: issues.length === 0,
@@ -11656,6 +11664,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     features,
     issues,
     warnings,
+    labs: review.labs,
     cgraph,
     repurposeReady,
     overrides,
