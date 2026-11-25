@@ -311,6 +311,10 @@ async function ensureThread(run, laneId, claimKey, laneState, entry) {
   if (sent.stop) return { outcome: sent.stop }
   if (!sent.result.ok) return failureOutcome(run, entry, sent.result)
   const thread = { channel: run.channel, cardTs: String(sent.result.body.ts || "") }
+  // The lock may have been taken over while the card was being posted. The
+  // new holder may already have recorded its own card for this lane task, so
+  // a holder that lost the lock must not overwrite the thread map.
+  if (!(await run.lock.stillMine())) return { outcome: "lost-lock" }
   await setThread(run.slackDir, laneId, claimKey, thread)
   run.summary.cards += 1
   return { thread, fresh: Boolean(current) }
@@ -344,7 +348,14 @@ async function deliverLane(run, laneId, laneState, items) {
     if (text) {
       const sent = await send(run, thread.channel, (options) => postMessage({ ...options, channel: thread.channel, text, threadTs: thread.cardTs }))
       if (sent.stop) return { outcome: sent.stop }
-      if (!sent.result.ok) return failureOutcome(run, entry, sent.result)
+      if (!sent.result.ok) {
+        const outcome = failureOutcome(run, entry, sent.result)
+        // A reply that is dropped (refused by Slack, or out of attempts) must
+        // not also drop the card's update: the card is still owed one. A reply
+        // that will be retried owes it when it is sent.
+        if (outcome.drop && !thread.fresh) owe(thread)
+        return outcome
+      }
     }
     // A card posted in this run was rendered from current state; any other
     // card is owed a refresh until one succeeds (FR-6).
