@@ -309,6 +309,26 @@ describe("board work left by the budget or by another repository (codex-reviewer
     assert.match(board.text, /\napi\n[\s\S]*\nweb\n/, "the one board shows both repositories")
   })
 
+  it("records nothing when the board lock is taken over during its call", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    const lockPath = path.join(api.homeDir, "slack", `board-${CHANNEL}.lock`)
+    // Another repository takes the board lock over while the board post is in
+    // flight, after this run's touch.
+    const fetchImpl = async (url, init) => {
+      const response = await c.fake.fetch(url, init)
+      if (String(url).endsWith("chat.postMessage") && String(init?.body || "").includes("board · dev:")) {
+        await fs.writeFile(lockPath, "another-holder")
+      }
+      return response
+    }
+    assert.equal((await api.run({ fetchImpl })).status, "done")
+    assert.equal(c.boardPosts().length, 1)
+    assert.equal(c.pins().length, 0, "no pin by a holder that lost the lock")
+    assert.equal((await getBoard(api.homeDir, CHANNEL)).ts ?? "", "", "no ts recorded by a holder that lost the lock")
+  })
+
   it("lets simultaneous first publishers create exactly one board", async () => {
     const c = await channelFixture()
     const api = c.repo("api")

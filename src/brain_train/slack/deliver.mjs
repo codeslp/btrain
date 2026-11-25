@@ -249,6 +249,9 @@ async function send(run, channel, call) {
         waitMs: Math.min(5000, run.deadline - run.now()),
       }, async () => {
         if (!(await run.lock.touch())) return { skipped: "lost-lock" }
+        // A board call also needs the board lock: a holder suspended past
+        // its staleness may have lost it to another repository.
+        if (run.boardLock && !(await run.boardLock.touch())) return { skipped: "lost-board-lock" }
         const timeoutMs = Math.min(run.callTimeoutMs, run.deadline - run.now())
         // The wait for the home lock may have used up the budget.
         if (!(timeoutMs >= minCall)) return { skipped: "budget" }
@@ -523,19 +526,30 @@ async function publishBoard(run, lanes, { stale = false } = {}) {
   // holds the lock, it publishes them before it lets go.
   const boardLock = (await tryAcquireLock(boardLockPath(run.homeDir, run.channel), { now: run.now })).lock
   if (!boardLock) return "next"
+  run.boardLock = boardLock
   try {
     for (let round = 0; round < MAX_BOARD_ROUNDS; round += 1) {
       const outcome = await publishBoardLocked(run)
-      // A failed call leaves the board owed to a later run, not this one.
-      if (outcome === "deferred") return "next"
+      // A failed call leaves the board owed to a later run, not this one;
+      // a lost board lock leaves it to the repository that took it over.
+      if (outcome === "deferred" || outcome === "lost-board-lock") return "next"
       if (outcome !== "next") return outcome
       // Lines another repository wrote while this one was sending.
       if (!(await boardOwed(run.homeDir, run.channel, String(run.renderContext.label || "")))) return "next"
     }
     return "next"
   } finally {
+    run.boardLock = null
     await boardLock.release()
   }
+}
+
+// Before writing the board record: "" while this run holds both locks, else
+// the stop for the lock it lost.
+async function lostBoardLocks(run) {
+  if (!(await run.lock.stillMine())) return "lost-lock"
+  if (!(await run.boardLock.stillMine())) return "lost-board-lock"
+  return ""
 }
 
 async function publishBoardLocked(run) {
@@ -568,7 +582,8 @@ async function publishBoardLocked(run) {
       pinned = false
       pinError = ""
     }
-    if (!(await run.lock.stillMine())) return "lost-lock"
+    const lost = await lostBoardLocks(run)
+    if (lost) return lost
     await updateBoard(run.homeDir, run.channel, { ts, text, pinned, pinError })
   }
 
@@ -578,7 +593,8 @@ async function publishBoardLocked(run) {
     const sent = await send(run, run.channel, (options) => addPin({ ...options, channel: run.channel, timestamp: ts }))
     if (sent.stop) return sent.stop
     const result = sent.result
-    if (!(await run.lock.stillMine())) return "lost-lock"
+    const lost = await lostBoardLocks(run)
+    if (lost) return lost
     if (result.ok || result.error === "already_pinned") {
       await updateBoard(run.homeDir, run.channel, { pinned: true, pinError: "" })
     } else {
