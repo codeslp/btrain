@@ -13,7 +13,9 @@
 // text rendered from the record differs from it, so a failed update is retried
 // by a later run without any other bookkeeping.
 
+import fs from "node:fs/promises"
 import path from "node:path"
+import { readJsonOr, writeJsonAtomic } from "./outbox.mjs"
 import { renderBoard } from "./render.mjs"
 import { getBoard, updateBoard } from "./threads.mjs"
 
@@ -79,6 +81,46 @@ export async function boardOwed(homeDir, channel, label) {
   if (!record.ts) return hasActiveLanes(record)
   if (!record.pinned && !record.pinError) return true
   return boardText(record, label) !== record.text
+}
+
+// ---- Board work cut off by the delivery budget ----
+//
+// A note in the repository's own Slack state (written under its delivery
+// lock, never the shared home lock), so board work the budget cut off is
+// neither lost nor done twice:
+// - `owed`: this repository's lines were not written to the board map; a later
+//   run publishes them, even one with no queued entries.
+// - `ts` and `text`: a board message was posted but its record could not be
+//   written; the next holder of the board lock adopts it instead of posting
+//   another.
+export const BOARD_PENDING_FILENAME = "board-pending.json"
+
+function pendingPath(slackDir) {
+  return path.join(slackDir, BOARD_PENDING_FILENAME)
+}
+
+/** The pending board note for `channel`, or null. A note for another channel is ignored. */
+export async function readBoardPending(slackDir, channel) {
+  const note = await readJsonOr(pendingPath(slackDir), null)
+  if (!note || typeof note !== "object" || note.channel !== String(channel)) return null
+  return note
+}
+
+/** Merge `fields` into the note for `channel`; a note left with nothing pending is removed. */
+export async function updateBoardPending(slackDir, channel, fields) {
+  const current = (await readBoardPending(slackDir, channel)) || { channel: String(channel) }
+  const next = { ...current, ...fields, channel: String(channel) }
+  if (!next.owed) delete next.owed
+  if (!next.ts) {
+    delete next.ts
+    delete next.text
+  }
+  if (Object.keys(next).length === 1) {
+    await fs.rm(pendingPath(slackDir), { force: true })
+    return null
+  }
+  await writeJsonAtomic(pendingPath(slackDir), next)
+  return next
 }
 
 /**

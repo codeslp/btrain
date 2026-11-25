@@ -45,7 +45,7 @@
 
 import path from "node:path"
 import { addPin, classifySlackError, DEFAULT_CALL_TIMEOUT_MS, ERROR_CLASSES, postMessage, updateMessage } from "./client.mjs"
-import { boardOwed, boardText, hasActiveLanes, writeRepoEntry } from "./board.mjs"
+import { boardOwed, boardText, hasActiveLanes, readBoardPending, updateBoardPending, writeRepoEntry } from "./board.mjs"
 import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
 import { prefixReply, renderCard, renderReply } from "./render.mjs"
@@ -164,7 +164,8 @@ export async function deliver(options = {}) {
 
     const entries = await listEntries(slackDir)
     const label = String(context.label || "")
-    if (entries.length === 0 && Object.keys(state.cards).length === 0 && !(await boardOwed(homeDir, channel, label))) return summary
+    if (entries.length === 0 && Object.keys(state.cards).length === 0
+      && !(await boardOwed(homeDir, channel, label)) && !(await readBoardPending(slackDir, channel))) return summary
 
     const run = {
       slackDir,
@@ -519,6 +520,8 @@ async function publishBoard(run, lanes, { stale = false } = {}) {
   const written = await writeBoardState(run, (options) => writeRepoEntry(run.homeDir, run.channel, {
     repoPath: run.repoPath, name: run.renderContext.repoName, lanes, stale,
   }, options))
+  // Lines the budget kept out of the board map are owed to a later run.
+  await updateBoardPending(run.slackDir, run.channel, { owed: Boolean(written) })
   if (written) return written
   // Every repository of this developer publishes the one board of the
   // channel, so reading the record, deciding, sending, and recording run under
@@ -560,6 +563,26 @@ async function writeBoardState(run, write) {
   }
 }
 
+// A board message this repository posted but could not record (its note's
+// `ts`): adopted into the record when the board has no message, so it is
+// pinned and updated instead of posted again; dropped when another
+// repository's board is recorded meanwhile. Returns "" or a stop.
+async function adoptPendingPost(run) {
+  const note = await readBoardPending(run.slackDir, run.channel)
+  if (!note?.ts) return ""
+  const record = await getBoard(run.homeDir, run.channel)
+  if (!record?.ts) {
+    const lost = await lostBoardLocks(run)
+    if (lost) return lost
+    const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, {
+      ts: note.ts, text: String(note.text || ""), pinned: false, pinError: "",
+    }, options))
+    if (written) return written
+  }
+  await updateBoardPending(run.slackDir, run.channel, { ts: "" })
+  return ""
+}
+
 // Before writing the board record: "" while this run holds both locks, else
 // the stop for the lock it lost.
 async function lostBoardLocks(run) {
@@ -570,6 +593,8 @@ async function lostBoardLocks(run) {
 
 async function publishBoardLocked(run) {
   const label = String(run.renderContext.label || "")
+  const adopted = await adoptPendingPost(run)
+  if (adopted) return adopted
   const record = (await getBoard(run.homeDir, run.channel)) || { repos: {} }
   let ts = String(record.ts || "")
   // A board is first posted when some repository has an active lane; one
@@ -597,11 +622,15 @@ async function publishBoardLocked(run) {
       if (!ts) return boardFailure(run, { error: "unknown_response" })
       pinned = false
       pinError = ""
+      // Until its record is written, the new message is kept in the note, so
+      // a run cut off now adopts it next time instead of posting another.
+      await updateBoardPending(run.slackDir, run.channel, { ts, text })
     }
     const lost = await lostBoardLocks(run)
     if (lost) return lost
     const written = await writeBoardState(run, (options) => updateBoard(run.homeDir, run.channel, { ts, text, pinned, pinError }, options))
     if (written) return written
+    await updateBoardPending(run.slackDir, run.channel, { ts: "" })
   }
 
   // Pin once. A failure is recorded for `btrain slack status` and not retried
