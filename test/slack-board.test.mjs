@@ -285,6 +285,30 @@ describe("board work left by the budget or by another repository (codex-reviewer
     assert.match(shown, /\nweb\n {2}lane b/, "the holder published web's lines before letting go")
   })
 
+  it("does not let a second repository replace a board lock while its holder waits (codex-reviewer on 86c49b5)", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    const web = c.repo("web", { lanes: [lane("b")] })
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: api.name, lanes: api.state.lanes })
+    await reserveChannelSend(api.homeDir, CHANNEL, { now: c.clock.at, intervalMs: 1000, waitMs: 5000 })
+    let interrupted = false
+    // api holds the board lock and is suspended past its staleness; web
+    // takes the lock over and publishes meanwhile.
+    const sleep = async (ms) => {
+      if (!interrupted) {
+        interrupted = true
+        c.clock.at += 61000
+        assert.equal((await web.run()).status, "done")
+      } else c.clock.at += ms
+    }
+    assert.equal((await api.run({ sleep })).status, "done")
+    assert.equal(c.boardPosts().length, 1, "one board per developer and channel")
+    assert.equal(c.pins().length, 1)
+    const board = await getBoard(api.homeDir, CHANNEL)
+    assert.equal(board.ts, c.boardPosts()[0].body.ts ?? board.ts)
+    assert.match(board.text, /\napi\n[\s\S]*\nweb\n/, "the one board shows both repositories")
+  })
+
   it("lets simultaneous first publishers create exactly one board", async () => {
     const c = await channelFixture()
     const api = c.repo("api")
