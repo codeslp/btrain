@@ -74,6 +74,18 @@ function iso(ms) {
   return new Date(ms).toISOString()
 }
 
+/** Order two Slack `ts` strings exactly, without a float. */
+export function compareTs(left, right) {
+  const split = (value) => {
+    const [seconds = "0", fraction = ""] = String(value ?? "").split(".")
+    return [seconds.replace(/^0+(?=\d)/, "").padStart(20, "0"), fraction.padEnd(6, "0").slice(0, 6)]
+  }
+  const [a, b] = [split(left), split(right)]
+  if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1
+  if (a[1] !== b[1]) return a[1] < b[1] ? -1 : 1
+  return 0
+}
+
 /** A Slack `ts` ("1700000000.000100") as milliseconds. */
 export function slackTsToMs(ts) {
   const [seconds = "0", fraction = ""] = String(ts ?? "").split(".")
@@ -178,7 +190,9 @@ function handleApproval(state, config, input, threadTs, actions, now) {
   const pendingTs = thread?.pending || ""
   const proposalKey = `${channel}:${pendingTs}`
   const proposal = pendingTs ? state.proposals[proposalKey] : null
-  const pending = proposal && proposal.state === "pending"
+  // An approve or reject applies only to a proposal posted before it: one sent
+  // before a newer proposal replaced the earlier is not about the newer one.
+  const pending = proposal && proposal.state === "pending" && compareTs(input.ts, pendingTs) > 0
   if (input.heard.approval === "reject") {
     if (!pending) {
       actions.push({ type: "reply", channel, thread: threadTs, text: REPLIES.nothingToReject })
@@ -222,15 +236,20 @@ function handleMessage(state, config, input, now) {
   const { channel, ts } = input
   const key = `${channel}:${ts}`
   if (Object.hasOwn(state.handled, key)) return actions
-  // Record first, then act (FR-7): the caller writes this state before it
-  // starts anything the actions name.
-  state.handled[key] = iso(now)
-
   const heard = input.heard || { heard: HEARD.IGNORED, reason: "unclassified", authors: {} }
   if (heard.heard === HEARD.IGNORED) {
+    // Recorded apart from the handled set: a copy ignored for where it was
+    // read (a reply shown in channel history) must not consume the copy read
+    // from the thread, which is heard.
+    const ignoredKey = `${key}#ignored`
+    if (Object.hasOwn(state.handled, ignoredKey)) return actions
+    state.handled[ignoredKey] = iso(now)
     actions.push({ type: "ignored", channel, ts, reason: heard.reason, authors: heard.authors || {} })
     return actions
   }
+  // Record first, then act (FR-7): the caller writes this state before it
+  // starts anything the actions name.
+  state.handled[key] = iso(now)
   const fromThread = heard.heard === HEARD.TURN || heard.heard === HEARD.APPROVAL || Boolean(input.threadTs)
   const threadTs = fromThread ? input.threadTs : ts
   if (now - slackTsToMs(ts) > cfg.approvalMinutes * 60 * 1000) {

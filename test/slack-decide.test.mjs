@@ -3,7 +3,7 @@
 // no file, no network, and no process.
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { decide, REPLIES, slackTsToMs } from "../src/brain_train/slack/decide.mjs"
+import { compareTs, decide, REPLIES, slackTsToMs } from "../src/brain_train/slack/decide.mjs"
 import { parseOperatorCommand } from "../src/brain_train/slack/grammar.mjs"
 import { classifyInbound } from "../src/brain_train/slack/inbound.mjs"
 import { emptyInbox } from "../src/brain_train/slack/inbox.mjs"
@@ -169,6 +169,20 @@ describe("conversations and turns (FR-13)", () => {
     assert.equal(actions[2].thread, parent, "a command in a thread replies in that thread")
   })
 
+  it("acts on a reply also sent to the channel when its history copy was read first", () => {
+    const parent = tsAt(START)
+    const reply = tsAt(START + 5000)
+    const fields = { text: "and what about lane e?", ts: reply, thread: parent, extra: { subtype: "thread_broadcast" } }
+    const { actions } = run([
+      [messageInput({ text: `<@${BOT}> hi`, ts: parent }), START],
+      [{ kind: "turn-done", channel: CH, thread: parent }, START + 1000],
+      [messageInput({ ...fields, source: "history" }), START + 5000],
+      [messageInput({ ...fields, source: "replies" }), START + 5000],
+      [messageInput({ ...fields, source: "history" }), START + 6000],
+    ])
+    assert.deepEqual(actions.map((action) => [action.type, action.ts]), [["turn", parent], ["ignored", reply], ["turn", reply]])
+  })
+
   it("closes a conversation conversationMinutes after the operator's last message", () => {
     const parent = tsAt(START)
     const { state } = run([
@@ -216,6 +230,21 @@ describe("proposals and approval (FR-6, FR-7)", () => {
     assert.deepEqual(types(byApp.actions), ["ignored"])
     const elsewhere = decide(posted.state, messageInput({ text: "approve", ts: tsAt(START + 7000), thread: "1699999999.000100", source: "replies" }), {}, START + 7000)
     assert.deepEqual(elsewhere.actions.map((action) => action.text), [REPLIES.nothingToApprove])
+  })
+
+  it("does not apply an approve or reject sent before the pending proposal was posted", () => {
+    const first = decide(opened(), { kind: "proposal", channel: CH, thread: parent, ts: "1700000005.000100", proposal: startProposal }, {}, START + 5000)
+    // A newer proposal replaces the first one after the operator typed approve,
+    // but before that approve was read.
+    const replacement = proposal("btrain> start owner=claude\ntask: other\nfiles: b", "start", {})
+    const second = decide(first.state, { kind: "proposal", channel: CH, thread: parent, ts: "1700000009.000000", proposal: replacement }, {}, START + 9000)
+    for (const text of ["approve", "reject"]) {
+      const early = decide(second.state, messageInput({ text, ts: "1700000008.000000", thread: parent, source: "replies" }), {}, START + 10_000)
+      assert.ok(!early.actions.some((action) => action.type === "command"), `${text} sent before the proposal runs nothing`)
+      assert.equal(early.state.proposals[`${CH}:1700000009.000000`].state, "pending", `${text} leaves the newer proposal pending`)
+    }
+    const later = decide(second.state, messageInput({ text: "approve", ts: "1700000010.000000", thread: parent, source: "replies" }), {}, START + 10_000)
+    assert.deepEqual(later.actions.filter((action) => action.type === "command").map((action) => action.canonical), [replacement.canonical])
   })
 
   it("rejects a pending proposal on reject and runs nothing", () => {
@@ -296,6 +325,14 @@ describe("limits (FR-10)", () => {
     const { actions } = run(inputs, { state: base })
     assert.equal(actions.filter((action) => action.type === "command").length, 3)
     assert.match(actions.at(-1).text, /3 unapproved retry-review runs an hour for lane e/)
+  })
+})
+
+describe("compareTs", () => {
+  it("orders Slack ts strings exactly", () => {
+    assert.equal(compareTs("1700000000.000101", "1700000000.000100"), 1)
+    assert.equal(compareTs("1700000000.0001", "1700000000.000100"), 0)
+    assert.equal(compareTs("999.999999", "1000.000000"), -1)
   })
 })
 
