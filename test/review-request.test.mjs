@@ -100,7 +100,13 @@ function createWorld({ clock, reviewer = A, behaviors = {}, prNumber = "", event
       return handle()
     },
     now: clock.now,
-    sleep: clock.sleep,
+    // A loop that never returns would run on the fake clock forever and keep
+    // the test process alive after its timeout; after six simulated hours the
+    // world's sleep throws, so such a loop fails its test (lane review M18).
+    sleep: async (ms) => {
+      if (clock.elapsed() > 6 * 60 * MIN) throw new Error("runaway request loop: six simulated hours")
+      return clock.sleep(ms)
+    },
   }
 }
 
@@ -120,7 +126,11 @@ async function run(world, options = {}) {
 
 const ended = (world) => world.events.filter((event) => event.type === "review-attempt-ended").map((event) => [event.details.outcome, event.details.detail])
 
-describe("runReviewRequest", () => {
+// A hung loop fails its test instead of wedging the suite (node --test has no
+// default timeout); the lane review's mutants M15 and M18 hung without it.
+const TIMEOUT = { timeout: 20_000 }
+
+describe("runReviewRequest", TIMEOUT, () => {
   it("returns the new status once a verdict arrives, without dispatching again", async () => {
     const clock = createFakeClock()
     const world = createWorld({ clock, behaviors: { [A]: { pickupAtMs: 30_000, outputUntilMs: 3 * MIN, verdictAtMs: 3 * MIN } } })
@@ -257,6 +267,24 @@ describe("runReviewRequest", () => {
     assert.ok(ended(world).every(([outcome]) => outcome === "failed"))
   })
 
+  it("retries the available reviewer at each silence limit when another candidate keeps failing its probe", async () => {
+    // Lane review (codex-reviewer) repro: the reviewer that failed its probe
+    // was picked again on every re-probe and the available one never was.
+    const clock = createFakeClock()
+    const world = createWorld({ clock, behaviors: { [A]: "fail" } })
+    const result = await run(world, { candidates: { otherLab: [A, B], sameLab: [] }, probe: async (name) => name !== B })
+    assert.deepEqual(result, { outcome: "escalation", reason: "no-reviewer" })
+    assert.deepEqual(world.dispatched.map((entry) => [entry.reviewer, entry.at]), [[A, 0], [A, 5 * MIN], [A, 10 * MIN]])
+  })
+
+  it("ends a picked-up attempt a silence limit after its output stops", async () => {
+    const clock = createFakeClock()
+    const world = createWorld({ clock, behaviors: { [A]: { pickupAtMs: 30_000, outputUntilMs: MIN } } })
+    assert.deepEqual(await run(world, { maxAttempts: 1 }), { outcome: "attempts-done" })
+    assert.deepEqual(ended(world), [["unresponsive", "no-progress"]])
+    assert.equal(clock.elapsed(), 6 * MIN)
+  })
+
   it("calls a clean exit with no verdict a failure, never an approval", async () => {
     const clock = createFakeClock()
     const world = createWorld({ clock, behaviors: { [A]: "exit0", [B]: "exit0" } })
@@ -297,9 +325,15 @@ describe("runReviewRequest", () => {
   })
 })
 
-describe("runReviewRequest with a real runner process", () => {
+describe("runReviewRequest with a real runner process", TIMEOUT, () => {
   const roots = []
-  after(async () => Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))))
+  const children = []
+  // A runner the loop failed to stop (lane review M15) is killed here, so the
+  // test fails at its timeout instead of keeping the process alive.
+  after(async () => {
+    for (const child of children) if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL")
+    await Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true })))
+  })
 
   it("stops a silent runner's process when its attempt ends", async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-request-runner-")))
@@ -309,7 +343,6 @@ describe("runReviewRequest with a real runner process", () => {
     const scenarioPath = await writeFakeRunnerScenario(path.join(root, "scenario.json"), { default: [{ do: "silent" }] })
     const clock = { now: () => Date.now(), iso: () => new Date().toISOString(), elapsed: () => 0 }
     const world = createWorld({ clock: { ...clock, sleep: async () => {}, atTime: () => {} } })
-    const children = []
     world.runAttempt = async ({ reviewer, signal }) => {
       const child = spawn(shim, [], { env: { ...withoutLaneScope(), ...fakeRunnerEnv({ scenarioPath, logPath }), BTRAIN_AGENT: reviewer }, stdio: "ignore" })
       children.push(child)

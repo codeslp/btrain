@@ -112,7 +112,13 @@ export async function runReviewRequest({
   const otherLab = Array.isArray(candidates.otherLab) ? candidates.otherLab : []
   const sameLab = Array.isArray(candidates.sameLab) ? candidates.sameLab : []
   const running = new Map()
+  // When each candidate last failed its presence probe, by lower-case name.
   const probeFailedAt = new Map()
+  // The start of the current pass over the other-lab list. A candidate is
+  // untried in this pass when its last attempt or failed probe is older. The
+  // first pass covers the whole request; a re-probe starts a new one, so every
+  // candidate is visited again, not only the one tried longest ago.
+  let passStart = -Infinity
   let started = 0
 
   const iso = () => new Date(now()).toISOString()
@@ -251,6 +257,7 @@ export async function runReviewRequest({
       const open = activeAttempt(record)
       if (open) await endAttempt(lane, open, "superseded", "new-head")
       probeFailedAt.clear()
+      passStart = -Infinity
       await writeRequest(lane)
       continue
     }
@@ -301,7 +308,17 @@ export async function runReviewRequest({
     const ordered = laneOnOtherLab
       ? [otherLab.find((name) => keyOf(name) === keyOf(lane.reviewer)), ...otherLab.filter((name) => keyOf(name) !== keyOf(lane.reviewer))]
       : [...otherLab]
-    const untried = ordered.filter((name) => attemptsOf(name).length === 0 && !probeFailedAt.has(keyOf(name)))
+    const lastTry = (name) => {
+      const tries = [
+        ...attemptsOf(name).map((attempt) => toMs(attempt.startedAt)).filter((value) => value !== null),
+        ...(probeFailedAt.has(keyOf(name)) ? [probeFailedAt.get(keyOf(name))] : []),
+      ]
+      return tries.length > 0 ? Math.max(...tries) : null
+    }
+    const untried = ordered.filter((name) => {
+      const last = lastTry(name)
+      return last === null || last < passStart
+    })
     const otherLabReason = (name) => {
       if (keyOf(name) === keyOf(lane.reviewer)) return ""
       return includesName(sameLab, lane.reviewer) || record.tier === "same-lab"
@@ -353,20 +370,17 @@ export async function runReviewRequest({
     }
 
     // Rule 5, re-probe: every other-lab reviewer has been tried and the
-    // window is still open. Probe the list again once the last pass is a
-    // silence limit old, starting with the reviewer tried longest ago.
+    // window is still open. Once the last pass ended a silence limit ago,
+    // start a new pass: every candidate is untried again and is visited in
+    // order, so one that keeps failing its probe cannot starve the others.
     if (!windowPassed) {
       const ends = [
         ...otherLabAttempts.map((attempt) => toMs(attempt.endedAt)).filter((value) => value !== null),
-        ...probeFailedAt.values(),
+        ...ordered.map((name) => probeFailedAt.get(keyOf(name))).filter((value) => value !== undefined),
       ]
       const lastEnd = ends.length > 0 ? Math.max(...ends) : requestedAt
       if (t - lastEnd >= limits.silenceLimitMs) {
-        probeFailedAt.clear()
-        const lastStart = (name) => toMs(attemptsOf(name).at(-1)?.startedAt) ?? -Infinity
-        const next = [...ordered].sort((left, right) => lastStart(left) - lastStart(right))[0]
-        const result = await tryOtherLab(next)
-        if (result && result !== "dispatched") return result
+        passStart = t
         continue
       }
     }

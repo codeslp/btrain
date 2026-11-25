@@ -70,6 +70,14 @@ describe("evaluateFixRules", () => {
     assert.deepEqual(evaluateFixRules({ ...GOOD, commits: [{ ...GOOD.commits[0], committedAt: GOOD.attempt.startedAt }] }).failures.map((f) => f.id), ["commit-time"])
   })
 
+  it("accepts a fix at exactly max_files files (lane review mutant M9: <= became <)", () => {
+    assert.equal(evaluateFixRules({ ...GOOD, files: ["a", "b", "c"], lockedFiles: ["a", "b", "c"] }).ok, true)
+  })
+
+  it("accepts a fix at exactly max_changed_lines lines (lane review mutant M10: <= became <)", () => {
+    assert.equal(evaluateFixRules({ ...GOOD, changedLines: 60 }).ok, true)
+  })
+
   it("allows the last round and refuses one more", () => {
     assert.equal(evaluateFixRules({ ...GOOD, round: 2 }).ok, true)
     assert.match(evaluateFixRules({ ...GOOD, round: 3 }).failures[0].message, /had 2 reviewer fixes/)

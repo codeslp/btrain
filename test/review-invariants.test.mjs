@@ -279,7 +279,12 @@ function createLoopWorld({ clock, owner = AGENTS.owner.name, reviewer = AGENTS.o
       return { exit, tail: () => "", lastOutputAt: () => lastOutputAt }
     },
     now: clock.now,
-    sleep: clock.sleep,
+    // A request loop that never returns would run on the fake clock forever;
+    // after six simulated hours this sleep throws so the test fails instead.
+    sleep: async (ms) => {
+      if (clock.elapsed() > 6 * 60 * MIN) throw new Error("runaway request loop: six simulated hours")
+      return clock.sleep(ms)
+    },
   }
 }
 
