@@ -123,11 +123,37 @@ describe("conversations and turns (FR-13)", () => {
   it("refuses the thirty-first run in an hour with a reason", () => {
     const inputs = []
     for (let index = 0; index < 31; index += 1) {
-      inputs.push([messageInput({ text: `<@${BOT}> q${index}`, ts: tsAt(START + index * 1000) }), START + index * 1000])
+      const ts = tsAt(START + index * 1000)
+      inputs.push([messageInput({ text: `<@${BOT}> q${index}`, ts }), START + index * 1000])
+      // Each run finishes, so only the hourly limit can refuse one.
+      inputs.push([{ kind: "turn-done", channel: CH, thread: ts }, START + index * 1000 + 500])
     }
     const { actions } = run(inputs)
     assert.equal(actions.filter((action) => action.type === "turn").length, 30)
     assert.match(actions.at(-1).text, /30 orchestrator runs an hour/)
+  })
+
+  it("keeps at most three runs alive, queues the rest, and starts them as runs finish", () => {
+    const parents = [0, 1, 2, 3].map((index) => tsAt(START + index * 1000))
+    const inputs = parents.map((ts, index) => [messageInput({ text: `<@${BOT}> q${index}`, ts }), START + index * 1000])
+    const opened = run(inputs)
+    assert.equal(opened.actions.filter((action) => action.type === "turn").length, 3, "a fourth live run waits")
+    assert.equal(Object.values(opened.state.threads).filter((thread) => thread.busy).length, 3)
+    assert.deepEqual(opened.state.threads[`${CH}:${parents[3]}`].queued, [parents[3]], "the fourth conversation is queued, not dropped")
+
+    // A reply in an open, idle thread also waits while three runs are alive.
+    const reply = tsAt(START + 5000)
+    const replied = run([
+      [{ kind: "turn-done", channel: CH, thread: parents[0] }, START + 4000],
+      [messageInput({ text: "more", ts: reply, thread: parents[1], source: "replies" }), START + 5000],
+    ], { state: opened.state })
+    assert.deepEqual(replied.actions.map((action) => [action.type, action.ts]), [["turn", parents[3]]], "capacity goes to the queued conversation first")
+    assert.deepEqual(replied.state.threads[`${CH}:${parents[1]}`].queued, [reply], "the reply waits in its busy thread")
+
+    // Each finished run releases capacity to the next queued message.
+    const released = decide(replied.state, { kind: "turn-done", channel: CH, thread: parents[1] }, {}, START + 6000)
+    assert.deepEqual(released.actions.map((action) => [action.type, action.thread, action.ts]), [["turn", parents[1], reply]])
+    assert.equal(Object.values(released.state.threads).filter((thread) => thread.busy).length, 3)
   })
 
   it("does not start a run for an approve, a reject, or a command in the thread", () => {

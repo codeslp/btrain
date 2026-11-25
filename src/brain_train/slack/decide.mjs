@@ -53,6 +53,8 @@ export const REPO_DEFAULTS = Object.freeze({
 const HOUR_MS = 60 * 60 * 1000
 // Verbs that start a loop, counted against `max_active`.
 const LOOP_VERBS = new Set(["start", "retry-review"])
+// Orchestrator runs alive at once, over every thread (plan, "Queueing").
+export const MAX_LIVE_TURNS = 3
 
 export const REPLIES = Object.freeze({
   modelOff: "The orchestrator model is off. Commands still work.",
@@ -134,6 +136,10 @@ function turnRefusal(state, cfg, now) {
     return REPLIES.limit(`${cfg.maxTurnsPerHour} orchestrator runs an hour`)
   }
   return ""
+}
+
+function liveTurns(state) {
+  return Object.values(state.threads).filter((thread) => thread.busy).length
 }
 
 function startTurn(state, actions, { channel, thread, ts }, now) {
@@ -248,14 +254,19 @@ function handleMessage(state, config, input, now) {
         break
       }
       state.threads[`${channel}:${ts}`] = { lastOperatorTs: ts, replyCursor: ts, busy: false, queued: [], pending: null }
+      if (liveTurns(state) >= MAX_LIVE_TURNS) {
+        // Waits for capacity; a finished run starts it (turn-done).
+        state.threads[`${channel}:${ts}`].queued = [ts]
+        break
+      }
       startTurn(state, actions, { channel, thread: ts, ts }, now)
       break
     }
     case HEARD.TURN: {
       if (!openThread) break
       const refused = turnRefusal(state, cfg, now)
-      if (openThread.busy) {
-        // One run at a time for a thread: this one waits for the reply.
+      if (openThread.busy || liveTurns(state) >= MAX_LIVE_TURNS) {
+        // One run at a time for a thread, three over all: this one waits.
         openThread.queued = [...openThread.queued, ts]
         break
       }
@@ -321,19 +332,27 @@ function handleProposal(state, config, input, now) {
 function handleTurnDone(state, config, input, now) {
   const cfg = settings(config)
   const actions = []
-  const thread = state.threads[`${input.channel}:${input.thread}`]
-  if (!thread) return actions
-  thread.busy = false
-  while (thread.queued.length > 0) {
-    const next = thread.queued[0]
-    thread.queued = thread.queued.slice(1)
-    const refused = turnRefusal(state, cfg, now)
-    if (refused) {
-      actions.push({ type: "reply", channel: input.channel, thread: input.thread, text: refused })
-      continue
+  const finishedKey = `${input.channel}:${input.thread}`
+  if (state.threads[finishedKey]) state.threads[finishedKey].busy = false
+  // Give the freed capacity to queued messages: the finished thread's first,
+  // then the other threads' in the order they opened.
+  const keys = [finishedKey, ...Object.keys(state.threads).filter((key) => key !== finishedKey)]
+  for (const key of keys) {
+    const thread = state.threads[key]
+    if (!thread || thread.busy) continue
+    while (thread.queued.length > 0 && liveTurns(state) < MAX_LIVE_TURNS) {
+      const next = thread.queued[0]
+      thread.queued = thread.queued.slice(1)
+      const [channel, threadTs] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)]
+      const refused = turnRefusal(state, cfg, now)
+      if (refused) {
+        actions.push({ type: "reply", channel, thread: threadTs, text: refused })
+        continue
+      }
+      startTurn(state, actions, { channel, thread: threadTs, ts: next }, now)
+      break
     }
-    startTurn(state, actions, { channel: input.channel, thread: input.thread, ts: next }, now)
-    break
+    if (liveTurns(state) >= MAX_LIVE_TURNS) break
   }
   return actions
 }
