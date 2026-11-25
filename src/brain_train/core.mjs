@@ -594,6 +594,8 @@ async function readText(targetPath) {
   return fs.readFile(targetPath, "utf8")
 }
 
+const MAX_WRITE_SYMLINK_HOPS = 40
+
 // Readers such as `btrain handoff wait`, the dashboard, and `btrain doctor`
 // read state files without taking the writer's lock. fs.writeFile truncates
 // the file before it writes, so such a reader could see an empty locks.json
@@ -611,12 +613,24 @@ async function writeText(targetPath, content) {
     mode = (await fs.stat(destination)).mode & 0o7777
   } catch (error) {
     if (error?.code !== "ENOENT") throw error
-    // A dangling symlink still names the file to create.
-    try {
-      const linkTarget = await fs.readlink(targetPath)
-      destination = path.resolve(path.dirname(targetPath), linkTarget)
-    } catch {
-      destination = targetPath
+    // A dangling symlink, or a chain of them, still names the file to
+    // create. Follow every hop so the rename creates the last target and
+    // leaves each link in place.
+    destination = targetPath
+    for (let hop = 0; ; hop += 1) {
+      if (hop === MAX_WRITE_SYMLINK_HOPS) {
+        const loop = new Error(`ELOOP: too many symbolic links, write '${targetPath}'`)
+        loop.code = "ELOOP"
+        throw loop
+      }
+      let linkTarget
+      try {
+        linkTarget = await fs.readlink(destination)
+      } catch (readlinkError) {
+        if (readlinkError?.code === "EINVAL" || readlinkError?.code === "ENOENT") break
+        throw readlinkError
+      }
+      destination = path.resolve(path.dirname(destination), linkTarget)
     }
   }
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`

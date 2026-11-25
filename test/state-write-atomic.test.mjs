@@ -52,4 +52,55 @@ describe("state file writes", () => {
       await fs.rm(repoRoot, { recursive: true, force: true })
     }
   })
+
+  // Red-team cases from the lane a review: the atomic rename must keep the
+  // old write's file identity rules.
+  async function withStateDir(run) {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-atomic-write-"))
+    try {
+      const stateDir = path.join(repoRoot, ".btrain")
+      await fs.mkdir(stateDir)
+      await run(repoRoot, stateDir)
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  }
+
+  it("keep an existing file's mode", () => withStateDir(async (repoRoot, stateDir) => {
+    const target = path.join(stateDir, "locks.json")
+    await fs.writeFile(target, '{"version":1,"locks":[]}')
+    await fs.chmod(target, 0o640)
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    assert.equal((await fs.stat(target)).mode & 0o777, 0o640)
+  }))
+
+  it("write through a symlink and keep the link", () => withStateDir(async (repoRoot, stateDir) => {
+    await fs.writeFile(path.join(stateDir, "actual.json"), '{"version":1,"locks":[]}')
+    await fs.symlink("actual.json", path.join(stateDir, "locks.json"))
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    assert.equal(await fs.readlink(path.join(stateDir, "locks.json")), "actual.json")
+    assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, "actual.json"), "utf8")).locks.length, 1)
+  }))
+
+  it("create the target of a dangling symlink and keep the link", () => withStateDir(async (repoRoot, stateDir) => {
+    await fs.symlink("actual.json", path.join(stateDir, "locks.json"))
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    assert.equal(await fs.readlink(path.join(stateDir, "locks.json")), "actual.json")
+    assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, "actual.json"), "utf8")).locks.length, 1)
+  }))
+
+  it("create the last target of a dangling symlink chain and keep every link", () => withStateDir(async (repoRoot, stateDir) => {
+    await fs.symlink("middle.json", path.join(stateDir, "locks.json"))
+    await fs.symlink("actual.json", path.join(stateDir, "middle.json"))
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    assert.equal(await fs.readlink(path.join(stateDir, "locks.json")), "middle.json")
+    assert.equal(await fs.readlink(path.join(stateDir, "middle.json")), "actual.json")
+    assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, "actual.json"), "utf8")).locks.length, 1)
+  }))
+
+  it("leave no temporary file when the rename fails", () => withStateDir(async (repoRoot, stateDir) => {
+    await fs.mkdir(path.join(stateDir, "locks.json"))
+    await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["src/"]))
+    assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
+  }))
 })
