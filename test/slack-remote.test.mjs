@@ -108,7 +108,10 @@ describe("pickBaseRemote", () => {
     assert.equal(pickBaseRemote({ names: ["origin", "github", "upstream"], marked: "" }), "upstream")
     assert.equal(pickBaseRemote({ names: ["origin", "github"], marked: "" }), "github")
     assert.equal(pickBaseRemote({ names: ["zeta", "origin"], marked: "" }), "origin")
-    assert.equal(pickBaseRemote({ names: ["zeta", "alpha"], marked: "" }), "zeta")
+    // `git remote` lists names sorted, so "the first remote" is the first by
+    // name, not by config order (codex-reviewer's repro on 1b0353e).
+    assert.equal(pickBaseRemote({ names: ["zeta", "alpha"], marked: "" }), "alpha")
+    assert.equal(pickBaseRemote({ names: ["b-remote", "B-remote", "a"], marked: "" }), "B-remote")
     assert.equal(pickBaseRemote({ names: [], marked: "" }), "")
     assert.equal(pickBaseRemote({}), "")
   })
@@ -127,6 +130,14 @@ describe("pullRequestLink", () => {
   it("links the marked remote over upstream", () => {
     const marked = config(fork.trim(), "remote.origin.gh-resolved base")
     assert.equal(pullRequestLink(marked, "7"), "https://github.com/fork-owner/example-repo/pull/7")
+  })
+
+  it("links the first remote by name when none is preferred, as git remote orders them", () => {
+    const text = config(
+      "remote.zeta.url https://github.com/example-zeta/repo.git",
+      "remote.alpha.url https://github.com/example-alpha/repo.git",
+    )
+    assert.equal(pullRequestLink(text, 7), "https://github.com/example-alpha/repo/pull/7")
   })
 
   it("links an SSH remote", () => {

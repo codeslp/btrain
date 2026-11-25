@@ -66,10 +66,14 @@ export function parseGitRemoteConfig(text) {
   return { names, urls, marked }
 }
 
-/** The remote PR flow opens PRs on, in `resolveBaseRemote`'s order, or "". */
+/**
+ * The remote PR flow opens PRs on, in `resolveBaseRemote`'s order, or "".
+ * Its last fallback is the first name `git remote` prints, and `git remote`
+ * sorts names byte by byte (strcmp), not in config order.
+ */
 export function pickBaseRemote({ names = [], marked = "" } = {}) {
   if (marked && names.includes(marked)) return marked
-  return PREFERRED_REMOTES.find((name) => names.includes(name)) || names[0] || ""
+  return PREFERRED_REMOTES.find((name) => names.includes(name)) || [...names].sort()[0] || ""
 }
 
 function prNumberText(prNumber) {
