@@ -51,6 +51,11 @@ T007 is done: `doctorRepo` appends the findings of `review/doctor.mjs`.
 Lab warnings are warnings and never change the exit code; a review setting
 that does not parse is an issue.
 
+T008 is done: `core.mjs` exports `appendWorkflowEvent`, `readWorkflowEvents`,
+and `detectCurrentAgent`, the export baseline has 72 names, and the
+inventory test expects 72 (71 in the export block). T010's call in `cli.mjs`
+and T011 follow.
+
 ## Phase 1: Foundations that change no behavior (WS0, WS1, WS2)
 
 - [x] T001 [WS0] Write the fake runner in `test/helpers/fake-runner.mjs`: an executable a test names in `[agents.runners]`, driven by a scenario file. It can run `btrain handoff`, print lines at given times, stay silent, exit with a code and text, commit a file with or without the `Btrain-Agent` trailer, and run a verdict or `handoff fix`.
@@ -60,7 +65,7 @@ that does not parse is an issue.
 - [x] T005 [WS1] Write `src/brain_train/review/review-config.mjs`: `[review]`, `[review.fixes]`, `[review.signals.<executable>]`, and `[pr_flow].bot_pending_timeout` with the spec's defaults and duration parsing. A duration that does not parse yields the default and a doctor error.
 - [x] T006 [WS1] Write `src/brain_train/review/runner-table.mjs`: for `claude`, `codex`, and `gemini`, the lab, the presence probe, the fresh-session flags, and the rejected flags; and `classifyExit`. Capture a real sample of each quota, authentication, and refusal message under `test/fixtures/runner-signals/` and ship only patterns that have a sample. Test each pattern against its sample, and that an exit with no pattern is `failed`.
 - [x] T007 [WS1] Write `src/brain_train/review/doctor.mjs` and append its findings in `doctorRepo`: every agent's resolved lab, a warning for each agent with none, and a warning when an owner has no other-lab agent with a `cli` runner. A missing lab never changes the exit code. Held on 2026-11-23: `core.mjs` (lane h).
-- [ ] T008 [WS2] Export `appendWorkflowEvent`, `readWorkflowEvents`, and `detectCurrentAgent` from `src/brain_train/core.mjs`, regenerate `specs/020-ws2-export-baseline.json`, and in `test/decomposition_inventory.test.mjs` change the four 69s to 72 and the export block's 68 to 71. Say in the commit that the surface change is intended.
+- [x] T008 [WS2] Export `appendWorkflowEvent`, `readWorkflowEvents`, and `detectCurrentAgent` from `src/brain_train/core.mjs`, regenerate `specs/020-ws2-export-baseline.json`, and in `test/decomposition_inventory.test.mjs` change the four 69s to 72 and the export block's 68 to 71. Say in the commit that the surface change is intended.
 - [x] T009 [WS2] Write the fold in `src/brain_train/review/record.mjs`: the events since the lane's last claim to the review record of the plan's data model. Test a fold over each event sequence, and that events before the last claim are ignored, in `test/review-record.test.mjs`.
 - [ ] T010 [WS2] Write `src/brain_train/review/activity.mjs` and call its helper after `resolveRepoRoot` in each lane-scoped handler of `src/brain_train/cli.mjs`: `handoff`, `review`, and `pr`. The helper uses `detectCurrentAgent`. When the agent is verified and is the reviewer of the lane's open attempt, `btrain handoff` writes `review-pickup` once and any other command writes `review-progress`, at most once a minute. It also writes the pickup of the owner of a `fix-confirmation` lane. Each write takes the lane's handoff lock with `withFileLock`. Test that the dispatched reviewer writes one pickup, that `btrain review code --lane <id>` writes one progress event, and that another agent, an unverified actor, `btrain pr status`, and the startup snapshot write none.
 - [ ] T011 [WS2] Add the display state, the reviewer, the time since dispatch or pickup, the tier, and the fallback reason to `buildLaneGuidance` and `getStatus`, and show them in `scripts/serve-dashboard.js`. Test that after pickup `btrain status` shows `in-review` while the handoff file holds `needs-review`. Remove the skip from invariant 5.

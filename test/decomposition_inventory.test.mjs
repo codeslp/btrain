@@ -136,9 +136,9 @@ describe("decomposition inventory, export surface", () => {
     const { spans } = readFunctionSpans(core)
     const surface = await checkExportSurface(spans)
 
-    assert.equal(surface.exported.length, 69, "the public surface is 69 names")
+    assert.equal(surface.exported.length, 72, "the public surface is 72 names")
     assert.deepEqual(surface.unassigned, [], "every exported name must have a home")
-    assert.equal(surface.placed.length + surface.reexported.length, 69)
+    assert.equal(surface.placed.length + surface.reexported.length, 72)
   })
 
   it("sees the inline export the export block does not list", async () => {
@@ -150,9 +150,9 @@ describe("decomposition inventory, export surface", () => {
     const surface = await checkExportSurface(spans)
 
     assert.deepEqual(surface.inline, ["buildReviewArtifactId"])
-    assert.equal(surface.blockNames.length, 68)
+    assert.equal(surface.blockNames.length, 71)
     assert.equal(surface.blockNames.includes("buildReviewArtifactId"), false)
-    assert.equal(surface.blockNames.length + surface.inline.length, 69)
+    assert.equal(surface.blockNames.length + surface.inline.length, 72)
   })
 
   it("gives BtrainError a home even though it is a class", async () => {
@@ -176,7 +176,7 @@ describe("decomposition inventory, export baseline", () => {
     const surface = await checkExportSurface(spans)
 
     assert.ok(surface.baseline, "a baseline must be committed for the check to mean anything")
-    assert.equal(surface.baseline.length, 69)
+    assert.equal(surface.baseline.length, 72)
     assert.deepEqual(surface.added, [], "no name may appear that the baseline does not have")
     assert.deepEqual(surface.removed, [], "no baseline name may disappear")
   })
