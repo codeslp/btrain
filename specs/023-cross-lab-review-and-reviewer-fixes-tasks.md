@@ -37,6 +37,15 @@ the request's branch ref (section "Head"), while PR #122 pins a `reviewHead`
 in lane state at `needs-review`. WS5 wiring has to settle which one the lane's
 head is before T024.
 
+**Status 2026-11-25:** T012 is done (PR #127, ledger entry 14). The same PR
+retired L9 and L15, which is part of T014; L8 waits for its FR-5 bound,
+2026-11-29T03:47:36Z. T010 is partly done (lane e, third PR):
+`review/activity.mjs` decides and writes the pickup and progress signals,
+and the owner's pickup of a `fix-confirmation` lane (`recordReviewActivity`,
+all I/O injected). Its call in `cli.mjs`, the exports of T008, the
+`doctorRepo` call of T007, and T011 wait for lane a (PR #112), which holds
+`core.mjs` and `cli.mjs`.
+
 ## Phase 1: Foundations that change no behavior (WS0, WS1, WS2)
 
 - [x] T001 [WS0] Write the fake runner in `test/helpers/fake-runner.mjs`: an executable a test names in `[agents.runners]`, driven by a scenario file. It can run `btrain handoff`, print lines at given times, stay silent, exit with a code and text, commit a file with or without the `Btrain-Agent` trailer, and run a verdict or `handoff fix`.
@@ -60,7 +69,7 @@ Retiring a legacy row is a semantic change (spec 015 FR-10): inside the PR
 the order is the spec 015 table and the ledger, the mirror and the harness
 with a TLC run, then the gate.
 
-- [ ] T012 [WS3] Run the spec 015 FR-5 audit for L4, L8, L9, and L15 over every registered repository: no `transition-advisory` event for the row in the last 7 days. Record it in the ledger in `test/formal/README.md`.
+- [x] T012 [WS3] Run the spec 015 FR-5 audit for L4, L8, L9, and L15 over every registered repository: no `transition-advisory` event for the row in the last 7 days. Record it in the ledger in `test/formal/README.md`.
 - [ ] T013 [WS3] Extend the `enforced` field of a legacy row in `src/brain_train/transitions.mjs` to hold target slices as well as source slices, with a rejection message for each new slice.
 - [ ] T014 [WS3] Retire L8 and L15. An approval or a request for changes by an actor that is not the recorded reviewer, or with no recorded reviewer, is refused. Remove the advisory branches for both rows in `resolveHandoff` and `requestChangesHandoff`. Retire L9: the reviewer's approval of a lane whose lock coverage is suspended is refused until the owner's resync.
 - [ ] T015 [WS3] Retire L4 for the targets `ready-for-pr`, `pr-review`, and `ready-to-merge`. Row 7 and row 12 keep working.
