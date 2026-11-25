@@ -265,19 +265,18 @@ describe("lane transition contract", () => {
     )
   })
 
-  it("preserves legacy request-changes when actor detection is unavailable", () => {
-    const result = applyTransition(
+  // spec 023 WS3 (T014): L15 is retired. A request for changes with no
+  // verifiable actor, or no recorded reviewer, is refused.
+  it("rejects request-changes when actor detection is unavailable (L15 retired)", () => {
+    for (const state of [
       { status: "needs-review", owner: "codex", reviewer: "claude" },
-      "handoff request-changes",
-      {
-        to: "changes-requested",
-        actor: "",
-        reasonCode: "spec-mismatch",
-      },
-    )
-
-    assert.equal(result.row.id, "L15")
-    assert.equal(result.next.status, "changes-requested")
+      { status: "needs-review", owner: "codex", reviewer: "" },
+    ]) {
+      assert.throws(
+        () => applyTransition(state, "handoff request-changes", { to: "changes-requested", actor: "", reasonCode: "spec-mismatch" }),
+        (error) => error instanceof TransitionRejection && error.rowId === "L15" && /recorded reviewer/.test(error.message),
+      )
+    }
   })
 
   it("revalidates lane transitions inside the registry publication lock", async () => {
@@ -317,8 +316,13 @@ describe("lane transition contract", () => {
     assert.deepEqual(byId.get("L10").enforced, ["idle"])
     assert.equal(byId.get("L6").state, "advisory")
     assert.equal(byId.get("L10").state, "advisory")
+    // spec 023 WS3 (ledger entry 14): L9 and L15 retired as whole rows.
+    for (const id of ["L9", "L15"]) {
+      assert.equal(byId.get(id).state, "enforced", id)
+      assert.equal(byId.get(id).enforced, "$all", id)
+    }
     for (const row of TRANSITION_ROWS) {
-      if (!["L2", "L3", "L5", "L6", "L10"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
+      if (!["L2", "L3", "L5", "L6", "L9", "L10", "L15"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
     }
     assert.equal(byId.get("20").actor, "reassign authority")
     assert.deepEqual(byId.get("8").from, ["pr-review", "ready-to-merge", "changes-requested"])
@@ -414,8 +418,12 @@ describe("lane transition contract", () => {
     assert.equal(applyTransition({ status: "ready-for-pr", owner: "codex", reviewer: "claude" }, "pr-poll", { to: "pr-review", actor: "system", prLinked: true }).row.id, "L5")
     // An unlinked changes-requested abandon by a third party is L11, not L1.
     assert.equal(applyTransition({ status: "changes-requested", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "resolved", actor: "gemini", prFlowEnabled: true }).row.id, "L11")
-    // L9: peer approval on a lane whose coverage was force-released.
-    assert.equal(applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: false }).row.id, "L9")
+    // L9 is retired (spec 023 WS3): peer approval on a lane whose coverage
+    // was force-released is refused until the owner's resync.
+    assert.throws(
+      () => applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: false }),
+      (error) => error instanceof TransitionRejection && error.rowId === "L9" && /resync/.test(error.message),
+    )
     assert.equal(applyTransition({ status: "needs-review", owner: "codex", reviewer: "claude" }, "handoff resolve", { to: "ready-for-pr", actor: "claude", prFlowEnabled: true, laneCovered: true }).row.id, "4")
     assert.equal(applyTransition(review, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "L6")
     assert.equal(applyTransition(lane, "doctor repair", { actor: "btrain doctor", systemEvent: true, filesChanged: false }).row.id, "17")

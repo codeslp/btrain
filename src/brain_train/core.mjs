@@ -6957,7 +6957,6 @@ async function requestChangesHandoff(repoRoot, options) {
       ? parseCurrentSection(await readText(overrideHandoffPath))
       : await readCurrentState(repoRoot)
 
-  let requestChangesAdvisory = ""
   const validateRequestChanges = (source) => {
     if (source.status !== "needs-review") {
       throw new BtrainError({
@@ -6979,26 +6978,16 @@ async function requestChangesHandoff(repoRoot, options) {
     const reasonMetadata = resolveReasonMetadata(source, "changes-requested", options, {
       requireReasonOnTransition: true,
     })
-    const transition = applyTransition(source, "handoff request-changes", {
+    // spec 023 WS3: L15 is retired. A request for changes with no recorded
+    // reviewer or no verified actor is refused by the gate (TransitionRejection).
+    applyTransition(source, "handoff request-changes", {
       to: "changes-requested",
       actor: resolvedActor,
       reasonCode: reasonMetadata.reasonCode,
     })
-    // spec 015 FR-5 advisory stage (spec 016 WS4): L15, request-changes with
-    // no recorded reviewer or an unverified actor, is accepted with a record.
-    requestChangesAdvisory = advisoryRowId(transition.row, source, { to: "changes-requested" })
     return reasonMetadata
   }
   validateRequestChanges(existingCurrent)
-  if (requestChangesAdvisory) {
-    options.onEvent?.(formatAdvisoryWarning(requestChangesAdvisory, {
-      event: "handoff request-changes",
-      from: existingCurrent.status,
-      to: "changes-requested",
-      actor: resolvedActor,
-      detail: `spec 002 CLI Commands and spec 005 FR-8: the recorded reviewer (${existingCurrent.reviewer || "none recorded"}) must be the verified actor`,
-    }))
-  }
 
   const requestChangesLastUpdated = `${actorLabel} ${formatIsoTimestamp()}`
   let updatedCurrent
@@ -7029,7 +7018,6 @@ async function requestChangesHandoff(repoRoot, options) {
         laneId,
         eventDetails: {
           summary: options.summary,
-          ...(requestChangesAdvisory ? { "transition-advisory": requestChangesAdvisory } : {}),
         },
         overrideHandoffPath,
       },
@@ -7222,9 +7210,10 @@ async function resolveHandoff(repoRoot, options) {
   }
 
   const reviewerResolveTarget = prFlow.enabled ? "ready-for-pr" : "resolved"
-  // spec 002 Force-release override (spec 015 L9): local approval does not
-  // re-acquire coverage suspended by an audited force-release. The gate sees
-  // laneCovered; an uncovered lane lands on L9 (advisory) until enforcement.
+  // spec 002 Force-release override (spec 015 L9, retired by spec 023 WS3):
+  // local approval does not re-acquire coverage suspended by an audited
+  // force-release. The gate sees laneCovered and refuses an uncovered lane
+  // until the owner's resync; acquireLocks rolls its re-acquire back.
   // Coverage is classified inside the registry critical section that
   // publishes the approval (see acquireLocks' publishInsideLock context); this
   // pre-read only serves the no-lock paths.
@@ -7330,6 +7319,7 @@ async function resolveHandoff(repoRoot, options) {
         prLinked: !!latestCurrent.prNumber,
         laneCovered,
       })
+      // Rows 4, L8 (advisory), or a refusal: L9 is retired.
       peerResolveAdvisory = reviewerAuthorityAdvisory
         ? "L8"
         : advisoryRowId(peerTransition.row, latestCurrent, { to: "ready-for-pr" })
@@ -7373,15 +7363,6 @@ async function resolveHandoff(repoRoot, options) {
       await publishResolve()
     }
     if (reviewerAuthorityAdvisory) options.onEvent?.(reviewerAuthorityAdvisory)
-    if (peerResolveAdvisory === "L9") {
-      options.onEvent?.(formatAdvisoryWarning("L9", {
-        event: "handoff resolve",
-        from: "needs-review",
-        to: "ready-for-pr",
-        actor: resolvedActor,
-        detail: "spec 002 Force-release override: coverage suspended by an audited force-release stays suspended until claim or rescope; local approval re-acquired it",
-      }))
-    }
     return resolvedCurrent
   }
 

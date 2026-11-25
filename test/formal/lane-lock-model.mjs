@@ -562,6 +562,15 @@ export class LaneLockModel {
     }
 
     if (this.prFlowEnabled && s.status === "needs-review" && !final) {
+      // spec 002 Force-release override, enforced by spec 023 WS3 (spec 015
+      // L9 retired): the reviewer's approval of a lane whose registry
+      // coverage differs from its record is refused until the owner's
+      // resync, and the gate rejects it in the implementation, so both modes
+      // do. A non-reviewer's approval stays L8 (advisory) in implementation
+      // mode, which still re-acquires below.
+      if (actor === s.reviewer && this.#coverageMismatch(lane)) {
+        return this.#reject("approve-uncovered-lane")
+      }
       if (this.mode === "implementation" && this.#coverageMismatch(lane)) {
         if (!this.#reacquireFromHandoff(lane)) return this.#reject("reacquire-conflict")
       }
