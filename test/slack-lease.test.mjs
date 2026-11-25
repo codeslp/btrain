@@ -79,6 +79,20 @@ describe("listener lease", () => {
     assert.equal((await takeLease(dir, { operator: OPERATOR, pid: 222 })).reason, "acquired")
   })
 
+  it("gives exactly one of twelve simultaneous fresh contenders the lease", async () => {
+    const dir = await slackDir()
+    const results = await Promise.all(Array.from({ length: 12 }, (_, i) => takeLease(dir, { operator: OPERATOR, pid: i + 1 })))
+    const winners = results.filter((result) => result.lease)
+    assert.equal(winners.length, 1)
+    for (const loser of results.filter((result) => !result.lease)) {
+      assert.equal(loser.reason, "held")
+      // A loser can read the file between the winner's create and its write
+      // and then names an unknown holder; it never names another contender.
+      assert.ok([winners[0].lease.holder.pid, null].includes(loser.holder?.pid ?? null))
+    }
+    await winners[0].lease.release()
+  })
+
   it("keeps a lease touched within 60 seconds and takes over one untouched for 60 seconds", async () => {
     const dir = await slackDir()
     const first = await takeLease(dir, { operator: OPERATOR, pid: 111 })
@@ -117,6 +131,7 @@ describe("listener lease", () => {
   it("refuses to take a lease with no operator", async () => {
     const dir = await slackDir()
     await assert.rejects(takeLease(dir, { operator: "" }), /operator/)
+    await assert.rejects(takeLease(dir, { operator: "   " }), /operator/)
     await assert.rejects(takeLease(dir, {}), /operator/)
     assert.equal(await exists(leasePath(dir)), false)
   })
@@ -162,7 +177,8 @@ describe("lease timer", () => {
     const dir = await slackDir()
     const { lease } = await takeLease(dir, { operator: OPERATOR, pid: 111 })
     const timers = fakeTimers()
-    const stop = startLeaseTimer(lease, { setInterval: timers.setInterval, clearInterval: timers.clearInterval })
+    let lost = 0
+    const stop = startLeaseTimer(lease, { setInterval: timers.setInterval, clearInterval: timers.clearInterval, onLost: () => (lost += 1) })
     assert.equal(timers.calls.length, 1)
     assert.equal(timers.calls[0].ms, LEASE_TOUCH_MS)
     assert.equal(timers.unrefed, 1)
@@ -171,9 +187,55 @@ describe("lease timer", () => {
     await timers.calls[0].fn()
     const { mtimeMs } = await fs.stat(lease.path)
     assert.ok(Date.now() - mtimeMs < 5_000, "the tick refreshed the lease")
+    assert.deepEqual([lost, timers.cleared.length], [0, 0], "a kept lease keeps the timer running")
     stop()
     assert.deepEqual(timers.cleared, [timers.calls[0]])
     await lease.release()
+  })
+
+  // codex-reviewer's red-team repros on c334bed: a slow filesystem keeps two
+  // ticks in flight, or the caller stops the timer while one is pending.
+  function pendingTouches() {
+    const pending = []
+    return { pending, lease: { touch: () => new Promise((resolve) => pending.push(resolve)) } }
+  }
+
+  it("calls onLost once when two failed ticks overlap", async () => {
+    const { pending, lease } = pendingTouches()
+    const timers = fakeTimers()
+    let lost = 0
+    startLeaseTimer(lease, { setInterval: timers.setInterval, clearInterval: timers.clearInterval, onLost: () => (lost += 1) })
+    const first = timers.calls[0].fn()
+    const second = timers.calls[0].fn()
+    pending[0](false)
+    await first
+    pending[1](false)
+    await second
+    assert.equal(lost, 1)
+    assert.equal(timers.cleared.length, 1)
+  })
+
+  it("reports nothing for a tick still pending when the timer is stopped", async () => {
+    const { pending, lease } = pendingTouches()
+    const timers = fakeTimers()
+    let lost = 0
+    const stop = startLeaseTimer(lease, { setInterval: timers.setInterval, clearInterval: timers.clearInterval, onLost: () => (lost += 1) })
+    const running = timers.calls[0].fn()
+    stop()
+    pending[0](false)
+    await running
+    assert.equal(lost, 0)
+  })
+
+  it("touches nothing on a tick that runs after stop, and cancels the timer once however often stop is called", async () => {
+    let touches = 0
+    const timers = fakeTimers()
+    const stop = startLeaseTimer({ touch: async () => ((touches += 1), false) }, { setInterval: timers.setInterval, clearInterval: timers.clearInterval })
+    stop()
+    stop()
+    await timers.calls[0].fn()
+    assert.equal(touches, 0)
+    assert.equal(timers.cleared.length, 1)
   })
 
   it("calls onLost once and stops when the lease was taken over", async () => {
@@ -217,6 +279,14 @@ describe("stop and pause flags", () => {
     assert.equal(await clearPaused(dir), true)
     assert.equal(await isPaused(dir), false)
     assert.equal(await clearPaused(dir), false)
+  })
+
+  it("surfaces a flag it cannot remove instead of reporting it absent", async () => {
+    const dir = await slackDir()
+    await fs.mkdir(path.join(dir, STOP_FILE), { recursive: true })
+    await fs.mkdir(path.join(dir, PAUSE_FILE), { recursive: true })
+    await assert.rejects(consumeStop(dir), (error) => ["EISDIR", "EPERM"].includes(error.code))
+    await assert.rejects(clearPaused(dir), (error) => ["EISDIR", "EPERM"].includes(error.code))
   })
 
   it("writes both flags with mode 0600 and no content from Slack, even under a strict umask, and can write them again", async () => {

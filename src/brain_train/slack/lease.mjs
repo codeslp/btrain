@@ -101,7 +101,9 @@ export async function takeLease(slackDir, { operator, pid = process.pid, now = D
 /**
  * Touch the lease every 15 seconds. The timer does not keep the process
  * alive. When a touch finds the lease is no longer this holder's, the timer
- * stops and `onLost` runs once. Returns a function that stops the timer.
+ * stops and `onLost` runs once, even when ticks overlap. A tick still
+ * pending when the timer stops reports nothing. Returns a function that
+ * stops the timer; calling it again does nothing.
  */
 export function startLeaseTimer(lease, {
   intervalMs = LEASE_TOUCH_MS,
@@ -117,10 +119,12 @@ export function startLeaseTimer(lease, {
   }
   const handle = schedule(async () => {
     if (stopped) return
-    if (!(await lease.touch())) {
-      stop()
-      onLost()
-    }
+    const kept = await lease.touch()
+    // Check again after the await: another tick may have reported the loss,
+    // or the caller may have stopped the timer while this touch was pending.
+    if (kept || stopped) return
+    stop()
+    onLost()
   }, intervalMs)
   handle?.unref?.()
   return stop
