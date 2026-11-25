@@ -7,7 +7,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { deliver } from "../src/brain_train/slack/deliver.mjs"
-import { boardLanes, boardStatus, boardText, repoKey, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
+import { boardLanes, boardOwed, boardStatus, boardText, repoKey, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
 import { writeEntry } from "../src/brain_train/slack/outbox.mjs"
 import { getBoard, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
@@ -251,6 +251,7 @@ describe("board work left by the budget or by another repository (codex-reviewer
     c.clock.at += 5000
     await api.run()
     assert.equal(c.pins().length, 2, "a failed pin is reported, not retried")
+    assert.equal(await boardOwed(api.homeDir, CHANNEL, "dev-a"), false, "nor owed")
   })
 
   it("retries board creation deferred by a short delivery budget", async () => {
@@ -264,6 +265,26 @@ describe("board work left by the budget or by another repository (codex-reviewer
     assert.equal(c.pins().length, 1)
   })
 
+  it("publishes the lines another repository wrote while the holder was sending", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    const web = c.repo("web", { lanes: [lane("b")] })
+    await reserveChannelSend(api.homeDir, CHANNEL, { now: c.clock.at, intervalMs: 1000, waitMs: 5000 })
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: api.name, lanes: api.state.lanes })
+    let webResult = null
+    // api holds the board lock and waits for its channel slot; web runs to
+    // its end meanwhile, finds the lock held, and leaves its lines to api.
+    const sleep = async (ms) => {
+      if (!webResult) webResult = await web.run()
+      c.clock.at += ms
+    }
+    assert.equal((await api.run({ sleep })).status, "done")
+    assert.equal(webResult.status, "done")
+    assert.equal(c.boardPosts().length, 1)
+    const shown = c.fake.calls.filter((call) => String(call.body?.text || "").startsWith("board")).at(-1).body.text
+    assert.match(shown, /\nweb\n {2}lane b/, "the holder published web's lines before letting go")
+  })
+
   it("lets simultaneous first publishers create exactly one board", async () => {
     const c = await channelFixture()
     const api = c.repo("api")
@@ -272,7 +293,9 @@ describe("board work left by the budget or by another repository (codex-reviewer
       await writeRepoEntry(repo.homeDir, CHANNEL, { repoPath: repo.repoPath, name: repo.name, lanes: repo.state.lanes })
     }
     await reserveChannelSend(api.homeDir, CHANNEL, { now: c.clock.at, intervalMs: 1000, waitMs: 5000 })
-    // Both runs wait at once; the second wait releases them together.
+    // Both runs start at once. The first waits for its channel slot; it is
+    // released by a second wait, or when either run ends without waiting
+    // (it finds the board lock held and leaves the board to the holder).
     let waiting = 0
     let release
     const ready = new Promise((resolve) => { release = resolve })
@@ -286,7 +309,7 @@ describe("board work left by the budget or by another repository (codex-reviewer
         await ready
       } else c.clock.at += ms
     }
-    const results = await Promise.all([api.run({ sleep }), web.run({ sleep })])
+    const results = await Promise.all([api.run({ sleep }).finally(() => release()), web.run({ sleep }).finally(() => release())])
     assert.deepEqual(results.map((result) => result.status), ["done", "done"])
     assert.equal(c.boardPosts().length, 1, "one message per developer and channel")
     assert.match(c.boardPosts()[0].body.text, /api[\s\S]*web/, "the one board shows both repositories")

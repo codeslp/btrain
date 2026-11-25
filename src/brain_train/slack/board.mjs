@@ -69,13 +69,15 @@ export function hasActiveLanes(record) {
 }
 
 /**
- * Whether the board in `channel` must be posted or updated for `label`. A
- * board with no message yet is owed only once some lane is active.
+ * Whether the board in `channel` must be posted, updated, or pinned for
+ * `label`. A board with no message yet is owed only once some lane is
+ * active. A pin is owed until it succeeds or fails once (`pinError`).
  */
 export async function boardOwed(homeDir, channel, label) {
   const record = await getBoard(homeDir, channel)
   if (!record) return false
   if (!record.ts) return hasActiveLanes(record)
+  if (!record.pinned && !record.pinError) return true
   return boardText(record, label) !== record.text
 }
 
