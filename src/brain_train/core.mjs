@@ -594,9 +594,40 @@ async function readText(targetPath) {
   return fs.readFile(targetPath, "utf8")
 }
 
+// Readers such as `btrain handoff wait`, the dashboard, and `btrain doctor`
+// read state files without taking the writer's lock. fs.writeFile truncates
+// the file before it writes, so such a reader could see an empty locks.json
+// (readJson then falls back to no locks) or a half-written handoff file. The
+// content goes to a temporary file in the same directory, and a rename puts
+// it in place, so a reader sees the old file or the new one, never a torn one.
+// A symlink stays a symlink: the rename targets the file it points to. An
+// existing file keeps its mode, so a hook stays executable.
 async function writeText(targetPath, content) {
   await ensureDir(path.dirname(targetPath))
-  await fs.writeFile(targetPath, content, "utf8")
+  let destination = targetPath
+  let mode
+  try {
+    destination = await fs.realpath(targetPath)
+    mode = (await fs.stat(destination)).mode & 0o7777
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error
+    // A dangling symlink still names the file to create.
+    try {
+      const linkTarget = await fs.readlink(targetPath)
+      destination = path.resolve(path.dirname(targetPath), linkTarget)
+    } catch {
+      destination = targetPath
+    }
+  }
+  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(temporary, content, "utf8")
+    if (mode !== undefined) await fs.chmod(temporary, mode)
+    await fs.rename(temporary, destination)
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 async function appendText(targetPath, content) {
@@ -7857,6 +7888,9 @@ async function waitForHandoffStateChange(
     sinceHash = "",
     timeoutMs = DEFAULT_LOOP_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_LOOP_POLL_INTERVAL_MS,
+    // Called once with the baseline hash before the first poll. A state
+    // change after this call wakes the waiter; one before it may not.
+    onBaseline,
   } = {},
 ) {
   const resolvedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 0
@@ -7876,6 +7910,10 @@ async function waitForHandoffStateChange(
       baselineHash,
       result: initial,
     }
+  }
+
+  if (typeof onBaseline === "function") {
+    await onBaseline(baselineHash)
   }
 
   const startedAt = Date.now()

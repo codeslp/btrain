@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import {
   buildLaneGuidance,
@@ -41,8 +41,42 @@ async function runBtrain(args, cwd, envOverrides = {}) {
   }
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+// Starts `btrain handoff wait` and resolves `baseline` once the waiter has
+// taken its baseline hash (its stderr line). A change made after that line
+// must wake it; a change made before it may become the baseline itself. The
+// tests mutate only after `baseline`, so they need no sleep.
+function startWaiter(args, cwd, envOverrides = {}) {
+  const child = spawn("node", [path.resolve("src/brain_train/cli.mjs"), ...withTrackedInit(args)], {
+    cwd,
+    env: { ...withoutLaneScope(), BRAIN_TRAIN_HOME: path.join(cwd, ".btrain-test-home"), ...envOverrides },
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  let stdout = ""
+  let stderr = ""
+  let markBaseline
+  let failBaseline
+  const baseline = new Promise((resolve, reject) => {
+    markBaseline = resolve
+    failBaseline = reject
+  })
+  child.stdout.setEncoding("utf8")
+  child.stderr.setEncoding("utf8")
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk
+  })
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk
+    const match = stderr.match(/^waiting for .* from state hash (\S+)$/m)
+    if (match) markBaseline(match[1])
+  })
+  const done = new Promise((resolve, reject) => {
+    child.on("error", reject)
+    child.on("close", (code) => {
+      failBaseline(new Error(`waiter exited (${code}) before it took a baseline:\n${stderr}\n${stdout}`))
+      resolve({ stdout: stdout.trim(), stderr: stderr.trim(), code })
+    })
+  })
+  return { baseline, done }
 }
 
 async function bootstrapRepo() {
@@ -364,7 +398,8 @@ describe("btrain handoff wait", () => {
 
   it("wakes and prints canonical guidance when the watched lane changes", async () => {
     const before = await checkHandoff(tmpDir, { laneId: "a" })
-    const waiting = runBtrain(
+    // The timeout only bounds a failing run: a passing run exits on the change.
+    const waiter = startWaiter(
       [
         "handoff",
         "wait",
@@ -375,7 +410,7 @@ describe("btrain handoff wait", () => {
         "--since",
         before.stateHash,
         "--timeout",
-        "2",
+        "60",
         "--poll-interval",
         "0.05",
       ],
@@ -383,7 +418,7 @@ describe("btrain handoff wait", () => {
       { BTRAIN_AGENT: "claude" },
     )
 
-    await delay(150)
+    assert.equal(await waiter.baseline, before.stateHash)
     const update = await runBtrain(
       [
         "handoff",
@@ -402,7 +437,7 @@ describe("btrain handoff wait", () => {
     )
     assert.equal(update.code, 0, update.stderr)
 
-    const result = await waiting
+    const result = await waiter.done
     assert.equal(result.code, 0, result.stderr)
     assert.ok(result.stdout.startsWith("handoff changed"), result.stdout)
     assert.ok(result.stdout.includes("--- lane a ---"), result.stdout)
@@ -413,7 +448,9 @@ describe("btrain handoff wait", () => {
 
   it("ignores unrelated lane changes and exits 2 on timeout", async () => {
     const before = await checkHandoff(tmpDir, { laneId: "a" })
-    const waiting = runBtrain(
+    // A slow lane b update can land after the timeout; the test still holds,
+    // because nothing that happens to lane b may wake the lane a waiter.
+    const waiter = startWaiter(
       [
         "handoff",
         "wait",
@@ -432,7 +469,7 @@ describe("btrain handoff wait", () => {
       { BTRAIN_AGENT: "claude" },
     )
 
-    await delay(100)
+    await waiter.baseline
     const update = await runBtrain(
       [
         "handoff",
@@ -451,7 +488,7 @@ describe("btrain handoff wait", () => {
     )
     assert.equal(update.code, 0, update.stderr)
 
-    const result = await waiting
+    const result = await waiter.done
     assert.equal(result.code, 2, result.stderr)
     assert.ok(result.stdout.startsWith("timed out"), result.stdout)
     assert.ok(result.stdout.includes(`state hash: ${before.stateHash}`), result.stdout)
@@ -459,7 +496,8 @@ describe("btrain handoff wait", () => {
   })
 
   it("uses the current hash as the baseline when --since is omitted", async () => {
-    const waiting = runBtrain(
+    const before = await checkHandoff(tmpDir, { laneId: "a" })
+    const waiter = startWaiter(
       [
         "handoff",
         "wait",
@@ -468,7 +506,7 @@ describe("btrain handoff wait", () => {
         "--lane",
         "a",
         "--timeout",
-        "2",
+        "60",
         "--poll-interval",
         "0.05",
       ],
@@ -476,7 +514,8 @@ describe("btrain handoff wait", () => {
       { BTRAIN_AGENT: "claude" },
     )
 
-    await delay(150)
+    // With no --since, the waiter's own read of the lane is the baseline.
+    assert.equal(await waiter.baseline, before.stateHash)
     const update = await runBtrain(
       [
         "handoff",
@@ -495,7 +534,7 @@ describe("btrain handoff wait", () => {
     )
     assert.equal(update.code, 0, update.stderr)
 
-    const result = await waiting
+    const result = await waiter.done
     assert.equal(result.code, 0, result.stderr)
     assert.ok(result.stdout.includes("woke without explicit since"), result.stdout)
   })
