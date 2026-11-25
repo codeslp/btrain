@@ -316,8 +316,13 @@ describe("lane transition contract", () => {
     assert.deepEqual(byId.get("L10").enforced, ["idle"])
     assert.equal(byId.get("L6").state, "advisory")
     assert.equal(byId.get("L10").state, "advisory")
+    // spec 023 WS3 (ledger entry 14): L9 and L15 retired as whole rows.
+    for (const id of ["L9", "L15"]) {
+      assert.equal(byId.get(id).state, "enforced", id)
+      assert.equal(byId.get(id).enforced, "$all", id)
+    }
     for (const row of TRANSITION_ROWS) {
-      if (!["L2", "L3", "L5", "L6", "L10"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
+      if (!["L2", "L3", "L5", "L6", "L9", "L10", "L15"].includes(row.id)) assert.equal(row.enforced, null, `row ${row.id} is not enforced`)
     }
     assert.equal(byId.get("20").actor, "reassign authority")
     assert.deepEqual(byId.get("8").from, ["pr-review", "ready-to-merge", "changes-requested"])
