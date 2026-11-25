@@ -7,9 +7,9 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { deliver } from "../src/brain_train/slack/deliver.mjs"
-import { boardLanes, boardStatus, boardText, repoKey } from "../src/brain_train/slack/board.mjs"
+import { boardLanes, boardStatus, boardText, repoKey, writeRepoEntry } from "../src/brain_train/slack/board.mjs"
 import { writeEntry } from "../src/brain_train/slack/outbox.mjs"
-import { getBoard } from "../src/brain_train/slack/threads.mjs"
+import { getBoard, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
 
 const FAKE_BOT = ["xoxb", "0000", "fake", "bot", "board"].join("-")
@@ -226,6 +226,70 @@ describe("the board in a channel (T022)", () => {
     c.clock.at += 2000
     await api.run()
     assert.doesNotMatch(c.boardUpdates().at(-1).body.text, /not refreshed/)
+  })
+})
+
+// codex-reviewer's repros on 02a50aa, committed before the fix.
+describe("board work left by the budget or by another repository (codex-reviewer on 02a50aa)", () => {
+  it("resumes a pin that the delivery budget deferred", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    assert.equal((await api.run({ budgetMs: 2750 })).status, "budget")
+    assert.equal(c.boardPosts().length, 1)
+    assert.equal(c.pins().length, 0)
+    c.clock.at += 5000
+    await api.run()
+    assert.equal(c.pins().length, 1, "the next run owes the unsent pin")
+    // A pin that failed is not owed again.
+    c.fake.queue("pins.add", { error: "not_pinnable" })
+    c.fake.queue("chat.update", null, { error: "message_not_found" })
+    api.state.lanes = [lane("a", { status: "needs-review" })]
+    await api.queue("a", "sent-to-review")
+    await api.run()
+    assert.equal(c.pins().length, 2)
+    c.clock.at += 5000
+    await api.run()
+    assert.equal(c.pins().length, 2, "a failed pin is reported, not retried")
+  })
+
+  it("retries board creation deferred by a short delivery budget", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    assert.equal((await api.run({ budgetMs: 2000 })).status, "budget")
+    c.clock.at += 5000
+    await api.run()
+    assert.equal(c.boardPosts().length, 1)
+    assert.equal(c.pins().length, 1)
+  })
+
+  it("lets simultaneous first publishers create exactly one board", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    const web = c.repo("web")
+    for (const repo of [api, web]) {
+      await writeRepoEntry(repo.homeDir, CHANNEL, { repoPath: repo.repoPath, name: repo.name, lanes: repo.state.lanes })
+    }
+    await reserveChannelSend(api.homeDir, CHANNEL, { now: c.clock.at, intervalMs: 1000, waitMs: 5000 })
+    // Both runs wait at once; the second wait releases them together.
+    let waiting = 0
+    let release
+    const ready = new Promise((resolve) => { release = resolve })
+    const sleep = async (ms) => {
+      waiting += 1
+      if (waiting <= 2) {
+        if (waiting === 2) {
+          c.clock.at += 2000
+          release()
+        }
+        await ready
+      } else c.clock.at += ms
+    }
+    const results = await Promise.all([api.run({ sleep }), web.run({ sleep })])
+    assert.deepEqual(results.map((result) => result.status), ["done", "done"])
+    assert.equal(c.boardPosts().length, 1, "one message per developer and channel")
+    assert.match(c.boardPosts()[0].body.text, /api[\s\S]*web/, "the one board shows both repositories")
   })
 })
 
