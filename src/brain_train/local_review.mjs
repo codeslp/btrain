@@ -1,7 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
-import { getRepoPaths } from "./core.mjs"
-import { isFeatureEnabled } from "./repo_mode.mjs"
+import { consumeOverride, getRepoPaths, listActiveOverrides } from "./core.mjs"
 
 const PR_STATUSES = new Set(["ready-for-pr", "pr-review", "ready-to-merge"])
 const WITHDRAWAL_EVENTS = new Set(["claim", "request-changes", "watchdog-repair"])
@@ -34,17 +33,21 @@ export async function readLaneEvents(repoRoot, laneId = "") {
 }
 
 // Local events record workflow decisions. GitHub enforces repository access.
-function hasLocalPeerApproval(events, lane) {
+function hasLocalReviewDecision(events, lane, laneId) {
   const owner = String(lane.owner || "").trim().toLowerCase()
   const reviewer = String(lane.reviewer || "").trim().toLowerCase()
-  if (!owner || !reviewer || owner === reviewer) return false
 
   for (const event of events.slice().reverse()) {
     const status = event?.after?.status
     if (WITHDRAWAL_EVENTS.has(event?.type) || (status && !PR_STATUSES.has(status))) return false
 
+    if (event?.type === "override-consumed" && event.details?.action === "local-review"
+      && (event.laneId || "") === (laneId || "")
+      && event.details.scope === (laneId ? "lane" : "repo")) return true
+
     if (event?.type === "resolve" && event.after?.status === "ready-for-pr") {
-      return event.before?.status === "needs-review"
+      return Boolean(owner && reviewer && owner !== reviewer)
+        && event.before?.status === "needs-review"
         && event.details?.localReviewApproved === true
         && !event.details["transition-advisory"]
         && String(event.actor || "").trim().toLowerCase() === reviewer
@@ -58,19 +61,28 @@ function hasLocalPeerApproval(events, lane) {
 
 export async function enforceLocalReview(repoRoot, config, { lane, laneId, stage }) {
   const laneLabel = laneId || "(single)"
-  if (PR_STATUSES.has(lane.status) && hasLocalPeerApproval(await readLaneEvents(repoRoot, laneId), lane)) return
+  if (PR_STATUSES.has(lane.status)) {
+    if (hasLocalReviewDecision(await readLaneEvents(repoRoot, laneId), lane, laneId)) return
 
-  const message = `${stage} needs a current local peer review for lane ${laneLabel}.`
-  if (!isFeatureEnabled(config, "local_review")) {
-    console.error(`warning: local_review is disabled. ${message}`)
-    return
+    const pending = (await listActiveOverrides(repoRoot)).find((record) => record.action === "local-review"
+      && (record.laneId || "") === (laneId || "")
+      && record.scope === (laneId ? "lane" : "repo"))
+    if (pending) {
+      await consumeOverride(repoRoot, {
+        config, action: "local-review", laneId, overrideId: pending.id, actor: lane.owner,
+      })
+      return
+    }
   }
 
+  const message = `${stage} needs a current local peer review for lane ${laneLabel}.`
   const laneArg = laneId ? ` --lane ${laneId}` : ""
   throw new Error(
     `${message} `
     + `Run btrain handoff update${laneArg} --status needs-review. `
     + `After reviewing, the assigned peer runs btrain handoff resolve${laneArg}. `
-    + "Relink an existing PR from ready-for-pr before requesting bot review."
+    + "Relink an existing PR from ready-for-pr before requesting bot review. "
+    + `For an audited override, run btrain override grant --action local-review${laneArg} `
+    + '--requested-by <agent> --confirmed-by <human> --reason "...".'
   )
 }

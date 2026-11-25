@@ -96,10 +96,14 @@ in place. After bot feedback, the owner commits the fix and sends the lane
 back to `needs-review`. The reviewer resolves it to `ready-for-pr`. The owner
 then pushes, relinks the existing PR, and requests another bot review.
 
-The `local_review` feature defaults to on. When disabled, the workflow check
-prints a warning. GitHub permissions and required reviews govern repository
-access. The repository, head, and base checks still run independently of
-this feature.
+The gate fails closed without peer approval. A human-confirmed override can
+replace approval for one lane and PR cycle:
+`btrain override grant --action local-review --lane <id> --requested-by <agent> --confirmed-by <human> --reason "..."`.
+The first gated stage consumes the override and records the audit event in
+the lane log. Later stages use that decision without another grant. A new
+claim, request for changes, watchdog repair, or status outside the PR flow
+withdraws either decision. Repo-scoped overrides do not apply to lanes.
+The repository, head, and base checks still run.
 
 ### `handoff resolve --final`
 

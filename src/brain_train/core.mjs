@@ -338,7 +338,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve", "local-review"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -2900,11 +2900,11 @@ async function grantOverride(repoRoot, options = {}) {
     })
   }
 
-  if (action === "needs-review" && laneConfigs && !laneId) {
+  if (["needs-review", "local-review"].includes(action) && laneConfigs && !laneId) {
     throw new BtrainError({
-      message: "`btrain override grant --action needs-review` requires --lane when [lanes] is enabled.",
-      reason: "The needs-review override must target a specific lane in multi-lane repos.",
-      fix: `btrain override grant --action needs-review --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
+      message: `\`btrain override grant --action ${action}\` requires --lane when [lanes] is enabled.`,
+      reason: `The ${action} override must target a specific lane in multi-lane repos.`,
+      fix: `btrain override grant --action ${action} --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
     })
   }
   if (action === "push" && laneId) {

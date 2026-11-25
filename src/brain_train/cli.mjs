@@ -161,7 +161,7 @@ Usage:
   btrain transitions [--format json|mermaid]                                    Print the guarded lane-transition contract
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
-  btrain override grant --action <push|needs-review|force-release|repair-resolve> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
+  btrain override grant --action <push|needs-review|force-release|repair-resolve|local-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
   btrain repair dispose --lane <id> --confirmed-by <human> --reason <text> [--actor <name>]
                                                                               Record the human disposition that lets an escalated repair-needed lane resolve (spec 006 FR-29)

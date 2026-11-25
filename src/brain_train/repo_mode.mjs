@@ -229,14 +229,6 @@ export const FEATURES = [
     localDefault: false,
   },
   {
-    // A runtime gate, not a scaffold. Disable it while the local reviewer
-    // cannot run (out of tokens, rate limited), then enable it again.
-    id: "local_review",
-    label: "Local review before bot review",
-    description: "`btrain pr create|request-review|poll --request-review` refuse a lane that local peer review has not approved",
-    localDefault: true,
-  },
-  {
     id: "loop",
     label: "Reviewer dispatch loop",
     description: "`btrain loop` automatic writer/reviewer dispatch",
@@ -272,8 +264,6 @@ const FEATURE_ALIASES = new Map([
   ["pr-flow", "pr_flow"],
   ["prflow", "pr_flow"],
   ["pr", "pr_flow"],
-  ["local-review", "local_review"],
-  ["localreview", "local_review"],
   ["handoff-history", "handoff_history"],
   ["git-hooks", "hooks"],
   ["zvec-grep", "zvec"],

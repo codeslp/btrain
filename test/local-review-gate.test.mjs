@@ -1,11 +1,12 @@
-import { describe, it, mock } from "node:test"
+import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { checkHandoff } from "../src/brain_train/core.mjs"
+import { checkHandoff, getRepoPaths, listActiveOverrides, readProjectConfig } from "../src/brain_train/core.mjs"
+import { enforceLocalReview, readLaneEvents } from "../src/brain_train/local_review.mjs"
 import { runPrCreate, runPrPoll, runPrRequestReview } from "../src/brain_train/pr-flow.mjs"
 
 const exec = promisify(execFile)
@@ -224,22 +225,107 @@ describe("local peer-review workflow", () => {
     })
   })
 
-  it("warns and allows a bot request when the workflow feature is disabled", async () => {
+  it("refuses all three stages even with a legacy disabled feature setting", async () => {
     await withRepo(async ({ repo, home, headA, baseSha }) => {
+      const configPath = path.join(repo, ".btrain", "project.toml")
+      const config = await fs.readFile(configPath, "utf8")
+      await fs.writeFile(configPath, config.includes("[features]")
+        ? config.replace("[features]", "[features]\nlocal_review = false")
+        : config + "\n[features]\nlocal_review = false\n")
+      assert.equal((await readProjectConfig(repo)).features.local_review, false)
+      await handOff(repo, home)
+      const resolve = await btrain(["handoff", "resolve", "--lane", "a", "--summary", "Owner update"], { cwd: repo, home })
+      assert.equal(resolve.code, 0, resolve.stderr)
+      await assert.rejects(runPrCreate(repo, { lane: "a", actor: "alpha" }), noPeerReview)
       await git(repo, "remote", "add", "upstream", "https://github.com/o/r.git")
       await linkPr(repo, home)
-      const disabled = await btrain(["features", "disable", "local_review"], { cwd: repo, home })
-      assert.equal(disabled.code, 0, disabled.stderr)
-      const warnings = mock.method(console, "error", () => {})
-      try {
-        await withGitHub(repo, headA, baseSha, async ({ posts }) => {
-          await request(repo)
-          assert.match(await posts(), /@codex review/)
-          assert.match(warnings.mock.calls[0].arguments[0], /local_review is disabled/)
-        })
-      } finally {
-        warnings.mock.restore()
-      }
+      await withGitHub(repo, headA, baseSha, async ({ posts, setReview }) => {
+        await assert.rejects(request(repo), noPeerReview)
+        await assert.rejects(poll(repo, { "request-review": true }), noPeerReview)
+        await setReview("APPROVED")
+        await assert.rejects(poll(repo, { apply: true }), noPeerReview)
+        assert.equal((await laneA(repo)).status, "pr-review")
+        assert.equal(await posts(), "")
+      })
     })
   })
+
+  it("consumes one audited override for creation, requests, and clearance in one PR cycle", async () => {
+    await withRepo(async ({ repo, home, headA, baseSha }) => {
+      await handOff(repo, home)
+      const resolve = await btrain(["handoff", "resolve", "--lane", "a", "--summary", "Owner update"], { cwd: repo, home })
+      assert.equal(resolve.code, 0, resolve.stderr)
+      await grantLocalReview(repo, home)
+      await withGitHub(repo, headA, baseSha, async ({ posts, setReview }) => {
+        await runPrCreate(repo, { lane: "a", actor: "alpha", bots: "all" })
+        assert.equal((await listActiveOverrides(repo)).length, 0)
+        await request(repo)
+        await setReview("APPROVED")
+        await poll(repo, { apply: true })
+        assert.equal((await laneA(repo)).status, "ready-to-merge")
+        assert.match(await posts(), /@codex review/)
+      })
+      const consumed = (await readLaneEvents(repo, "a")).filter((event) => event.type === "override-consumed")
+      assert.equal(consumed.length, 1)
+      assert.equal(consumed[0].laneId, "a")
+      assert.equal(consumed[0].details.action, "local-review")
+      assert.equal(consumed[0].details.scope, "lane")
+      assert.equal(consumed[0].details.requestedBy, "alpha")
+      assert.equal(consumed[0].details.confirmedBy, "human")
+      assert.equal(consumed[0].details.reason, "Reviewer unavailable for this cycle")
+      assert.equal((await readLaneEvents(repo)).filter((event) => event.type === "override-consumed").length, 0)
+    })
+  })
+
+  it("requires a lane when granting a local-review override in a multi-lane repo", async () => {
+    await withRepo(async ({ repo, home }) => {
+      const result = await btrain(["override", "grant", "--action", "local-review", "--requested-by", "alpha",
+        "--confirmed-by", "human", "--reason", "Reviewer unavailable"], { cwd: repo, home })
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /requires --lane/)
+    })
+  })
+
+  it("does not consume an override for another lane or at repo scope", async () => {
+    await withRepo(async ({ repo, home }) => {
+      await linkPr(repo, home)
+      await grantLocalReview(repo, home, "b")
+      // Simulate a pre-existing repo-scoped grant. The CLI must reject new ones.
+      await fs.writeFile(path.join(getRepoPaths(repo).overridesDir, "repo-scope.json"), JSON.stringify({
+        id: "repo-scope", action: "local-review", scope: "repo", laneId: "",
+        requestedBy: "alpha", confirmedBy: "human", reason: "Old repo grant",
+      }))
+      await assert.rejects(gate(repo), noPeerReview)
+      assert.equal((await listActiveOverrides(repo)).length, 2)
+      assert.equal((await readLaneEvents(repo, "a")).filter((event) => event.type === "override-consumed").length, 0)
+    })
+  })
+
+  for (const withdrawal of ["claim", "request-changes", "watchdog-repair", "status"]) {
+    it(`withdraws a consumed override after ${withdrawal}`, async () => {
+      await withRepo(async ({ repo, home }) => {
+        await linkPr(repo, home)
+        await grantLocalReview(repo, home)
+        await gate(repo)
+        // Keep the current PR status to prove the event history withdraws approval.
+        await fs.appendFile(path.join(getRepoPaths(repo).eventsDir, "lane-a.jsonl"), JSON.stringify({
+          type: withdrawal, laneId: "a", ...(withdrawal === "status" ? { after: { status: "in-progress" } } : {}),
+        }) + "\n")
+        await assert.rejects(gate(repo), noPeerReview)
+        assert.equal((await listActiveOverrides(repo)).length, 0)
+      })
+    })
+  }
 })
+
+async function grantLocalReview(repo, home, lane = "a") {
+  const result = await btrain(["override", "grant", "--action", "local-review", "--lane", lane,
+    "--requested-by", "alpha", "--confirmed-by", "human", "--reason", "Reviewer unavailable for this cycle"], { cwd: repo, home })
+  assert.equal(result.code, 0, result.stderr)
+}
+
+async function gate(repo) {
+  return enforceLocalReview(repo, await readProjectConfig(repo), {
+    lane: await laneA(repo), laneId: "a", stage: "Requesting bot review",
+  })
+}
