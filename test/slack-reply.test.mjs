@@ -7,17 +7,17 @@ import { MAX_PROSE_CHARS, renderProposalMessage, splitModelReply } from "../src/
 const REPO = { name: "btrain", path: "/work/btrain", laneIds: ["a", "e"], agents: ["claude", "codex"] }
 const CHANNEL = { repos: [REPO] }
 // Fake secrets, built at runtime so the source holds no matching string.
-const SLACK_TOKEN = ["xoxb", "1234567890", "fake", "reply", "token"].join("-")
+const FAKE_SLACK_BOT = ["xoxb", "1234567890", "fake", "reply", "token"].join("-")
 const GITHUB_PAT = ["github", "pat", "1".repeat(22), "2".repeat(59)].join("_")
 
 describe("the prose", () => {
   it("is redacted and escaped, with no mention and no link", () => {
-    const raw = `Lane e is waiting. <!channel> <@U0000FAKE> see https://evil.invalid/x and ${SLACK_TOKEN} & ${GITHUB_PAT}`
+    const raw = `Lane e is waiting. <!channel> <@U0000FAKE> see https://evil.invalid/x and ${FAKE_SLACK_BOT} & ${GITHUB_PAT}`
     const { prose, proposal, notes } = splitModelReply(raw, { channel: CHANNEL })
     assert.equal(proposal, null)
     assert.deepEqual(notes, [])
     assert.doesNotMatch(prose, /[<>]|:\/\//)
-    assert.ok(!prose.includes(SLACK_TOKEN) && !prose.includes("1".repeat(22)))
+    assert.ok(!prose.includes(FAKE_SLACK_BOT) && !prose.includes("1".repeat(22)))
     assert.match(prose, /&lt;!channel&gt;/)
     assert.match(prose, /https\[:\]\/\/evil\.invalid/)
     assert.match(prose, /\[redacted\]/)
@@ -66,7 +66,7 @@ describe("the proposal", () => {
   })
 
   it("rejects a proposal the scrub or the URL rewrite would change", () => {
-    for (const task of [`rotate ${SLACK_TOKEN}`, "read https://example.invalid/spec"]) {
+    for (const task of [`rotate ${FAKE_SLACK_BOT}`, "read https://example.invalid/spec"]) {
       const { proposal, notes } = splitModelReply(`btrain> start owner=codex\ntask: ${task}\nfiles: a`, { channel: CHANNEL })
       assert.equal(proposal, null, task)
       assert.match(notes[0], /secret pattern|URL/)

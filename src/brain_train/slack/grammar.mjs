@@ -151,11 +151,11 @@ export function renderCanonical({ verb, values = {}, repoGiven }) {
   return lines.join("\n")
 }
 
-function parseAndCheck(text, channel, { decoded }) {
+function parseAndCheck(text, channel) {
   const found = findCommand(text)
   if (!found.found) return { ok: false, reason: found.reason, many: Boolean(found.many) }
   const blockText = found.block.join("\n")
-  if (decoded && MENTION_TOKEN.test(blockText)) {
+  if (MENTION_TOKEN.test(blockText)) {
     return { ok: false, reason: "a command may not hold a user, channel, or special mention" }
   }
   const checked = checkCommand(parseCommandBlock(found.block), channel)
@@ -169,7 +169,7 @@ function parseAndCheck(text, channel, { decoded }) {
  * ignored (FR-2).
  */
 export function parseOperatorCommand(slackText, channel = {}) {
-  return parseAndCheck(decodeSlackText(slackText), channel, { decoded: true })
+  return parseAndCheck(decodeSlackText(slackText), channel)
 }
 
 /**
@@ -178,7 +178,7 @@ export function parseOperatorCommand(slackText, channel = {}) {
  * `end`, the line span of the command block in the text.
  */
 export function parseModelCommand(text, channel = {}) {
-  return parseAndCheck(String(text ?? ""), channel, { decoded: true })
+  return parseAndCheck(String(text ?? ""), channel)
 }
 
 /**

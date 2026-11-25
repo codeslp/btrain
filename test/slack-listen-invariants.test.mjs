@@ -69,7 +69,7 @@ async function createListenFixture({ slackListen = true, features = true } = {})
   await exec("git", ["-C", repo, "config", "user.email", "test@example.com"])
   await exec("git", ["-C", repo, "config", "user.name", "Test Bot"])
   const env = { ...process.env, BRAIN_TRAIN_HOME: home, BTRAIN_DASHBOARD_DISABLED: "1" }
-  for (const key of ["BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO", "BTRAIN_LOOP_ACTIVE", "BTRAIN_SLACK_BOT_TOKEN"]) delete env[key]
+  for (const key of ["BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO", "BTRAIN_LOOP_ACTIVE", "BTRAIN_SLACK_BOT_TOKEN"]) delete env[key] // btrain-allow: env-var-required
   await exec("node", [CLI, "init", repo, "--tracked", "--core-only", "--agent", "claude", "--agent", "codex"], { cwd: repo, env })
   if (features) {
     const tomlPath = path.join(repo, ".btrain", "project.toml")
@@ -279,7 +279,7 @@ describe("spec 025 listener invariants", () => {
   it("11. no child gets an agent identity or a lane pin, and lane state is read only through the reader functions", { skip: "WS5: typed commands (T027)" }, async () => { // btrain-allow: skipped-test
     const commands = await slackModule("commands.mjs")
     const env = commands.childEnvironment({ ...process.env, BTRAIN_SLACK_BOT_TOKEN: TOKEN, BTRAIN_AGENT: "codex", BRAIN_TRAIN_AGENT: "codex", BTRAIN_LANE: "a", BTRAIN_LANE_LOCKED: "1", BTRAIN_REPO: "/x", BTRAIN_LOOP_ACTIVE: "1" })
-    for (const name of ["BTRAIN_SLACK_BOT_TOKEN", "BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO", "BTRAIN_LOOP_ACTIVE"]) {
+    for (const name of ["BTRAIN_SLACK_BOT_TOKEN", "BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO", "BTRAIN_LOOP_ACTIVE"]) { // btrain-allow: env-var-required
       assert.equal(env[name], undefined, name)
     }
     const source = await fs.readFile(path.join(REPO_ROOT, "src/brain_train/slack/listen.mjs"), "utf8")
