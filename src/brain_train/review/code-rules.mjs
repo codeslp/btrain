@@ -63,6 +63,7 @@ import {
   readProjectConfig,
 } from "../core.mjs"
 import { SECRET_PATTERNS } from "./secret-patterns.mjs"
+import { isNamedTestFile, JS_TEST_CONFIG_BASENAME, PYTHON_TEST_CONFIG_BASENAME } from "./test-files.mjs"
 
 const execFileAsync = promisify(execFile)
 
@@ -123,18 +124,8 @@ const DEPENDENCY_FILES = [
 
 // ---- weakened-test rules: file classes ----
 
-const TEST_CODE_EXTENSION = "(?:[cm]?[jt]sx?|py|go|rb|rs|java|kts?|scala|groovy|cs|swift|php|exs?|dart)"
-// Runner naming conventions: foo.test.mjs, foo.spec.ts, foo_test.go,
-// foo-test.js, test_foo.py, FooTest.java, __tests__/foo.js, Rust tests/*.rs.
-const TEST_BASENAME_PATTERNS = [
-  new RegExp(`[._-](?:test|spec)\\.${TEST_CODE_EXTENSION}$`, "i"),
-  new RegExp(`^test[_-].+\\.${TEST_CODE_EXTENSION}$`, "i"),
-  /(?:Tests?|Spec|IT)\.(?:java|kts?|scala|groovy|cs|swift|php)$/,
-]
-const TEST_PATH_PATTERNS = [
-  new RegExp(`(?:^|/)__tests__/.+\\.${TEST_CODE_EXTENSION}$`, "i"),
-  /(?:^|\/)tests\/[^/]+\.rs$/,
-]
+// Runner naming conventions (foo.test.mjs, foo_test.go, FooTest.java, ...)
+// live in test-files.mjs, shared with the spec 023 fix rules.
 // Node's test runner and mocha collect every JS file under a test/
 // directory by default, so test/smoke.js counts whatever its name. Files
 // in helper, fixture, mock or data folders under it do not.
@@ -146,10 +137,8 @@ const PYTHON_FILE = /\.pyi?$/
 // Files whose comments start with `#`; every other file uses // and /* */.
 const HASH_COMMENT_FILE =
   /(?:\.(?:py|pyi|rb|sh|bash|zsh|toml|ya?ml|ini|cfg|conf|mk|r|pl)|(?:^|\/)(?:Makefile|makefile|GNUmakefile|justfile|Justfile|Dockerfile|\.coveragerc))$/
-// Test-runner and coverage config. `exclude` counts only in the JS ones.
-const JS_TEST_CONFIG_BASENAME =
-  /^(?:(?:jest|vitest|vite|playwright|cypress|karma|wdio|ava|mocha)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|karma\.conf\.[cm]?js|\.(?:mocharc|nycrc|c8rc)(?:\.(?:json|ya?ml|[cm]?js))?|package\.json)$/
-const PYTHON_TEST_CONFIG_BASENAME = /^(?:\.coveragerc|\.?codecov\.ya?ml|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|conftest\.py)$/
+// Test-runner and coverage config (test-files.mjs, shared with the
+// spec 023 fix rules). `exclude` counts only in the JS ones.
 // Config shared with non-test tools (vite optimizeDeps, package.json
 // fields). There `exclude` counts only under one of these parent keys.
 const SHARED_CONFIG_BASENAME = /^(?:(?:vite|vitest)(?:\.[\w-]+)*\.(?:[cm]?[jt]s|json)|package\.json)$/
@@ -663,13 +652,6 @@ function splitCallArgs(code, masked, openIndex) {
 
 function isAssertionCode(masked, file) {
   return ASSERTION_CALL.test(masked) || (PYTHON_FILE.test(file) && PYTHON_ASSERT_STATEMENT.test(masked))
-}
-
-// A test file by its runner naming convention alone: foo.test.mjs,
-// test_foo.py, __tests__/foo.js.
-function isNamedTestFile(file) {
-  const base = path.posix.basename(file)
-  return TEST_BASENAME_PATTERNS.some((re) => re.test(base)) || TEST_PATH_PATTERNS.some((re) => re.test(file))
 }
 
 function isTestFilePath(file) {
