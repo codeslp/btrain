@@ -332,9 +332,13 @@ export async function runReviewRequest({
         if (!laneOnOtherLab && record.sameLabChangeRequests >= SAME_LAB_CHANGE_REQUEST_LIMIT) {
           return escalate(lane, record, ESCALATION_REASONS.SAME_LAB_LIMIT)
         }
+        // A reviewer the caller left out of both lists (a notify runner, or no
+        // cli runner) is never dispatched: it keeps manual pickup until the
+        // window's end escalates.
+        const laneIsCandidate = laneOnOtherLab || includesName(sameLab, lane.reviewer)
         const previous = attemptsOf(lane.reviewer).at(-1)
         const endedAt = toMs(previous?.endedAt)
-        if (!previous || (endedAt !== null && t - endedAt >= limits.silenceLimitMs)) {
+        if (laneIsCandidate && (!previous || (endedAt !== null && t - endedAt >= limits.silenceLimitMs))) {
           const result = await dispatch(lane, record, {
             reviewer: lane.reviewer,
             reason: "",
