@@ -10,7 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { clearPause, collapsedReplyText, deliver, DELIVERY_LOCK_FILENAME, MAX_UNKNOWN_ATTEMPTS } from "../src/brain_train/slack/deliver.mjs"
 import { listEntries, outboxDir, readDeliveryState, writeEntry } from "../src/brain_train/slack/outbox.mjs"
-import { getThread } from "../src/brain_train/slack/threads.mjs"
+import { getThread, readChannelState, reserveChannelSend } from "../src/brain_train/slack/threads.mjs"
 import { tryAcquireLock } from "../src/brain_train/slack/lock.mjs"
 import { createFakeSlack } from "./helpers/fake-slack.mjs"
 
@@ -358,6 +358,41 @@ describe("deliver", () => {
     }
     assert.equal(t.fake.calls.filter((call) => call.method === "chat.update").length, 5)
     assert.deepEqual((await readDeliveryState(t.slackDir)).cards, {})
+  })
+
+  it("stops at once, without waiting or reserving, when the channel's next slot is past the budget (pins mutant M7)", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const homeDir = path.join(t.root, "home")
+    // Another repository already holds the channel's slots for the next 5 seconds.
+    for (let index = 0; index < 5; index += 1) await reserveChannelSend(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 })
+    const before = await readChannelState(homeDir, CHANNEL)
+    const startedAt = t.clock.at
+    const result = await t.run({ budgetMs: 2000 })
+    assert.deepEqual([result.status, t.fake.calls.length, t.clock.at - startedAt], ["budget", 0, 0], "no call and no wait")
+    assert.deepEqual(await readChannelState(homeDir, CHANNEL), before, "no phantom slot was reserved")
+  })
+
+  it("stamps the retry time on every entry of a collapsed set that failed (pins mutant M12)", async () => {
+    const t = await setup()
+    const old = t.clock.at - 25 * HOUR
+    const queued = []
+    for (let index = 0; index < 3; index += 1) queued.push((await t.queue("a", "sent-to-review", {}, { at: old + index })).entry.id)
+    t.fake.queue("chat.postMessage", null, { status: 503 })
+    await t.run()
+    const state = await readDeliveryState(t.slackDir)
+    for (const id of queued) assert.ok(Date.parse(state.entries[id]?.nextTryAt) > t.clock.at, `entry ${id} waits`)
+  })
+
+  it("reports a 429 on an owed card refresh as ratelimited (pins mutant M14)", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    await t.run()
+    await t.queue("a", "card-refresh")
+    t.fake.queue("chat.update", { retryAfter: 60 })
+    const result = await t.run()
+    assert.equal(result.status, "ratelimited")
+    assert.equal(Object.keys((await readDeliveryState(t.slackDir)).cards).length, 1, "the card stays owed")
   })
 
   it("keeps the one-message-a-second pace across runs", async () => {

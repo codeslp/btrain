@@ -39,7 +39,7 @@ import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
 import { renderCard, renderReply } from "./render.mjs"
 import { btrainHome } from "./credentials.mjs"
-import { deleteThread, getThread, holdChannel, reserveChannelSend, setThread, threadKey } from "./threads.mjs"
+import { deleteThread, getThread, holdChannel, readChannelState, reserveChannelSend, setThread, threadKey } from "./threads.mjs"
 
 export const DELIVERY_LOCK_FILENAME = "delivery.lock"
 export const COLLAPSE_AGE_MS = 24 * 60 * 60 * 1000
@@ -204,16 +204,21 @@ export async function deliver(options = {}) {
   }
 }
 
-// One Slack call under the run's rules: budget, the channel's shared pace and
-// Retry-After, the lock heartbeat. Returns `{ result }`, or `{ stop }` with
-// `budget`, `ratelimited`, or `lost-lock`.
-async function send(run, call) {
-  if (run.now() >= run.deadline) return { stop: "budget" }
+// One Slack call to `channel` under the run's rules: budget, that channel's
+// shared pace and Retry-After, the lock heartbeat. `channel` is where the call
+// goes: an existing thread keeps the channel it was posted in, which can
+// differ from the repository's current mapping. Returns `{ result }`, or
+// `{ stop }` with `budget`, `ratelimited`, or `lost-lock`.
+async function send(run, channel, call) {
+  const minCall = Math.min(MIN_CALL_MS, run.callTimeoutMs)
+  if (run.now() + minCall > run.deadline) return { stop: "budget" }
   let reservation
   try {
-    reservation = await reserveChannelSend(run.homeDir, run.channel, {
+    reservation = await reserveChannelSend(run.homeDir, channel, {
       now: run.now(),
       intervalMs: CHANNEL_INTERVAL_MS,
+      // Reserve only a slot that still leaves a whole call inside the budget.
+      notAfter: run.deadline - minCall,
       waitMs: Math.min(5000, run.deadline - run.now()),
     })
   } catch {
@@ -224,18 +229,24 @@ async function send(run, call) {
     run.rateLimited = true
     return { stop: "ratelimited" }
   }
+  if (reservation.tooLate) return { stop: "budget" }
   const wait = reservation.slotAt - run.now()
   if (wait > 0) {
-    if (run.now() + wait >= run.deadline) return { stop: "budget" }
     await run.sleep(wait)
+    // Another repository may have been told to wait (a 429) while this one
+    // slept: check the channel again before sending.
+    if ((await readChannelState(run.homeDir, channel)).retryUntil > run.now()) {
+      run.rateLimited = true
+      return { stop: "ratelimited" }
+    }
   }
   if (!(await run.lock.touch())) return { stop: "lost-lock" }
   const timeoutMs = Math.min(run.callTimeoutMs, run.deadline - run.now())
-  if (!(timeoutMs >= Math.min(MIN_CALL_MS, run.callTimeoutMs))) return { stop: "budget" }
+  if (!(timeoutMs >= minCall)) return { stop: "budget" }
   const result = await call({ token: run.token, fetchImpl: run.fetchImpl, timeoutMs })
   if (result.status === 429 || result.error === "ratelimited") {
     run.rateLimited = true
-    await holdChannel(run.homeDir, run.channel, run.now() + Math.max(result.retryAfterMs || 0, CHANNEL_INTERVAL_MS)).catch(() => {})
+    await holdChannel(run.homeDir, channel, run.now() + Math.max(result.retryAfterMs || 0, CHANNEL_INTERVAL_MS)).catch(() => {})
   }
   // Cut off by the budget, not by the call's own limit: not a failure of the
   // entry. It stays queued with no backoff.
@@ -291,7 +302,7 @@ async function ensureThread(run, laneId, claimKey, laneState, entry) {
   if (existing) return { thread: existing, fresh: false }
   const current = stateForClaim(laneState, claimKey)
   const text = renderCard(current || { lane: laneId, status: laneState ? "earlier claim" : "unknown" }, run.renderContext)
-  const sent = await send(run, (options) => postMessage({ ...options, channel: run.channel, text }))
+  const sent = await send(run, run.channel, (options) => postMessage({ ...options, channel: run.channel, text }))
   if (sent.stop) return { outcome: sent.stop }
   if (!sent.result.ok) return failureOutcome(run, entry, sent.result)
   const thread = { channel: run.channel, cardTs: String(sent.result.body.ts || "") }
@@ -326,7 +337,7 @@ async function deliverLane(run, laneId, laneState, items) {
       thread = { ...ensured.thread, claimKey, fresh: ensured.fresh }
     }
     if (text) {
-      const sent = await send(run, (options) => postMessage({ ...options, channel: thread.channel, text, threadTs: thread.cardTs }))
+      const sent = await send(run, thread.channel, (options) => postMessage({ ...options, channel: thread.channel, text, threadTs: thread.cardTs }))
       if (sent.stop) return { outcome: sent.stop }
       if (!sent.result.ok) return failureOutcome(run, entry, sent.result)
     }
@@ -403,7 +414,8 @@ async function refreshCards(run, lanes) {
       continue
     }
     const text = renderCard(current, run.renderContext)
-    const sent = await send(run, (options) => updateMessage({ ...options, channel: owed.channel || run.channel, ts: owed.cardTs, text }))
+    const destination = owed.channel || run.channel
+    const sent = await send(run, destination, (options) => updateMessage({ ...options, channel: destination, ts: owed.cardTs, text }))
     if (sent.stop) return sent.stop
     const result = sent.result
     if (result.ok) {

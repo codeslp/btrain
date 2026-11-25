@@ -138,18 +138,22 @@ export async function readChannelState(homeDir, channel) {
 /**
  * Reserve the next send to a channel, for every repository of this developer
  * (FR-10: at most one message a second to a channel; a 429 holds the
- * channel). Returns `{ blockedUntil }` while a Retry-After holds the channel,
- * else `{ slotAt }`: the time this send may go, at least `intervalMs` after
- * the last reserved one. The slot is recorded at once, so two processes never
- * get the same one. `waitMs` bounds the wait for the home lock.
+ * channel). Returns `{ blockedUntil }` while a Retry-After holds the channel;
+ * `{ tooLate }` when the next free slot is after `notAfter`, in which case
+ * nothing is reserved, so a send the caller's budget cannot make leaves no
+ * phantom slot; else `{ slotAt }`: the time this send may go, at least
+ * `intervalMs` after the last reserved one. The slot is recorded at once, so
+ * two processes never get the same one. `waitMs` bounds the wait for the
+ * home lock.
  */
-export async function reserveChannelSend(homeDir, channel, { now, intervalMs, waitMs }) {
+export async function reserveChannelSend(homeDir, channel, { now, intervalMs, notAfter = Infinity, waitMs }) {
   return withHomeLock(homeDir, { waitMs }, async () => {
     const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
     const entry = objectOr(all[String(channel)])
     const retryUntil = Number(entry.retryUntil) || 0
     if (retryUntil > now) return { blockedUntil: retryUntil }
     const slotAt = Math.max(now, (Number(entry.lastSentAt) || 0) + intervalMs)
+    if (slotAt > notAfter) return { tooLate: slotAt }
     all[String(channel)] = { ...entry, lastSentAt: slotAt }
     await writeJsonAtomic(channelsPath(homeDir), all)
     return { slotAt }
