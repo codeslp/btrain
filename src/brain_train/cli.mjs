@@ -635,6 +635,10 @@ function formatDoctorResult(result) {
     lines.push(`  features off: ${off.length > 0 ? off.join(", ") : "(none)"}`)
   }
 
+  if (result.labs?.length > 0) {
+    lines.push(`  labs: ${result.labs.join(" | ")}`)
+  }
+
   if (result.issues.length > 0) {
     lines.push(`  issues: ${result.issues.join(" | ")}`)
   }
