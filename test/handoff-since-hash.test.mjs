@@ -539,6 +539,26 @@ describe("btrain handoff wait", () => {
     assert.ok(result.stdout.includes("woke without explicit since"), result.stdout)
   })
 
+  it("core wait awaits onBaseline before its first poll", async () => {
+    const before = await checkHandoff(tmpDir, { laneId: "a" })
+    let reportedHash = ""
+    let callbackFinished = false
+    const result = await waitForHandoffStateChange(tmpDir, {
+      laneId: "a",
+      timeoutMs: 20,
+      pollIntervalMs: 5,
+      onBaseline: async (hash) => {
+        reportedHash = hash
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        callbackFinished = true
+      },
+    })
+
+    assert.equal(reportedHash, before.stateHash)
+    assert.equal(callbackFinished, true, "the wait returned before onBaseline settled")
+    assert.equal(result.timedOut, true)
+  })
+
   it("core wait returns immediately when a supplied hash is already stale", async () => {
     const startedAt = Date.now()
     const result = await waitForHandoffStateChange(tmpDir, {

@@ -633,7 +633,9 @@ async function writeText(targetPath, content) {
       destination = path.resolve(path.dirname(destination), linkTarget)
     }
   }
-  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`
+  // A short fixed-shape name: appending to a long valid basename could pass
+  // the filesystem's 255-byte name limit.
+  const temporary = path.join(path.dirname(destination), `.btrain-write-${process.pid}-${randomUUID()}.tmp`)
   try {
     await fs.writeFile(temporary, content, "utf8")
     if (mode !== undefined) await fs.chmod(temporary, mode)
