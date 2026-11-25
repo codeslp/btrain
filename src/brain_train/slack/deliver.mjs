@@ -126,7 +126,9 @@ export async function deliver({
   } catch (error) {
     return { ...summary, status: "error", reason: String(error?.message || error) }
   } finally {
-    if (lock && state) {
+    // A holder whose lock was taken over must not overwrite the new holder's
+    // state.
+    if (lock && state && (await lock.stillMine())) {
       await writeDeliveryState(slackDir, state).catch(() => {})
     }
     await lock?.release()
@@ -245,6 +247,11 @@ async function deliverLane(run, laneId, laneState, items) {
 
   if (old.length > 0) {
     const newest = old[old.length - 1].entry
+    const retry = run.state.entries[String(newest.id || "")]
+    if (retry?.nextTryAt && Date.parse(retry.nextTryAt) > run.now()) {
+      run.summary.deferred += pending.length
+      return "next"
+    }
     const result = await sendReply(newest, collapsedReplyText(old.length))
     if (result.ok) {
       await finishEntries(run, old, "collapsed")

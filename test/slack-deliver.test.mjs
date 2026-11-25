@@ -189,6 +189,21 @@ describe("deliver", () => {
     assert.equal((await readDeliveryState(t.slackDir)).counters.collapsed, 3)
   })
 
+  it("honors the retry time of a collapsed reply that failed", async () => {
+    const t = await setup()
+    const old = t.clock.at - 25 * HOUR
+    for (let index = 0; index < 2; index += 1) await t.queue("a", "sent-to-review", {}, { at: old + index })
+    t.fake.queue("chat.postMessage", null, { status: 503 })
+    await t.run()
+    const calls = t.fake.calls.length
+    t.clock.at += 1000
+    await t.run()
+    assert.equal(t.fake.calls.length, calls, "no new try before nextTryAt")
+    t.clock.at += HOUR
+    const result = await t.run()
+    assert.equal(result.collapsed, 2)
+  })
+
   it("after a crash between Slack's answer and the entry's removal, sends that reply once more and keeps the card right", async () => {
     const t = await setup()
     await t.queue("a", "claimed")
@@ -243,6 +258,8 @@ describe("deliver", () => {
           replaced = true
           // Another process judged the lock stale and created its own.
           writeFileSync(lockFile, "another-process-nonce", "utf8")
+          // ...and the new holder writes its own delivery state.
+          writeFileSync(path.join(t.slackDir, "delivery-state.json"), JSON.stringify({ entries: {}, paused: null, counters: { sent: 99, dropped: 0, collapsed: 0 } }), "utf8")
         }
       },
     })
@@ -251,6 +268,7 @@ describe("deliver", () => {
     const replies = fake.calls.filter((call) => call.body.thread_ts)
     assert.equal(replies.length, 1, "the first holder sent one reply and stopped")
     assert.equal((await listEntries(t.slackDir)).length, 2)
+    assert.equal((await readDeliveryState(t.slackDir)).counters.sent, 99, "the stopped holder did not overwrite the new holder's state")
   })
 
   it("ends within a 2-second budget when a call never returns", async () => {
