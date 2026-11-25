@@ -413,6 +413,21 @@ describe("deliver", () => {
     assert.deepEqual(await claimChannelSend(homeDir, CHANNEL, { now: at + 1000, intervalMs: 1000 }), { claimed: at + 1000 })
   })
 
+  it("gives up a send for this run, without sending, when other senders keep taking the channel", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const homeDir = path.join(t.root, "home")
+    // Another repository sends on the channel every time this one wakes.
+    const busySleep = async (ms) => {
+      t.clock.at += ms
+      await claimChannelSend(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 })
+    }
+    await claimChannelSend(homeDir, CHANNEL, { now: t.clock.at, intervalMs: 1000 })
+    const result = await t.run({ sleep: busySleep })
+    assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
+    assert.equal((await listEntries(t.slackDir)).length, 1, "the entry waits for a later run")
+  })
+
   it("keeps the one-message-a-second pace across runs", async () => {
     const t = await setup()
     await t.queue("a", "claimed")
