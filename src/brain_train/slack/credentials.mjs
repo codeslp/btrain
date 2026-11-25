@@ -1,7 +1,7 @@
 // Spec 024 FR-2: the bot token and the developer's Slack settings never enter
 // a repository.
 //
-// The token comes from `BTRAIN_SLACK_BOT_TOKEN`, else from
+// The token comes from `BTRAIN_SLACK_BOT_TOKEN`, else from // btrain-allow: env-var-required
 // `<btrain home>/slack.json` (`BRAIN_TRAIN_HOME` moves the home). The file is
 // read under the rules `loadSystemOneRuntimeConfig` applies to `jev.json`:
 // opened without following a symlink, at most 4096 bytes, owned by the
@@ -17,7 +17,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-export const TOKEN_ENV = "BTRAIN_SLACK_BOT_TOKEN"
+export const TOKEN_ENV = "BTRAIN_SLACK_BOT_TOKEN" // btrain-allow: env-var-required (the name of the variable, not a value)
 export const SLACK_FILENAME = "slack.json"
 export const MAX_CREDENTIAL_BYTES = 4096
 
