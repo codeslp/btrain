@@ -37,6 +37,18 @@
 // test/helpers/fake-slack-preload.mjs installs the same fake as the global
 // `fetch` in a btrain subprocess and appends each call to a JSONL log, so a
 // test that drives the real CLI can read the calls with `readFakeSlackLog`.
+//
+// Reads (spec 025 WS0, T001). `history(channel, messages)` scripts a channel's
+// messages and `replies(channel, threadTs, messages)` a thread's, parent
+// included. `conversations.history` answers newest first and
+// `conversations.replies` earliest first with the parent first, both filtered
+// by `oldest` and `latest` (exclusive unless `inclusive` is true; the parent
+// of a thread is always returned), paged by `limit` (default 100) and
+// `cursor`, with `has_more` and `response_metadata.next_cursor`. On a GET the
+// arguments come from the query string, as Slack reads them. A JSON body on
+// `conversations.replies` is refused with `invalid_arguments`, because Slack
+// reads that method's arguments only from a form or the query. Every outcome
+// above (errors, 429, network, hang) applies to the two read methods too.
 
 import fs from "node:fs"
 
@@ -65,6 +77,10 @@ export function createFakeSlack({
   const refused = []
   const queues = new Map()
   const defaults = new Map()
+  // Scripted messages for the read calls: channel -> messages, and
+  // "channel:threadTs" -> messages (the parent included).
+  const histories = new Map()
+  const threads = new Map()
   let sequence = 0
   let pendingHangs = 0
 
@@ -111,14 +127,19 @@ export function createFakeSlack({
     }
     const method = url.slice(SLACK_API_PREFIX.length).split(/[?#]/)[0]
     const headers = recordHeaders(options.headers, options.body)
-    const parsed = parseBody(options.body, headers["content-type"])
+    // Slack reads a GET's arguments from the query string.
+    const parsed = httpMethod === "GET" || httpMethod === "HEAD"
+      ? parseQuery(url)
+      : parseBody(options.body, headers["content-type"])
+    const jsonBody = String(headers["content-type"] || "").includes("application/json")
     const auth = authState(bearerToken(options.headers) ?? parsed.token, expectedToken)
     const body = parsed.body
     const { outcome, source } = takeOutcome(method)
     const call = {
       index: calls.length,
       method,
-      url,
+      // A token in the query string never reaches the record.
+      url: url.replace(/([?&]token=)[^&#]*/gi, `$1${REDACTED}`),
       httpMethod,
       body,
       headers,
@@ -158,10 +179,12 @@ export function createFakeSlack({
       settle({ kind: "network", code })
       throw networkError(code)
     }
-    const response = buildResponse(method, body, outcome, nextTs, auth)
+    const response = buildResponse(method, body, outcome, nextTs, auth, { histories, threads, jsonBody })
     settle(response.record)
     return response.response
   }
+
+  const copyMessages = (messages) => (Array.isArray(messages) ? messages : []).map((message) => ({ ...message }))
 
   return {
     fetch: fetchImpl,
@@ -182,11 +205,23 @@ export function createFakeSlack({
       }
       return this
     },
+    /** Script a channel's messages for `conversations.history` (any order). */
+    history(channel, messages) {
+      histories.set(String(channel), copyMessages(messages))
+      return this
+    },
+    /** Script a thread's messages for `conversations.replies`, the parent included (any order). */
+    replies(channel, threadTs, messages) {
+      threads.set(`${channel}:${threadTs}`, copyMessages(messages))
+      return this
+    },
     reset() {
       calls.length = 0
       refused.length = 0
       queues.clear()
       defaults.clear()
+      histories.clear()
+      threads.clear()
       return this
     },
     callsTo(method) {
@@ -201,7 +236,7 @@ export function createFakeSlack({
   }
 }
 
-function buildResponse(method, body, outcome, nextTs, auth) {
+function buildResponse(method, body, outcome, nextTs, auth, reads = {}) {
   if (outcome?.retryAfter !== undefined) {
     const seconds = String(outcome.retryAfter ?? DEFAULT_RETRY_AFTER_SECONDS)
     return jsonResponse(429, { ok: false, error: "ratelimited" }, { "retry-after": seconds }, {
@@ -227,6 +262,14 @@ function buildResponse(method, body, outcome, nextTs, auth) {
       kind: "slack-error", status: 200, error: authError,
     })
   }
+  if (method === "conversations.history" || method === "conversations.replies") {
+    const read = readResponse(method, body, reads)
+    const { ok: _ignored, ...extra } = outcome || {}
+    const payload = read.ok ? { ...read, ...extra } : read
+    return jsonResponse(200, payload, {}, read.ok
+      ? { kind: "ok", status: 200, count: payload.messages.length, hasMore: payload.has_more }
+      : { kind: "slack-error", status: 200, error: read.error })
+  }
   const builder = SUCCESS_BODIES[method]
   // A method with no built-in body answers `unknown_method`, as Slack does,
   // unless the test scripted a success for it with `{ ok: true, ... }`.
@@ -246,6 +289,95 @@ function buildResponse(method, body, outcome, nextTs, auth) {
   const { ok: _ignored, ...extra } = outcome || {}
   const payload = { ...success, ...extra }
   return jsonResponse(200, payload, {}, { kind: "ok", status: 200, ts: payload.ts })
+}
+
+// Order two Slack `ts` strings ("1700000000.000100") without going through a
+// float, which loses the microseconds.
+export function compareSlackTs(left, right) {
+  const split = (value) => {
+    const [seconds = "0", fraction = ""] = String(value ?? "").split(".")
+    return [BigInt(/^\d+$/.test(seconds) ? seconds : "0"), fraction.padEnd(6, "0").slice(0, 6)]
+  }
+  const [leftSeconds, leftFraction] = split(left)
+  const [rightSeconds, rightFraction] = split(right)
+  if (leftSeconds !== rightSeconds) return leftSeconds < rightSeconds ? -1 : 1
+  if (leftFraction !== rightFraction) return leftFraction < rightFraction ? -1 : 1
+  return 0
+}
+
+const DEFAULT_READ_LIMIT = 100
+const MAX_READ_LIMIT = 1000
+const CURSOR_PREFIX = "fakecursor_"
+
+function inWindow(ts, { oldest, latest, inclusive }) {
+  if (oldest !== undefined && oldest !== "") {
+    const order = compareSlackTs(ts, oldest)
+    if (order < 0 || (order === 0 && !inclusive)) return false
+  }
+  if (latest !== undefined && latest !== "") {
+    const order = compareSlackTs(ts, latest)
+    if (order > 0 || (order === 0 && !inclusive)) return false
+  }
+  return true
+}
+
+function readLimit(value) {
+  const number = Number.parseInt(String(value ?? ""), 10)
+  if (!Number.isFinite(number) || number <= 0) return DEFAULT_READ_LIMIT
+  return Math.min(number, MAX_READ_LIMIT)
+}
+
+// One page of a read call: `has_more` and the cursor of the next page.
+function page(messages, fields) {
+  let offset = 0
+  if (fields.cursor) {
+    const match = new RegExp(`^${CURSOR_PREFIX}(\\d+)$`).exec(String(fields.cursor))
+    if (!match) return { ok: false, error: "invalid_cursor" }
+    offset = Number(match[1])
+  }
+  const limit = readLimit(fields.limit)
+  const slice = messages.slice(offset, offset + limit)
+  const more = offset + limit < messages.length
+  return {
+    ok: true,
+    messages: slice,
+    has_more: more,
+    response_metadata: { next_cursor: more ? `${CURSOR_PREFIX}${offset + limit}` : "" },
+  }
+}
+
+function readResponse(method, body, { histories = new Map(), threads = new Map(), jsonBody = false }) {
+  if (method === "conversations.replies" && jsonBody) {
+    // Slack reads this method's arguments from a form or the query only.
+    return { ok: false, error: "invalid_arguments" }
+  }
+  const fields = body && typeof body === "object" ? body : {}
+  if (!fields.channel) return { ok: false, error: "channel_not_found" }
+  const window = { oldest: fields.oldest, latest: fields.latest, inclusive: fields.inclusive === true || fields.inclusive === "true" || fields.inclusive === "1" }
+  if (method === "conversations.history") {
+    const messages = (histories.get(String(fields.channel)) || [])
+      .filter((message) => inWindow(message.ts, window))
+      .sort((left, right) => compareSlackTs(right.ts, left.ts))
+    return page(messages, fields)
+  }
+  if (!fields.ts) return { ok: false, error: "thread_not_found" }
+  const thread = threads.get(`${fields.channel}:${fields.ts}`)
+  if (!thread) return { ok: false, error: "thread_not_found" }
+  const parent = thread.filter((message) => message.ts === String(fields.ts))
+  const rest = thread
+    .filter((message) => message.ts !== String(fields.ts) && inWindow(message.ts, window))
+    .sort((left, right) => compareSlackTs(left.ts, right.ts))
+  return page([...parent, ...rest], fields)
+}
+
+// A GET's arguments from its query string; a `token` argument authenticates
+// the call and is redacted from the record.
+function parseQuery(url) {
+  const query = String(url).split("?")[1]?.split("#")[0] || ""
+  if (!query) return { body: null, token: undefined }
+  const fields = Object.fromEntries(new URLSearchParams(query))
+  if (fields.token === undefined) return { body: fields, token: undefined }
+  return { body: { ...fields, token: REDACTED }, token: String(fields.token) }
 }
 
 // The error Slack returns when a built-in method is called without an
@@ -484,7 +616,8 @@ export const FAKE_SLACK_PRELOAD_URL = new URL("./fake-slack-preload.mjs", import
  * preload goes in NODE_OPTIONS (after any options `nodeOptions` already
  * holds), so a btrain command's own node children are covered too.
  *
- * `script` is `{ queue: { method: [outcome, ...] }, defaults: { method: outcome } }`.
+ * `script` is `{ queue: { method: [outcome, ...] }, defaults: { method: outcome },
+ * history: { channel: [message, ...] }, replies: { "channel:threadTs": [message, ...] } }`.
  * Each process starts with its own copy of the script, so a queue is per
  * process, not shared across the commands a test runs.
  */
@@ -591,6 +724,13 @@ export function installFakeSlackFromEnv(env = process.env) {
   }
   for (const [method, outcome] of Object.entries(script.defaults || {})) {
     fake.setDefault(method, outcome)
+  }
+  for (const [channel, messages] of Object.entries(script.history || {})) {
+    fake.history(channel, messages)
+  }
+  for (const [key, messages] of Object.entries(script.replies || {})) {
+    const split = key.lastIndexOf(":")
+    fake.replies(key.slice(0, split), key.slice(split + 1), messages)
   }
   globalThis.fetch = fake.fetch
   globalThis[INSTALLED] = fake
