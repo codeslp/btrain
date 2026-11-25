@@ -471,6 +471,18 @@ describe("deliver", () => {
     assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
   })
 
+  it("stops within its budget when the home lock cannot be read", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const dir = path.join(t.root, "home", "slack")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.symlink(path.join(t.root, "missing"), path.join(dir, "home.lock.3"))
+    const started = Date.now()
+    const result = await t.run({ budgetMs: 2000, now: Date.now, sleep: undefined })
+    assert.ok(Date.now() - started < 2600, `took ${Date.now() - started} ms`)
+    assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
+  })
+
   it("keeps the one-message-a-second pace across runs", async () => {
     const t = await setup()
     await t.queue("a", "claimed")

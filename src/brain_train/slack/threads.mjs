@@ -110,7 +110,9 @@ async function homeLockGenerations(dir) {
 }
 
 // Take the home lock, waiting up to `waitMs`. Returns a handle, or null when
-// another live holder kept it for the whole wait.
+// the lock could not be taken within the wait: another live holder kept it,
+// or the highest generation could not be read (removed meanwhile, unreadable,
+// a dangling link). Every retry is bounded by the same deadline.
 async function acquireHomeLock(homeDir, waitMs) {
   const dir = path.join(homeDir, "slack")
   await fs.mkdir(dir, { recursive: true })
@@ -126,8 +128,9 @@ async function acquireHomeLock(homeDir, waitMs) {
         free = Math.abs(Date.now() - seen.mtimeMs) > HOME_LOCK_STALE_MS
           || (await fs.readFile(top.file, "utf8")) === RELEASED
       } catch {
-        // Superseded between the listing and the read: look again.
-        continue
+        // Superseded between the listing and the read, or not readable at
+        // all: not free; look again until the deadline.
+        free = false
       }
     }
     if (free) {
@@ -135,15 +138,14 @@ async function acquireHomeLock(homeDir, waitMs) {
       const file = path.join(dir, `home.lock.${generation}`)
       try {
         await fs.writeFile(file, nonce, { flag: "wx", mode: 0o600 })
+        // Superseded generations: a stale one's holder is gone, and a live
+        // one finds before it sends that it no longer holds the lock.
+        for (const older of generations) await fs.unlink(older.file).catch(() => {})
+        return makeHomeLock(dir, file, generation, nonce)
       } catch (error) {
+        // EEXIST: another process took this generation first.
         if (error.code !== "EEXIST") throw error
-        // Another process took this generation first.
-        continue
       }
-      // Superseded generations: a stale one's holder is gone, and a live one
-      // finds before it sends that it no longer holds the lock.
-      for (const older of generations) await fs.unlink(older.file).catch(() => {})
-      return makeHomeLock(dir, file, generation, nonce)
     }
     if (Date.now() >= deadline) return null
     await pause(5 + Math.floor(Math.random() * 20))
