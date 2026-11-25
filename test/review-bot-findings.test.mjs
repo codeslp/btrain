@@ -3,7 +3,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { runReviewRequest } from "../src/brain_train/review/request.mjs"
-import { isTestPath } from "../src/brain_train/review/fix-rules.mjs"
+import { inLockedFiles, isTestPath } from "../src/brain_train/review/fix-rules.mjs"
 import { scanDiff } from "../src/brain_train/review/code-rules.mjs"
 import { createFakeClock } from "./helpers/fake-clock.mjs"
 
@@ -239,6 +239,33 @@ index 1111111..0000000
 -assert(true)
 `
       assert.equal(scanDiff(diff).violations.filter((v) => v.rule === "deleted-test-file").length, 1)
+    })
+  }
+})
+
+// gh-codex, #125 at 952a806: the fix-path lock check must read a lane's
+// locks as the pre-commit hook's path_matches_lock does (core.mjs), including
+// the literal /** directory glob. Cases mirror test/core.test.mjs.
+describe("inLockedFiles agrees with the hook's path_matches_lock", () => {
+  const cases = [
+    ["test/a.test.mjs", "test/a.test.mjs", true],
+    ["test/b.test.mjs", "test/a.test.mjs", false],
+    ["src/brain_train/cli.mjs", "src/brain_train/core.mjs", false],
+    ["src/auth/guard.ts", "src/auth/", true],
+    ["src/auth/deep/x.ts", "src/auth/", true],
+    ["src/authz/x.ts", "src/auth/", false],
+    ["src/auth/guard.ts", "src/auth", true],
+    ["src/auth/guard.ts", "src/**", true],
+    ["src/auth/deep/x.ts", "src/auth/**", true],
+    ["src/auth", "src/auth/**", true],
+    ["src/authz/x.ts", "src/auth/**", false],
+    ["docs/a.md", "src/**", false],
+    ["test/a.test.mjs", " test/a.test.mjs ", true],
+    ["test/a.test.mjs", "(none)", false],
+  ]
+  for (const [file, lock, expected] of cases) {
+    it(`${file} under ${JSON.stringify(lock)}: ${expected}`, () => {
+      assert.equal(inLockedFiles(file, [lock]), expected)
     })
   }
 })
