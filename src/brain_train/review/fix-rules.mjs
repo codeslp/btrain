@@ -111,15 +111,20 @@ function normalizePath(value) {
   return String(value || "").trim().replace(/^\.\/+/, "")
 }
 
-/** True when `file` is a locked file or under a locked directory. */
+/**
+ * True when `file` is a locked file or under a locked directory, read as the
+ * pre-commit hook's path_matches_lock (core.mjs) reads a lock: a trailing `/`
+ * or a literal `/**` makes it a directory, and a lock also covers what is
+ * under it.
+ */
 export function inLockedFiles(file, lockedFiles) {
   const target = normalizePath(file)
   if (!target) return false
   return (Array.isArray(lockedFiles) ? lockedFiles : []).some((lock) => {
     const entry = normalizePath(lock)
     if (!entry) return false
-    if (entry.endsWith("/")) return target.startsWith(entry)
-    return target === entry || target.startsWith(`${entry}/`)
+    const prefix = entry.endsWith("/**") ? entry.slice(0, -3) : entry.replace(/\/$/, "")
+    return target === prefix || target.startsWith(`${prefix}/`)
   })
 }
 
