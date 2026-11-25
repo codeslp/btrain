@@ -74,7 +74,16 @@ export const CHANNELS_RELATIVE = path.join("slack", "channels.json")
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function withHomeLock(homeDir, { waitMs = HOME_LOCK_WAIT_MS } = {}, fn) {
+// Take the home lock, waiting up to `waitMs`. Returns a handle, or null when
+// another live holder kept it for the whole wait.
+//
+// A stale lock (its holder died) is taken over by renaming it to a name of our
+// own and checking that the file we moved is the one we judged stale: same
+// inode, same modification time. Two processes can both judge one lock
+// stale; when the first has already replaced it with a fresh lock, the second
+// moves that fresh lock instead, sees the mismatch, and puts it back, so a
+// fresh lock is never removed on the strength of an old observation.
+async function acquireHomeLock(homeDir, waitMs) {
   const lockPath = path.join(homeDir, "slack", "home.lock")
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
   const nonce = randomUUID()
@@ -82,32 +91,72 @@ async function withHomeLock(homeDir, { waitMs = HOME_LOCK_WAIT_MS } = {}, fn) {
   for (;;) {
     try {
       await fs.writeFile(lockPath, nonce, { flag: "wx", mode: 0o600 })
-      break
+      return {
+        async stillMine() {
+          try {
+            return (await fs.readFile(lockPath, "utf8")) === nonce
+          } catch {
+            return false
+          }
+        },
+        async release() {
+          try {
+            if ((await fs.readFile(lockPath, "utf8")) === nonce) await fs.unlink(lockPath)
+          } catch {
+            // Already gone.
+          }
+        },
+      }
     } catch (error) {
       if (error.code !== "EEXIST") throw error
     }
+    let seen = null
     try {
-      const stat = await fs.stat(lockPath)
-      if (Math.abs(Date.now() - stat.mtimeMs) > HOME_LOCK_STALE_MS) {
-        await fs.unlink(lockPath).catch(() => {})
-        continue
-      }
+      seen = await fs.stat(lockPath)
     } catch {
       continue
     }
-    if (Date.now() >= deadline) {
-      throw new Error("The Slack state in the btrain home is locked by another btrain process.")
+    if (Math.abs(Date.now() - seen.mtimeMs) > HOME_LOCK_STALE_MS) {
+      await breakStaleLock(lockPath, seen, nonce)
+      continue
     }
+    if (Date.now() >= deadline) return null
     await pause(5 + Math.floor(Math.random() * 20))
   }
+}
+
+async function breakStaleLock(lockPath, seen, nonce) {
+  const moved = `${lockPath}.stale-${nonce}`
   try {
-    return await fn()
+    await fs.rename(lockPath, moved)
+  } catch {
+    // Someone else moved or removed it first.
+    return
+  }
+  let found = null
+  try {
+    found = await fs.stat(moved)
+  } catch {
+    return
+  }
+  if (found.ino !== seen.ino || found.mtimeMs !== seen.mtimeMs) {
+    // We moved a fresh lock that replaced the stale one: put it back. A link
+    // fails if the path was taken meanwhile; the displaced holder then sees,
+    // before it sends, that the lock is no longer its own.
+    await fs.link(moved, lockPath).catch(() => {})
+  }
+  await fs.unlink(moved).catch(() => {})
+}
+
+async function withHomeLock(homeDir, { waitMs = HOME_LOCK_WAIT_MS } = {}, fn) {
+  const lock = await acquireHomeLock(homeDir, waitMs)
+  if (!lock) {
+    throw new Error("The Slack state in the btrain home is locked by another btrain process.")
+  }
+  try {
+    return await fn(lock)
   } finally {
-    try {
-      if ((await fs.readFile(lockPath, "utf8")) === nonce) await fs.unlink(lockPath)
-    } catch {
-      // Already gone.
-    }
+    await lock.release()
   }
 }
 
@@ -176,11 +225,15 @@ export async function reserveChannelSend(homeDir, channel, { now, intervalMs, no
  * error holds the channel for its Retry-After (at least `intervalMs`).
  *
  * `now` is a clock function (a number is accepted for a fixed time).
- * `waitMs` bounds the wait for the home lock.
+ * `waitMs` bounds the wait for the home lock; when another sender holds it
+ * for the whole wait, nothing is sent and `{ busy: true }` is returned.
  */
-export async function sendOnChannel(homeDir, channel, { now, intervalMs, waitMs }, send) {
+export async function sendOnChannel(homeDir, channel, { now, intervalMs, waitMs = HOME_LOCK_WAIT_MS }, send) {
   const clock = typeof now === "function" ? now : () => now
-  return withHomeLock(homeDir, { waitMs }, async () => {
+  const lock = await acquireHomeLock(homeDir, waitMs)
+  // Another sender held the channel's lock for the whole wait.
+  if (!lock) return { busy: true }
+  try {
     const at = clock()
     const all = objectOr(await readJsonOr(channelsPath(homeDir), {}))
     const entry = objectOr(all[String(channel)])
@@ -188,6 +241,9 @@ export async function sendOnChannel(homeDir, channel, { now, intervalMs, waitMs 
     if (retryUntil > at) return { blockedUntil: retryUntil }
     const freeAt = (Number(entry.lastSentAt) || 0) + intervalMs
     if (freeAt > at) return { waitUntil: freeAt }
+    // The lock may have been taken over (see acquireHomeLock): never send
+    // without it.
+    if (!(await lock.stillMine())) return { busy: true }
     const result = await send()
     if (result?.skipped) return { result }
     const endedAt = clock()
@@ -198,7 +254,9 @@ export async function sendOnChannel(homeDir, channel, { now, intervalMs, waitMs 
     all[String(channel)] = updated
     await writeJsonAtomic(channelsPath(homeDir), all)
     return { result }
-  })
+  } finally {
+    await lock.release()
+  }
 }
 
 /** Hold a channel until `retryUntil` after a 429, for every repository. */

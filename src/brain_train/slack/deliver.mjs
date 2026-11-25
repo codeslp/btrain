@@ -239,6 +239,7 @@ async function send(run, channel, call) {
       // The home lock was not free within the budget.
       return { stop: "budget" }
     }
+    if (outcome.busy) return { stop: "budget" }
     if (outcome.blockedUntil) {
       run.rateLimited = true
       return { stop: "ratelimited" }
