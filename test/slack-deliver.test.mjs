@@ -457,6 +457,20 @@ describe("deliver", () => {
     assert.equal((await listEntries(t.slackDir)).length, 1, "the entry waits for a later run")
   })
 
+  it("does not start a call when waiting for the home lock used up the budget (pins mutant E4)", async () => {
+    const t = await setup()
+    await t.queue("a", "claimed")
+    const homeDir = path.join(t.root, "home")
+    // Another btrain process holds the home lock for 1.6 s of a 2 s budget.
+    const homeLock = path.join(homeDir, "slack", "home.lock")
+    await fs.mkdir(path.dirname(homeLock), { recursive: true })
+    await fs.writeFile(homeLock, "another-process", "utf8")
+    const released = new Promise((resolve) => setTimeout(() => fs.rm(homeLock, { force: true }).then(resolve), 1600))
+    const result = await t.run({ budgetMs: 2000, now: Date.now, sleep: undefined })
+    await released
+    assert.deepEqual([result.status, t.fake.calls.length], ["budget", 0])
+  })
+
   it("keeps the one-message-a-second pace across runs", async () => {
     const t = await setup()
     await t.queue("a", "claimed")
