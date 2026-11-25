@@ -37,13 +37,18 @@ function hasLocalReviewDecision(events, lane, laneId) {
   const owner = String(lane.owner || "").trim().toLowerCase()
   const reviewer = String(lane.reviewer || "").trim().toLowerCase()
 
+  let consumedOverride = false
   for (const event of events.slice().reverse()) {
     const status = event?.after?.status
     if (WITHDRAWAL_EVENTS.has(event?.type) || (status && !PR_STATUSES.has(status))) return false
 
+    // Consumption has no status snapshot. Only an earlier snapshot proves
+    // it occurred inside this PR cycle, after all withdrawal checks above.
+    if (consumedOverride && status) return true
+
     if (event?.type === "override-consumed" && event.details?.action === "local-review"
       && (event.laneId || "") === (laneId || "")
-      && event.details.scope === (laneId ? "lane" : "repo")) return true
+      && event.details.scope === (laneId ? "lane" : "repo")) consumedOverride = true
 
     if (event?.type === "resolve" && event.after?.status === "ready-for-pr") {
       return Boolean(owner && reviewer && owner !== reviewer)

@@ -277,6 +277,28 @@ describe("local peer-review workflow", () => {
     })
   })
 
+  for (const status of ["in-progress", "needs-review"]) {
+    for (const target of ["ready-for-pr", "pr-review"]) {
+      it(`rejects an override consumed during ${status} after a direct update to ${target}`, async () => {
+        await withRepo(async ({ repo, home }) => {
+          if (status === "needs-review") await handOff(repo, home)
+          await grantLocalReview(repo, home)
+          const consumed = await btrain(["override", "consume", "--action", "local-review", "--lane", "a"], { cwd: repo, home })
+          assert.equal(consumed.code, 0, consumed.stderr)
+          if (target === "pr-review") {
+            await linkPr(repo, home)
+          } else {
+            const update = await btrain(["handoff", "update", "--lane", "a", "--status", target], { cwd: repo, home })
+            assert.equal(update.code, 0, update.stderr)
+          }
+          assert.equal((await laneA(repo)).status, target)
+          assert.equal((await listActiveOverrides(repo)).length, 0)
+          await assert.rejects(gate(repo), noPeerReview)
+        })
+      })
+    }
+  }
+
   it("requires a lane when granting a local-review override in a multi-lane repo", async () => {
     await withRepo(async ({ repo, home }) => {
       const result = await btrain(["override", "grant", "--action", "local-review", "--requested-by", "alpha",
