@@ -1,0 +1,164 @@
+{
+  "about": "Spec 025 T004: one real run of the claude profile, field names only. No value from the run is stored except the facts below.",
+  "probe": {
+    "date": "2026-11-26",
+    "cliVersion": "2.1.274",
+    "arguments": [
+      "-p",
+      "--tools",
+      "",
+      "--safe-mode",
+      "--restricted",
+      "--strict-mcp-config",
+      "--no-session-persistence",
+      "--permission-prompts",
+      "none",
+      "--output-format",
+      "stream-json",
+      "--verbose"
+    ],
+    "input": "Reply with OK",
+    "environmentNames": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "SHELL",
+      "TERM",
+      "TMPDIR",
+      "USER"
+    ],
+    "workingDirectory": "an empty directory from mktemp -d, still empty after the run",
+    "exitCode": 0,
+    "stderr": ""
+  },
+  "firstEventReports": {
+    "tools": [],
+    "mcp_servers": [],
+    "apiKeySource": "none",
+    "plugins": []
+  },
+  "subscriptionLogin": {
+    "used": true,
+    "evidence": [
+      "apiKeySource is \"none\"",
+      "rate_limit_info.rateLimitType is \"five_hour\" with unified five_hour and seven_day windows",
+      "rate_limit_info.isUsingOverage is false"
+    ],
+    "note": "total_cost_usd is present on the result event even on the subscription; it is a computed figure, not a charge."
+  },
+  "alsoListedInFirstEvent": {
+    "note": "Listed although tools is empty, so the run cannot invoke them. FR-15 checks tools, MCP servers, and the credential source only.",
+    "agents": 4,
+    "skills": 18,
+    "slash_commands": 52,
+    "messaging_socket_path": "set (value not stored)"
+  },
+  "streamOrder": [
+    "system",
+    "assistant",
+    "rate_limit_event",
+    "result"
+  ],
+  "fields": {
+    "system.init": [
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "messaging_socket_path",
+      "model",
+      "output_style",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "uuid"
+    ],
+    "assistant": [
+      "message",
+      "parent_tool_use_id",
+      "request_id",
+      "session_id",
+      "timestamp",
+      "type",
+      "uuid"
+    ],
+    "assistant.message": [
+      "container",
+      "content",
+      "context_management",
+      "diagnostics",
+      "id",
+      "model",
+      "role",
+      "stop_details",
+      "stop_reason",
+      "stop_sequence",
+      "type",
+      "usage"
+    ],
+    "assistant.message.content[0]": [
+      "text",
+      "type"
+    ],
+    "rate_limit_event": [
+      "rate_limit_info",
+      "session_id",
+      "type",
+      "uuid"
+    ],
+    "rate_limit_event.rate_limit_info": [
+      "isUsingOverage",
+      "overageDisabledReason",
+      "overageStatus",
+      "rateLimitType",
+      "resetsAt",
+      "status",
+      "unifiedWindows"
+    ],
+    "result": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+    ]
+  },
+  "values": {
+    "result.subtype": "success",
+    "result.is_error": false,
+    "result.result": "OK",
+    "assistant.message.content[0].type": "text"
+  }
+}

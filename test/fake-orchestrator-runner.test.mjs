@@ -18,6 +18,7 @@ import {
 } from "./helpers/fake-orchestrator-runner.mjs"
 
 const skip = process.platform === "win32"
+const PROBE_FIXTURE = new URL("./fixtures/claude-stream/profile-probe.json", import.meta.url)
 const PROFILE_ARGS = ["-p", "--tools", "", "--output-format", "stream-json", "--verbose"]
 
 const tempDirs = []
@@ -247,5 +248,53 @@ describe("fake orchestrator runner (spec 025 T002)", { skip }, () => {
   it("readFakeOrchestratorRecords returns an empty list before any run", async () => {
     const { runner } = await setup()
     assert.deepEqual(await readFakeOrchestratorRecords(runner), [])
+  })
+
+  it("writes the stream the T004 probe captured: event order and every field name", async () => {
+    const probe = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8"))
+    const { runner, cwd, env } = await setup()
+    const { stdout } = await startRun(runner.executable, { cwd, env }).exited
+    const stream = events(stdout)
+    assert.deepEqual(stream.map((event) => event.type), probe.streamOrder)
+    const [init, assistant, rateLimit, result] = stream
+    const keys = (object) => Object.keys(object).sort()
+    assert.deepEqual(keys(init), probe.fields["system.init"])
+    assert.deepEqual(keys(assistant), probe.fields.assistant)
+    assert.deepEqual(keys(assistant.message), probe.fields["assistant.message"])
+    assert.deepEqual(keys(assistant.message.content[0]), probe.fields["assistant.message.content[0]"])
+    assert.deepEqual(keys(rateLimit), probe.fields.rate_limit_event)
+    assert.deepEqual(keys(rateLimit.rate_limit_info), probe.fields["rate_limit_event.rate_limit_info"])
+    assert.deepEqual(keys(result), probe.fields.result)
+    for (const [field, value] of Object.entries(probe.firstEventReports)) {
+      assert.deepEqual(init[field], value, `first event ${field}`)
+    }
+    assert.equal(result.subtype, probe.values["result.subtype"])
+    assert.equal(result.is_error, probe.values["result.is_error"])
+  })
+
+  it("a null reply still writes no assistant, rate limit, or result event", async () => {
+    const { runner, cwd, env } = await setup({ reply: null, exitCode: 1 })
+    const { stdout } = await startRun(runner.executable, { cwd, env }).exited
+    assert.deepEqual(events(stdout).map((event) => event.type), ["system"])
+  })
+})
+
+describe("T004 profile probe fixture", () => {
+  it("records the subscription login and a first event that passes the FR-15 check", async () => {
+    const probe = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8"))
+    assert.equal(probe.subscriptionLogin.used, true)
+    assert.deepEqual(probe.firstEventReports.tools, [])
+    assert.deepEqual(probe.firstEventReports.mcp_servers, [])
+    assert.equal(probe.firstEventReports.apiKeySource, "none")
+    for (const field of ["tools", "mcp_servers", "apiKeySource"]) {
+      assert.ok(probe.fields["system.init"].includes(field), `the first event reports ${field}`)
+    }
+  })
+
+  it("stores field names and facts, not run values that identify a session or a path", async () => {
+    const text = await fs.readFile(PROBE_FIXTURE, "utf8")
+    assert.doesNotMatch(text, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i, "no UUID")
+    assert.doesNotMatch(text, /\/Users\/|\/home\/|\/private\/|\/var\/folders\//, "no local path")
+    assert.doesNotMatch(text, /@[a-z0-9-]+\.[a-z]/i, "no email address")
   })
 })

@@ -63,20 +63,28 @@ channel, a 429 not retried before `Retry-After`) are covered by
 `test/slack-read-client.test.mjs` (T016) and, through the cycle, by the
 90-second `Retry-After` case of `test/slack-listen.test.mjs`.
 
-T002's helper is written ahead of T004: `test/helpers/fake-orchestrator-runner.mjs`
-installs the fake `claude`, records each run, and takes its behavior from a
-control file, with its own tests in `test/fake-orchestrator-runner.test.mjs`.
-Its default first event and its assistant and result events follow the
-documented stream-json shape, not a captured one, and every field a test
-checks can be set from the control file. T002 stays open until the T004
-fixture confirms those field names or replaces them.
+**Status 2026-11-26 (T004, T002):** T004 is done. One run of the `claude`
+profile (CLI 2.1.274) in an empty temporary directory, with only profile
+environment names and the input "Reply with OK", exited 0 with the reply
+"OK". Its first event reports `tools: []`, `mcp_servers: []`, and
+`apiKeySource: "none"`, so the FR-15 check can be made and FR-15 needs no
+amendment. The run used the subscription login: `apiKeySource` is `"none"`,
+the stream's `rate_limit_event` names the five-hour and seven-day windows, and
+`isUsingOverage` is false. The stream is `system`/`init`, `assistant`,
+`rate_limit_event`, `result`; the field names of each are in
+`test/fixtures/claude-stream/profile-probe.json`, with no run value that names
+a session or a path. The first event also lists agents, skills, slash
+commands, and a messaging socket path even with `--safe-mode` and
+`--restricted`; with no tools the run cannot use them, and FR-15 does not
+check them. T002 is done: the fake runner writes that stream with those field
+names, and a test holds it to the fixture.
 
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Extend `test/helpers/fake-slack.mjs` with `conversations.history` and `conversations.replies`: scripted messages for each channel and thread, paging with `has_more` and `next_cursor`, newest first for history and earliest first for replies, every failure the fake already supports, and a rejection of a JSON body on `conversations.replies`.
-- [ ] T002 [WS0] Write `test/helpers/fake-orchestrator-runner.mjs`: it writes an executable named `claude` into a temporary directory. The executable records its arguments, working directory, that directory's listing, its environment names, and its standard input, and takes its first stream event, reply, exit code, error output, and delay from a control file. It writes the stream of JSON events the real CLI does, in the shape T004 captures. Tests that use it are skipped on Windows.
+- [x] T002 [WS0] Write `test/helpers/fake-orchestrator-runner.mjs`: it writes an executable named `claude` into a temporary directory. The executable records its arguments, working directory, that directory's listing, its environment names, and its standard input, and takes its first stream event, reply, exit code, error output, and delay from a control file. It writes the stream of JSON events the real CLI does, in the shape T004 captures. Tests that use it are skipped on Windows.
 - [ ] T003 [WS0] Live captures, by a person, with the real app in a private test channel: the raw history and replies bodies for a typed mention, a typed command whose `files` field names `README.md` and a `.py` file, a typed `approve`, a message an app posted as the operator, a thread reply also sent to the channel, and a command typed in a code block. Replace every real ID, name, and unneeded text with a fake value and store them under `test/fixtures/slack/`.
-- [ ] T004 [WS0] One real profile probe, by a person: run the `claude` profile once with `--output-format stream-json --verbose` and the input "Reply with OK". Store the field names of the first event as a fixture and record whether the run used the subscription login. If the first event does not report tools, MCP servers, and the credential source, stop and amend spec 025 FR-15 before T020.
+- [x] T004 [WS0] One real profile probe, by a person: run the `claude` profile once with `--output-format stream-json --verbose` and the input "Reply with OK". Store the field names of the first event as a fixture and record whether the run used the subscription login. If the first event does not report tools, MCP servers, and the credential source, stop and amend spec 025 FR-15 before T020.
 - [x] T005 [WS0] Add the thirteen invariant tests of the plan to `test/slack-listen-invariants.test.mjs`, each skipped and naming the workstream that enables it. Every test sets `BRAIN_TRAIN_HOME` to a temporary directory. `npm test` gives the same result as `main`.
 - [ ] T006 [WS1] Write `src/brain_train/slack/inbound.mjs`: the plan's table of which messages are heard. Test a message with another user's ID, one with the operator's ID and an `app_id`, a bot message, a thread reply shown in the channel, and each fixture from T003, in `test/slack-inbound.test.mjs`. (Written in lane i; the T003 fixture cases are skipped until the captures exist.)
 - [x] T007 [WS1] Write `src/brain_train/slack/verbs.mjs`: the six verbs as data with their keys, value checks, approval rule, and argument template, and the FR-4 list. Test that no template holds a word from the FR-4 list and that `start` and `pause` are refused in `auto`.
