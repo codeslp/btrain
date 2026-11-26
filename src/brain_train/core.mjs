@@ -634,19 +634,16 @@ async function writeText(targetPath, content) {
       // target, unnormalized: realpath follows each symlinked directory
       // before it applies a "..", where path.resolve would cancel the pair
       // lexically and land elsewhere (for example "dir/../x" with dir a
-      // symlink, or "../x" under a symlinked parent).
+      // symlink, or "../x" under a symlinked parent). A missing directory on
+      // the way fails with ENOENT, as a native write through the link would.
       const unresolved = path.isAbsolute(linkTarget)
         ? linkTarget
         : `${path.dirname(destination)}${path.sep}${linkTarget}`
       const lastSeparator = unresolved.lastIndexOf(path.sep)
-      const unresolvedParent = unresolved.slice(0, lastSeparator) || path.sep
-      let parent
-      try {
-        parent = await fs.realpath(unresolvedParent)
-      } catch (parentError) {
-        if (parentError?.code !== "ENOENT") throw parentError
-        parent = path.resolve(unresolvedParent)
-      }
+      // A target ending in "/", "." or ".." needs no special case: if that
+      // directory exists the link is not dangling, and if it is missing this
+      // realpath fails.
+      const parent = await fs.realpath(unresolved.slice(0, lastSeparator) || path.sep)
       destination = path.join(parent, unresolved.slice(lastSeparator + 1))
     }
   }
