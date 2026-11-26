@@ -388,4 +388,29 @@ describe("state file writes", () => {
     assert.equal((await fs.stat(victim)).mode & 0o777, 0o600)
     assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
   }))
+
+  it("keep the committed file and remove the temporary file when the mode change fails", () => withStateDir(async (repoRoot, stateDir) => {
+    const target = path.join(stateDir, "locks.json")
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    await fs.chmod(target, 0o640)
+    const before = await fs.readFile(target, "utf8")
+    const open = fs.open
+    fs.open = async (candidate, ...rest) => {
+      const handle = await open(candidate, ...rest)
+      if (path.basename(String(candidate)).startsWith(".btrain-write-")) {
+        handle.chmod = async () => {
+          throw Object.assign(new Error("EPERM: injected"), { code: "EPERM" })
+        }
+      }
+      return handle
+    }
+    try {
+      await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["other/"]), { code: "EPERM" })
+    } finally {
+      fs.open = open
+    }
+    assert.equal(await fs.readFile(target, "utf8"), before)
+    assert.equal((await fs.stat(target)).mode & 0o777, 0o640)
+    assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
+  }))
 })
