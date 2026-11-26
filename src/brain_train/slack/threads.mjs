@@ -204,6 +204,30 @@ export async function updateBoard(homeDir, channel, update, { waitMs } = {}) {
   })
 }
 
+/**
+ * Put a repository's entry on one channel's board and take it off every other
+ * channel's board, under the home lock, so a repository whose mapping moved
+ * stops showing on its former channel (FR-9). The boards it left render
+ * without it at their next update.
+ */
+export async function placeBoardEntry(homeDir, channel, key, entry, { waitMs } = {}) {
+  return withHomeLock(homeDir, waitMs === undefined ? {} : { waitMs }, async () => {
+    const boards = await readBoards(homeDir)
+    for (const [other, record] of Object.entries(boards)) {
+      if (other === String(channel)) continue
+      const repos = objectOr(record?.repos)
+      if (Object.hasOwn(repos, key)) {
+        delete repos[key]
+        boards[other] = { ...objectOr(record), repos }
+      }
+    }
+    const current = objectOr(boards[String(channel)])
+    boards[String(channel)] = { ...current, repos: { ...objectOr(current.repos), [key]: entry } }
+    await writeJsonAtomic(boardsPath(homeDir), boards)
+    return boards[String(channel)]
+  })
+}
+
 function channelsPath(homeDir) {
   return path.join(homeDir, CHANNELS_RELATIVE)
 }

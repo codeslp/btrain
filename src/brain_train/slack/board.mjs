@@ -17,7 +17,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { readJsonOr, writeJsonAtomic } from "./outbox.mjs"
 import { renderBoard } from "./render.mjs"
-import { getBoard, updateBoard } from "./threads.mjs"
+import { getBoard, placeBoardEntry, updateBoard } from "./threads.mjs"
 
 const INACTIVE = new Set(["", "idle", "resolved"])
 
@@ -61,7 +61,17 @@ export async function writeRepoEntry(homeDir, channel, { repoPath, name, lanes, 
     if (!existing) return record
     return updateBoard(homeDir, channel, { repos: { [key]: { ...existing, stale: true } } }, { waitMs })
   }
-  return updateBoard(homeDir, channel, { repos: { [key]: { name: String(name || ""), lanes: boardLanes(lanes), stale: false } } }, { waitMs })
+  // A fresh read also takes the repository off any channel it left.
+  return placeBoardEntry(homeDir, channel, key, { name: String(name || ""), lanes: boardLanes(lanes), stale: false }, { waitMs })
+}
+
+/**
+ * Whether this repository's lines on the board in `channel` are marked stale:
+ * its next run must read its lane state again, even with nothing queued.
+ */
+export async function repoEntryStale(homeDir, channel, repoPath) {
+  const record = await getBoard(homeDir, channel)
+  return Boolean(record?.repos?.[repoKey(repoPath)]?.stale)
 }
 
 /** Whether any repository of the record shows an active lane. */

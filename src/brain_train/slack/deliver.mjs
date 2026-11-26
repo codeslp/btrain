@@ -45,7 +45,7 @@
 
 import path from "node:path"
 import { addPin, classifySlackError, DEFAULT_CALL_TIMEOUT_MS, ERROR_CLASSES, postMessage, updateMessage } from "./client.mjs"
-import { boardOwed, boardText, hasActiveLanes, readBoardPending, readPostedNote, updateBoardPending, writePostedNote, writeRepoEntry } from "./board.mjs"
+import { boardOwed, boardText, hasActiveLanes, readBoardPending, readPostedNote, repoEntryStale, updateBoardPending, writePostedNote, writeRepoEntry } from "./board.mjs"
 import { tryAcquireLock } from "./lock.mjs"
 import { listEntries, readDeliveryState, removeEntry, writeDeliveryState } from "./outbox.mjs"
 import { prefixReply, renderCard, renderReply } from "./render.mjs"
@@ -165,7 +165,9 @@ export async function deliver(options = {}) {
     const entries = await listEntries(slackDir)
     const label = String(context.label || "")
     if (entries.length === 0 && Object.keys(state.cards).length === 0
-      && !(await boardOwed(homeDir, channel, label)) && !(await readBoardPending(slackDir, channel))) return summary
+      && !(await boardOwed(homeDir, channel, label)) && !(await readBoardPending(slackDir, channel))
+      // Lines marked stale are reread once lane state can be read again.
+      && !(await repoEntryStale(homeDir, channel, String(repo.path || slackDir)))) return summary
 
     const run = {
       slackDir,
