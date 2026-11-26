@@ -12,6 +12,7 @@ import { withTrackedInit } from "./helpers/legacy-init.mjs"
 
 const exec = promisify(execFile)
 const CLI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/brain_train/cli.mjs")
+const FLIP_STATUS_PRELOAD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "helpers/flip-status-after-needs-review.mjs")
 
 async function makeTmpDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "btrain-reviewer-dispatch-"))
@@ -33,9 +34,9 @@ function dispatchEnv(cwd, extra = {}) {
   }
 }
 
-async function runBtrain(args, cwd, envOverrides = {}) {
+async function runBtrain(args, cwd, envOverrides = {}, { nodeArgs = [] } = {}) {
   try {
-    const result = await exec("node", [CLI_PATH, ...withTrackedInit(args)], {
+    const result = await exec("node", [...nodeArgs, CLI_PATH, ...withTrackedInit(args)], {
       cwd,
       env: dispatchEnv(cwd, envOverrides),
       maxBuffer: 5 * 1024 * 1024,
@@ -530,53 +531,42 @@ console.log("APPROVED")
     const { tmpDir } = await setupRepo()
     const handoffPath = path.join(tmpDir, ".claude", "collab", "HANDOFF_A.md")
     const spawnMark = path.join(tmpDir, "spawned.txt")
-    let poller
+    const flipMark = path.join(tmpDir, "flipped.txt")
     try {
-      poller = execFile(
-        process.execPath,
-        [
-          "-e",
-          `const fs = require("node:fs");
-const p = process.argv[1];
-const deadline = Date.now() + 20000;
-while (Date.now() < deadline) {
-  try {
-    let text = fs.readFileSync(p, "utf8");
-    if (text.includes("Status: needs-review")) {
-      text = text.replace("Status: needs-review", "Status: ready-for-pr");
-      fs.writeFileSync(p, text);
-      process.exit(0);
-    }
-  } catch {}
-}
-process.exit(1);`,
-          handoffPath,
-        ],
-        () => {},
-      )
-
+      // The preload moves the lane to ready-for-pr right after btrain
+      // publishes needs-review, inside the same process, so the change always
+      // lands before the dispatch re-read. A separately started poller raced
+      // btrain's own startup and lost under load.
+      // A short dispatch budget only bounds a regression: without the
+      // re-read, btrain would wait on the owner's notify runner this long.
       const args = needsReviewArgs(tmpDir)
-      const timeoutIndex = args.indexOf("--timeout")
-      args[timeoutIndex + 1] = "2"
-      const started = Date.now()
-      const result = await runBtrain(args, tmpDir, {
-        REVIEWER_SPAWN_MARK: spawnMark,
-        REVIEWER_ACTION: "resolve",
-      })
-      const elapsedMs = Date.now() - started
+      args[args.indexOf("--timeout") + 1] = "2"
+      const result = await runBtrain(
+        args,
+        tmpDir,
+        {
+          REVIEWER_SPAWN_MARK: spawnMark,
+          REVIEWER_ACTION: "resolve",
+          BTRAIN_TEST_FLIP_HANDOFF: handoffPath,
+          BTRAIN_TEST_FLIP_STATUS: "ready-for-pr",
+          BTRAIN_TEST_FLIP_MARK: flipMark,
+        },
+        { nodeArgs: ["--import", FLIP_STATUS_PRELOAD] },
+      )
       assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
-      assert.match(result.stdout, /status: ready-for-pr|lane already ready-for-pr/)
+      assert.match(await fs.readFile(flipMark, "utf8"), /flipped to ready-for-pr/)
+      assert.match(result.stdout, /reviewer dispatch skipped: lane already ready-for-pr/)
+      assert.match(result.stdout, /status: ready-for-pr/)
       assert.doesNotMatch(result.stdout, /status: needs-review/)
-      // Must not fall into owner notify-wait for the full timeout budget.
-      assert.ok(elapsedMs < 1800, `expected early return after status change, took ${elapsedMs}ms`)
+      // The re-read stops dispatch outright: no reviewer runs, and no loop
+      // starts, so the owner's notify wait never begins.
+      assert.equal(await fs.access(spawnMark).then(() => true, () => false), false)
+      assert.doesNotMatch(result.stdout, /loop start/)
       const content = await readLane(tmpDir)
       assert.match(content, /Status: ready-for-pr/)
       assert.doesNotMatch(content, /Status: needs-review/)
       assert.doesNotMatch(content, /Status: resolved/)
     } finally {
-      if (poller?.pid) {
-        try { process.kill(poller.pid, "SIGKILL") } catch {}
-      }
       await rmDir(tmpDir)
     }
   })
