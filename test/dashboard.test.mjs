@@ -2,6 +2,7 @@ import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import assert from "node:assert/strict"
 import { execFile, spawn } from "node:child_process"
 import fs from "node:fs/promises"
+import http from "node:http"
 import os from "node:os"
 import path from "node:path"
 import { afterEach, describe, it } from "node:test"
@@ -19,6 +20,48 @@ import {
 const execFileAsync = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const cleanupRepos = []
+
+function dashboardStateFile(env) {
+  return path.join(env.BRAIN_TRAIN_HOME, "dashboard.json")
+}
+
+async function stateFileExists(env) {
+  return fs.access(dashboardStateFile(env)).then(() => true, () => false)
+}
+
+async function writeRecordedDashboard(env, state) {
+  await fs.mkdir(env.BRAIN_TRAIN_HOME, { recursive: true })
+  await fs.writeFile(dashboardStateFile(env), JSON.stringify(state), "utf8")
+}
+
+async function exitedChild(signal) {
+  const child = spawn(process.execPath, ["-e", signal ? "setInterval(() => {}, 1000)" : "process.exit(3)"], { stdio: "ignore" })
+  if (signal) {
+    await new Promise((resolve) => child.once("spawn", resolve))
+    child.kill(signal)
+  }
+  await new Promise((resolve) => child.once("exit", resolve))
+  return child
+}
+
+const unhealthyFetch = () => Promise.reject(new Error("connection refused"))
+const healthyResponse = { ok: true, json: async () => ({ ok: true, scope: "global" }) }
+
+// Resolve with the elapsed ms, or reject once the guard passes, so a stop
+// that never returns fails the test instead of hanging it.
+async function timed(promise, guardMs) {
+  const started = Date.now()
+  let timer
+  const guard = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`did not return within ${guardMs}ms`)), guardMs)
+  })
+  try {
+    const value = await Promise.race([promise, guard])
+    return { value, elapsedMs: Date.now() - started }
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 async function createDashboardRepo(sharedHome) {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-dashboard-"))
@@ -184,6 +227,49 @@ describe("dashboard lifecycle", () => {
     )
     assert.ok(Date.now() - started < 4000, "a dead dashboard must not use the whole startup budget")
     assert.equal((await getDashboardStatus(repoRoot, { env })).running, false)
+    assert.equal(await stateFileExists(env), false, "a failed startup must remove its dashboard state")
+  })
+
+  it("rejects a dead child even when another server answers health on its port", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3650)
+    const child = await exitedChild()
+    // A competing server binds the selected port after the dead child was
+    // spawned; its health answer must not count as this child's startup.
+    const other = http.createServer((req, res) => {
+      res.setHeader("Content-Type", "application/json")
+      res.end(JSON.stringify({ ok: true, scope: "global" }))
+    })
+    try {
+      await assert.rejects(
+        ensureDashboard(repoRoot, {
+          env,
+          port,
+          openBrowser: false,
+          spawnImpl: () => {
+            other.listen(port, "127.0.0.1")
+            return child
+          },
+        }),
+        /Dashboard exited with code 3 before it became healthy/,
+      )
+      assert.equal(await stateFileExists(env), false, "a failed startup must remove its dashboard state")
+    } finally {
+      await new Promise((resolve) => other.close(resolve))
+    }
+  })
+
+  it("names the signal when the dashboard was killed before startup is watched", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3675)
+    const child = await exitedChild("SIGTERM")
+    const started = Date.now()
+    await assert.rejects(
+      ensureDashboard(repoRoot, { env, port, openBrowser: false, spawnImpl: () => child }),
+      /Dashboard exited with signal SIGTERM before it became healthy/,
+    )
+    assert.ok(Date.now() - started < 4000, "a killed dashboard must not use the whole startup budget")
+    assert.equal(await stateFileExists(env), false, "a failed startup must remove its dashboard state")
   })
 
   it("fails fast when the dashboard process exited before startup is watched", async () => {
@@ -273,6 +359,61 @@ describe("dashboard lifecycle", () => {
       if (stdout.includes("serve-dashboard.js")) {
         try { process.kill(started.pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
       }
+    }
+  })
+
+  it("stops promptly when the recorded dashboard has no PID", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    await writeRecordedDashboard(env, { pid: 0, port: 3700 })
+    const { value, elapsedMs } = await timed(stopDashboard(repoRoot, { env, fetchImpl: unhealthyFetch }), 8000)
+    assert.equal(value.stopped, false)
+    assert.ok(elapsedMs < 2000, `stop waited ${elapsedMs}ms for a dashboard with no PID`)
+  })
+
+  it("stops promptly when the recorded dashboard process has exited", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const child = await exitedChild()
+    await writeRecordedDashboard(env, { pid: child.pid, port: 3700 })
+    const { value, elapsedMs } = await timed(stopDashboard(repoRoot, { env, fetchImpl: unhealthyFetch }), 8000)
+    assert.equal(value.stopped, false)
+    assert.ok(elapsedMs < 2000, `stop waited ${elapsedMs}ms for a dashboard that had exited`)
+  })
+
+  it("gives up at the probe cap on a live process that never answers", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    // This test's own process: alive for the whole stop, and never signalled
+    // because no probe succeeds.
+    await writeRecordedDashboard(env, { pid: process.pid, port: 3700 })
+    const { value, elapsedMs } = await timed(stopDashboard(repoRoot, { env, fetchImpl: unhealthyFetch }), 8000)
+    assert.equal(value.stopped, false)
+    assert.ok(elapsedMs >= 4500, `stop gave up after ${elapsedMs}ms, before the probe cap`)
+    assert.equal(await stateFileExists(env), false)
+  })
+
+  it("treats a process it may not signal (EPERM) as alive and keeps probing", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    await writeRecordedDashboard(env, { pid: 999_999, port: 3700 })
+    const originalKill = process.kill
+    const sent = []
+    process.kill = (pid, signal) => {
+      if (pid !== 999_999) return originalKill.call(process, pid, signal)
+      sent.push(signal)
+      if (signal === 0) throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
+      return true
+    }
+    let probes = 0
+    const answersSecond = async () => {
+      probes += 1
+      if (probes === 1) throw new Error("timed out")
+      return healthyResponse
+    }
+    try {
+      const { value } = await timed(stopDashboard(repoRoot, { env, fetchImpl: answersSecond }), 8000)
+      assert.equal(value.stopped, true)
+      assert.equal(probes, 2)
+      assert.deepEqual(sent, [0, "SIGTERM"])
+    } finally {
+      process.kill = originalKill
     }
   })
 })
