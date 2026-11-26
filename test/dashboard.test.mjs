@@ -1,12 +1,13 @@
 import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import assert from "node:assert/strict"
-import { spawn } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { afterEach, describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import { setTimeout as delay } from "node:timers/promises"
+import { promisify } from "node:util"
 import {
   ensureDashboard,
   findAvailableDashboardPort,
@@ -15,6 +16,7 @@ import {
   stopDashboard,
 } from "../src/brain_train/dashboard.mjs"
 
+const execFileAsync = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const cleanupRepos = []
 
@@ -238,5 +240,39 @@ describe("dashboard lifecycle", () => {
     assert.equal(stopped.stopped, true)
     assert.equal(stopped.pid, started.pid)
     assert.equal((await getDashboardStatus(firstRepo.repoRoot, { env: firstRepo.env })).running, false)
+  })
+
+  it("stops a running dashboard whose first health probe times out", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3575)
+    const started = await ensureDashboard(repoRoot, { env, port, openBrowser: false })
+    // On a loaded machine one health probe can miss its 750 ms budget. That
+    // alone must not make stop forget a dashboard that is still running.
+    let probes = 0
+    const slowOnce = (url, options) => {
+      probes += 1
+      if (probes === 1) {
+        return Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError"))
+      }
+      return fetch(url, options)
+    }
+    try {
+      const stopped = await stopDashboard(repoRoot, { env, fetchImpl: slowOnce })
+      assert.equal(stopped.stopped, true)
+      assert.equal(stopped.pid, started.pid)
+      const deadline = Date.now() + 10_000
+      while (Date.now() < deadline) {
+        try { process.kill(started.pid, 0) } catch (error) { if (error.code === "ESRCH") break; throw error }
+        await delay(50)
+      }
+      assert.throws(() => process.kill(started.pid, 0), { code: "ESRCH" }, "the dashboard process must be stopped")
+    } finally {
+      // A stop that forgot the dashboard leaves it running; stop it here, but
+      // only while that PID is still this test's dashboard server.
+      const { stdout } = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(started.pid)]).catch(() => ({ stdout: "" }))
+      if (stdout.includes("serve-dashboard.js")) {
+        try { process.kill(started.pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+      }
+    }
   })
 })
