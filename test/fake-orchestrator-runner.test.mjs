@@ -113,13 +113,13 @@ describe("fake orchestrator runner (spec 025 T002)", { skip }, () => {
 
   it("records environment names only, exactly the ones it was given", async () => {
     const { runner, cwd } = await setup()
-    const env = { PATH: "/usr/bin:/bin", HOME: cwd, LANG: "C", SECRET_VALUE_NAME: "xoxb-not-a-real-token" }
+    const env = { PATH: "/usr/bin:/bin", HOME: cwd, LANG: "C", SECRET_VALUE_NAME: "value-that-must-not-be-recorded" }
     const { code } = await startRun(runner.executable, { cwd, env }).exited
     assert.equal(code, 0)
     const [record] = await readFakeOrchestratorRecords(runner)
     assert.deepEqual(record.envNames, ["HOME", "LANG", "PATH", "SECRET_VALUE_NAME"])
     const raw = await fs.readFile(runner.recordPath, "utf8")
-    assert.ok(!raw.includes("xoxb-not-a-real-token"), "no environment value is recorded")
+    assert.ok(!raw.includes("value-that-must-not-be-recorded"), "no environment value is recorded")
   })
 
   it("records the listing of its working directory", async () => {
