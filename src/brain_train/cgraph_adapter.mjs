@@ -747,6 +747,7 @@ export {
   hasCommand,
   probeManifest,
   resolveBinary,
+  resolveTimeouts,
   tryDaemon,
   // Constants for testing
   DEFAULT_TIMEOUT,

@@ -9,6 +9,7 @@ import {
   failOpen,
   hasCommand,
   resolveBinary,
+  resolveTimeouts,
   TIMEOUTS,
 } from "../src/brain_train/cgraph_adapter.mjs"
 
@@ -631,6 +632,33 @@ describe("cgraph_adapter", () => {
   })
 
   describe("timeout overrides", () => {
+    it("resolveTimeouts accepts only positive integers a timer can hold", () => {
+      const kind = "advise"
+      const accepted = [[1000, 1000], ["1000", 1000], [" 1000 ", 1000], [1, 1], [2_147_483_647, 2_147_483_647]]
+      for (const [raw, expected] of accepted) {
+        assert.equal(resolveTimeouts({ [kind]: raw })[kind], expected, `accepts ${JSON.stringify(raw)}`)
+      }
+      // 2^31 ms and above overflow Node's timer, which then fires after 1 ms.
+      const rejected = [0, "0", -5, "-5", 1.5, "1.5", "1e3", "0x10", "abc", "", " ", null, true, {}, [], NaN, Infinity,
+        2_147_483_648, "2147483648", Number.MAX_SAFE_INTEGER, "99999999999999999999"]
+      for (const raw of rejected) {
+        assert.equal(resolveTimeouts({ [kind]: raw })[kind], TIMEOUTS[kind], `rejects ${String(JSON.stringify(raw) ?? raw)}`)
+      }
+    })
+
+    it("resolveTimeouts keeps every default without a usable table and ignores unknown kinds", () => {
+      for (const table of [undefined, null, "advise=1000", 1000]) {
+        assert.deepEqual(resolveTimeouts(table), TIMEOUTS)
+      }
+      const resolved = resolveTimeouts({ advise: "900", bogus: "900" })
+      assert.deepEqual(Object.keys(resolved).sort(), Object.keys(TIMEOUTS).sort())
+      assert.equal(resolved.advise, 900)
+      for (const kind of Object.keys(TIMEOUTS).filter((name) => name !== "advise")) {
+        assert.equal(resolved[kind], TIMEOUTS[kind], `${kind} keeps its default`)
+      }
+      assert.notEqual(resolveTimeouts({}), TIMEOUTS, "callers get a copy, not the shared defaults")
+    })
+
     // A fake kkg that answers every command, manifest included, after 600 ms:
     // longer than the 200 ms advise budget on any machine, so these cases do
     // not depend on how fast a process starts.
