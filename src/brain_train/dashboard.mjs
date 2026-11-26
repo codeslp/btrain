@@ -141,8 +141,15 @@ async function findAvailableDashboardPort(startPort = DEFAULT_DASHBOARD_PORT) {
   throw new Error(`No dashboard port is available between ${startPort} and ${Math.min(startPort + 20, 65535)}.`)
 }
 
-async function waitForAvailablePort(startPort) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+// After a legacy dashboard is told to stop, its port frees when the process
+// exits, which on a loaded machine can take well over a second. Wait for that
+// rather than moving to another port; the cap only guards against a legacy
+// process that never exits.
+const LEGACY_PORT_RELEASE_TIMEOUT_MS = 10_000
+
+async function waitForAvailablePort(startPort, timeoutMs = LEGACY_PORT_RELEASE_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
     if (await canListen(startPort)) {
       return startPort
     }
@@ -201,15 +208,27 @@ function configuredPort(value, env) {
   return parsed
 }
 
-async function waitForDashboard(port, fetchImpl) {
-  const deadline = Date.now() + 5_000
+// A new dashboard is waited for until it answers or its process exits. The
+// cap only guards against a process that stays up without ever answering; a
+// slow start on a loaded machine is not a failure.
+const DASHBOARD_START_TIMEOUT_MS = 15_000
+
+async function waitForDashboard(port, fetchImpl, child) {
+  let exit = null
+  child?.once?.("exit", (code, signal) => {
+    exit = { code, signal }
+  })
+  const deadline = Date.now() + DASHBOARD_START_TIMEOUT_MS
   while (Date.now() < deadline) {
     if (await probeDashboard(port, fetchImpl)) {
-      return true
+      return { healthy: true }
+    }
+    if (exit) {
+      return { healthy: false, exit }
     }
     await delay(100)
   }
-  return false
+  return { healthy: false, exit }
 }
 
 async function getDashboardStatus(repoRoot, { env = process.env, fetchImpl = fetch } = {}) {
@@ -286,10 +305,14 @@ async function ensureDashboard(repoRoot, {
   }
   await writeDashboardState(state, env)
 
-  if (!await waitForDashboard(selectedPort, fetchImpl)) {
-    terminateProcess(child.pid)
+  const startup = await waitForDashboard(selectedPort, fetchImpl, child)
+  if (!startup.healthy) {
+    if (!startup.exit) terminateProcess(child.pid)
     await removeDashboardState(env)
-    throw new Error(`Dashboard did not become healthy. See ${logPath}.`)
+    const how = startup.exit
+      ? `exited with ${startup.exit.signal ? `signal ${startup.exit.signal}` : `code ${startup.exit.code}`} before it became healthy`
+      : "did not become healthy"
+    throw new Error(`Dashboard ${how}. See ${logPath}.`)
   }
 
   let browserOpened = false
