@@ -42,7 +42,13 @@ import {
   syncSkills,
   syncTemplates,
   waitForHandoffStateChange,
+  parseCurrentSection,
+  withFileLock,
+  readWorkflowEvents,
+  appendWorkflowEvent,
+  detectCurrentAgent,
 } from "./core.mjs"
+import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -616,6 +622,49 @@ function formatRepoStatus(status) {
   }
 
   return lines.join("\n")
+}
+
+// Spec 023 T010: the review pickup and progress signals. Called once after
+// `resolveRepoRoot` in each lane-scoped handler (`handoff`, `review`, `pr`).
+// Only a lane under review can get a signal, so other lanes take no lock.
+// A failure here never fails the command: the signal is advisory.
+const ACTIVITY_STATUSES = new Set(["needs-review", "fix-confirmation"])
+
+async function recordLaneActivity(repoRoot, options, command, subcommand) {
+  const laneId = typeof options.lane === "string" ? options.lane.trim() : ""
+  const kind = activityKindFor(command, subcommand || "")
+  if (!laneId || !kind) return
+  try {
+    const config = await readProjectConfig(repoRoot)
+    const laneConfig = (getLaneConfigs(config) || []).find((lane) => lane.id === laneId)
+    if (!laneConfig) return
+    // Only the selected lane is read, never the others (lane isolation): its
+    // handoff file's Current section, the lane's status, owner, and reviewer.
+    const handoffPath = path.isAbsolute(laneConfig.handoffPath)
+      ? laneConfig.handoffPath
+      : path.resolve(resolveStateRoot(repoRoot), laneConfig.handoffPath)
+    const readLane = async () => {
+      try {
+        return parseCurrentSection(await fs.readFile(handoffPath, "utf8"))
+      } catch (error) {
+        if (error?.code === "ENOENT") return null
+        throw error
+      }
+    }
+    if (!ACTIVITY_STATUSES.has((await readLane())?.status)) return
+    await recordReviewActivity({
+      laneId,
+      kind,
+      identity: detectCurrentAgent(config),
+      // The lane's handoff lock, the one updateHandoff takes.
+      withLaneLock: (fn) => withFileLock(`${handoffPath}.lock`, fn),
+      readLane,
+      readEvents: () => readWorkflowEvents(repoRoot, config, laneId),
+      appendEvent: (event) => appendWorkflowEvent(repoRoot, config, event),
+    })
+  } catch (error) {
+    console.error(`btrain: the review activity signal for lane ${laneId} was not recorded: ${error?.message || error}`)
+  }
 }
 
 function formatDoctorResult(result) {
@@ -1916,6 +1965,7 @@ async function run() {
     }
 
     const repoRoot = await resolveRepoRoot(options.repo)
+    await recordLaneActivity(repoRoot, options, "handoff", subcommand)
 
     if (subcommand === "wait") {
       const config = await readProjectConfig(repoRoot)
@@ -2284,6 +2334,7 @@ async function run() {
 
     const options = parseOptions(rest.slice(1))
     const repoRoot = await resolveRepoRoot(options.repo)
+    await recordLaneActivity(repoRoot, options, "review", subcommand)
 
     if (subcommand === "run") {
       const result = await runReview({
@@ -2359,6 +2410,7 @@ async function run() {
 
     const options = parseOptions(rest.slice(1))
     const repoRoot = await resolveRepoRoot(options.repo)
+    await recordLaneActivity(repoRoot, options, "pr", subcommand)
 
     if (subcommand === "create") {
       await runPrCreate(repoRoot, options)
