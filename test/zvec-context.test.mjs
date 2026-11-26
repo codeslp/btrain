@@ -354,25 +354,34 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
   })
   it("re-signals an executor that missed the first TERM", async () => {
     // A TERM can land while the job subshell is still turning into node and
-    // be lost; node then runs zg to completion. Reproduce that loss on every
-    // run: the job subshell ignores TERM until it execs node and reports it
-    // through a marker, and the helper is interrupted only after that marker
-    // exists. A single TERM is then dropped, and only a repeated one cancels
-    // zg ("sleep 30") instead of waiting for it.
+    // be lost: bash catches it, then execs node before running the trap, and
+    // node runs zg to completion. Reproduce that loss on every run: the job
+    // subshell traps TERM with a handler that only records it, reports that
+    // it is ready, and execs node only after that handler has run. The
+    // helper is interrupted after the ready marker exists, so its first TERM
+    // is always swallowed, and only a repeated TERM cancels zg ("sleep 30")
+    // instead of waiting for it.
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
     const scratch = path.join(tmpDir, "scratch")
     const bashEnv = path.join(tmpDir, "bash-env")
-    const ignoring = path.join(tmpDir, "job-ignores-term")
+    const ignoring = path.join(tmpDir, "job-traps-term")
     const zgLog = path.join(tmpDir, "zg.log")
+    // The fake zg logs its PID and then execs "sleep 30", so the logged PID is
+    // the only process this test may clean up.
+    const zgPids = path.join(tmpDir, "zg.pids")
     await fs.mkdir(binDir)
     await fs.mkdir(scratch)
     await writeFakeZg(binDir)
+    // An unrelated process that ps lists exactly like the fake zg's
+    // "sleep 30"; the cleanup must leave it alone.
+    const bystander = spawn("sleep", ["30"], { stdio: "ignore", env: { ...process.env, PATH: "/usr/bin:/bin" } })
     await fs.writeFile(bashEnv, `set -T
 miss_first_term() {
   if [ "$BASH_SUBSHELL" -gt 0 ] && [ "\${1#local secs=}" != "$1" ]; then
-    trap '' TERM
+    trap 'ZVEC_TEST_SWALLOWED=1' TERM
     : > "$ZVEC_TEST_IGNORING"
+    while [ -z "\${ZVEC_TEST_SWALLOWED:-}" ]; do sleep 0.01; done
   elif [ "$BASH_SUBSHELL" -eq 0 ] && [ "$1" = 'pid=$!' ]; then
     trap - DEBUG
     while [ ! -e "$ZVEC_TEST_IGNORING" ]; do sleep 0.01; done
@@ -386,7 +395,7 @@ trap 'miss_first_term "$BASH_COMMAND"' DEBUG
       const result = await runHelper(["search", "query", "--root", tmpDir], {
         cwd: tmpDir, timeout: 20000, killSignal: "SIGKILL",
         env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch, BASH_ENV: bashEnv,
-          ZVEC_TEST_IGNORING: ignoring, ZVEC_TEST_LOG: zgLog, ZVEC_TEST_STATUS_SLEEP: "30" },
+          ZVEC_TEST_IGNORING: ignoring, ZVEC_TEST_LOG: zgLog, ZVEC_TEST_PID_LOG: zgPids, ZVEC_TEST_STATUS_SLEEP: "30" },
       })
       const elapsedMs = Date.now() - started
       assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
@@ -395,13 +404,20 @@ trap 'miss_first_term "$BASH_COMMAND"' DEBUG
       assert.ok(elapsedMs < 15000, `the helper waited ${elapsedMs}ms for zg instead of cancelling it`)
       assert.deepEqual(await fs.readdir(scratch), [], "cancellation must leave no capture files")
     } finally {
-      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
-      for (const line of ps.stdout.split("\n")) {
-        const sleeper = line.trim().match(/^(\d+)\s+sleep 30$/)
-        if (sleeper && (await fs.readFile(zgLog, "utf8").catch(() => "")).includes("CALL")) {
-          try { process.kill(Number(sleeper[1]), "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+      const pids = (await fs.readFile(zgPids, "utf8").catch(() => "")).split("\n").filter(Boolean).map(Number)
+      for (const pid of pids) {
+        const state = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(pid)]).catch(() => ({ stdout: "" }))
+        if (state.stdout.trim() === "sleep 30") {
+          try { process.kill(pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
         }
       }
+      // ps, not the exit event: Node may not have processed a kill yet. A
+      // killed process is gone or a zombie ("Z") by the time ps runs.
+      const bystanderState = (await execFileAsync("/bin/ps", ["-o", "stat=", "-p", String(bystander.pid)])
+        .catch(() => ({ stdout: "" }))).stdout.trim()
+      const bystanderAlive = bystanderState !== "" && !bystanderState.startsWith("Z")
+      bystander.kill("SIGKILL")
+      assert.ok(bystanderAlive, "cleanup must not touch an unrelated sleep process")
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
   })
