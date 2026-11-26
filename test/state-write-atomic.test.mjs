@@ -249,4 +249,29 @@ describe("state file writes", () => {
     assert.equal(await fs.readFile(target, "utf8"), before)
     assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
   }))
+
+  // Red-team case from round 7 (and the PR #138 bot): ".." inside a dangling
+  // link's target must step out of the directory a symlinked component points
+  // to, as the filesystem does, not cancel that component lexically.
+  it("follow a symlinked directory before '..' inside a dangling link's target", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-traversal-"))
+    try {
+      const repo = path.join(root, "repo")
+      const state = path.join(repo, ".btrain")
+      const external = path.join(root, "external")
+      await fs.mkdir(state, { recursive: true })
+      await fs.mkdir(path.join(external, "nested"), { recursive: true })
+      await fs.symlink(path.join(external, "nested"), path.join(state, "dir"))
+      await fs.symlink("dir/../registry.json", path.join(state, "locks.json"))
+
+      await acquireLocks(repo, "a", "claude", ["src/"])
+
+      assert.equal((await readLockRegistry(repo)).locks.length, 1, "the acquired lock must be visible through locks.json")
+      assert.equal(JSON.parse(await fs.readFile(path.join(external, "registry.json"), "utf8")).locks.length, 1)
+      assert.equal(await fs.readlink(path.join(state, "locks.json")), "dir/../registry.json")
+      await assert.rejects(fs.stat(path.join(state, "registry.json")), { code: "ENOENT" })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 })
