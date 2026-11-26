@@ -603,3 +603,146 @@ describe("spec 025 WS3: a resume covers every served channel", () => {
     assert.deepEqual(fake.posts.map((post) => post.body.text), [REPLIES.paused], "the command sent during the pause is not acted on")
   })
 })
+
+// codex-reviewer on 5421e42. Two channels, CHANNEL (repo a) and CHANNEL_B
+// (repo b), each served, with stub readers.
+const CHANNEL_B = "C0000FAKB"
+
+async function twoChannelHome({ registered = ["a", "b"] } = {}) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-listen-two-")))
+  roots.push(root)
+  const home = path.join(root, "home")
+  const repos = { a: path.join(root, "repo-a"), b: path.join(root, "repo-b") }
+  await fs.mkdir(home, { recursive: true })
+  const configPath = path.join(home, "slack.json")
+  await fs.writeFile(configPath, JSON.stringify({ botToken: TOKEN, operator: OPERATOR, channels: { [repos.a]: CHANNEL, [repos.b]: CHANNEL_B }, pollSeconds: 4, orchestrator: { runner: "claude -p" } }), { mode: 0o600 })
+  await fs.chmod(configPath, 0o600)
+  const register = (names) => fs.writeFile(path.join(home, "repos.json"), JSON.stringify({ repos: names.map((name) => ({ path: repos[name], name })) }))
+  await register(registered)
+  const readers = {
+    readConfig: async () => ({ features: { slack: true, slack_listen: true } }),
+    readRoster: async () => ({ laneIds: ["a"], agents: ["claude"] }),
+    readLanes: async () => [],
+  }
+  return { root, home, repos, register, readers, slackDir: path.join(home, "slack"), env: cleanEnv(home) }
+}
+
+const historyOf = (fake, channel) => fake.callsTo("conversations.history").filter((call) => call.body.channel === channel).length
+
+describe("spec 025 WS3: a read error stops the reads it affects at once", () => {
+  for (const [error, histories, replies] of [["invalid_auth", 1, 0], ["missing_scope", 1, 0], ["not_in_channel", 2, 0], ["internal_error", 2, 1]]) {
+    it(`a ${error} on a channel read (${histories} history, ${replies} thread reads this cycle)`, async () => {
+      const home = await twoChannelHome()
+      const threadTs = tsAt(NOW - 1000)
+      writeInbox(home.slackDir, { ...emptyInbox(), threads: { [`${CHANNEL}:${threadTs}`]: { lastOperatorTs: threadTs, replyCursor: threadTs, busy: false, queued: [], pending: null } } })
+      const fake = createFakeSlack({ expectedToken: TOKEN })
+      fake.queue("conversations.history", { error })
+      const listener = await createListener({ home: home.home, env: home.env, fetch: fake.fetch, now: () => NOW, readers: home.readers })
+      assert.equal((await listener.acquire()).ok, true)
+      try {
+        await listener.cycle()
+        assert.equal(fake.callsTo("conversations.history").length, histories, "history reads this cycle")
+        assert.equal(fake.callsTo("conversations.replies").length, replies, "thread reads this cycle")
+      } finally {
+        await listener.stop()
+      }
+    })
+  }
+
+  for (const [error, replies, channelBRead] of [["invalid_auth", 1, false], ["not_in_channel", 1, true]]) {
+    it(`a ${error} on the first of three thread reads stops the rest of that batch`, async () => {
+      const home = await twoChannelHome()
+      const threads = {}
+      for (const back of [3000, 2000, 1000]) threads[`${CHANNEL}:${tsAt(NOW - back)}`] = { lastOperatorTs: tsAt(NOW - back), replyCursor: tsAt(NOW - back), busy: false, queued: [], pending: null }
+      writeInbox(home.slackDir, { ...emptyInbox(), threads })
+      const fake = createFakeSlack({ expectedToken: TOKEN })
+      fake.queue("conversations.replies", { error })
+      const listener = await createListener({ home: home.home, env: home.env, fetch: fake.fetch, now: () => NOW, readers: home.readers })
+      assert.equal((await listener.acquire()).ok, true)
+      try {
+        await listener.cycle()
+        assert.equal(fake.callsTo("conversations.replies").length, replies, "no thread read after the error")
+        assert.equal(historyOf(fake, CHANNEL_B) > 0, channelBRead, "the other channel is read only after a channel error")
+      } finally {
+        await listener.stop()
+      }
+    })
+  }
+})
+
+describe("spec 025 WS3: replies whose post failed (codex-reviewer M12-M14)", () => {
+  it("M12: keeps the exact reply text across a restart and posts it on the retry", async () => {
+    const fixture = await createFixture()
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    fake.history(CHANNEL, [message(OPERATOR, NOW, "btrain> status")])
+    fake.queue("chat.postMessage", { error: "internal_error" })
+    await (await listenerFor(fixture, fake, clockAt(NOW + 1000))).listener.cycle()
+    assert.equal(fake.posts.length, 1, "the first post failed")
+    const restarted = await listenerFor(fixture, fake, clockAt(NOW + 40_000))
+    await restarted.listener.cycle()
+    assert.equal(fake.posts.length, 2, "the retry posted")
+    assert.equal(fake.posts[1].body.text, LISTEN_NOTES.commandsNotBuilt)
+    assert.equal(fake.posts[1].body.thread_ts, tsAt(NOW))
+  })
+
+  const seedOutgoing = (fixture, { nextTryAt, attempts = 1 }) => writeInbox(fixture.slackDir, {
+    ...emptyInbox(),
+    channels: { [CHANNEL]: { cursor: tsAt(NOW) } },
+    outgoing: [{ channel: CHANNEL, thread: tsAt(NOW), text: "a queued reply", attempts, nextTryAt: new Date(nextTryAt).toISOString(), proposal: null }],
+  })
+
+  it("M13: does not retry before nextTryAt", async () => {
+    const fixture = await createFixture()
+    seedOutgoing(fixture, { nextTryAt: NOW + 30_000 })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const clock = clockAt(NOW + 29_000)
+    const { listener } = await listenerFor(fixture, fake, clock)
+    await listener.cycle()
+    assert.equal(fake.posts.length, 0, "not before its time")
+    clock.t = NOW + 30_000
+    await listener.cycle()
+    assert.deepEqual(fake.posts.map((post) => post.body.text), ["a queued reply"])
+  })
+
+  it("M14: drops a reply after five attempts and never makes a sixth", async () => {
+    const fixture = await createFixture()
+    seedOutgoing(fixture, { nextTryAt: NOW })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    fake.setDefault("chat.postMessage", { error: "internal_error" })
+    const clock = clockAt(NOW)
+    const { listener } = await listenerFor(fixture, fake, clock)
+    for (let index = 0; index < 8; index += 1) {
+      await listener.cycle()
+      clock.advance(10 * MINUTE)
+    }
+    assert.equal(fake.posts.length, 4, "attempts 2 to 5")
+    const inbox = JSON.parse(await fs.readFile(path.join(fixture.slackDir, "inbox.json"), "utf8"))
+    assert.deepEqual(inbox.outgoing, [])
+  })
+})
+
+describe("spec 025 WS3: the registry and toggles are read again every sixth cycle (M15)", () => {
+  it("starts reading a newly registered repository's channel and stops reading an unregistered one", async () => {
+    const home = await twoChannelHome({ registered: ["a"] })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const clock = clockAt(NOW)
+    const listener = await createListener({ home: home.home, env: home.env, fetch: fake.fetch, now: clock.now, readers: home.readers })
+    const cycle = async () => {
+      await listener.cycle()
+      clock.advance(10_000)
+    }
+    for (let index = 0; index < 5; index += 1) await cycle()
+    assert.equal(historyOf(fake, CHANNEL_B), 0)
+    await home.register(["a", "b"])
+    await cycle() // the sixth cycle reads the registry again
+    await cycle()
+    assert.ok(historyOf(fake, CHANNEL_B) > 0, "the newly registered repository's channel is read")
+
+    await home.register(["b"])
+    for (let index = 0; index < 5; index += 1) await cycle() // through the twelfth
+    const readsOfA = historyOf(fake, CHANNEL)
+    await cycle()
+    await cycle()
+    assert.equal(historyOf(fake, CHANNEL), readsOfA, "the unregistered repository's channel is no longer read")
+  })
+})
