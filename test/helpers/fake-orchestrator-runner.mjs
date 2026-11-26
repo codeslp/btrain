@@ -22,7 +22,7 @@
 //      `envNames` (sorted names only, never values, without the names Node
 //      adds to itself at startup), `stdin`, and `pid`.
 //   3. Writes the first stream event, then waits `delayMs`.
-//   4. Writes an assistant event and a result event with the reply text,
+//   4. Writes an assistant event, a rate limit event, and a result event with the reply text,
 //      writes `stderr`, and exits with `exitCode`. With `neverExit` it stays
 //      alive after step 3 until it is signalled.
 //
@@ -32,7 +32,7 @@
 //               written as a raw line (an unreadable event); null for none.
 //               Default: DEFAULT_FIRST_EVENT with `cwd` set to the run's
 //               working directory.
-//   reply       the reply text; null writes no assistant or result event.
+//   reply       the reply text; null writes none of those three events.
 //               Default "OK".
 //   exitCode    default 0.
 //   stderr      text written to standard error. Default "".
@@ -43,11 +43,13 @@
 //               already written) follows the Nth, later runs the last. Runs
 //               are counted at start, so give concurrent runs one control.
 //
-// The stream shape. `DEFAULT_FIRST_EVENT` and the assistant and result
-// events follow the documented `claude -p --output-format stream-json
-// --verbose` shape. They are not yet checked against a real run: task T004
-// is that probe. When the T004 fixture lands, replace the field names here
-// with the captured ones and tick T002.
+// The stream shape. The default stream has the event order and the field
+// names of one real run of the `claude` profile (CLI 2.1.274), stored by
+// task T004 in `test/fixtures/claude-stream/profile-probe.json`: a
+// `system`/`init` event, an `assistant` event, a `rate_limit_event`, and a
+// `result` event. The values are fake. A test checks the names against the
+// fixture, so a new probe that changes them fails that test until this file
+// follows.
 
 import fs from "node:fs"
 import fsp from "node:fs/promises"
@@ -75,23 +77,46 @@ const NODE_STARTUP_ENV_NAMES = new Set(["__CF_USER_TEXT_ENCODING"])
 const FAKE_SESSION_ID = "00000000-0000-4000-8000-000000000000"
 const FAKE_MODEL = "claude-fake-model"
 
+const FAKE_UUID = "00000000-0000-4000-8000-000000000001"
+const FAKE_VERSION = "0.0.0-fake"
+
 /**
  * The first event of a run that passes the spec 025 FR-15 check: no tools,
- * no MCP servers, and the subscription login as the credential source.
- * Provisional until the T004 probe.
+ * no MCP servers, and the subscription login as the credential source
+ * (`apiKeySource: "none"`, as the T004 probe reported).
  */
-export const DEFAULT_FIRST_EVENT = Object.freeze({
+export const DEFAULT_FIRST_EVENT = deepFreeze({
   type: "system",
   subtype: "init",
   cwd: "",
   session_id: FAKE_SESSION_ID,
-  tools: Object.freeze([]),
-  mcp_servers: Object.freeze([]),
+  tools: [],
+  mcp_servers: [],
   model: FAKE_MODEL,
   permissionMode: "default",
-  slash_commands: Object.freeze([]),
+  slash_commands: [],
+  terminal_slash_commands: [],
   apiKeySource: "none",
+  claude_code_version: FAKE_VERSION,
+  output_style: "default",
+  agents: [],
+  skills: [],
+  plugins: [],
+  capabilities: [],
+  analytics_disabled: true,
+  product_feedback_disabled: true,
+  fast_mode_state: "off",
+  fast_mode_disabled_reason: null,
+  messaging_socket_path: null,
+  uuid: FAKE_UUID,
 })
+
+function deepFreeze(object) {
+  for (const value of Object.values(object)) {
+    if (value && typeof value === "object") deepFreeze(value)
+  }
+  return Object.freeze(object)
+}
 
 /** The default first event with some fields replaced, for a failing check. */
 export function firstEventWith(overrides) {
@@ -196,6 +221,7 @@ export async function runFakeOrchestrator(dir) {
   const reply = Object.hasOwn(control, "reply") ? control.reply : "OK"
   if (reply !== null) {
     await writeLine(JSON.stringify(assistantEvent(String(reply))))
+    await writeLine(JSON.stringify(rateLimitEvent()))
     await writeLine(JSON.stringify(resultEvent(String(reply))))
   }
   if (control.stderr) await new Promise((resolve) => process.stderr.write(String(control.stderr), resolve))
@@ -241,6 +267,8 @@ function writeLine(line) {
   return new Promise((resolve) => process.stdout.write(`${line}\n`, resolve))
 }
 
+const FAKE_USAGE = { input_tokens: 0, output_tokens: 0 }
+
 function assistantEvent(text) {
   return {
     type: "assistant",
@@ -250,10 +278,36 @@ function assistantEvent(text) {
       role: "assistant",
       model: FAKE_MODEL,
       content: [{ type: "text", text }],
+      container: null,
+      context_management: null,
+      diagnostics: null,
+      stop_details: null,
       stop_reason: null,
+      stop_sequence: null,
+      usage: FAKE_USAGE,
     },
     parent_tool_use_id: null,
+    request_id: "req_fake",
     session_id: FAKE_SESSION_ID,
+    timestamp: new Date(0).toISOString(),
+    uuid: FAKE_UUID,
+  }
+}
+
+function rateLimitEvent() {
+  return {
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed",
+      resetsAt: 0,
+      rateLimitType: "five_hour",
+      overageStatus: "rejected",
+      overageDisabledReason: null,
+      isUsingOverage: false,
+      unifiedWindows: {},
+    },
+    session_id: FAKE_SESSION_ID,
+    uuid: FAKE_UUID,
   }
 }
 
@@ -262,8 +316,27 @@ function resultEvent(text) {
     type: "result",
     subtype: "success",
     is_error: false,
+    api_error_status: null,
+    duration_ms: 0,
+    duration_api_ms: 0,
+    first_content_frame_ms: 0,
+    time_to_request_ms: 0,
+    ttft_ms: 0,
+    ttft_stream_ms: 0,
     num_turns: 1,
     result: text,
+    result_index: 0,
+    stop_reason: "end_turn",
+    terminal_reason: null,
+    permission_denials: [],
+    queued_turn_count: 0,
+    subagent_stats: null,
+    fast_mode_state: "off",
+    fast_mode_disabled_reason: null,
+    total_cost_usd: 0,
+    usage: FAKE_USAGE,
+    modelUsage: {},
     session_id: FAKE_SESSION_ID,
+    uuid: FAKE_UUID,
   }
 }
