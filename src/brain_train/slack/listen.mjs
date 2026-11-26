@@ -55,8 +55,15 @@ function tsOf(ms) {
   return `${Math.floor(ms / 1000)}.${String(Math.floor(ms) % 1000).padStart(3, "0")}000`
 }
 
-function laterTs(left, right) {
-  return compareTs(left, right) >= 0 ? left : right
+// A cursor more than 25 hours old moves to 24 hours ago: the handled set
+// keeps a ts for 48 hours, so nothing read again is acted on twice. The hour
+// of slack keeps a clamped cursor still while a read longer than one minute
+// of budget pages from it (read-client resumes a read only for the same
+// lower bound).
+const CLAMP_SLACK_MS = 60 * 60 * 1000
+
+function clampedCursor(cursor, nowMs) {
+  return nowMs - slackTsToMs(cursor) > DAY_MS + CLAMP_SLACK_MS ? tsOf(nowMs - DAY_MS) : cursor
 }
 
 function iso(ms) {
@@ -295,8 +302,8 @@ export async function createListener({
       // A channel with no saved cursor starts at the current time (the read
       // overlap still covers the minute before).
       entry = { cursor: tsOf(nowMs) }
-    } else if (nowMs - slackTsToMs(entry.cursor) > DAY_MS) {
-      entry = { ...entry, cursor: tsOf(nowMs - DAY_MS) }
+    } else {
+      entry = { ...entry, cursor: clampedCursor(entry.cursor, nowMs) }
     }
     // Kept in memory; the cycle's next state write, which checks the lease,
     // saves it.
@@ -320,11 +327,16 @@ export async function createListener({
 
   const readThreads = async (channel) => {
     const prefix = `${channel}:`
-    const open = Object.entries(state.threads)
-      .filter(([key]) => key.startsWith(prefix))
-      // Never read further back than 24 hours, as for a channel: the handled
-      // set forgets a ts after 48.
-      .map(([key, thread]) => ({ threadTs: key.slice(prefix.length), cursorTs: laterTs(thread.replyCursor || thread.lastOperatorTs, tsOf(now() - DAY_MS)) }))
+    const nowMs = now()
+    const open = []
+    for (const [key, thread] of Object.entries(state.threads)) {
+      if (!key.startsWith(prefix)) continue
+      // The same 24-hour floor as a channel's, kept in the state so a long
+      // read pages from one lower bound.
+      const replyCursor = clampedCursor(thread.replyCursor || thread.lastOperatorTs, nowMs)
+      if (replyCursor !== thread.replyCursor) state.threads[key] = { ...thread, replyCursor }
+      open.push({ threadTs: key.slice(prefix.length), cursorTs: replyCursor })
+    }
     const { results } = await reader.readThreads(channel, open)
     const context = channelContext(channel)
     for (const { threadTs, result } of results) {
