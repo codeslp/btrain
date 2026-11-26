@@ -381,13 +381,19 @@ describe("dashboard lifecycle", () => {
 
   it("gives up at the probe cap on a live process that never answers", async () => {
     const { repoRoot, env } = await createDashboardRepo()
-    // This test's own process: alive for the whole stop, and never signalled
-    // because no probe succeeds.
-    await writeRecordedDashboard(env, { pid: process.pid, port: 3700 })
-    const { value, elapsedMs } = await timed(stopDashboard(repoRoot, { env, fetchImpl: unhealthyFetch }), 8000)
-    assert.equal(value.stopped, false)
-    assert.ok(elapsedMs >= 4500, `stop gave up after ${elapsedMs}ms, before the probe cap`)
-    assert.equal(await stateFileExists(env), false)
+    // A live process that is never signalled, because no probe succeeds.
+    // Killing it afterwards also ends a stop loop that ignored the cap.
+    const live = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" })
+    await new Promise((resolve) => live.once("spawn", resolve))
+    try {
+      await writeRecordedDashboard(env, { pid: live.pid, port: 3700 })
+      const { value, elapsedMs } = await timed(stopDashboard(repoRoot, { env, fetchImpl: unhealthyFetch }), 8000)
+      assert.equal(value.stopped, false)
+      assert.ok(elapsedMs >= 4500, `stop gave up after ${elapsedMs}ms, before the probe cap`)
+      assert.equal(await stateFileExists(env), false)
+    } finally {
+      live.kill("SIGKILL")
+    }
   })
 
   it("treats a process it may not signal (EPERM) as alive and keeps probing", async () => {
