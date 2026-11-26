@@ -91,6 +91,36 @@ async function probeLegacyDashboard(repoRoot, port, fetchImpl = fetch) {
     && await normalizedPath(payload.repo) === await normalizedPath(repoRoot)
 }
 
+function isProcessAlive(pid) {
+  if (!pid) {
+    return false
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === "EPERM"
+  }
+}
+
+// One health probe can miss its 750 ms budget on a loaded machine. While the
+// recorded process is still alive, keep asking; the cap only guards against a
+// process that stays up without ever answering, which is then not ours to stop.
+const DASHBOARD_PROBE_TIMEOUT_MS = 5_000
+
+async function probeRecordedDashboard(state, fetchImpl) {
+  const deadline = Date.now() + DASHBOARD_PROBE_TIMEOUT_MS
+  while (true) {
+    if (await probeDashboard(state.port, fetchImpl)) {
+      return true
+    }
+    if (!isProcessAlive(state.pid) || Date.now() >= deadline) {
+      return false
+    }
+    await delay(100)
+  }
+}
+
 function terminateProcess(pid) {
   if (!pid) {
     return false
@@ -141,8 +171,15 @@ async function findAvailableDashboardPort(startPort = DEFAULT_DASHBOARD_PORT) {
   throw new Error(`No dashboard port is available between ${startPort} and ${Math.min(startPort + 20, 65535)}.`)
 }
 
-async function waitForAvailablePort(startPort) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+// After a legacy dashboard is told to stop, its port frees when the process
+// exits, which on a loaded machine can take well over a second. Wait for that
+// rather than moving to another port; the cap only guards against a legacy
+// process that never exits.
+const LEGACY_PORT_RELEASE_TIMEOUT_MS = 10_000
+
+async function waitForAvailablePort(startPort, timeoutMs = LEGACY_PORT_RELEASE_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
     if (await canListen(startPort)) {
       return startPort
     }
@@ -201,15 +238,37 @@ function configuredPort(value, env) {
   return parsed
 }
 
-async function waitForDashboard(port, fetchImpl) {
-  const deadline = Date.now() + 5_000
+// A new dashboard is waited for until it answers or its process exits. The
+// cap only guards against a process that stays up without ever answering; a
+// slow start on a loaded machine is not a failure.
+const DASHBOARD_START_TIMEOUT_MS = 15_000
+
+async function waitForDashboard(port, fetchImpl, child) {
+  // The child can exit while ensureDashboard is still writing its state, and
+  // then its exit event has already been emitted. Read the recorded exit
+  // first, and listen only for an exit that is still to come.
+  let exit = null
+  if (typeof child?.exitCode === "number" || typeof child?.signalCode === "string") {
+    exit = { code: child.exitCode, signal: child.signalCode }
+  } else {
+    child?.once?.("exit", (code, signal) => {
+      exit = { code, signal }
+    })
+  }
+  const deadline = Date.now() + DASHBOARD_START_TIMEOUT_MS
   while (Date.now() < deadline) {
-    if (await probeDashboard(port, fetchImpl)) {
-      return true
+    const answered = await probeDashboard(port, fetchImpl)
+    // An exit, including one during the probe, outranks a health answer:
+    // once this child is gone, whatever answers on the port is not it.
+    if (exit) {
+      return { healthy: false, exit }
+    }
+    if (answered) {
+      return { healthy: true }
     }
     await delay(100)
   }
-  return false
+  return { healthy: false, exit }
 }
 
 async function getDashboardStatus(repoRoot, { env = process.env, fetchImpl = fetch } = {}) {
@@ -286,10 +345,16 @@ async function ensureDashboard(repoRoot, {
   }
   await writeDashboardState(state, env)
 
-  if (!await waitForDashboard(selectedPort, fetchImpl)) {
-    terminateProcess(child.pid)
+  const startup = await waitForDashboard(selectedPort, fetchImpl, child)
+  if (!startup.healthy) {
+    if (!startup.exit) terminateProcess(child.pid)
     await removeDashboardState(env)
-    throw new Error(`Dashboard did not become healthy. See ${logPath}.`)
+    let reason = "did not become healthy"
+    if (startup.exit) {
+      const how = startup.exit.signal ? `signal ${startup.exit.signal}` : `code ${startup.exit.code}`
+      reason = `exited with ${how} before it became healthy`
+    }
+    throw new Error(`Dashboard ${reason}. See ${logPath}.`)
   }
 
   let browserOpened = false
@@ -322,7 +387,7 @@ async function stopDashboard(repoRoot, { env = process.env, fetchImpl = fetch } 
     return { stopped: stoppedLegacy, reason: stoppedLegacy ? "legacy" : "not-running" }
   }
 
-  const ownsProcess = state.port && await probeDashboard(state.port, fetchImpl)
+  const ownsProcess = Boolean(state.port) && await probeRecordedDashboard(state, fetchImpl)
   if (ownsProcess) {
     terminateProcess(state.pid)
   }
