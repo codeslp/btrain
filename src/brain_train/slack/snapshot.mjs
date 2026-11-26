@@ -69,11 +69,19 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-// A btrain message carries the label as the reply prefix
-// (`{repo} · dev: {label} · …`) or as the card's own line (`dev: {label}`).
+// A btrain message carries the label in one fixed place: the second ` · `
+// segment of its first line (a reply, `{repo} · dev: {label} · …`, or the
+// board, `board · dev: {label}`), or its whole second line (a card,
+// `dev: {label}`). A label anywhere else is text, not the author.
 function carriesLabel(text, label) {
   if (!label) return false
-  return new RegExp(`(?:^|\\n|· )dev: ${escapeRegex(label)}(?: · |\\n|$)`).test(text)
+  const wanted = `dev: ${label}`
+  const lines = String(text).split("\n")
+  const segment = lines[0].split(" · ")[1] ?? ""
+  // A message has one label slot: a first line whose second segment is a
+  // `dev:` segment is a reply or the board; otherwise it is a card.
+  if (segment.startsWith("dev: ")) return segment === wanted
+  return lines[1] === wanted
 }
 
 function typedByOperator(item, operator) {
