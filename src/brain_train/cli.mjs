@@ -167,6 +167,9 @@ Usage:
   btrain slack channels                                                          Print the path-to-channel map and the catch-all
   btrain slack test                                                              Call auth.test, post one test message, and clear a delivery pause
   btrain slack whois [--channel <id>]                                            Show the author fields (no text) of a channel's last ten messages
+  btrain slack flush                                                             Deliver this repo's queued Slack entries now, with no time budget
+  btrain slack refresh                                                           Re-render every active lane card and the board from current lane state
+  btrain slack listen [--stop|--resume]                                          Run the Slack listener in the foreground; --stop ends it, --resume clears a pause
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane

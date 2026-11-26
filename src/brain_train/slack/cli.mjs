@@ -17,9 +17,13 @@ import { btrainHome, CREDENTIAL_REASONS, loadSlackCredentials, MAX_CREDENTIAL_BY
 import { clearPause } from "./deliver.mjs"
 import { listEntries, readDeliveryState } from "./outbox.mjs"
 import { deliverToTarget, deliveryTarget } from "./target.mjs"
+import { getListenerSettings } from "./config.mjs"
+import { createListener } from "./listen.mjs"
+import { clearPaused, leasePath, readLeaseHolder, requestStop } from "./lease.mjs"
+import { LOCK_STALE_MS } from "./lock.mjs"
 import { scrubSecrets } from "./text.mjs"
 
-export const SLACK_SUBCOMMANDS = Object.freeze(["setup", "status", "channels", "test", "whois", "flush", "refresh"])
+export const SLACK_SUBCOMMANDS = Object.freeze(["setup", "status", "channels", "test", "whois", "flush", "refresh", "listen"])
 
 // A Slack bot token. The value is checked for shape only; `btrain slack test`
 // checks it against Slack.
@@ -60,6 +64,8 @@ export async function runSlackCommand(subcommand, options = {}, readers = {}) {
       return test(readers, io)
     case "whois":
       return whois(options, readers, io)
+    case "listen":
+      return listen(options, readers, io)
     case "flush":
       return drain("flush", readers, io)
     case "refresh":
@@ -275,6 +281,111 @@ async function status(readers, io) {
     io.out(`board: ${!board.posted ? "not posted yet" : board.pinned ? "posted and pinned" : board.pinError ? `posted, not pinned (${board.pinError})` : "posted, not pinned yet"}`)
   }
   return 0
+}
+
+// Spec 025 WS3 (T017, T018): `btrain slack listen` runs the listener in the
+// foreground until the stop flag; `--stop` writes that flag and waits up to
+// two poll intervals for the lease to go; `--resume` removes the pause flag.
+// It refuses to start with no operator, no token, no served repository, or a
+// live lease, which it names. It prints one line for each action and never
+// message text or the token.
+async function listen(options, readers, io) {
+  const home = btrainHome(io.env)
+  const slackDir = path.join(home, "slack")
+  if (options.resume) {
+    io.out((await clearPaused(slackDir)) ? "listen: resumed; messages sent during the pause are ignored" : "listen: was not paused")
+    return 0
+  }
+  if (options.stop) return stopListener(slackDir, io)
+
+  let listener
+  try {
+    listener = await createListener({ home, env: io.env, readers, cliPath: readers.cliPath, fetch: readers.fetchImpl || globalThis.fetch, log: (line) => io.out(line) })
+  } catch (error) {
+    io.err(`btrain slack listen: ${error.message}`)
+    return 1
+  }
+  if (!listener.operator) {
+    io.err("btrain slack listen: no operator is set in ~/.btrain/slack.json; run btrain slack setup --operator <user id>")
+    return 1
+  }
+  if (!listener.token) {
+    io.err("btrain slack listen: no Slack token; run btrain slack setup")
+    return 1
+  }
+  if (listener.served.length === 0) {
+    io.err("btrain slack listen: no repository is served; turn on [features].slack and slack_listen and map a channel with btrain slack setup --channel <id>")
+    return 1
+  }
+  const taken = await listener.acquire()
+  if (!taken.ok) {
+    const holder = taken.holder
+    io.err(`btrain slack listen: another listener holds this btrain home${holder?.pid ? ` (process ${holder.pid}, started ${holder.startedAt || "at an unknown time"})` : ""}`)
+    return 1
+  }
+  io.out(`operator: ${listener.operator}`)
+  for (const repo of listener.served) io.out(`serving ${repo.name} (${repo.path}) in ${repo.channel}`)
+  io.out(`runner: ${listener.runner || "none"} (the model is not built yet)`)
+
+  let interrupted = false
+  let wake = () => {}
+  const onSignal = () => {
+    interrupted = true
+    wake()
+  }
+  process.once("SIGINT", onSignal)
+  process.once("SIGTERM", onSignal)
+  try {
+    while (!interrupted) {
+      const result = await listener.cycle()
+      if (result.status !== "ok") {
+        io.out(result.status === "stopped" ? "listen: stopped" : "listen: the lease was taken over; exiting")
+        return 0
+      }
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, listener.pollSeconds * 1000)
+        wake = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+      })
+    }
+    io.out("listen: interrupted")
+    return 0
+  } finally {
+    process.removeListener("SIGINT", onSignal)
+    process.removeListener("SIGTERM", onSignal)
+    await listener.stop()
+  }
+}
+
+async function leaseIsLive(slackDir) {
+  try {
+    const stat = await fs.stat(leasePath(slackDir))
+    return Date.now() - stat.mtimeMs < LOCK_STALE_MS
+  } catch {
+    return false
+  }
+}
+
+async function stopListener(slackDir, io) {
+  if (!(await leaseIsLive(slackDir))) {
+    io.out("listen: no listener is running")
+    return 0
+  }
+  const holder = readLeaseHolder(slackDir)
+  await requestStop(slackDir)
+  const credentials = await loadSlackCredentials({ env: io.env })
+  const deadline = Date.now() + 2 * getListenerSettings(credentials.settings).pollSeconds * 1000 + 1000
+  while (Date.now() < deadline) {
+    if (!(await leaseIsLive(slackDir))) {
+      io.out(`listen: stopped${holder?.pid ? ` process ${holder.pid}` : ""}`)
+      return 0
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  io.err("btrain slack listen --stop: the listener did not stop within two poll intervals")
+  return 1
 }
 
 // Spec 024 FR-11 (T018): `flush` drains the queue now, with no time budget;

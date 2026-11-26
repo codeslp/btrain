@@ -64,6 +64,24 @@ export async function readLaneStates(repoRoot) {
   })))
 }
 
+/**
+ * Spec 025: what the listener checks a typed command's values against (FR-2):
+ * the repository's lane IDs and its active agents whose runner is set and is
+ * not `notify`.
+ */
+export async function readRepoRoster(repoRoot) {
+  const config = await readProjectConfig(repoRoot)
+  const runners = config?.agents?.runners && typeof config.agents.runners === "object" ? config.agents.runners : {}
+  const active = Array.isArray(config?.agents?.active) ? config.agents.active.map(String) : []
+  return {
+    laneIds: (getLaneConfigs(config) || []).map((lane) => lane.id),
+    agents: active.filter((agent) => {
+      const runner = String(runners[agent] ?? "").trim()
+      return runner !== "" && runner !== "notify"
+    }),
+  }
+}
+
 /** The readers object of the `slack` block, beyond the repository fields. */
 export function buildSlackReaders({ cliPath }) {
   return {
@@ -71,6 +89,7 @@ export function buildSlackReaders({ cliPath }) {
     findAvailableLane,
     readConfig: readProjectConfig,
     readLanes: readLaneStates,
+    readRoster: readRepoRoster,
     enteredByPrPoll: readEnteredByPrPoll,
     cliPath,
   }
