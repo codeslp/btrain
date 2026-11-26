@@ -562,3 +562,44 @@ describe("spec 025 WS3: a backlog longer than one minute of read budget", () => 
     }
   })
 })
+
+// codex-reviewer on 82d6f4e: a resume moved only the cursors already saved,
+// so a channel first read after the resume picked up pause-time messages
+// through the read overlap.
+describe("spec 025 WS3: a resume covers every served channel", () => {
+  it("ignores a command sent during the pause in a channel not yet read when the pause came", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-listen-resume-")))
+    roots.push(root)
+    const home = path.join(root, "home")
+    const repoA = path.join(root, "repo-a")
+    const repoB = path.join(root, "repo-b")
+    const channelB = "C0000FAKB"
+    await fs.mkdir(home, { recursive: true })
+    const configPath = path.join(home, "slack.json")
+    await fs.writeFile(configPath, JSON.stringify({ botToken: TOKEN, operator: OPERATOR, channels: { [repoA]: CHANNEL, [repoB]: channelB }, pollSeconds: 4, orchestrator: { runner: "claude -p" } }), { mode: 0o600 })
+    await fs.chmod(configPath, 0o600)
+    await fs.writeFile(path.join(home, "repos.json"), JSON.stringify({ repos: [{ path: repoA, name: "repo-a" }, { path: repoB, name: "repo-b" }] }))
+    const readers = {
+      readConfig: async () => ({ features: { slack: true, slack_listen: true } }),
+      readRoster: async () => ({ laneIds: ["a"], agents: ["claude"] }),
+      readLanes: async () => [],
+    }
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    fake.history(CHANNEL, [message(OPERATOR, NOW, "btrain> pause")])
+    const clock = clockAt(NOW + 1000)
+    const listener = await createListener({ home, env: cleanEnv(home), fetch: fake.fetch, now: clock.now, readers })
+    assert.deepEqual(listener.served.map((repo) => repo.channel), [CHANNEL, channelB])
+    await listener.cycle()
+    assert.deepEqual(fake.posts.map((post) => post.body.text), [REPLIES.paused])
+    assert.equal(fake.callsTo("conversations.history").filter((call) => call.body.channel === channelB).length, 0, "the pause came before channel B was read")
+
+    fake.history(channelB, [message(OPERATOR, NOW + 5000, "btrain> status")])
+    await clearPaused(path.join(home, "slack"))
+    clock.t = NOW + 10_000
+    await listener.cycle()
+    clock.advance(10_000)
+    await listener.cycle()
+    assert.ok(fake.callsTo("conversations.history").some((call) => call.body.channel === channelB), "channel B is read after the resume")
+    assert.deepEqual(fake.posts.map((post) => post.body.text), [REPLIES.paused], "the command sent during the pause is not acted on")
+  })
+})
