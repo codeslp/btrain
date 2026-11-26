@@ -526,3 +526,39 @@ describe("spec 025 WS3: every Slack call checks the lease first", () => {
     await second.stop()
   })
 })
+
+// codex-reviewer on f5995e5: an old cursor was clamped to now minus 24 hours
+// again every cycle, so a read longer than one minute of budget restarted
+// from its first page each minute and never finished.
+describe("spec 025 WS3: a backlog longer than one minute of read budget", () => {
+  it("finishes the read across cycles after clamping an old cursor, and answers the recent command", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-listen-backlog-")))
+    roots.push(root)
+    const home = path.join(root, "home")
+    const repo = path.join(root, "repo")
+    await writeSlackJson(home, repo)
+    await fs.writeFile(path.join(home, "repos.json"), JSON.stringify({ repos: [{ path: repo, name: "repo" }] }))
+    writeInbox(path.join(home, "slack"), { ...emptyInbox(), channels: { [CHANNEL]: { cursor: tsAt(NOW - 2 * 24 * 60 * MINUTE) } } })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    fake.history(CHANNEL, Array.from({ length: 6201 }, (_, index) => message(index === 0 ? OPERATOR : OTHER, NOW - index * 1000, index === 0 ? "btrain> status" : "irrelevant")))
+    const clock = clockAt(NOW)
+    const readers = {
+      readConfig: async () => ({ features: { slack: true, slack_listen: true } }),
+      readRoster: async () => ({ laneIds: [], agents: [] }),
+      readLanes: async () => [],
+    }
+    const listener = await createListener({ home, env: cleanEnv(home), fetch: fake.fetch, now: clock.now, readers })
+    assert.equal((await listener.acquire()).ok, true)
+    try {
+      await listener.cycle()
+      assert.equal(fake.posts.length, 0, "the first cycle spends its budget before the read completes")
+      clock.advance(60_000)
+      await listener.cycle()
+      assert.equal(fake.posts.length, 1, "the second cycle finishes the saved pages and answers the command")
+      const calls = fake.callsTo("conversations.history")
+      assert.ok(calls.slice(1).every((call) => call.body.oldest === calls[0].body.oldest), "the read keeps one lower bound while it is unfinished")
+    } finally {
+      await listener.stop()
+    }
+  })
+})
