@@ -257,11 +257,14 @@ async function waitForDashboard(port, fetchImpl, child) {
   }
   const deadline = Date.now() + DASHBOARD_START_TIMEOUT_MS
   while (Date.now() < deadline) {
-    if (await probeDashboard(port, fetchImpl)) {
-      return { healthy: true }
-    }
+    const answered = await probeDashboard(port, fetchImpl)
+    // An exit, including one during the probe, outranks a health answer:
+    // once this child is gone, whatever answers on the port is not it.
     if (exit) {
       return { healthy: false, exit }
+    }
+    if (answered) {
+      return { healthy: true }
     }
     await delay(100)
   }
