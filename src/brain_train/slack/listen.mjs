@@ -349,7 +349,7 @@ export async function createListener({
         })
         if (summary.sent || summary.cards) log(`outbox of ${repo.name}: sent ${summary.sent}, cards ${summary.cards}`)
       } catch (error) {
-        log(`outbox of ${repo.name}: ${field(error?.code) === "-" ? "failed" : error.code}`)
+        log(`outbox of ${repo.name}: delivery failed (${field(error?.code)})`)
       }
     }
   }
