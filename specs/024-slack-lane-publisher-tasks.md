@@ -47,8 +47,9 @@ T022 is done: `btrain slack status` reports a failed pin. Invariant 1 runs.
 **Status 2026-11-26:** WS4 (T016 to T021) is done. Every workflow event is
 queued by `slack/index.mjs` after its append, and `cli.mjs` delivers once,
 after the command's output and error, within the 2-second budget. A lane's
-claim key is kept per lane under `.btrain/slack/claims/`, so its later
-entries and its lane state name the same lane task. `btrain slack flush` and
+claim key is the time of the lane's last claim event in its own workflow
+event log, which btrain writes whether or not the publisher is on, so its
+later entries and its lane state name the same lane task. `btrain slack flush` and
 `refresh` share the drain with the inline delivery (`slack/target.mjs`).
 At one message a second per channel, a 2-second budget sends about two
 messages, so a lane command often leaves the first board post or a later

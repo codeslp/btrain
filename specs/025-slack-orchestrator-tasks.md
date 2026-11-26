@@ -44,6 +44,25 @@ Invariant 12 runs, rewritten for the lease API that #130 merged
 (`{ lease, reason, holder }`). Invariant 1 checks served repositories through
 `createListener`, so it stays skipped until T017 writes `listen.mjs`.
 
+**Status 2026-11-26:** WS3 (T017 to T019) is done. `slack/listen.mjs` builds
+the listener as `createListener({ home, fetch, env, readers, now, log })`
+with `acquire()`, `cycle()`, and `stop()`, and runs the plan's seven steps:
+every message goes through `decide.mjs`, and its state is written, with the
+lease nonce checked last, before anything is posted. A mention is answered
+with a note that the model is not built yet and a command with a note that
+commands are not built yet; `btrain> pause` writes the pause flag and drops
+the rest of the read. `btrain slack listen` runs it in the foreground and
+refuses to start with no operator, no token, no served repository, or a live
+lease; `--stop` and `--resume` work as the CLI contract says. A resume moves
+every cursor to the time of the resume and keeps a floor there, so the read
+overlap cannot bring back a message sent during the pause. The `inbox.json`
+state gains `paused`, the time of the pause. Invariants 1, 3, and 10 run;
+invariant 3 checks the reply post, the first thing a command causes until
+WS5 adds the child. The read-budget cases of T019 (six open threads on one
+channel, a 429 not retried before `Retry-After`) are covered by
+`test/slack-read-client.test.mjs` (T016) and, through the cycle, by the
+90-second `Retry-After` case of `test/slack-listen.test.mjs`.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Extend `test/helpers/fake-slack.mjs` with `conversations.history` and `conversations.replies`: scripted messages for each channel and thread, paging with `has_more` and `next_cursor`, newest first for history and earliest first for replies, every failure the fake already supports, and a rejection of a JSON body on `conversations.replies`.
@@ -67,9 +86,9 @@ Invariant 12 runs, rewritten for the lease API that #130 merged
 - [x] T014 [WS2] Write `src/brain_train/slack/lease.mjs` over `slack/lock.mjs`: take and release the listener lease, touch it on a 15-second timer, and read its nonce again with synchronous calls as the last thing before each rename of `inbox.json`; the stop flag; the pause flag. Test that a second lease for one btrain home is refused with the holder named, and that a lease untouched for 60 seconds is taken over. Needs 024 T012.
 - [x] T015 [WS2] Add `btrain slack whois [--channel <id>]` to `slack/cli.mjs` (author fields, no message text), add `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (the predicate of `enteredChangesRequestedViaPrPoll` over the lane's event log), and the CLI path to the readers object the `slack` block in `cli.mjs` passes, add the help lines, and ship `docs/slack-app-manifest-listen.json` with the publisher's scopes plus `channels:history` and `groups:history`. Remove the skips from invariants 1 and 12. Held on 2026-11-23: `cli.mjs` (lane c).
 - [x] T016 [WS3] Write `src/brain_train/slack/read-client.mjs` over the low-level call of `slack/client.mjs`: the two read calls as GET requests, paging, the 60-second overlap, and the read budget of 30 a minute for a channel and 40 a minute for a method. Test six open threads on one channel and a 429 not retried before `Retry-After`. Needs 024 T013.
-- [ ] T017 [WS3] Write the cycle in `src/brain_train/slack/listen.mjs` and the `btrain slack listen` command: the seven steps of the plan, record before act, refusal to start with no `operator`, no served repository, or a live lease. In this workstream a mention gets the one-line note that the model is off and a command gets a note that commands are not built yet.
-- [ ] T018 [WS3] Add `--stop`, `--resume`, and the pause flag. `pause` drops the rest of what was read, and resume moves every channel cursor and every open thread's reply cursor to the current time. Open a conversation on a typed top-level mention, keep its reply cursor, and close it `conversationMinutes` after the operator's last message. Drain each served repository's outbox every cycle, also while paused. Needs 024 T015.
-- [ ] T019 [WS3] Add `test/slack-listen.test.mjs` with every WS3 test the plan lists: other authors ignored, a mention under a lane card ignored with no replies call, a closed thread no longer read, the age rule with exactly one reply across a restart, a handled `ts` not acted on twice, two operators with separate homes on one channel, the stop flag, the pause flag in a channel and in an open thread, a command after `pause` in one read, a 90-second `Retry-After` that keeps the lease, a replaced nonce, 30 hours down, and a queued spec 024 entry delivered within one cycle. Remove the skips from invariants 3 and 10.
+- [x] T017 [WS3] Write the cycle in `src/brain_train/slack/listen.mjs` and the `btrain slack listen` command: the seven steps of the plan, record before act, refusal to start with no `operator`, no served repository, or a live lease. In this workstream a mention gets the one-line note that the model is off and a command gets a note that commands are not built yet.
+- [x] T018 [WS3] Add `--stop`, `--resume`, and the pause flag. `pause` drops the rest of what was read, and resume moves every channel cursor and every open thread's reply cursor to the current time. Open a conversation on a typed top-level mention, keep its reply cursor, and close it `conversationMinutes` after the operator's last message. Drain each served repository's outbox every cycle, also while paused. Needs 024 T015.
+- [x] T019 [WS3] Add `test/slack-listen.test.mjs` with every WS3 test the plan lists: other authors ignored, a mention under a lane card ignored with no replies call, a closed thread no longer read, the age rule with exactly one reply across a restart, a handled `ts` not acted on twice, two operators with separate homes on one channel, the stop flag, the pause flag in a channel and in an open thread, a command after `pause` in one read, a 90-second `Retry-After` that keeps the lease, a replaced nonce, 30 hours down, and a queued spec 024 entry delivered within one cycle. Remove the skips from invariants 3 and 10.
 
 **Independent check:** a listener against the fake hears only the operator, answers a mention with the commands-only note, survives a restart without acting twice, and delivers queued publisher posts.
 

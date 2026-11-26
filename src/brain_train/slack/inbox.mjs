@@ -37,6 +37,9 @@ export function emptyInbox() {
     windows: { commands: {}, retryReview: {}, turns: [] },
     loops: [],
     outgoing: [],
+    // When the listener handled `btrain> pause` (ISO time), or "". Resuming
+    // moves every cursor to the time of the resume (plan, "listen.paused").
+    paused: "",
   }
 }
 
@@ -63,6 +66,7 @@ export function normalizeInbox(raw) {
     },
     loops: Array.isArray(state.loops) ? state.loops : [],
     outgoing: Array.isArray(state.outgoing) ? state.outgoing : [],
+    paused: typeof state.paused === "string" ? state.paused : "",
   }
 }
 

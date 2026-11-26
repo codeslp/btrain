@@ -116,7 +116,7 @@ describe("the listener invariant harness itself", () => {
 describe("spec 025 listener invariants", () => {
   // The toggle and the served repositories exist (T011, T012), but this
   // checks them through createListener, which WS3 writes (T017).
-  it("1. a repository with slack_listen off, or with no [features] table, is not served, and its channel is never read", { skip: "WS3: createListener (T017)" }, async () => { // btrain-allow: skipped-test
+  it("1. a repository with slack_listen off, or with no [features] table, is not served, and its channel is never read", async () => {
     const { createListener } = await slackModule("listen.mjs")
     for (const options of [{ slackListen: false }, { features: false }]) {
       const fixture = await createListenFixture(options)
@@ -152,21 +152,28 @@ describe("spec 025 listener invariants", () => {
     assert.deepEqual(typed.actions.map((action) => action.type), ["command"])
   })
 
-  it("3. a message's ts is handled, and the state renamed into place, before any child or post for it starts", { skip: "WS3: the poll cycle (T019)" }, async () => { // btrain-allow: skipped-test
+  // WS3 answers a command with a post (commands are built in WS5, T027), so
+  // the first thing the message causes is that post; WS5 adds the child.
+  it("3. a message's ts is handled, and the state renamed into place, before any child or post for it starts", async () => {
     const { createListener } = await slackModule("listen.mjs")
     const fixture = await createListenFixture()
     const fake = createFakeSlack({ expectedToken: TOKEN })
     fake.history(CHANNEL, [{ type: "message", user: OPERATOR, ts: tsAt(NOW), text: "btrain> status" }])
     const order = []
+    const handledNow = () => JSON.parse(fsSync.readFileSync(path.join(fixture.home, "slack", "inbox.json"), "utf8")).handled
     const execFileSpy = () => {
-      order.push(["child", JSON.parse(fsSync.readFileSync(path.join(fixture.home, "slack", "inbox.json"), "utf8")).handled])
+      order.push(["child", handledNow()])
       return { pid: 1 }
     }
-    const listener = await createListener({ home: fixture.home, fetch: fake.fetch, env: fixture.env, execFile: execFileSpy, now: () => NOW })
+    const fetchSpy = async (input, init) => {
+      if (String(input).includes("chat.postMessage")) order.push(["post", handledNow()])
+      return fake.fetch(input, init)
+    }
+    const listener = await createListener({ home: fixture.home, fetch: fetchSpy, env: fixture.env, execFile: execFileSpy, now: () => NOW })
     await listener.cycle()
     assert.ok(order.length > 0)
-    for (const [, handled] of order) assert.ok(handled[`${CHANNEL}:${tsAt(NOW)}`], "handled before the child started")
-    const restarted = await createListener({ home: fixture.home, fetch: fake.fetch, env: fixture.env, execFile: execFileSpy, now: () => NOW + 1000 })
+    for (const [, handled] of order) assert.ok(handled[`${CHANNEL}:${tsAt(NOW)}`], "handled before the post or child started")
+    const restarted = await createListener({ home: fixture.home, fetch: fetchSpy, env: fixture.env, execFile: execFileSpy, now: () => NOW + 1000 })
     await restarted.cycle()
     assert.equal(order.length, 1, "no ts acts twice across a restart")
   })
@@ -265,7 +272,8 @@ describe("spec 025 listener invariants", () => {
     }
   })
 
-  it("10. a poll cycle never waits for a child process", { skip: "WS3: the poll cycle (T019)" }, async () => { // btrain-allow: skipped-test
+  // In WS3 a command starts no child yet; WS5 (T027) gives this its teeth.
+  it("10. a poll cycle never waits for a child process", async () => {
     const { createListener } = await slackModule("listen.mjs")
     const fixture = await createListenFixture()
     const fake = createFakeSlack({ expectedToken: TOKEN })
