@@ -44,6 +44,10 @@ const DEFAULT_TIMEOUT = 10_000
 // budgets above per command kind, in ms, for example `advise = "1000"` on a
 // slow machine. The TOML reader returns numbers as strings, so both forms are
 // accepted; anything that is not a positive integer keeps the default.
+// Node's timers hold at most 2^31 - 1 ms and fire after 1 ms for anything
+// larger, so a bigger value also keeps the default.
+const MAX_TIMER_MS = 2_147_483_647
+
 function resolveTimeouts(overrides) {
   const resolved = { ...TIMEOUTS }
   if (!overrides || typeof overrides !== "object") return resolved
@@ -52,7 +56,7 @@ function resolveTimeouts(overrides) {
     const isDigitString = typeof raw === "string" && /^\d+$/.test(raw.trim())
     if (!isDigitString && typeof raw !== "number") continue
     const value = Number(raw)
-    if (Number.isSafeInteger(value) && value > 0) resolved[kind] = value
+    if (Number.isInteger(value) && value > 0 && value <= MAX_TIMER_MS) resolved[kind] = value
   }
   return resolved
 }
