@@ -2461,7 +2461,9 @@ async function run() {
     // One object of readers (plan WS2), so a later subcommand can need
     // another without a change to this call.
     process.exitCode = await runSlackCommand(subcommand, options, {
-      repoRoot,
+      // The channel map is keyed by the registered path, the state root a
+      // linked worktree shares, not the worktree's own path (FR-16).
+      repoRoot: resolveStateRoot(repoRoot),
       config,
       slackDir: path.join(resolveStateRoot(repoRoot), ".btrain", "slack"),
       stdin: process.stdin,

@@ -13,7 +13,7 @@ import readline from "node:readline"
 import { authTest, postMessage } from "./client.mjs"
 import { boardStatus } from "./board.mjs"
 import { channelForRepo, developerLabel, isSlackEnabled, listChannels } from "./config.mjs"
-import { btrainHome, CREDENTIAL_REASONS, loadSlackCredentials, readSlackFile, slackFilePath } from "./credentials.mjs"
+import { btrainHome, CREDENTIAL_REASONS, loadSlackCredentials, MAX_CREDENTIAL_BYTES, readSlackFile, slackFilePath } from "./credentials.mjs"
 import { clearPause } from "./deliver.mjs"
 import { listEntries, readDeliveryState } from "./outbox.mjs"
 
@@ -78,13 +78,22 @@ function lineReader(stdin) {
   }
 }
 
+// Write slack.json only in a form its reader accepts (FR-2: at most
+// MAX_CREDENTIAL_BYTES): indented when that fits, else compact. Returns false,
+// writing nothing, when even the compact form is too large, so a working file
+// is never replaced by one that would turn the publisher off.
 async function writeSlackFile(env, data) {
+  const pretty = `${JSON.stringify(data, null, 2)}\n`
+  const compact = `${JSON.stringify(data)}\n`
+  const text = Buffer.byteLength(pretty) <= MAX_CREDENTIAL_BYTES ? pretty : compact
+  if (Buffer.byteLength(text) > MAX_CREDENTIAL_BYTES) return false
   const target = slackFilePath(env)
   await fs.mkdir(btrainHome(env), { recursive: true })
   const temporary = `${target}.${process.pid}.tmp`
-  await fs.writeFile(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 })
+  await fs.writeFile(temporary, text, { mode: 0o600 })
   await fs.chmod(temporary, 0o600)
   await fs.rename(temporary, target)
+  return true
 }
 
 async function setup(options, readers, io) {
@@ -155,7 +164,10 @@ async function setup(options, readers, io) {
     }
     if (Object.keys(channelsMap).length > 0) data.channels = channelsMap
 
-    await writeSlackFile(io.env, data)
+    if (!(await writeSlackFile(io.env, data))) {
+      io.err(`btrain slack setup: the settings would exceed ${MAX_CREDENTIAL_BYTES} bytes, which ${slackFilePath(io.env)} may not. Nothing was written; remove unused entries from its channels map.`)
+      return 1
+    }
     const { channel, source } = channelForRepo(data, repoPath)
     io.out(`Saved ${slackFilePath(io.env)} (mode 0600). The token is stored, not shown.`)
     io.out(channel ? `This repository publishes to ${channel}${source === "default" ? " (the catch-all)" : ""}.` : "No channel is mapped for this repository.")

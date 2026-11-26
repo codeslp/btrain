@@ -275,10 +275,31 @@ describe("btrain slack setup and status, review repros (codex-reviewer on 9c726f
     const original = JSON.stringify({ botToken: TOKEN, channels })
     await fs.writeFile(path.join(home, "slack.json"), original, { mode: 0o600 })
     assert.equal((await loadSlackCredentials({ env })).reason, "")
-    await runSlackCommand("setup", { channel: OTHER_CHANNEL }, {
+    const code = await runSlackCommand("setup", { channel: OTHER_CHANNEL }, {
       env, repoRoot: "/work/new-repository", stdin: Readable.from([`${TOKEN}\n`]), out() {}, err() {},
     })
-    assert.equal((await loadSlackCredentials({ env })).reason, "", "setup leaves loadable credentials")
+    assert.equal(code, 0, "it fits in the compact form")
+    const loaded = await loadSlackCredentials({ env })
+    assert.equal(loaded.reason, "", "setup leaves loadable credentials")
+    assert.equal(loaded.settings.channels["/work/new-repository"], OTHER_CHANNEL)
+  })
+
+  it("refuses, keeping the file as it was, when even the compact form is too large", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "slack-cli-size-"))
+    roots.push(home)
+    const env = { BRAIN_TRAIN_HOME: home }
+    // Compact settings just under the limit: one more mapping cannot fit.
+    const channels = {}
+    for (let i = 0; JSON.stringify({ botToken: TOKEN, channels }).length < 4000; i += 1) channels[`/work/${"r".repeat(60)}/${i}`] = CHANNEL
+    const original = JSON.stringify({ botToken: TOKEN, channels })
+    await fs.writeFile(path.join(home, "slack.json"), original, { mode: 0o600 })
+    const errors = []
+    const code = await runSlackCommand("setup", { channel: OTHER_CHANNEL }, {
+      env, repoRoot: `/work/${"n".repeat(120)}`, stdin: Readable.from([`${TOKEN}\n`]), out() {}, err: (line) => errors.push(line),
+    })
+    assert.equal(code, 1)
+    assert.match(errors.join("\n"), /would exceed 4096 bytes/)
+    assert.equal(await fs.readFile(path.join(home, "slack.json"), "utf8"), original)
   })
 
   it("maps the registered repository, not a linked worktree's path", async () => {
