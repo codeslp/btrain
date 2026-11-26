@@ -12,7 +12,7 @@ import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { fakeSlackProcessEnv, readFakeSlackLog } from "./helpers/fake-slack.mjs"
 import { writeEntry, writeDeliveryState, readDeliveryState, emptyDeliveryState } from "../src/brain_train/slack/outbox.mjs"
 import { updateBoard } from "../src/brain_train/slack/threads.mjs"
-import { Readable } from "node:stream"
+import { PassThrough, Readable } from "node:stream"
 import { runSlackCommand } from "../src/brain_train/slack/cli.mjs"
 import { loadSlackCredentials } from "../src/brain_train/slack/credentials.mjs"
 
@@ -316,5 +316,58 @@ describe("btrain slack setup and status, review repros (codex-reviewer on 9c726f
     await exec("git", ["-C", fresh.repo, "worktree", "add", "--detach", freshWorktree, "HEAD"])
     assert.equal((await fresh.run(["slack", "setup", "--channel", CHANNEL, "--repo", freshWorktree], { input: `${TOKEN}\n` })).code, 0)
     assert.deepEqual(Object.keys((await fresh.readSettings()).channels), [fresh.repo], "setup maps the registered path")
+  })
+})
+
+// codex-reviewer on c888de6: at a terminal, the pasted token must not echo.
+describe("btrain slack setup at a terminal (codex-reviewer on c888de6)", () => {
+  // A stand-in for a TTY stdin: records raw-mode switches and whether data
+  // arrived while echo was on (raw mode off).
+  function fakeTty(chunks) {
+    const stream = new PassThrough()
+    stream.isTTY = true
+    stream.rawModes = []
+    stream.raw = false
+    stream.echoedWhileReading = []
+    stream.setRawMode = (on) => {
+      stream.raw = on
+      stream.rawModes.push(on)
+      return stream
+    }
+    setImmediate(() => {
+      for (const chunk of chunks) {
+        if (!stream.raw) stream.echoedWhileReading.push(chunk)
+        stream.write(chunk)
+      }
+      stream.end()
+    })
+    return stream
+  }
+
+  it("reads the token with echo off and restores the terminal, then reads the channel prompt", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "slack-cli-tty-"))
+    roots.push(home)
+    const env = { BRAIN_TRAIN_HOME: home }
+    await fs.writeFile(path.join(home, "slack.json"), JSON.stringify({ channels: { "/work/other": OTHER_CHANNEL } }), { mode: 0o600 })
+    // A typo fixed with backspace, Enter as a carriage return, then the
+    // channel choice in the same chunk.
+    const stdin = fakeTty([`${TOKEN}x\u007f\r1\n`])
+    const code = await runSlackCommand("setup", {}, { env, repoRoot: "/work/repo", stdin, out() {}, err() {} })
+    assert.equal(code, 0)
+    assert.deepEqual(stdin.rawModes, [true, false], "echo off while reading the token, then restored")
+    assert.deepEqual(stdin.echoedWhileReading, [], "the token arrived with echo off")
+    const settings = (await loadSlackCredentials({ env })).settings
+    assert.equal((await loadSlackCredentials({ env })).token, TOKEN, "backspace removed the typo")
+    assert.equal(settings.channels["/work/repo"], OTHER_CHANNEL, "the prompt after the token still reads its answer")
+  })
+
+  it("restores the terminal and writes nothing when the token read is cancelled with Ctrl-C", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "slack-cli-tty-"))
+    roots.push(home)
+    const stdin = fakeTty([`${TOKEN.slice(0, 8)}\u0003`])
+    const code = await runSlackCommand("setup", { channel: CHANNEL }, { env: { BRAIN_TRAIN_HOME: home }, repoRoot: "/work/repo", stdin, out() {}, err() {} })
+    assert.equal(code, 1)
+    assert.deepEqual(stdin.rawModes, [true, false])
+    await assert.rejects(fs.stat(path.join(home, "slack.json")))
   })
 })
