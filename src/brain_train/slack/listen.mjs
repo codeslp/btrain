@@ -130,13 +130,28 @@ export async function createListener({
     else log(`auth.test failed: ${field(auth.error)}`)
   }
 
-  const reader = createReader({ token, fetchImpl, now })
   const loaded = loadInbox(slackDir)
   if (loaded.error) log(`inbox: ${loaded.error}; starting from an empty state`)
   let state = loaded.state
   let lease = null
   let stopTimer = () => {}
   let lost = false
+
+  // True while this listener may act: its lease file still holds its
+  // record. Read synchronously, so nothing runs between the check and the
+  // call that follows it.
+  const stillMine = () => {
+    if (lost) return false
+    if (lease && !lease.isMineSync()) lost = true
+    return !lost
+  }
+  // Every Slack call the listener makes goes through here: its reads, its
+  // replies, and the publisher's calls inside deliver. A takeover stops the
+  // next call, wherever the await before it was.
+  const guardedFetch = (input, init) => (stillMine()
+    ? fetchImpl(input, init)
+    : Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "LEASE_LOST" } })))
+  const reader = createReader({ token, fetchImpl: guardedFetch, now })
   let cycles = 0
   let readingStopped = false
   const stoppedChannels = new Set()
@@ -169,7 +184,8 @@ export async function createListener({
   }
 
   const post = async (channel, thread, text) => {
-    const result = await postMessage({ token, fetchImpl, channel, text, threadTs: thread })
+    const result = await postMessage({ token, fetchImpl: guardedFetch, channel, text, threadTs: thread })
+    if (lost) return
     if (result.ok) {
       log(`replied in ${channel} ${thread}`)
       return
@@ -187,7 +203,7 @@ export async function createListener({
   let pausedThisCycle = false
   const act = async (actions) => {
     for (const action of actions) {
-      if (lost) return
+      if (!stillMine()) return
       switch (action.type) {
         case "reply":
           await post(action.channel, action.thread, action.text)
@@ -320,8 +336,8 @@ export async function createListener({
   const retryOutgoing = async () => {
     const due = state.outgoing.filter((item) => Date.parse(item.nextTryAt) <= now())
     for (const item of due) {
-      if (lost) return
-      const result = await postMessage({ token, fetchImpl, channel: item.channel, text: item.text, threadTs: item.thread })
+      if (!stillMine()) return
+      const result = await postMessage({ token, fetchImpl: guardedFetch, channel: item.channel, text: item.text, threadTs: item.thread })
       change((next) => {
         const index = next.outgoing.findIndex((entry) => entry.channel === item.channel && entry.thread === item.thread && entry.text === item.text && entry.nextTryAt === item.nextTryAt)
         if (index < 0) return
@@ -337,6 +353,7 @@ export async function createListener({
   // interval. Delivery keeps its own pace on the real clock.
   const drainOutboxes = async () => {
     for (const repo of served) {
+      if (!stillMine()) return
       try {
         const config = await reading.readConfig(repo.path)
         const target = await deliveryTarget(repo.path, config, { env: homeEnv })
@@ -344,7 +361,7 @@ export async function createListener({
         if (!(await fs.stat(target.slackDir).then((stat) => stat.isDirectory(), () => false))) continue
         const summary = await deliverToTarget(target, {
           readLanes: () => reading.readLanes(repo.path),
-          fetchImpl,
+          fetchImpl: guardedFetch,
           budgetMs: (listening.pollSeconds * 1000) / 2,
         })
         if (summary.sent || summary.cards) log(`outbox of ${repo.name}: sent ${summary.sent}, cards ${summary.cards}`)
@@ -402,6 +419,7 @@ export async function createListener({
       await retryOutgoing()
       if (lost) return { status: "lost-lease" }
       await drainOutboxes()
+      if (lost) return { status: "lost-lease" }
       if (cycles % RELOAD_EVERY_CYCLES === 0) await loadServed()
       return { status: "ok", paused: paused || pausedThisCycle }
     },
