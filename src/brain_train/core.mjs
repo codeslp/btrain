@@ -5653,7 +5653,11 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
   // Spec 023 FR-3 (T018, T019): a new same-lab or lab-less reviewer needs a
   // same-lab-review override for the lane while an other-lab agent with a cli
   // runner is configured; the override is consumed here.
+  // The override is consumed only after the update is published (patchHandoff
+  // calls consumeOverride), so a refused update never spends it, and it never
+  // waives author separation.
   let reviewerLabAllowed
+  let sameLabOverride = null
   if (reviewerChanged) {
     const reviewerLab = checkReviewerLab(config, {
       owner: updates.owner ?? existingCurrent.owner,
@@ -5663,12 +5667,18 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
     })
     reviewerLabAllowed = reviewerLab.allowed
     if (!reviewerLab.allowed) {
-      const override = (await listActiveOverrides(repoRoot)).find((record) => record.action === "same-lab-review"
-        && (record.laneId || "") === (laneId || "") && record.scope === (laneId ? "lane" : "repo"))
-      if (!override) {
+      if (reviewerIsPriorAuthor) {
+        throw new BtrainError({
+          message: `\`btrain handoff update\` refuses ${updates.reviewer} as the reviewer: it authored this lane.`,
+          reason: "Spec 005 FR-5: no prior author of the task reviews it. A same-lab-review override does not waive that.",
+          fix: `Name an agent that has not owned this task, for example --reviewer ${reviewerLab.otherLab[0] || "<agent>"}.`,
+        })
+      }
+      sameLabOverride = (await listActiveOverrides(repoRoot)).find((record) => record.action === "same-lab-review"
+        && (record.laneId || "") === (laneId || "") && record.scope === (laneId ? "lane" : "repo")) || null
+      if (!sameLabOverride) {
         throw new BtrainError(sameLabReviewerRefusal({ reviewer: updates.reviewer, otherLab: reviewerLab.otherLab, laneId, command: "handoff update" }))
       }
-      await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId, overrideId: override.id, actor: actor || existingCurrent.owner })
       reviewerLabAllowed = true
     }
   }
@@ -5682,6 +5692,11 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
     authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(),
     // Row 20's guard inputs that patchHandoff spreads into its gate calls.
     gateFacts: reviewerLabAllowed === undefined ? {} : { reviewerLabAllowed },
+    // Spends the same-lab-review override this reassignment relies on, once
+    // the update is published.
+    consumeOverride: async () => {
+      if (sameLabOverride) await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId, overrideId: sameLabOverride.id, actor: actor || existingCurrent.owner })
+    },
   }
 }
 
@@ -6430,6 +6445,9 @@ async function claimHandoff(repoRoot, options) {
       },
     },
   )
+  if (sameLabOverride) {
+    await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId: "", overrideId: sameLabOverride.id, actor: options.owner })
+  }
   if (claimAdvisory) {
     options.onEvent?.(formatAdvisoryWarning(claimAdvisory, {
       event: "handoff claim",
@@ -6845,6 +6863,7 @@ async function patchHandoff(repoRoot, options) {
       } else {
         updatedCurrent = await updateHandoff(...updateHandoffArgs)
       }
+      await reassign.consumeOverride()
       return finishPatchWithReviewerDispatch(repoRoot, {
         previousStatus: existingCurrent.status,
         nextStatus,
@@ -7068,6 +7087,7 @@ async function patchHandoff(repoRoot, options) {
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
   })
+  await singleReassign.consumeOverride()
   return finishPatchWithReviewerDispatch(repoRoot, {
     previousStatus: existingCurrent.status,
     nextStatus,
