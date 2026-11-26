@@ -44,6 +44,19 @@ hands it one readers object. `setup` reads the token from standard input and
 writes `slack.json` with mode 0600; no command prints the token. With it,
 T022 is done: `btrain slack status` reports a failed pin. Invariant 1 runs.
 
+**Status 2026-11-26:** WS4 (T016 to T021) is done. Every workflow event is
+queued by `slack/index.mjs` after its append, and `cli.mjs` delivers once,
+after the command's output and error, within the 2-second budget. A lane's
+claim key is kept per lane under `.btrain/slack/claims/`, so its later
+entries and its lane state name the same lane task. `btrain slack flush` and
+`refresh` share the drain with the inline delivery (`slack/target.mjs`).
+At one message a second per channel, a 2-second budget sends about two
+messages, so a lane command often leaves the first board post or a later
+reply owed to the next run or a flush. Invariants 2 to 8 run; invariants 4
+and 6 grant a `same-lab-review` override before they make `claude-reviewer`
+the reviewer (spec 023 FR-3), and invariant 8 compares `patchHandoff` and
+`runLoop` with the branch point instead of fixed line counts.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Write the fake Slack `fetch` in `test/helpers/fake-slack.mjs` and its preload in `test/helpers/fake-slack-preload.mjs`. It records every call, returns a `ts` for a post, and on demand returns any Slack error, an HTTP 429 with `Retry-After`, a network error, or never resolves. Scripted responses are keyed by Slack method name. Test it in `test/slack-fake-harness.test.mjs`.
@@ -76,12 +89,12 @@ token.
 
 Held on 2026-11-23: `core.mjs` (lane h), `cli.mjs` (lane c).
 
-- [ ] T016 [WS4] Write `offerWorkflowEvent`, `offerDispatchFailure`, and `deliverAfterCommand` in `src/brain_train/slack/index.mjs`. Add one call to `offerWorkflowEvent` after the append in `appendWorkflowEvent`, and one call to `offerDispatchFailure` before the throw in `finishPatchWithReviewerDispatch`, in `src/brain_train/core.mjs`. Both return at once when the toggle is off and catch every error. `slack/` imports nothing from `core.mjs`.
-- [ ] T017 [WS4] Replace the last statement of `src/brain_train/cli.mjs` with `try { await run() } catch { print the error; set the exit code } finally { await deliverAfterCommand() }`. `cli.mjs` passes the lane-state reader in. `deliverAfterCommand` has the 2-second budget, cannot throw, and prints one warning line after the command's own output when delivery is paused.
-- [ ] T018 [WS4] Add `btrain slack flush` (no time budget, prints counts) and `btrain slack refresh` (re-renders the board and every active card) to `src/brain_train/slack/cli.mjs`.
-- [ ] T019 [WS4] Write `src/brain_train/slack/doctor.mjs` and append its findings in `doctorRepo`: a paused publisher, the toggle on with no token, the toggle on with no channel, and an oldest entry over an hour old.
-- [ ] T020 [WS4] Print the thread line and the one-sentence guidance of FR-12 in `printHandoffState` in `src/brain_train/cli.mjs`. `btrain pr` commands and the startup snapshot do not show it.
-- [ ] T021 [WS4] Add the composition test `test/slack-composition.test.mjs`: claim, review request, request-changes, approval, PR link, and merge through the real CLI in a temporary repository, asserting the fake's calls. Add the WS4 tests the plan lists: the result printed before the first call, a failing or hanging fetch leaving output and exit code unchanged, exactly one paused warning line, each doctor finding, the thread line in `btrain handoff` and not in `btrain pr status`, and no token in any entry file, log line, or command output. Confirm `node scripts/decomposition_inventory.mjs --stages` exits 0 and `test/decomposition_inventory.test.mjs` passes with no change to `specs/020-ws2-module-assignment.json`. Remove the skips from invariants 2, 3, 4, 6, 7, and 8.
+- [x] T016 [WS4] Write `offerWorkflowEvent`, `offerDispatchFailure`, and `deliverAfterCommand` in `src/brain_train/slack/index.mjs`. Add one call to `offerWorkflowEvent` after the append in `appendWorkflowEvent`, and one call to `offerDispatchFailure` before the throw in `finishPatchWithReviewerDispatch`, in `src/brain_train/core.mjs`. Both return at once when the toggle is off and catch every error. `slack/` imports nothing from `core.mjs`.
+- [x] T017 [WS4] Replace the last statement of `src/brain_train/cli.mjs` with `try { await run() } catch { print the error; set the exit code } finally { await deliverAfterCommand() }`. `cli.mjs` passes the lane-state reader in. `deliverAfterCommand` has the 2-second budget, cannot throw, and prints one warning line after the command's own output when delivery is paused.
+- [x] T018 [WS4] Add `btrain slack flush` (no time budget, prints counts) and `btrain slack refresh` (re-renders the board and every active card) to `src/brain_train/slack/cli.mjs`.
+- [x] T019 [WS4] Write `src/brain_train/slack/doctor.mjs` and append its findings in `doctorRepo`: a paused publisher, the toggle on with no token, the toggle on with no channel, and an oldest entry over an hour old.
+- [x] T020 [WS4] Print the thread line and the one-sentence guidance of FR-12 in `printHandoffState` in `src/brain_train/cli.mjs`. `btrain pr` commands and the startup snapshot do not show it.
+- [x] T021 [WS4] Add the composition test `test/slack-composition.test.mjs`: claim, review request, request-changes, approval, PR link, and merge through the real CLI in a temporary repository, asserting the fake's calls. Add the WS4 tests the plan lists: the result printed before the first call, a failing or hanging fetch leaving output and exit code unchanged, exactly one paused warning line, each doctor finding, the thread line in `btrain handoff` and not in `btrain pr status`, and no token in any entry file, log line, or command output. Confirm `node scripts/decomposition_inventory.mjs --stages` exits 0 and `test/decomposition_inventory.test.mjs` passes with no change to `specs/020-ws2-module-assignment.json`. Remove the skips from invariants 2, 3, 4, 6, 7, and 8.
 
 **Independent check:** with the toggle on in a temporary repository, a lane's life produces the expected card and replies in the fake. With it off, no file appears under `.btrain/slack/` and `fetch` is never called. `patchHandoff` and `runLoop` keep their line counts.
 

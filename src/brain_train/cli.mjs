@@ -52,7 +52,8 @@ import {
 import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
 import { formatReviewLine } from "./review/record.mjs"
 import { runSlackCommand, SLACK_SUBCOMMANDS } from "./slack/cli.mjs"
-import { buildSlackReaders } from "./slack-readers.mjs"
+import { buildSlackReaders, readLaneStates } from "./slack-readers.mjs"
+import { deliverAfterCommand, threadLines } from "./slack/index.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -1386,7 +1387,9 @@ export function buildAssignedWorkReminderLines(result, actor) {
   return lines
 }
 
-function printHandoffState(result) {
+// `threadLines` (spec 024 FR-12) maps a lane id to its Slack thread line;
+// only `btrain handoff` passes it.
+function printHandoffState(result, { threadLines = new Map() } = {}) {
   console.log(`repo: ${result.repoName}`)
   const agentCheckLine = formatAgentCheck(result.agentCheck)
   if (agentCheckLine) {
@@ -1409,6 +1412,9 @@ function printHandoffState(result) {
       console.log(`locked files: ${lane.lockPaths?.length ? lane.lockPaths.join(", ") : "(none)"}`)
       console.log(`lock state: ${lane.lockState || "clear"}`)
       console.log(`next: ${lane.nextAction || "(none)"}`)
+      if (threadLines.has(lane._laneId)) {
+        console.log(threadLines.get(lane._laneId))
+      }
       if (lane.reasonCode) {
         console.log(`reason code: ${lane.reasonCode}`)
       }
@@ -1446,6 +1452,9 @@ function printHandoffState(result) {
       console.log(line)
     }
     console.log(`next: ${result.current.nextAction || "(none)"}`)
+    if (threadLines.has("")) {
+      console.log(threadLines.get(""))
+    }
     if (result.current.reasonCode) {
       console.log(`reason code: ${result.current.reasonCode}`)
     }
@@ -1670,6 +1679,18 @@ const LANE_LOCKED_ALLOWED_COMMANDS = new Set([
   "traces",
   "transitions",
 ])
+
+// Commands that deliver nothing afterwards: `btrain slack` delivers itself,
+// and the others are not about one repository's lanes.
+const NO_DELIVERY_COMMANDS = new Set(["slack", "init", "help", "--help", "-h", "--version", "-v"])
+
+// The repository the command ran in, for Slack delivery after it (spec 024
+// WS4), or null. deliverAfterCommand catches a failure to resolve it.
+async function slackDeliveryRepo() {
+  const [command, ...rest] = process.argv.slice(2)
+  if (!command || NO_DELIVERY_COMMANDS.has(command)) return null
+  return resolveRepoRoot(parseOptions(rest).repo)
+}
 
 async function run() {
   const [, , command, ...rest] = process.argv
@@ -2101,7 +2122,8 @@ async function run() {
       console.log(`state hash: ${result.stateHash}`)
       return
     }
-    printHandoffState(result)
+    // Spec 024 FR-12 (T020): each lane's Slack thread, empty with the publisher off.
+    printHandoffState(result, { threadLines: await threadLines(repoRoot, await readProjectConfig(repoRoot), readLaneStates) })
     return
   }
 
@@ -3041,7 +3063,14 @@ async function run() {
   })
 }
 
-run().catch((error) => {
+// Spec 024 WS4 (T017): Slack delivery runs once, after the command's output
+// and its error, whether the command returned, set process.exitCode, or
+// threw. It has its own time budget and cannot throw.
+try {
+  await run()
+} catch (error) {
   console.error(error.message)
   process.exitCode = 1
-})
+} finally {
+  await deliverAfterCommand({ resolveRepo: slackDeliveryRepo, readConfig: readProjectConfig, readLanes: readLaneStates })
+}

@@ -233,8 +233,7 @@ describe("spec 024 publisher invariants", () => {
     }
   })
 
-  // btrain-allow: skipped-test
-  it("2. a command's state change, event, and printed result or error are complete before any Slack call", { skip: "enabled in WS4" }, async () => {
+  it("2. a command's state change, event, and printed result or error are complete before any Slack call", async () => {
     const fixture = await createSlackRepo()
 
     // A command that succeeds: its whole output is written before the first call.
@@ -267,8 +266,7 @@ describe("spec 024 publisher invariants", () => {
     assert.equal(failingCalls[0].outputBefore.stdout, Buffer.byteLength(failing.stdout))
   })
 
-  // btrain-allow: skipped-test
-  it("3. no Slack or delivery outcome throws into a lane command or changes its exit code", { skip: "enabled in WS4" }, async () => {
+  it("3. no Slack or delivery outcome throws into a lane command or changes its exit code", async () => {
     const baseline = await createSlackRepo({ toggle: "off" })
     const steps = [
       claimArgs(),
@@ -307,8 +305,7 @@ describe("spec 024 publisher invariants", () => {
     }
   })
 
-  // btrain-allow: skipped-test
-  it("4. the outbox, thread map, logs, and command output never hold the token or a secret", { skip: "enabled in WS4" }, async () => {
+  it("4. the outbox, thread map, logs, and command output never hold the token or a secret", async () => {
     const fixture = await createSlackRepo()
     const env = { BTRAIN_SLACK_BOT_TOKEN: TOKEN }
     const task = `Rotate ${GITHUB_PAT} and ${GITHUB_CLASSIC}; the alert hook is ${WEBHOOK}`
@@ -323,6 +320,8 @@ describe("spec 024 publisher invariants", () => {
     // flush removes finished entries.
     const queued = await withDeliveryHeld(fixture, async () => {
       assert.equal((await run(claimArgs("a", task))).code, 0)
+      // Spec 023 FR-3: a same-lab reviewer needs a granted override.
+      assert.equal((await run(["override", "grant", "--action", "same-lab-review", "--lane", "a", "--requested-by", "claude", "--confirmed-by", "human", "--reason", "fixture reassignment"])).code, 0)
       assert.equal((await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])).code, 0)
       return readAll(await listFiles(path.join(fixture.slackStateDir, "outbox")))
     })
@@ -416,18 +415,24 @@ describe("spec 024 publisher invariants", () => {
     assertEscapedAndRedacted(card, "renderCard task line")
   })
 
-  // btrain-allow: skipped-test
-  it("6. a card and a board are functions of current lane state, and sending one twice leaves Slack unchanged", { skip: "enabled in WS4" }, async () => {
+  it("6. a card and a board are functions of current lane state, and sending one twice leaves Slack unchanged", async () => {
     const fixture = await createSlackRepo()
     assert.equal((await fixture.btrain(claimArgs("a", "Task at claim time"))).code, 0)
     const cardPost = fixture.calls().find((call) => call.method === "chat.postMessage" && !call.body.thread_ts)
     assert.ok(cardPost?.result?.ts, "the claim posts a card")
+    // The claim's 2-second budget leaves the first board post owed (one
+    // message a second per channel); a flush posts it, so both refreshes
+    // below find a board to update.
+    assert.equal((await fixture.btrain(["slack", "flush"])).code, 0)
 
     // Card fields change while delivery is held, so those updates never reach
     // Slack. The next render must still show current state, not the claim's.
     await withDeliveryHeld(fixture, async () => {
       const task = await fixture.btrain(["handoff", "update", "--lane", "a", "--task", "Task changed while Slack was down", "--actor", "claude"])
       assert.equal(task.code, 0, task.stderr)
+      // Spec 023 FR-3: a same-lab reviewer needs a granted override.
+      const granted = await fixture.btrain(["override", "grant", "--action", "same-lab-review", "--lane", "a", "--requested-by", "claude", "--confirmed-by", "human", "--reason", "fixture reassignment"])
+      assert.equal(granted.code, 0, granted.stderr)
       const reviewer = await fixture.btrain(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
       assert.equal(reviewer.code, 0, reviewer.stderr)
     })
@@ -454,8 +459,7 @@ describe("spec 024 publisher invariants", () => {
     assert.match(card.body.text, /reviewer: claude-reviewer\b/, "the card shows the current reviewer")
   })
 
-  // btrain-allow: skipped-test
-  it("7. a process that finds a live delivery lock skips delivery and returns", { skip: "enabled in WS4" }, async () => {
+  it("7. a process that finds a live delivery lock skips delivery and returns", async () => {
     // The same claim with the publisher off is the time to beat; the slower
     // of two samples, so one fast sample does not make the test flaky.
     const baseline = await createSlackRepo({ toggle: "off" })
@@ -487,22 +491,21 @@ describe("spec 024 publisher invariants", () => {
     assert.deepEqual(fixture.calls(), [], "flush also skips while the lock is live")
   })
 
-  // btrain-allow: skipped-test
-  it("8. core.mjs gains no function, keeps its pinned line counts, and imports only the slack entry point", { skip: "enabled in WS4" }, async (t) => {
+  it("8. core.mjs gains no function, keeps its pinned line counts, and imports only the slack entry point", async (t) => {
     const inventory = await exec("node", [path.join(REPO_ROOT, "scripts/decomposition_inventory.mjs"), "--stages"], { cwd: REPO_ROOT })
       .then(() => 0, (error) => (typeof error.code === "number" ? error.code : 1))
     assert.equal(inventory, 0, "node scripts/decomposition_inventory.mjs --stages exits 0")
 
     const { readFunctionSpans } = await import(new URL("../scripts/decomposition_inventory.mjs", import.meta.url))
     const { spans } = readFunctionSpans(path.join(REPO_ROOT, CORE_RELATIVE))
-    assert.equal(spans.find((span) => span.name === "patchHandoff").lines, 585)
-    assert.equal(spans.find((span) => span.name === "runLoop").lines, 422)
+    const linesOf = (list, name) => list.find((span) => span.name === name).lines
 
     // `--stages` passes when a new function is also added to the assignment
     // JSON, so compare against the branch point: no function added to
-    // core.mjs, and no change to the JSON. This guards a branch; on main the
-    // branch point is HEAD and the comparison is empty. The 585 and 422 above
-    // are the pins of test/decomposition_inventory.test.mjs.
+    // core.mjs, patchHandoff and runLoop the same length, and no change to
+    // the JSON. This guards a branch; on main the branch point is HEAD and
+    // the comparison is empty. test/decomposition_inventory.test.mjs pins
+    // the two lengths themselves.
     const base = (await git(["merge-base", "HEAD", "origin/main"]))?.trim()
     if (!base) {
       t.diagnostic("origin/main is not available; skipped the comparison with the branch point")
@@ -511,9 +514,13 @@ describe("spec 024 publisher invariants", () => {
       const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-core-base-"))
       try {
         await fs.writeFile(path.join(scratch, "core.mjs"), baseCore, "utf8")
-        const baseNames = new Set(readFunctionSpans(path.join(scratch, "core.mjs")).spans.map((span) => span.name))
+        const baseSpans = readFunctionSpans(path.join(scratch, "core.mjs")).spans
+        const baseNames = new Set(baseSpans.map((span) => span.name))
         const added = spans.map((span) => span.name).filter((name) => !baseNames.has(name))
         assert.deepEqual(added, [], "core.mjs gains no function")
+        for (const name of ["patchHandoff", "runLoop"]) {
+          assert.equal(linesOf(spans, name), linesOf(baseSpans, name), `${name} keeps its line count`)
+        }
       } finally {
         await fs.rm(scratch, { recursive: true, force: true })
       }

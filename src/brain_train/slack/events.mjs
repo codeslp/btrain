@@ -174,6 +174,20 @@ export function buildEventFields(event, { summaryChars = DEFAULT_SUMMARY_CHARS }
 }
 
 /**
+ * The claim key of a lane's current task (FR-5): the time of the last `claim`
+ * event in the lane's own event log, or "" for a lane with none. The log is
+ * written whether or not the publisher is on, and never rewritten, so every
+ * entry and lane state of one task names the same key.
+ */
+export function claimKeyOf(events) {
+  const list = Array.isArray(events) ? events : []
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (list[index]?.type === "claim") return String(list[index].recordedAt || "")
+  }
+  return ""
+}
+
+/**
  * A workflow event to `{ kind, reply, mention, fields }`. `reply` is false only
  * for `card-refresh`. `mention` is a decision; the renderer adds the
  * configured IDs.
