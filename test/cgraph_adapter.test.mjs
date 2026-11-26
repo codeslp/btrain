@@ -625,6 +625,47 @@ describe("cgraph_adapter", () => {
     })
   })
 
+  describe("timeout overrides", () => {
+    // A fake kkg that answers every command, manifest included, after 600 ms:
+    // longer than the 200 ms advise budget on any machine, so these cases do
+    // not depend on how fast a process starts.
+    let tmpDir
+    let binPath
+    before(async () => {
+      tmpDir = await makeTmpDir()
+      binPath = await writeFakeBinary(tmpDir, { stdout: JSON.stringify(fakeManifestWithCommands()), sleepMs: 600 })
+    })
+    after(async () => { await rmDir(tmpDir) })
+
+    it("keeps the default budget without [cgraph.timeouts]", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const result = await adapter.advise("lock_overlap", "a")
+      assert.equal(result.timed_out, true)
+    })
+
+    it("extends a command's budget from [cgraph.timeouts], as TOML strings or numbers", async () => {
+      for (const advise of ["30000", 30000]) {
+        const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, timeouts: { advise } } })
+        const result = await adapter.advise("lock_overlap", "a")
+        assert.equal(result.timed_out, false, `advise = ${JSON.stringify(advise)}`)
+        assert.equal(result.ok, true)
+      }
+    })
+
+    it("applies the manifest override to the startup probe", async () => {
+      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, timeouts: { manifest: "100" } } })
+      assert.equal(adapter, null, "a 100 ms manifest budget must reject a 600 ms manifest probe")
+    })
+
+    it("ignores invalid overrides and keeps the default", async () => {
+      for (const advise of ["0", "-5", "1.5", "fast", "", true]) {
+        const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, timeouts: { advise, unknown_kind: "5" } } })
+        const result = await adapter.advise("lock_overlap", "a")
+        assert.equal(result.timed_out, true, `advise = ${JSON.stringify(advise)} must fall back to 200 ms`)
+      }
+    })
+  })
+
   describe("timeout constants", () => {
     it("all timeout values are positive integers", () => {
       for (const [key, value] of Object.entries(TIMEOUTS)) {
