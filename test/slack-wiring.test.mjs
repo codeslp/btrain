@@ -171,3 +171,47 @@ describe("spec 024 WS4: the thread line of FR-12 (T020)", () => {
     }
   })
 })
+
+// codex-reviewer on 17c2fdf: the claim key came from a file only the publisher
+// wrote, so a claim made while it was off was invisible to it.
+describe("spec 024 FR-5: the lane task comes from the lane's own event log", () => {
+  const setToggle = async (fixture, on) => {
+    const tomlPath = path.join(fixture.repo, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    await fs.writeFile(tomlPath, toml.replace(/^slack = (true|false)$/m, `slack = ${on}`))
+  }
+  const cardPosts = (fixture) => fixture.calls()
+    .filter((call) => call.method === "chat.postMessage" && !call.body.thread_ts && !call.body.text.startsWith("board"))
+
+  it("posts the card of a lane claimed while the publisher was off on its next event", async () => {
+    const fixture = await repoWith({ toggle: "off" })
+    assert.equal((await fixture.btrain(claimArgs())).code, 0)
+    await setToggle(fixture, true)
+    const update = await fixture.btrain(["handoff", "update", "--lane", "a", "--task", "Updated active task", "--actor", "claude"])
+    assert.equal(update.code, 0, update.stderr)
+    assert.equal((await fixture.btrain(["slack", "flush"])).code, 0)
+    assert.equal(cardPosts(fixture).length, 1, "the next event creates the active lane's card")
+    assert.match(cardPosts(fixture)[0].body.text, /Updated active task/)
+  })
+
+  it("gives a task claimed while the publisher was off its own thread", async () => {
+    const fixture = await repoWith()
+    assert.equal((await fixture.btrain(claimArgs("a", "First task"))).code, 0)
+    assert.equal((await fixture.btrain(["slack", "flush"])).code, 0)
+    await setToggle(fixture, false)
+    const resolved = await fixture.btrain(["handoff", "resolve", "--lane", "a", "--actor", "claude", "--summary", "Abandoned"])
+    assert.equal(resolved.code, 0, resolved.stderr)
+    assert.equal((await fixture.btrain(claimArgs("a", "Second task"))).code, 0)
+    await setToggle(fixture, true)
+    const update = await fixture.btrain(needsReviewArgs())
+    assert.equal(update.code, 0, update.stderr)
+    assert.equal((await fixture.btrain(["slack", "flush"])).code, 0)
+    const cards = cardPosts(fixture)
+    assert.equal(cards.length, 2, "the new task has its own thread")
+    const firstTs = cards[0].result.ts
+    assert.ok(fixture.calls().filter((call) => call.body.thread_ts === firstTs).every((call) => !/sent to review/.test(call.body.text)),
+      "the new task's reply is not posted in the old thread")
+    assert.ok(fixture.calls().filter((call) => call.method === "chat.update" && call.body.ts === firstTs).every((call) => !/Second task/.test(call.body.text)),
+      "the old card never shows the new task")
+  })
+})
