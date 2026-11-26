@@ -76,9 +76,19 @@ on_signal() {
   fi
   # The job table owns the executor even before its following $! assignment.
   # Running jobs have not been reaped, so their PIDs cannot be recycled.
-  local job_pid
-  for job_pid in $(jobs -pr); do
-    kill -TERM "$job_pid" 2>/dev/null
+  # One TERM is not enough: a TERM that lands while the job's subshell is
+  # still turning into node can be lost, and node would then run zg to the
+  # end. Repeat it until no job is running. Node's handler is idempotent and
+  # escalates to KILL by itself after its grace period.
+  local job_pid tries=0
+  while [ -n "$(jobs -pr)" ] && [ "$tries" -lt 100 ]; do
+    for job_pid in $(jobs -pr); do
+      kill -TERM "$job_pid" 2>/dev/null
+    done
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  for job_pid in $(jobs -p); do
     wait "$job_pid" 2>/dev/null
   done
   cleanup_tmp
