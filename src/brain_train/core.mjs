@@ -80,6 +80,7 @@ import {
 import { needsReviewGateScope } from "./needs_review_gate.mjs"
 import { collectReviewDoctorFindings } from "./review/doctor.mjs"
 import { formatReviewLine, reviewSummary } from "./review/record.mjs"
+import { checkReviewerLab, orderCandidates, sameLabReviewerRefusal } from "./review/labs.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 
@@ -342,7 +343,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve", "local-review"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve", "local-review", "same-lab-review"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -2982,7 +2983,7 @@ async function grantOverride(repoRoot, options = {}) {
     })
   }
 
-  if (["needs-review", "local-review"].includes(action) && laneConfigs && !laneId) {
+  if (["needs-review", "local-review", "same-lab-review"].includes(action) && laneConfigs && !laneId) {
     throw new BtrainError({
       message: `\`btrain override grant --action ${action}\` requires --lane when [lanes] is enabled.`,
       reason: `The ${action} override must target a specific lane in multi-lane repos.`,
@@ -5630,6 +5631,25 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
   const authorHistory = reassigning
     ? authorHistorySinceClaim(await readWorkflowEvents(repoRoot, config, laneId), existingCurrent)
     : new Set()
+  // Spec 023 FR-3: `--reviewer any-other` names no agent. It resolves to the
+  // first eligible candidate, other-lab then same-lab, that never owned the
+  // task, so the recorded reviewer is always an agent that can pick it up.
+  if (updates.reviewer !== undefined && isAnyOtherReviewerValue(updates.reviewer)) {
+    const candidates = orderCandidates(config, {
+      owner: updates.owner ?? existingCurrent.owner,
+      authorHistory: [...authorHistory],
+      configuredAgents: getConfiguredAgentNames(config),
+    })
+    const picked = candidates.otherLab[0] || candidates.sameLab[0] || ""
+    if (!picked) {
+      throw new BtrainError({
+        message: "`--reviewer any-other` found no agent that can review this lane.",
+        reason: "Every configured agent with a cli runner has owned this task.",
+        fix: `Name a reviewer: btrain handoff update${laneId ? ` --lane ${laneId}` : ""} --reviewer <agent>`,
+      })
+    }
+    updates.reviewer = picked
+  }
   const previousOwnerKey = normalizeAgentName(existingCurrent.owner).toLowerCase()
   const previousReviewerKey = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
   const nextOwnerKey = normalizeAgentName(updates.owner ?? existingCurrent.owner).toLowerCase()
@@ -5649,6 +5669,40 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
     if (ownerChanged) responsibleActor = updates.owner
     else if (reviewerChanged && actorKey && actorKey === previousReviewerKey) responsibleActor = existingCurrent.owner
   }
+  // Spec 023 FR-3 (T018, T019): a new same-lab or lab-less reviewer needs a
+  // same-lab-review override for the lane while an other-lab agent with a cli
+  // runner is configured; the override is consumed here.
+  // patchHandoff spends the override after its own checks and immediately
+  // before the handoff write, so a refused update keeps it, and a second
+  // update that read the same override fails to spend it and never publishes.
+  // It never waives author separation.
+  let reviewerLabAllowed
+  let sameLabOverride = null
+  let overrideSpent = false
+  if (reviewerChanged) {
+    const reviewerLab = checkReviewerLab(config, {
+      owner: updates.owner ?? existingCurrent.owner,
+      authorHistory: [...authorHistory],
+      reviewer: updates.reviewer,
+      configuredAgents: getConfiguredAgentNames(config),
+    })
+    reviewerLabAllowed = reviewerLab.allowed
+    if (!reviewerLab.allowed) {
+      if (reviewerIsPriorAuthor) {
+        throw new BtrainError({
+          message: `\`btrain handoff update\` refuses ${updates.reviewer} as the reviewer: it authored this lane.`,
+          reason: "Spec 005 FR-5: no prior author of the task reviews it. A same-lab-review override does not waive that.",
+          fix: `Name an agent that has not owned this task, for example --reviewer ${reviewerLab.otherLab[0] || "<agent>"}.`,
+        })
+      }
+      sameLabOverride = (await listActiveOverrides(repoRoot)).find((record) => record.action === "same-lab-review"
+        && (record.laneId || "") === (laneId || "") && record.scope === (laneId ? "lane" : "repo")) || null
+      if (!sameLabOverride) {
+        throw new BtrainError(sameLabReviewerRefusal({ reviewer: updates.reviewer, otherLab: reviewerLab.otherLab, laneId, command: "handoff update" }))
+      }
+      reviewerLabAllowed = true
+    }
+  }
   return {
     reassigning,
     ownerChanged,
@@ -5657,6 +5711,16 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
     distinctReviewer: reassigning ? (!!nextOwnerKey && !!nextReviewerKey && nextOwnerKey !== nextReviewerKey) : undefined,
     responsibleActor,
     authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(),
+    // Row 20's guard inputs that patchHandoff spreads into its gate calls.
+    gateFacts: reviewerLabAllowed === undefined ? {} : { reviewerLabAllowed },
+    // Spends the same-lab-review override this reassignment relies on. Called
+    // immediately before the handoff write; it throws when another operation
+    // already spent the override, so that operation alone publishes.
+    consumeOverride: async () => {
+      if (!sameLabOverride || overrideSpent) return
+      await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId, overrideId: sameLabOverride.id, actor: actor || existingCurrent.owner })
+      overrideSpent = true
+    },
   }
 }
 
@@ -6225,6 +6289,49 @@ async function claimHandoff(repoRoot, options) {
 
   // Acquire file locks if lanes enabled and files specified
   const files = options.files ? parseCsvList(options.files) : []
+
+  // Spec 023 T017: the reviewer is resolved before the row 1 gate, from the
+  // FR-2 candidate order (other-lab, then same-lab, then the rest), so a claim
+  // with no reviewer or `any-other` takes the first other-lab candidate. A
+  // valid explicit reviewer is still never replaced (spec 015 FR-9).
+  const reviewerOrder = orderCandidates(config, { owner: options.owner, configuredAgents })
+  const resolvedReviewer = inferPeerReviewer({
+    actor: options.owner,
+    reviewer: options.reviewer,
+    currentReviewer: "",
+    owner: options.owner,
+    currentOwner: "",
+    configuredAgents: [...new Set([...reviewerOrder.otherLab, ...reviewerOrder.sameLab, ...configuredAgents])],
+  })
+
+  if (!resolvedReviewer) {
+    throw new BtrainError({
+      message: `Could not infer a reviewer different from "${options.owner}".`,
+      reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
+      fix: `Pass --reviewer <other-agent> explicitly, or add more agents to .btrain/project.toml with \`btrain agents add --repo . --agent <name>\`.`,
+    })
+  }
+
+  // Spec 023 FR-3 (T018, T019): an explicit same-lab or lab-less reviewer
+  // needs a same-lab-review override for the lane while an other-lab agent
+  // with a cli runner is configured. The claim spends the override after its
+  // own checks and immediately before the handoff write; a second claim that
+  // read the same override fails to spend it and never publishes.
+  const reviewerLab = checkReviewerLab(config, { owner: options.owner, reviewer: options.reviewer, configuredAgents })
+  const sameLabOverride = reviewerLab.allowed
+    ? null
+    : (await listActiveOverrides(repoRoot)).find((record) => record.action === "same-lab-review"
+      && (record.laneId || "") === (laneId || "") && record.scope === (laneId ? "lane" : "repo")) || null
+  if (!reviewerLab.allowed && !sameLabOverride) {
+    throw new BtrainError(sameLabReviewerRefusal({ reviewer: options.reviewer, otherLab: reviewerLab.otherLab, laneId: laneId || "" }))
+  }
+  let sameLabOverrideSpent = false
+  const spendSameLabOverride = async (scopeLaneId) => {
+    if (!sameLabOverride || sameLabOverrideSpent) return
+    await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId: scopeLaneId, overrideId: sameLabOverride.id, actor: options.owner })
+    sameLabOverrideSpent = true
+  }
+
   const validateLaneClaim = (source) => {
     if (!["idle", "resolved"].includes(source.status)) {
       throw new BtrainError({
@@ -6239,7 +6346,8 @@ async function claimHandoff(repoRoot, options) {
     applyTransition(source, "handoff claim", {
       to: "in-progress",
       actor: options.owner,
-      changes: { owner: options.owner, reviewer: options.reviewer, lockedFiles: files },
+      changes: { owner: options.owner, reviewer: resolvedReviewer, lockedFiles: files },
+      reviewerLabAllowed: true,
     })
   }
   if (laneConfigs && laneId) {
@@ -6254,23 +6362,6 @@ async function claimHandoff(repoRoot, options) {
     }
     // Acquisition is deferred to the publish step below so both land in one
     // registry critical section.
-  }
-
-  const resolvedReviewer = inferPeerReviewer({
-    actor: options.owner,
-    reviewer: options.reviewer,
-    currentReviewer: "",
-    owner: options.owner,
-    currentOwner: "",
-    configuredAgents,
-  })
-
-  if (!resolvedReviewer) {
-    throw new BtrainError({
-      message: `Could not infer a reviewer different from "${options.owner}".`,
-      reason: "The owner and all configured agents resolve to the same identity, so no peer reviewer can be assigned.",
-      fix: `Pass --reviewer <other-agent> explicitly, or add more agents to .btrain/project.toml with \`btrain agents add --repo . --agent <name>\`.`,
-    })
   }
 
   const updates = {
@@ -6319,6 +6410,7 @@ async function claimHandoff(repoRoot, options) {
     const publishClaim = async () => {
       const latestLane = await readLaneState(repoRoot, config, laneId)
       validateLaneClaim(latestLane)
+      await spendSameLabOverride(laneId)
       result = await updateHandoff(
       repoRoot,
       updates,
@@ -6336,6 +6428,7 @@ async function claimHandoff(repoRoot, options) {
         eventDetails: {
           task: options.task,
           lockedFiles: files,
+          ...(sameLabOverride ? { sameLabReviewOverride: sameLabOverride.id } : {}),
           ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
         },
         overrideHandoffPath: handoffPath,
@@ -6355,10 +6448,12 @@ async function claimHandoff(repoRoot, options) {
     to: "in-progress",
     actor: options.owner,
     changes: updates,
+    reviewerLabAllowed: true,
   })
   // spec 015 FR-5 advisory stage (spec 016 WS4): L13, a single-handoff claim
   // over an active handoff, is accepted with a record until enforcement.
   const claimAdvisory = advisoryRowId(claimTransition.row, existingCurrent, { to: "in-progress" })
+  await spendSameLabOverride("")
   const result = await updateHandoff(
     repoRoot,
     updates,
@@ -6375,6 +6470,7 @@ async function claimHandoff(repoRoot, options) {
         task: options.task,
         lockedFiles: files,
         ...(claimAdvisory ? { "transition-advisory": claimAdvisory } : {}),
+        ...(sameLabOverride ? { sameLabReviewOverride: sameLabOverride.id } : {}),
         ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
       },
     },
@@ -6532,6 +6628,7 @@ async function patchHandoff(repoRoot, options) {
           ownerChanged: reassign.ownerChanged,
           reviewerIsPriorAuthor: reassign.reviewerIsPriorAuthor,
           distinctReviewer: reassign.distinctReviewer,
+          ...reassign.gateFacts,
           structuralCompatibility: options.transitionCompatibility === true,
           filesChanged:
             options.files === undefined
@@ -6784,6 +6881,7 @@ async function patchHandoff(repoRoot, options) {
           )) {
             throw new BtrainError({ message: "The lane review range changed. Read the lane and retry." })
           }
+          await reassign.consumeOverride()
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
         await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
@@ -6791,6 +6889,7 @@ async function patchHandoff(repoRoot, options) {
           isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
         })
       } else {
+        await reassign.consumeOverride()
         updatedCurrent = await updateHandoff(...updateHandoffArgs)
       }
       return finishPatchWithReviewerDispatch(repoRoot, {
@@ -6869,6 +6968,7 @@ async function patchHandoff(repoRoot, options) {
     ownerChanged: singleReassign.ownerChanged,
     reviewerIsPriorAuthor: singleReassign.reviewerIsPriorAuthor,
     distinctReviewer: singleReassign.distinctReviewer,
+    ...singleReassign.gateFacts,
     structuralCompatibility: options.transitionCompatibility === true,
     filesChanged: options.files === undefined
       ? undefined
@@ -6986,6 +7086,7 @@ async function patchHandoff(repoRoot, options) {
         })
       : null
 
+  await singleReassign.consumeOverride()
   const updatedCurrent = await updateHandoff(repoRoot, updates, {
     actorLabel: singleReassign.responsibleActor || resolvedActor || updates.owner || existingCurrent.owner || "btrain",
     delegationPacketSectionText:

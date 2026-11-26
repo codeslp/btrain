@@ -1,0 +1,402 @@
+// Spec 023 WS4 (T017-T019): reviewer choice by lab. A claim with no reviewer
+// takes the first other-lab candidate; an explicit same-lab or lab-less
+// reviewer is refused (FR-3) while an other-lab agent with a cli runner is
+// configured, unless a same-lab-review override for the lane is consumed.
+import { after, describe, it } from "node:test"
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { checkHandoff, listActiveOverrides, withFileLock } from "../src/brain_train/core.mjs"
+import { applyTransition } from "../src/brain_train/transitions.mjs"
+
+const exec = promisify(execFile)
+const CLI_PATH = path.resolve("src/brain_train/cli.mjs")
+
+const roots = []
+after(async () => Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))))
+
+function cliEnv(home) {
+  const env = { ...process.env }
+  for (const key of ["BTRAIN_AGENT", "BRAIN_TRAIN_AGENT", "BTRAIN_LANE", "BTRAIN_LANE_LOCKED", "BTRAIN_REPO", "BTRAIN_LOOP_ACTIVE", "CLAUDECODE", "CODEX_SANDBOX"]) delete env[key]
+  return { ...env, BRAIN_TRAIN_HOME: home, BTRAIN_NO_REVIEW_DISPATCH: "1", CI: "true" }
+}
+
+// Owner claude (anthropic); codex-reviewer (openai, cli); claude-reviewer
+// (anthropic, cli); human (notify runner, no lab).
+async function withRepo({ agents = ["claude", "claude-reviewer", "codex-reviewer", "human"], lanes = true } = {}, fn) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-lab-claim-")))
+  roots.push(root)
+  const home = path.join(root, "home")
+  const repo = path.join(root, "repo")
+  await exec("git", ["init", "-q", "-b", "main", repo])
+  const run = async (args, agent = "claude") => {
+    try {
+      const result = await exec("node", [CLI_PATH, ...args], { cwd: repo, env: { ...cliEnv(home), BTRAIN_AGENT: agent }, maxBuffer: 5 * 1024 * 1024 })
+      return { code: 0, stdout: result.stdout, stderr: result.stderr }
+    } catch (error) {
+      return { code: typeof error.code === "number" ? error.code : 1, stdout: error.stdout || "", stderr: error.stderr || "" }
+    }
+  }
+  const init = await run(["init", repo, "--tracked", ...agents.flatMap((agent) => ["--agent", agent]), "--core-only", "--no-hooks"])
+  assert.equal(init.code, 0, init.stderr)
+  if (!lanes) {
+    const tomlPath = path.join(repo, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    await fs.writeFile(tomlPath, toml.replace("[lanes]\nenabled = true", "[lanes]\nenabled = false"))
+  }
+  const reviewerOf = async (laneId = "a") => {
+    const state = await checkHandoff(repo)
+    return (state.lanes ? state.lanes.find((lane) => lane._laneId === laneId) : state.current).reviewer
+  }
+  const claim = (extra = [], laneArgs = ["--lane", "a"]) => run(["handoff", "claim", ...(lanes ? laneArgs : []), "--task", "change", "--owner", "claude", "--files", "src/", ...extra])
+  const grant = (laneArgs = ["--lane", "a"]) => run(["override", "grant", "--action", "same-lab-review", ...(lanes ? laneArgs : []), "--requested-by", "claude", "--confirmed-by", "human", "--reason", "only Anthropic reviewers are reachable today"])
+  await fn({ repo, run, reviewerOf, claim, grant })
+}
+
+const FR3 = /same-lab[\s\S]*codex-reviewer[\s\S]*--reviewer any-other[\s\S]*btrain override grant --action same-lab-review/
+
+describe("reviewer choice at claim (spec 023 T017)", () => {
+  it("records the other-lab reviewer for owner claude when no reviewer is named", async () => {
+    await withRepo({}, async ({ claim, reviewerOf }) => {
+      const result = await claim()
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+    })
+  })
+
+  it("takes the other-lab reviewer for --reviewer any-other, and keeps a valid explicit one", async () => {
+    await withRepo({}, async ({ claim, reviewerOf }) => {
+      assert.equal((await claim(["--reviewer", "any-other"])).code, 0)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+    })
+    await withRepo({ agents: ["claude", "claude-reviewer", "codex-reviewer", "codex-second"] }, async ({ claim, reviewerOf }) => {
+      assert.equal((await claim(["--reviewer", "codex-second"])).code, 0, "an explicit other-lab reviewer")
+      assert.equal(await reviewerOf(), "codex-second", "is never replaced by inference")
+    })
+  })
+})
+
+describe("an explicit same-lab reviewer needs a reason (spec 023 FR-3, T018, T019)", () => {
+  it("refuses a same-lab reviewer with the FR-3 text, and a notify reviewer with no lab", async () => {
+    await withRepo({}, async ({ claim, reviewerOf }) => {
+      const sameLab = await claim(["--reviewer", "claude-reviewer"])
+      assert.notEqual(sameLab.code, 0)
+      assert.match(sameLab.stderr, FR3)
+      const noLab = await claim(["--reviewer", "human"])
+      assert.notEqual(noLab.code, 0)
+      assert.match(noLab.stderr, FR3)
+      assert.notEqual(await reviewerOf(), "claude-reviewer")
+    })
+  })
+
+  it("accepts it with a same-lab-review override for the lane, which is then spent", async ({ skip }) => {
+    await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+      const granted = await grant()
+      assert.equal(granted.code, 0, granted.stderr)
+      const result = await claim(["--reviewer", "claude-reviewer"])
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual((await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review"), [], "the override is spent")
+      // The next claim needs a new override.
+      assert.equal((await run(["handoff", "resolve", "--lane", "a", "--summary", "abandon", "--actor", "claude"])).code, 0)
+      assert.notEqual((await claim(["--reviewer", "claude-reviewer"])).code, 0)
+    })
+  })
+
+  it("requires --lane for a same-lab-review grant in a repository with lanes", async () => {
+    await withRepo({}, async ({ grant }) => {
+      const result = await grant([])
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /requires --lane/)
+    })
+  })
+
+  it("accepts a same-lab reviewer with no override when no other-lab agent is configured", async () => {
+    await withRepo({ agents: ["claude", "claude-reviewer"] }, async ({ claim, reviewerOf }) => {
+      const result = await claim(["--reviewer", "claude-reviewer"])
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+    })
+  })
+})
+
+describe("the same rule for a reassignment (spec 023 T018)", () => {
+  it("refuses handoff update --reviewer <same-lab>, accepts it with the override, and still refuses a lane author", async () => {
+    await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      const refused = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+      assert.notEqual(refused.code, 0)
+      assert.match(refused.stderr, FR3)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+
+      assert.equal((await grant()).code, 0)
+      const allowed = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+      assert.equal(allowed.code, 0, allowed.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual((await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review"), [])
+
+      const author = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude", "--actor", "claude"])
+      assert.notEqual(author.code === 0 && (await reviewerOf()) === "claude", true, "a lane author never becomes the reviewer")
+    })
+  })
+
+  it("refuses it in a repository without lanes too", async () => {
+    await withRepo({ lanes: false }, async ({ run, claim, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      const refused = await run(["handoff", "update", "--reviewer", "claude-reviewer", "--actor", "claude"])
+      assert.notEqual(refused.code, 0)
+      assert.match(refused.stderr, FR3)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+    })
+  })
+})
+
+// codex-reviewer's findings on 283cc91, committed before the fix.
+describe("same-lab-review overrides are spent only on success (codex-reviewer on 283cc91)", () => {
+  const sameLabGrants = async (repo) => (await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review")
+
+  it("spends the grant on a successful claim in a repository without lanes", async () => {
+    await withRepo({ lanes: false }, async ({ repo, claim, grant, reviewerOf }) => {
+      assert.equal((await grant()).code, 0)
+      const result = await claim(["--reviewer", "claude-reviewer"])
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [], "one approval permits one claim")
+    })
+  })
+
+  it("keeps the grant when the update it would permit is refused", async () => {
+    await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      // needs-review without review context or a diff is refused.
+      const refused = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--status", "needs-review", "--actor", "claude"])
+      assert.notEqual(refused.code, 0)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+      assert.equal((await sameLabGrants(repo)).length, 1, "the grant is still there")
+    })
+  })
+
+  it("never lets the grant make a lane author the reviewer", async () => {
+    await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      const author = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude", "--actor", "claude"])
+      assert.notEqual(author.code, 0)
+      assert.match(author.stderr, /authored this lane/)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+      assert.equal((await sameLabGrants(repo)).length, 1, "the grant is not spent on a refusal")
+    })
+  })
+})
+
+describe("the reviewerLabAllowed guard on rows 1 and 20 (codex-reviewer M13, M14)", () => {
+  it("row 1 matches a claim only while the reviewer's lab is allowed", () => {
+    const claimInput = (allowed) => ({ to: "in-progress", actor: "claude", filesNonEmpty: true, noConflict: true, distinctReviewer: true, reviewerLabAllowed: allowed })
+    assert.equal(applyTransition({ status: "idle" }, "handoff claim", claimInput(true)).row.id, "1")
+    assert.notEqual(rowIdOrRejection({ status: "idle" }, "handoff claim", claimInput(false)), "1")
+  })
+
+  it("row 20 matches a reassignment only while the reviewer's lab is allowed", () => {
+    const state = { status: "in-progress", owner: "claude", reviewer: "codex-reviewer" }
+    const reassignInput = (allowed) => ({ to: "in-progress", actor: "claude", distinctReviewer: true, reviewerIsPriorAuthor: false, prLinked: false, reviewerLabAllowed: allowed })
+    assert.equal(applyTransition(state, "handoff update --reassign", reassignInput(true)).row.id, "20")
+    assert.notEqual(rowIdOrRejection(state, "handoff update --reassign", reassignInput(false)), "20")
+  })
+})
+
+// The matched row id, or "rejected" when a retired legacy row refuses it.
+function rowIdOrRejection(state, event, input) {
+  try {
+    return applyTransition(state, event, input).row.id
+  } catch {
+    return "rejected"
+  }
+}
+
+// codex-reviewer on 481212a: the FR-3 refusal recommends --reviewer any-other.
+describe("--reviewer any-other on a reassignment (codex-reviewer on 481212a)", () => {
+  for (const lanes of [true, false]) {
+    it(`resolves to the first other-lab candidate, never the literal value (${lanes ? "lanes" : "no lanes"})`, async () => {
+      await withRepo({ lanes, agents: ["claude", "claude-reviewer", "codex-reviewer", "codex-second"] }, async ({ run, claim, reviewerOf }) => {
+        assert.equal((await claim(["--reviewer", "codex-second"])).code, 0)
+        const result = await run(["handoff", "update", ...(lanes ? ["--lane", "a"] : []), "--reviewer", "any-other", "--actor", "claude"])
+        assert.equal(result.code, 0, result.stderr)
+        assert.equal(await reviewerOf(), "codex-reviewer")
+      })
+    })
+  }
+})
+
+describe("lane f adversarial review", () => {
+  // M3, M5: author history and the same-lab fallback need CLI coverage.
+  it("excludes a prior owner from any-other after an ownership transfer", async () => {
+    await withRepo({ agents: ["claude", "claude-reviewer", "codex-reviewer", "codex-second"] }, async ({ repo, run, claim, reviewerOf }) => {
+      const tomlPath = path.join(repo, ".btrain", "project.toml")
+      const toml = await fs.readFile(tomlPath, "utf8")
+      assert.match(toml, /^reviewer_default = /m)
+      await fs.writeFile(tomlPath, toml.replace(/^reviewer_default = .*$/m, 'reviewer_default = "claude"'))
+      assert.equal((await claim(["--reviewer", "codex-second"])).code, 0)
+      const transfer = await run(["handoff", "update", "--lane", "a", "--owner", "codex-reviewer", "--actor", "claude"])
+      assert.equal(transfer.code, 0, transfer.stderr)
+      const result = await run(["handoff", "update", "--lane", "a", "--reviewer", "any-other", "--actor", "codex-reviewer"], "codex-reviewer")
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+    })
+  })
+  // M4: candidate choice must use the incoming owner.
+  it("excludes the incoming owner when owner and any-other are supplied together", async () => {
+    await withRepo({ agents: ["claude", "claude-reviewer", "codex-reviewer", "codex-second"] }, async ({ run, claim, reviewerOf }) => {
+      assert.equal((await claim(["--reviewer", "codex-second"])).code, 0)
+      const result = await run(["handoff", "update", "--lane", "a", "--owner", "codex-reviewer", "--reviewer", "any-other", "--actor", "claude"])
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+    })
+  })
+  // M6: exhausting CLI candidates must refuse without writing a reviewer.
+  it("refuses any-other without an eligible cli candidate and preserves the reviewer", async () => {
+    await withRepo({ agents: ["claude", "human"] }, async ({ run, claim, reviewerOf }) => {
+      assert.equal((await claim(["--reviewer", "human"])).code, 0)
+      const result = await run(["handoff", "update", "--lane", "a", "--reviewer", "any-other", "--actor", "claude"])
+      assert.notEqual(result.code, 0)
+      assert.match(result.stderr, /found no agent/)
+      assert.equal(await reviewerOf(), "human")
+    })
+  })
+  // M10: another lane's grant must never permit this update.
+  it("does not use another lane's grant", async () => {
+    await withRepo({}, async ({ run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant(["--lane", "b"])).code, 0)
+      const result = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+      assert.notEqual(result.code, 0)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+    })
+  })
+  // M12: a no-lanes update must spend its grant after publication.
+  it("spends a no-lanes reassignment grant once", async () => {
+    await withRepo({ lanes: false }, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      const result = await run(["handoff", "update", "--reviewer", "claude-reviewer", "--actor", "claude"])
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual((await listActiveOverrides(repo)).filter(r => r.action === "same-lab-review"), [])
+    })
+  })
+})
+
+// codex-reviewer on d954668: the grant was read before the handoff write and
+// spent after it, so two operations could publish on one grant while another
+// process held overrides.lock. A grant is now spent before the write, so while
+// that lock is held nothing that relies on a grant publishes, and after it is
+// released only one operation does.
+describe("one same-lab-review grant under overrides.lock contention (codex-reviewer on d954668)", () => {
+  const HOLD_MS = 1500
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const holdOverrides = (repo, fn) => withFileLock(path.join(repo, ".btrain", "overrides.lock"), fn)
+  const laneOf = async (repo, laneId = "a") => {
+    const state = await checkHandoff(repo)
+    return state.lanes ? state.lanes.find((lane) => lane._laneId === laneId) : state.current
+  }
+  const sameLabGrants = async (repo) => (await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review")
+
+  it("lets one of two reassignments publish on one grant", async () => {
+    await withRepo({ agents: ["claude", "claude-reviewer", "claude-second", "codex-reviewer"] }, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      let first, second, heldReviewer
+      await holdOverrides(repo, async () => {
+        first = run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+        second = run(["handoff", "update", "--lane", "a", "--reviewer", "claude-second", "--actor", "claude"])
+        await pause(HOLD_MS)
+        heldReviewer = await reviewerOf()
+      })
+      assert.equal(heldReviewer, "codex-reviewer", "no reassignment publishes before its grant is spent")
+      const results = await Promise.all([first, second])
+      const winners = results.filter((result) => result.code === 0)
+      assert.equal(winners.length, 1, JSON.stringify(results))
+      assert.equal(await reviewerOf(), results[0].code === 0 ? "claude-reviewer" : "claude-second")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+
+  it("does not publish a lane claim before its grant is spent", async () => {
+    await withRepo({}, async ({ repo, claim, grant, reviewerOf }) => {
+      assert.equal((await grant()).code, 0)
+      let pending, heldStatus
+      await holdOverrides(repo, async () => {
+        pending = claim(["--reviewer", "claude-reviewer"])
+        await pause(HOLD_MS)
+        heldStatus = (await laneOf(repo))?.status
+      })
+      assert.notEqual(heldStatus, "in-progress")
+      const result = await pending
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+
+  it("does not publish a no-lanes claim before its grant is spent", async () => {
+    await withRepo({ lanes: false }, async ({ repo, claim, grant, reviewerOf }) => {
+      assert.equal((await grant()).code, 0)
+      let pending, heldStatus
+      await holdOverrides(repo, async () => {
+        pending = claim(["--reviewer", "claude-reviewer"])
+        await pause(HOLD_MS)
+        heldStatus = (await laneOf(repo))?.status
+      })
+      assert.notEqual(heldStatus, "in-progress")
+      const result = await pending
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+
+  it("does not publish a no-lanes reassignment before its grant is spent", async () => {
+    await withRepo({ lanes: false }, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      let pending, heldReviewer
+      await holdOverrides(repo, async () => {
+        pending = run(["handoff", "update", "--reviewer", "claude-reviewer", "--actor", "claude"])
+        await pause(HOLD_MS)
+        heldReviewer = await reviewerOf()
+      })
+      assert.equal(heldReviewer, "codex-reviewer")
+      const result = await pending
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+})
+
+// codex-reviewer on 1781a6a (M7, M8): the grant lookup in claimHandoff and
+// resolveReassignInputs must filter by lane. Without the filter it picks the
+// newest grant, here lane b's, and consumeOverride then refuses a valid claim
+// or reassignment on lane a.
+describe("lane a's grant with a newer lane b grant present (codex-reviewer M7, M8 on 1781a6a)", () => {
+  for (const reassign of [false, true]) {
+    it(`uses lane a's grant for a ${reassign ? "reassignment" : "claim"}`, async () => {
+      await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+        if (reassign) assert.equal((await claim()).code, 0)
+        assert.equal((await grant()).code, 0)
+        await new Promise((resolve) => setTimeout(resolve, 1100))
+        assert.equal((await grant(["--lane", "b"])).code, 0)
+        const result = reassign
+          ? await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+          : await claim(["--reviewer", "claude-reviewer"])
+        assert.equal(result.code, 0, result.stderr)
+        assert.equal(await reviewerOf(), "claude-reviewer")
+        const remaining = (await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review")
+        assert.deepEqual(remaining.map((record) => record.laneId), ["b"])
+      })
+    })
+  }
+})

@@ -63,6 +63,16 @@ pickup), the reviewer, the time since dispatch or pickup, the tier, and the
 fallback reason, from `reviewSummary` in `review/record.mjs`. The handoff
 file and the JSON keep the stored status. Invariant 5 runs.
 
+WS4 is done (T017 to T019): `claimHandoff` resolves the reviewer before the
+row 1 gate, from the `orderCandidates` order, so owner `claude` gets
+`codex-reviewer` over `claude-reviewer`. An explicit same-lab or lab-less
+reviewer is refused with the FR-3 text, in `claimHandoff` and
+`resolveReassignInputs`, while an other-lab agent with a `cli` runner is
+configured, unless a `same-lab-review` override for the lane is consumed.
+Rows 1 and 20 take a `reviewerLabAllowed` guard input. `patchHandoff` grew
+from 632 to 634 lines (one spread line per gate input); the plan's 585 and
+587 predate other lanes' changes, and invariant 12's pin follows at T039.
+
 ## Phase 1: Foundations that change no behavior (WS0, WS1, WS2)
 
 - [x] T001 [WS0] Write the fake runner in `test/helpers/fake-runner.mjs`: an executable a test names in `[agents.runners]`, driven by a scenario file. It can run `btrain handoff`, print lines at given times, stay silent, exit with a code and text, commit a file with or without the `Btrain-Agent` trailer, and run a verdict or `handoff fix`.
@@ -96,9 +106,9 @@ with a TLC run, then the gate.
 
 ## Phase 3: Rule 1, cross-lab review (WS4, WS5, WS6)
 
-- [ ] T017 [WS4] In `claimHandoff`, resolve the reviewer before the row 1 gate call (today the gate runs first), order the candidates with `orderCandidates`, and pass that list to `inferPeerReviewer`. Test that owner `claude` with `codex-reviewer` and `claude-reviewer` configured gets `codex-reviewer`, and that a valid explicit other-lab reviewer is never replaced.
-- [ ] T018 [WS4] Refuse an explicit reviewer that is same-lab or has no lab in `claimHandoff` and `resolveReassignInputs` when an other-lab agent with a `cli` runner is configured, with the FR-3 text. Add the `reviewerLabAllowed` guard input to rows 1 and 20. `resolveReassignInputs` returns it in a `gateFacts` object, and `patchHandoff` gains one spread line in each of its two gate inputs; change the pinned 585 in `test/decomposition_inventory.test.mjs` to 587 and state both numbers in the handoff. Test the refusal, `--reviewer any-other`, the case with no other-lab agent, a `notify` reviewer with no lab, the same refusal in a repository without lanes, and that a reassignment making a lane author the reviewer is still refused.
-- [ ] T019 [WS4] Add `same-lab-review` to `VALID_OVERRIDE_ACTIONS`, require `--lane` for it in `grantOverride`, and consume it on the claim or reassignment it permits. Test that the override is spent after one use.
+- [x] T017 [WS4] In `claimHandoff`, resolve the reviewer before the row 1 gate call (today the gate runs first), order the candidates with `orderCandidates`, and pass that list to `inferPeerReviewer`. Test that owner `claude` with `codex-reviewer` and `claude-reviewer` configured gets `codex-reviewer`, and that a valid explicit other-lab reviewer is never replaced.
+- [x] T018 [WS4] Refuse an explicit reviewer that is same-lab or has no lab in `claimHandoff` and `resolveReassignInputs` when an other-lab agent with a `cli` runner is configured, with the FR-3 text. Add the `reviewerLabAllowed` guard input to rows 1 and 20. `resolveReassignInputs` returns it in a `gateFacts` object, and `patchHandoff` gains one spread line in each of its two gate inputs; change the pinned 585 in `test/decomposition_inventory.test.mjs` to 587 and state both numbers in the handoff. Test the refusal, `--reviewer any-other`, the case with no other-lab agent, a `notify` reviewer with no lab, the same refusal in a repository without lanes, and that a reassignment making a lane author the reviewer is still refused.
+- [x] T019 [WS4] Add `same-lab-review` to `VALID_OVERRIDE_ACTIONS`, require `--lane` for it in `grantOverride`, and consume it on the claim or reassignment it permits. Test that the override is spent after one use.
 - [ ] T020 [WS5, PR 1] Prose and model for the system reassignment: add it to spec 005 FR-5, re-pin with `python3 scripts/tla_pin.py`, add a separate system reassignment action to `specs/tla/LaneLock.tla` and `test/formal/lane-lock-model.mjs`, with no agent parameter, quantified the way `Resync` is for `Doctor`: the owner stays, the reviewer changes under row 20's guards, and `lastActor` becomes the owner. Run TLC.
 - [x] T021 [WS5] Write `src/brain_train/review/request-lock.mjs`: one heartbeat lock for each lane request, with the 60-second liveness rule, a touch on a 15-second timer for the whole life of the loop, and a nonce the holder reads again before every dispatch. Test that a second process finds a live lock and does not dispatch, and that a ten-minute attempt keeps the lock.
 - [x] T022 [WS5] Write the attempt loop `runReviewRequest` in `src/brain_train/review/request.mjs` with injected `readEvents`, `writeEvent`, `readLane`, `startAttempt`, `runAttempt`, `now`, and `sleep`, applying the plan's eight rules in order and its three short cases. `runAttempt` starts the runner and returns a handle, so the loop polls while it runs. The loop can be asked for one attempt only.
