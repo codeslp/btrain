@@ -380,3 +380,87 @@ describe("spec 025 WS3: btrain slack listen (T017)", () => {
     assert.ok(!output.includes(TOKEN), "no token")
   })
 })
+
+// codex-reviewer on c24ade8: the lease was checked only at state writes and
+// through a cached flag, so a takeover between two posts, or while the
+// publisher read lane state, still let posts out. Each Slack call now checks
+// the lease file itself.
+describe("spec 025 WS3: every Slack call checks the lease first", () => {
+  async function bareFixture() {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-listen-lease-")))
+    roots.push(root)
+    const home = path.join(root, "home")
+    const repo = path.join(root, "repo")
+    await fs.mkdir(repo, { recursive: true })
+    await writeSlackJson(home, repo)
+    await fs.writeFile(path.join(home, "repos.json"), JSON.stringify({ repos: [{ path: repo, name: "repo" }] }))
+    const readers = {
+      readConfig: async () => ({ features: { slack: true, slack_listen: true } }),
+      readRoster: async () => ({ laneIds: ["a"], agents: ["claude"] }),
+      readLanes: async () => [],
+    }
+    const slackDir = path.join(home, "slack")
+    const replace = () => fsSync.writeFileSync(leasePath(slackDir), JSON.stringify({ nonce: "replacement", pid: 1, operator: OPERATOR }))
+    return { home, repo, slackDir, readers, replace, env: cleanEnv(home) }
+  }
+
+  it("posts no further reply once the lease is taken over during the first", async () => {
+    const fixture = await bareFixture()
+    const state = emptyInbox()
+    for (const back of [1000, 2000]) {
+      state.proposals[`${CHANNEL}:${tsAt(NOW - back)}`] = { state: "pending", thread: tsAt(NOW - back), expiresAt: new Date(NOW - 1000).toISOString(), canonical: "btrain> status", repo: fixture.repo }
+    }
+    writeInbox(fixture.slackDir, state)
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    let replaced = false
+    const fetchImpl = async (input, init) => {
+      const result = await fake.fetch(input, init)
+      if (String(input).includes("chat.postMessage") && !replaced) {
+        replaced = true
+        fixture.replace()
+      }
+      return result
+    }
+    const listener = await createListener({ home: fixture.home, env: fixture.env, fetch: fetchImpl, readers: fixture.readers, now: () => NOW })
+    assert.equal((await listener.acquire()).ok, true)
+    await listener.cycle()
+    assert.equal(fake.posts.length, 1, "no reply after the takeover")
+  })
+
+  it("lets no publisher post out once the lease is taken over while lane state is read", async () => {
+    const fixture = await bareFixture()
+    await writeEntry(path.join(fixture.repo, ".btrain", "slack"), { laneId: "a", claimKey: "", kind: "claimed", reply: true, mention: false, fields: { actor: "claude", lane: "a" } })
+    fixture.readers.readLanes = async () => {
+      fixture.replace()
+      return []
+    }
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const listener = await createListener({ home: fixture.home, env: fixture.env, fetch: fake.fetch, readers: fixture.readers, now: () => NOW })
+    assert.equal((await listener.acquire()).ok, true)
+    await listener.cycle()
+    assert.equal(fake.posts.length, 0, "nothing published after the takeover")
+  })
+
+  it("keeps a pause across a restart and ignores what was sent during it", async () => {
+    const fixture = await bareFixture()
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    fake.history(CHANNEL, [message(OPERATOR, NOW, "btrain> pause")])
+    const clock = clockAt(NOW + 1000)
+    const options = { home: fixture.home, env: fixture.env, fetch: fake.fetch, readers: fixture.readers, now: clock.now }
+    const first = await createListener(options)
+    assert.equal((await first.acquire()).ok, true)
+    await first.cycle()
+    await first.stop()
+    fake.history(CHANNEL, [message(OPERATOR, NOW + 10_000, "btrain> status")])
+    const second = await createListener(options)
+    assert.equal((await second.acquire()).ok, true)
+    clock.t = NOW + 20_000
+    await second.cycle()
+    const count = fake.posts.length
+    await clearPaused(fixture.slackDir)
+    clock.t = NOW + 30_000
+    await second.cycle()
+    assert.equal(fake.posts.length, count)
+    await second.stop()
+  })
+})
