@@ -329,18 +329,23 @@ describe("btrain slack setup at a terminal (codex-reviewer on c888de6)", () => {
     stream.rawModes = []
     stream.raw = false
     stream.echoedWhileReading = []
+    let sent = false
     stream.setRawMode = (on) => {
       stream.raw = on
       stream.rawModes.push(on)
+      // The person types once the prompt is reading, as at a real terminal.
+      if (on && !sent) {
+        sent = true
+        setImmediate(() => {
+          for (const chunk of chunks) {
+            if (!stream.raw) stream.echoedWhileReading.push(chunk)
+            stream.write(chunk)
+          }
+          stream.end()
+        })
+      }
       return stream
     }
-    setImmediate(() => {
-      for (const chunk of chunks) {
-        if (!stream.raw) stream.echoedWhileReading.push(chunk)
-        stream.write(chunk)
-      }
-      stream.end()
-    })
     return stream
   }
 
@@ -352,8 +357,11 @@ describe("btrain slack setup at a terminal (codex-reviewer on c888de6)", () => {
     // A typo fixed with backspace, Enter as a carriage return, then the
     // channel choice in the same chunk.
     const stdin = fakeTty([`${TOKEN}x\u007f\r1\n`])
-    const code = await runSlackCommand("setup", {}, { env, repoRoot: "/work/repo", stdin, out() {}, err() {} })
+    let rawAtPrompt = null
+    const err = (line) => { if (/Paste the bot token/.test(line)) rawAtPrompt = stdin.raw }
+    const code = await runSlackCommand("setup", {}, { env, repoRoot: "/work/repo", stdin, out() {}, err })
     assert.equal(code, 0)
+    assert.equal(rawAtPrompt, true, "echo is off before the prompt appears: typing may start at once")
     assert.deepEqual(stdin.rawModes, [true, false], "echo off while reading the token, then restored")
     assert.deepEqual(stdin.echoedWhileReading, [], "the token arrived with echo off")
     const settings = (await loadSlackCredentials({ env })).settings

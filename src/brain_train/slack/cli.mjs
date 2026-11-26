@@ -62,6 +62,47 @@ export async function runSlackCommand(subcommand, options = {}, readers = {}) {
   }
 }
 
+// The token from a terminal, read with echo off (raw mode) so a pasted token is
+// never shown. Enter ends it; Backspace removes a character; Ctrl-C cancels
+// (resolves null). Raw mode is turned off again on every path, and input
+// after Enter is put back for the channel prompt.
+function readSecretFromTerminal(stdin, prompt) {
+  return new Promise((resolve) => {
+    let value = ""
+    // Echo goes off before the prompt is shown: a person, or a script, may
+    // type the moment the prompt appears.
+    stdin.setRawMode(true)
+    prompt()
+    const finish = (result, rest = "") => {
+      stdin.removeListener("data", onData)
+      stdin.removeListener("end", onEnd)
+      stdin.setRawMode(false)
+      // Paused, so input put back waits for the channel prompt's reader.
+      stdin.pause()
+      if (rest) stdin.unshift(Buffer.from(rest))
+      resolve(result)
+    }
+    const onEnd = () => finish(value)
+    const onData = (chunk) => {
+      const text = String(chunk)
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index]
+        if (character === "\r" || character === "\n") {
+          // A carriage return from Enter may come with its line feed.
+          const restStart = character === "\r" && text[index + 1] === "\n" ? index + 2 : index + 1
+          return finish(value, text.slice(restStart))
+        }
+        if (character === "\u0003") return finish(null)
+        if (character === "\u007f" || character === "\b") value = value.slice(0, -1)
+        else value += character
+      }
+    }
+    stdin.on("data", onData)
+    stdin.on("end", onEnd)
+    stdin.resume()
+  })
+}
+
 // Lines from standard input, one at a time, so a person at a terminal can
 // answer the channel prompt after typing the token.
 function lineReader(stdin) {
@@ -97,15 +138,31 @@ async function writeSlackFile(env, data) {
 }
 
 async function setup(options, readers, io) {
-  const lines = lineReader(readers.stdin || process.stdin)
+  const stdin = readers.stdin || process.stdin
+  const terminal = Boolean(stdin.isTTY) && typeof stdin.setRawMode === "function"
+  // At a terminal the token is read with echo off before the line reader
+  // starts; piped input reads it as the first line.
+  let lines = terminal ? null : lineReader(stdin)
   try {
     const { data: existing, reason } = await readSlackFile({ env: io.env })
     if (reason) {
       io.err(`btrain slack setup: ${reasonText(reason)}`)
       return 1
     }
-    io.err("Paste the bot token (xoxb-...) and press Enter. It is not shown or printed.")
-    const token = String((await lines.next()) || "").trim()
+    const prompt = () => io.err("Paste the bot token (xoxb-...) and press Enter. It is not shown or printed.")
+    let typed
+    if (terminal) {
+      typed = await readSecretFromTerminal(stdin, prompt)
+    } else {
+      prompt()
+      typed = await lines.next()
+    }
+    if (typed === null && terminal) {
+      io.err("btrain slack setup: cancelled. Nothing was written.")
+      return 1
+    }
+    const token = String(typed || "").trim()
+    if (!lines) lines = lineReader(stdin)
     if (!BOT_TOKEN.test(token)) {
       io.err("btrain slack setup: that is not a Slack bot token (it starts with xoxb-). Nothing was written.")
       return 1
@@ -174,7 +231,7 @@ async function setup(options, readers, io) {
     io.out("Check it with: btrain slack test")
     return 0
   } finally {
-    lines.close()
+    lines?.close()
   }
 }
 
