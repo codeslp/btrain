@@ -274,4 +274,35 @@ describe("state file writes", () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  // Red-team cases from round 8: writes through a dangling link fail where a
+  // native write fails, and multi-hop chains keep physical traversal.
+  it("refuse a dangling target that steps through a missing directory, as a native write does", () => withStateDir(async (repoRoot, stateDir) => {
+    const link = path.join(stateDir, "locks.json")
+    await fs.symlink("missing/../registry.json", link)
+    await assert.rejects(fs.writeFile(link, "native"), { code: "ENOENT" })
+    await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["src/"]), { code: "ENOENT" })
+    await assert.rejects(fs.stat(path.join(stateDir, "registry.json")), { code: "ENOENT" })
+    assert.equal(await fs.readlink(link), "missing/../registry.json")
+    assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
+  }))
+
+  it("refuse a dangling target with a trailing slash and keep the link", () => withStateDir(async (repoRoot, stateDir) => {
+    const link = path.join(stateDir, "locks.json")
+    await fs.symlink("missing/", link)
+    await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["src/"]))
+    assert.equal(await fs.readlink(link), "missing/")
+    await assert.rejects(fs.stat(path.join(stateDir, "missing")), { code: "ENOENT" })
+  }))
+
+  it("follow several dangling hops through a symlinked directory", () => withStateDir(async (repoRoot, stateDir) => {
+    await fs.mkdir(path.join(stateDir, "actual"))
+    await fs.symlink("actual", path.join(stateDir, "dir"))
+    await fs.symlink("dir/middle", path.join(stateDir, "locks.json"))
+    await fs.symlink("../registry.json", path.join(stateDir, "actual", "middle"))
+    await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    assert.equal((await readLockRegistry(repoRoot)).locks.length, 1)
+    assert.equal(await fs.readlink(path.join(stateDir, "actual", "middle")), "../registry.json")
+    assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, "registry.json"), "utf8")).locks.length, 1)
+  }))
 })
