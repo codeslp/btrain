@@ -172,7 +172,9 @@ export async function isLocalStateIgnored(repoRoot) {
 // Every optional subsystem `btrain init` can scaffold. `localDefault` is the
 // default for a new repo; a repo whose project.toml has no [features] table
 // (every repo initialized before spec 022) treats every feature as enabled,
-// so nothing changes for it.
+// so nothing changes for it. An `explicitOnly` feature is the exception: it is
+// on only when its [features] key is exactly `true`, so a missing table or
+// key leaves it off (spec 024 FR-1, spec 025 FR-1).
 export const FEATURES = [
   {
     id: "hooks",
@@ -252,9 +254,26 @@ export const FEATURES = [
     description: "handoff-history watcher and launch-agent scripts",
     localDefault: false,
   },
+  {
+    id: "slack",
+    label: "Slack publisher",
+    description: "lane cards, replies, and a board in a mapped Slack channel (spec 024)",
+    localDefault: false,
+    explicitOnly: true,
+  },
+  {
+    id: "slack_listen",
+    label: "Slack listener",
+    description: "`btrain slack listen` reads the operator's Slack messages (spec 025)",
+    localDefault: false,
+    explicitOnly: true,
+  },
 ]
 
 export const FEATURE_IDS = FEATURES.map((feature) => feature.id)
+
+/** The features that are on only when their [features] key is exactly `true`. */
+export const EXPLICIT_ONLY_FEATURE_IDS = FEATURES.filter((feature) => feature.explicitOnly).map((feature) => feature.id)
 
 const FEATURE_ALIASES = new Map([
   ["tla", "formal"],
@@ -310,8 +329,10 @@ export function getDefaultFeatureMap() {
   return Object.fromEntries(FEATURES.map((feature) => [feature.id, feature.localDefault]))
 }
 
+// Every feature on, except the explicit-only ones, which are never on by
+// default.
 export function getAllOnFeatureMap() {
-  return Object.fromEntries(FEATURE_IDS.map((id) => [id, true]))
+  return Object.fromEntries(FEATURE_IDS.map((id) => [id, !EXPLICIT_ONLY_FEATURE_IDS.includes(id)]))
 }
 
 // Resolve a feature map from CLI flags. `base` is the starting map (defaults
@@ -335,7 +356,13 @@ export function hasFeaturesTable(config) {
 }
 
 // Missing table or missing key means enabled: legacy repos keep everything on.
+// An explicit-only feature is on only for an exact `true`; the project TOML
+// parser keeps a comment after an unquoted value, so `true # on` counts too.
 export function isFeatureEnabled(config, featureId) {
+  if (EXPLICIT_ONLY_FEATURE_IDS.includes(featureId)) {
+    const value = hasFeaturesTable(config) ? config.features[featureId] : undefined
+    return value === true || (typeof value === "string" && /^true\s+#/.test(value))
+  }
   if (!hasFeaturesTable(config)) return true
   const value = config.features[featureId]
   return value !== false

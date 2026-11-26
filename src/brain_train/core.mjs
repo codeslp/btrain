@@ -78,6 +78,7 @@ import {
   collectClaimUnblockedContext,
 } from "./unblocked/context.mjs"
 import { needsReviewGateScope } from "./needs_review_gate.mjs"
+import { collectReviewDoctorFindings } from "./review/doctor.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 
@@ -340,7 +341,7 @@ const LOCKS_FILENAME = "locks.json"
 const DEFAULT_COLLABORATION_AGENT_COUNT = 2
 const DEFAULT_LANES_PER_AGENT = 2
 const DEFAULT_HISTORY_KEEP = 3
-const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve"])
+const VALID_OVERRIDE_ACTIONS = new Set(["needs-review", "push", "force-release", "repair-resolve", "local-review"])
 const RESERVED_LANE_METADATA_KEYS = new Set(["enabled", "per_agent", "ids"])
 const ACTIVE_LANE_STATUSES = new Set([
   "in-progress",
@@ -593,9 +594,87 @@ async function readText(targetPath) {
   return fs.readFile(targetPath, "utf8")
 }
 
+const MAX_WRITE_SYMLINK_HOPS = 40
+
+// Readers such as `btrain handoff wait`, the dashboard, and `btrain doctor`
+// read state files without taking the writer's lock. fs.writeFile truncates
+// the file before it writes, so such a reader could see an empty locks.json
+// (readJson then falls back to no locks) or a half-written handoff file. The
+// content goes to a temporary file in the same directory, and a rename puts
+// it in place, so a reader sees the old file or the new one, never a torn one.
+// A symlink stays a symlink: the rename targets the file it points to. An
+// existing file keeps its mode, so a hook stays executable.
 async function writeText(targetPath, content) {
   await ensureDir(path.dirname(targetPath))
-  await fs.writeFile(targetPath, content, "utf8")
+  let destination = targetPath
+  let mode
+  try {
+    destination = await fs.realpath(targetPath)
+    mode = (await fs.stat(destination)).mode & 0o7777
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error
+    // A dangling symlink, or a chain of them, still names the file to
+    // create. Follow every hop so the rename creates the last target and
+    // leaves each link in place.
+    destination = targetPath
+    for (let hop = 0; ; hop += 1) {
+      if (hop === MAX_WRITE_SYMLINK_HOPS) {
+        const loop = new Error(`ELOOP: too many symbolic links, write '${targetPath}'`)
+        loop.code = "ELOOP"
+        throw loop
+      }
+      let linkTarget
+      try {
+        linkTarget = await fs.readlink(destination)
+      } catch (readlinkError) {
+        if (readlinkError?.code === "EINVAL" || readlinkError?.code === "ENOENT") break
+        throw readlinkError
+      }
+      // Let the filesystem resolve everything but the last component of the
+      // target, unnormalized: realpath follows each symlinked directory
+      // before it applies a "..", where path.resolve would cancel the pair
+      // lexically and land elsewhere (for example "dir/../x" with dir a
+      // symlink, or "../x" under a symlinked parent). A missing directory on
+      // the way fails with ENOENT, as a native write through the link would.
+      const unresolved = path.isAbsolute(linkTarget)
+        ? linkTarget
+        : `${path.dirname(destination)}${path.sep}${linkTarget}`
+      const lastSeparator = unresolved.lastIndexOf(path.sep)
+      // A target ending in "/", "." or ".." needs no special case: if that
+      // directory exists the link is not dangling, and if it is missing this
+      // realpath fails.
+      const parent = await fs.realpath(unresolved.slice(0, lastSeparator) || path.sep)
+      destination = path.join(parent, unresolved.slice(lastSeparator + 1))
+    }
+  }
+  // A short fixed-shape name: appending to a long valid basename could pass
+  // the filesystem's 255-byte name limit.
+  const temporary = path.join(path.dirname(destination), `.btrain-write-${process.pid}-${randomUUID()}.tmp`)
+  // Someone who can write this directory must not be able to redirect the
+  // temporary file: "wx" refuses any existing name (a symlink included), the
+  // mode is set through the open descriptor rather than a path chmod would
+  // follow, and the rename goes ahead only if the name still holds the file
+  // this call wrote.
+  let handle
+  try {
+    handle = await fs.open(temporary, "wx", mode === undefined ? 0o666 : 0o600)
+    await handle.writeFile(content, "utf8")
+    if (mode !== undefined) await handle.chmod(mode)
+    const written = await handle.stat()
+    await handle.close()
+    handle = undefined
+    const current = await fs.lstat(temporary)
+    if (current.ino !== written.ino || current.dev !== written.dev) {
+      const replaced = new Error(`The temporary file ${temporary} was replaced before btrain could rename it into place.`)
+      replaced.code = "ETMPREPLACED"
+      throw replaced
+    }
+    await fs.rename(temporary, destination)
+  } catch (error) {
+    await handle?.close().catch(() => {})
+    await fs.rm(temporary, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 async function appendText(targetPath, content) {
@@ -2902,11 +2981,11 @@ async function grantOverride(repoRoot, options = {}) {
     })
   }
 
-  if (action === "needs-review" && laneConfigs && !laneId) {
+  if (["needs-review", "local-review"].includes(action) && laneConfigs && !laneId) {
     throw new BtrainError({
-      message: "`btrain override grant --action needs-review` requires --lane when [lanes] is enabled.",
-      reason: "The needs-review override must target a specific lane in multi-lane repos.",
-      fix: `btrain override grant --action needs-review --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
+      message: `\`btrain override grant --action ${action}\` requires --lane when [lanes] is enabled.`,
+      reason: `The ${action} override must target a specific lane in multi-lane repos.`,
+      fix: `btrain override grant --action ${action} --lane <id> --requested-by ${requestedBy} --confirmed-by ${confirmedBy} --reason "..."`,
     })
   }
   if (action === "push" && laneId) {
@@ -3018,6 +3097,27 @@ async function consumeOverride(repoRoot, options = {}) {
         reason: "The override's lane scope does not match the requested lane.",
         fix: `Use --lane ${record.laneId || ""} to match the override, or grant a new override for lane ${laneId}.`,
       })
+    }
+
+    if (action === "local-review") {
+      // Check inside the override lock for both the gate and hand-run consumption.
+      const { isLocalReviewGrantCurrent } = await import("./local_review.mjs")
+      const events = await readWorkflowEvents(repoRoot, config, record.laneId || "")
+      if (!isLocalReviewGrantCurrent(events, record)) {
+        await appendWorkflowEvent(repoRoot, config, {
+          type: "override-retired",
+          actor: actorLabel,
+          laneId: record.laneId || "",
+          details: { overrideId: record.id, action, scope: record.scope, reason: "stale-local-review-grant" },
+        })
+        await fs.rm(record.path, { force: true })
+        throw new Error(
+          "The local-review grant is stale: new claim, change request, watchdog repair, or any non-PR status after the grant; or missing grant event. "
+          + "The stale grant was retired without authorization. A new grant is needed. Grant from a PR status. "
+          + `Run btrain override grant --action local-review${record.laneId ? ` --lane ${record.laneId}` : ""} `
+          + '--requested-by <agent> --confirmed-by <human> --reason "...".'
+        )
+      }
     }
 
     await fs.rm(record.path, { force: true })
@@ -4726,13 +4826,10 @@ async function readJsonLinesSnapshot(filePath) {
 }
 
 async function writeJsonLinesSnapshot(filePath, rows) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  const tmpPath = `${filePath}.tmp`
   const content = rows.length > 0
     ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
     : ""
-  await fs.writeFile(tmpPath, content, "utf8")
-  await fs.rename(tmpPath, filePath)
+  await writeText(filePath, content)
 }
 
 async function appendCgraphTelemetryRows(repoRoot, rows) {
@@ -7835,6 +7932,9 @@ async function waitForHandoffStateChange(
     sinceHash = "",
     timeoutMs = DEFAULT_LOOP_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_LOOP_POLL_INTERVAL_MS,
+    // Called once with the baseline hash before the first poll. A state
+    // change after this call wakes the waiter; one before it may not.
+    onBaseline,
   } = {},
 ) {
   const resolvedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 0
@@ -7854,6 +7954,10 @@ async function waitForHandoffStateChange(
       baselineHash,
       result: initial,
     }
+  }
+
+  if (typeof onBaseline === "function") {
+    await onBaseline(baselineHash)
   }
 
   const startedAt = Date.now()
@@ -11628,6 +11732,13 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     }
   }
 
+  // Spec 023 T007: every agent's lab and the review settings. A missing lab
+  // is a warning and never changes the exit code; a review setting that does
+  // not parse is an issue (its default applies meanwhile).
+  const review = collectReviewDoctorFindings(config)
+  warnings.push(...review.warnings)
+  issues.push(...review.errors)
+
   return {
     repoRoot,
     healthy: issues.length === 0,
@@ -11635,6 +11746,7 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
     features,
     issues,
     warnings,
+    labs: review.labs,
     cgraph,
     repurposeReady,
     overrides,
@@ -11736,4 +11848,7 @@ export {
   syncTemplates,
   waitForHandoffStateChange,
   withFileLock,
+  appendWorkflowEvent,
+  readWorkflowEvents,
+  detectCurrentAgent,
 }

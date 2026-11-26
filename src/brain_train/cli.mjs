@@ -161,7 +161,7 @@ Usage:
   btrain transitions [--format json|mermaid]                                    Print the guarded lane-transition contract
   btrain doctor [--repo <path>] [--repair]                                       Check registry and repo health
   btrain hooks [--repo <path>]                                                   Install the managed pre-commit and pre-push hooks
-  btrain override grant --action <push|needs-review|force-release|repair-resolve> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
+  btrain override grant --action <push|needs-review|force-release|repair-resolve|local-review> [--lane <id>] --requested-by <agent> --confirmed-by <human> --reason <text>
                                                                               Create a human-confirmed audited override
   btrain repair dispose --lane <id> --confirmed-by <human> --reason <text> [--actor <name>]
                                                                               Record the human disposition that lets an escalated repair-needed lane resolve (spec 006 FR-29)
@@ -633,6 +633,10 @@ function formatDoctorResult(result) {
   if (result.features) {
     const off = FEATURE_IDS.filter((id) => result.features[id] === false)
     lines.push(`  features off: ${off.length > 0 ? off.join(", ") : "(none)"}`)
+  }
+
+  if (result.labs?.length > 0) {
+    lines.push(`  labs: ${result.labs.join(" | ")}`)
   }
 
   if (result.issues.length > 0) {
@@ -1788,7 +1792,8 @@ async function run() {
       console.log(`repo: ${repoRoot}`)
       console.log(`storage: ${getStorageMode(config)}`)
       if (!hasFeaturesTable(config)) {
-        console.log("features: no [features] table, so every feature is on (pre-022 behavior)")
+        const explicitOnly = FEATURES.filter((feature) => feature.explicitOnly).map((feature) => feature.id)
+        console.log(`features: no [features] table, so every feature except ${explicitOnly.join(" and ")} is on (pre-022 behavior); those are on only when set to true`)
       }
       for (const feature of FEATURES) {
         console.log(`  [${currentMap[feature.id] ? "x" : " "}] ${feature.id.padEnd(16)} ${feature.label} — ${feature.description}`)
@@ -1931,6 +1936,10 @@ async function run() {
         sinceHash: typeof options.since === "string" ? options.since : "",
         timeoutMs: Math.round(timeoutSeconds * 1000),
         pollIntervalMs: Math.round(pollIntervalSeconds * 1000),
+        // stderr keeps stdout's "handoff changed" / "timed out" contract.
+        onBaseline: (hash) => {
+          console.error(`waiting for ${laneId ? `lane ${laneId}` : "handoff"} to change from state hash ${hash}`)
+        },
       })
 
       if (waitResult.timedOut) {

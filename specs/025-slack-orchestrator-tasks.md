@@ -27,6 +27,14 @@ file is a JSON record that names its holder (process ID, operator, start
 time), so `lock.mjs` now takes an optional `nonce`, which is the lock file's
 whole content.
 
+T012 is done: `slack/config.mjs` reads the `slack_listen` toggle by the same
+explicit-only rule as `slack`, the listener's settings in `slack.json`, and
+`[slack.orchestrator]`, each with the spec's defaults, and computes the
+served repositories from the registered ones its caller reads. T011 is done
+too: `slack_listen` is in `FEATURES` as explicit-only, with spec 024's
+`slack`, so a repository with no `[features]` table has it off and `btrain
+features` shows it off.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Extend `test/helpers/fake-slack.mjs` with `conversations.history` and `conversations.replies`: scripted messages for each channel and thread, paging with `has_more` and `next_cursor`, newest first for history and earliest first for replies, every failure the fake already supports, and a rejection of a JSON body on `conversations.replies`.
@@ -44,8 +52,8 @@ whole content.
 
 ## Phase 2: Toggle, state, and the poll loop (WS2, WS3)
 
-- [ ] T011 [WS2] Add `slack_listen` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Test that a repository with no `[features]` table has it off and that `btrain features` shows it off. Needs 024 T007. Held on 2026-11-23: `repo_mode.mjs` (lane a).
-- [ ] T012 [WS2] Extend `src/brain_train/slack/config.mjs`: the `orchestrator` object of `slack.json`, `[slack.orchestrator]` of `project.toml`, the spec's defaults, and the served repositories (registered, both toggles on, a channel from the map or the catch-all). An empty `runner` means no model. Needs 024 T009.
+- [x] T011 [WS2] Add `slack_listen` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Test that a repository with no `[features]` table has it off and that `btrain features` shows it off. Needs 024 T007. Held on 2026-11-23: `repo_mode.mjs` (lane a).
+- [x] T012 [WS2] Extend `src/brain_train/slack/config.mjs`: the `orchestrator` object of `slack.json`, `[slack.orchestrator]` of `project.toml`, the spec's defaults, and the served repositories (registered, both toggles on, a channel from the map or the catch-all). An empty `runner` means no model. Needs 024 T009.
 - [x] T013 [WS2] Write `src/brain_train/slack/inbox.mjs`: load, change, and write `inbox.json` by temporary file and rename with mode 0600; drop `handled` entries after 48 hours and old window times; refuse `approvalMinutes` above 24 hours; keep 20 results for each repository. Test a round trip and that a half-written temporary file is never read.
 - [x] T014 [WS2] Write `src/brain_train/slack/lease.mjs` over `slack/lock.mjs`: take and release the listener lease, touch it on a 15-second timer, and read its nonce again with synchronous calls as the last thing before each rename of `inbox.json`; the stop flag; the pause flag. Test that a second lease for one btrain home is refused with the holder named, and that a lease untouched for 60 seconds is taken over. Needs 024 T012.
 - [ ] T015 [WS2] Add `btrain slack whois [--channel <id>]` to `slack/cli.mjs` (author fields, no message text), add `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (the predicate of `enteredChangesRequestedViaPrPoll` over the lane's event log), and the CLI path to the readers object the `slack` block in `cli.mjs` passes, add the help lines, and ship `docs/slack-app-manifest-listen.json` with the publisher's scopes plus `channels:history` and `groups:history`. Remove the skips from invariants 1 and 12. Held on 2026-11-23: `cli.mjs` (lane c).

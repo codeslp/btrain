@@ -1,7 +1,7 @@
 {
   "note": "The public surface of src/brain_train/core.mjs, captured before the Workstream 2 extraction begins. Every stage must leave Object.keys() on the imported module exactly equal to this list. Regenerate only when a surface change is intended, and say so in the commit.",
-  "capturedAt": "main 04184af, before stage 1",
-  "count": 69,
+  "capturedAt": "main 04184af, before stage 1; regenerated for spec 023 T008 (appendWorkflowEvent, readWorkflowEvents, detectCurrentAgent added on purpose)",
+  "count": 72,
   "names": [
     "BtrainError",
     "DEFAULT_LOCK_TTL_MS",
@@ -9,6 +9,7 @@
     "HANDOFF_NOTES_DIRNAME",
     "TASK_ARTIFACT_ENVELOPE_VERSION",
     "acquireLocks",
+    "appendWorkflowEvent",
     "buildCurrentSection",
     "buildLaneGuidance",
     "buildReviewArtifactId",
@@ -20,6 +21,7 @@
     "computeHandoffStateHash",
     "consumeOverride",
     "createEmptyTaskArtifactEnvelope",
+    "detectCurrentAgent",
     "disposeRepair",
     "doctor",
     "extractSpillPathFromNextAction",
@@ -55,6 +57,7 @@
     "readLockRegistry",
     "readProjectConfig",
     "readSpilledNextActionBody",
+    "readWorkflowEvents",
     "registerRepo",
     "releaseLaneLocksAudited",
     "releaseLocks",

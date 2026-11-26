@@ -82,6 +82,70 @@ Close without merge is a **terminal lock-release** event. It is not `repair-need
 
 Current `applyPrStatusToHandoff` sending `overall === "closed"` to `repair-needed` (`src/brain_train/pr-flow.mjs`) is implementation drift and a candidate counterexample. The model must pin this designated contract, not the current branch.
 
+### Local peer review before GitHub bot review
+
+This gate supersedes the earlier `changes-requested` row and paragraph where
+they say local approval survives GitHub feedback. Bot feedback withdraws the
+decision for this gate. Direct relinking does not restore it. The CLI also
+rejects direct relinking from `needs-review` before this gate runs.
+
+The PR workflow reads the lane's current status and workflow log. PR creation,
+bot review requests, and application of bot clearance require a current
+recorded peer approval in a PR-flow state. The approval comes from a resolve
+by the assigned reviewer, on a lane in `needs-review` under its current claim.
+An advisory resolve or approval by the owner does not count.
+Peer approval applies only to `reviewHead`, the commit recorded at the
+`needs-review` handoff. PR creation, bot review requests, and bot clearance
+require that head. A missing or different head requires another peer review.
+The audited `local-review` override is not bound to a head. It applies to one
+uninterrupted PR cycle, subject to the withdrawal rules below.
+
+A new claim, a request for changes, or a move out of the PR flow withdraws the
+approval. A bookkeeping event without a status snapshot leaves the approval
+in place. After bot feedback, the owner commits the fix and sends the lane
+back to `needs-review`. The reviewer resolves it to `ready-for-pr`. The owner
+then pushes, relinks the existing PR, and requests another bot review.
+
+The gate fails closed without peer approval. A human-confirmed override can
+replace approval for one lane and PR cycle:
+`btrain override grant --action local-review --lane <id> --requested-by <agent> --confirmed-by <human> --reason "..."`.
+
+All override actions are audited, not authenticated. The CLI records the names
+supplied with `--requested-by` and `--confirmed-by` without verifying who ran
+the command. Any agent with CLI access can record a grant that names a human.
+The event log makes such a grant visible afterwards but does not prevent it.
+Authenticated confirmation is a planned follow-up.
+
+The first gated stage consumes the override and records the audit event in
+the lane log. Consumption counts only while the lane is already in a PR
+status (`ready-for-pr`, `pr-review`, or `ready-to-merge`) in the current cycle.
+An override consumed in any other status never counts after a later transition.
+Later stages use that decision without another grant. A new
+claim, request for changes, watchdog repair, or status outside the PR flow
+withdraws either decision. Repo-scoped overrides do not apply to lanes.
+A pending grant must have a matching `override-granted` event in the lane log.
+The event records `overrideId`, `action`, and `scope` in `details`, and the lane
+in `laneId`. Single-lane repositories use `repo.jsonl` and repo scope.
+The gate uses log order, not timestamps. A later claim, request for changes,
+watchdog repair, or any non-PR status snapshot after the grant invalidates it.
+This includes metadata-only updates that keep the same non-PR status.
+This also rejects grants issued while idle before a later claim.
+Grant after the lane enters a PR status. Owner or reviewer reassignment within
+the same claim preserves the grant only while the lane stays in a PR status.
+Closing a PR through the workflow resolves the lane. Reopening requires a fresh
+claim and approval or grant.
+
+Both the gate and `btrain override consume --action local-review --lane <id>`
+retire stale grants. Retirement records `override-retired`, never
+`override-consumed`, and refuses authorization. It frees the pending slot.
+After retirement, obtain a new human confirmation and run
+`btrain override grant --action local-review --lane <id> --requested-by <agent> --confirmed-by <human> --reason "..."`.
+Omit `--lane <id>` in single-lane repositories. Only one pending grant per
+action and lane is allowed. Manual consumption outside a PR status does not
+authorize a later PR cycle.
+
+The repository, head, and base checks still run.
+
 ### `handoff resolve --final`
 
 `--final` marks a resolve as terminal: the lane becomes `resolved` and locks release. It does not enter `ready-for-pr`.
