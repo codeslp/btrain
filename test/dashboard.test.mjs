@@ -184,6 +184,28 @@ describe("dashboard lifecycle", () => {
     assert.equal((await getDashboardStatus(repoRoot, { env })).running, false)
   })
 
+  it("fails fast when the dashboard process exited before startup is watched", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3550)
+    // The child has exited, and its exit event has already been emitted,
+    // before ensureDashboard starts waiting: a missed event must not cost the
+    // whole startup budget.
+    const exited = spawn(process.execPath, ["-e", "process.exit(3)"], { stdio: "ignore" })
+    await new Promise((resolve) => exited.once("exit", resolve))
+    const started = Date.now()
+    await assert.rejects(
+      ensureDashboard(repoRoot, {
+        env,
+        port,
+        openBrowser: false,
+        spawnImpl: () => exited,
+      }),
+      /Dashboard exited with code 3 before it became healthy/,
+    )
+    assert.ok(Date.now() - started < 4000, "an already-exited dashboard must not use the whole startup budget")
+    assert.equal((await getDashboardStatus(repoRoot, { env })).running, false)
+  })
+
   it("waits for a dashboard that is slow to start but still running", async () => {
     const { repoRoot, env } = await createDashboardRepo()
     const port = await findAvailableDashboardPort(3525)
