@@ -28,6 +28,16 @@ masks its value. T023 is partly done: `slack/remote.mjs` takes the text of
 link to the `ready-to-merge` reply belongs to WS4's `index.mjs`, which waits
 for lane a.
 
+T024 and T025 are done, and T022 is done except its report. `deliver()`
+now ends each run with the developer's board in the channel
+(`slack/board.mjs`): it posts the board once some lane is active, pins it
+once, updates it in place, and keeps a repository's last lines marked "not
+refreshed" when its state cannot be read. A failed pin is recorded and
+blocks nothing; `boardStatus` returns it for `btrain slack status`, which
+T010 writes in `slack/cli.mjs` and which waits for lane a. Every reply now
+starts with the repository name and the developer label. A first
+`repair-needed` has no mention; its escalation has one.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Write the fake Slack `fetch` in `test/helpers/fake-slack.mjs` and its preload in `test/helpers/fake-slack-preload.mjs`. It records every call, returns a `ts` for a post, and on demand returns any Slack error, an HTTP 429 with `Retry-After`, a network error, or never resolves. Scripted responses are keyed by Slack method name. Test it in `test/slack-fake-harness.test.mjs`.
@@ -75,8 +85,8 @@ Held on 2026-11-23: `README.md` (lane h).
 
 - [ ] T022 [WS5] Render one board for each developer in each channel from every mapped repository's lane state, pin it once, and keep a repository's last lines when its state cannot be read. Test that a failed `pins.add` is reported by `btrain slack status` and blocks nothing.
 - [ ] T023 [WS5] Write `src/brain_train/slack/remote.mjs`: parse `https://`, `ssh://`, and `git@host:owner/repo.git`, pick the remote in the order `resolveBaseRemote` uses (the one `gh repo set-default` marked, else `upstream`, `github`, `origin`, else the first), and build a link only for a `github.com` host. Use it for the `ready-to-merge` reply, which carries the mention list and the PR link. Test the marked remote and `upstream` preferred over `origin`, an SSH remote, and a host that is not `github.com`, in `test/slack-remote.test.mjs`.
-- [ ] T024 [WS5] Mention a person for `repair-needed` only when the repair has escalated, and for `dispatch-failed` until WS7. Test that a first `repair-needed` has no mention, its escalation has one, and `merged` has neither a link nor a mention.
-- [ ] T025 [WS5] Shared channels: the repository name on every card and reply, the developer label on every message, the path-keyed channel map, and the catch-all. Test two repositories of one developer sharing a board with separate threads, and two developer labels in one channel with separate threads and boards.
+- [x] T024 [WS5] Mention a person for `repair-needed` only when the repair has escalated, and for `dispatch-failed` until WS7. Test that a first `repair-needed` has no mention, its escalation has one, and `merged` has neither a link nor a mention.
+- [x] T025 [WS5] Shared channels: the repository name on every card and reply, the developer label on every message, the path-keyed channel map, and the catch-all. Test two repositories of one developer sharing a board with separate threads, and two developer labels in one channel with separate threads and boards.
 - [ ] T026 [WS5] Ship `docs/slack-app-manifest.json` and the README section: scopes, setup, the commands, and what is never posted.
 - [x] T027 [WS5] Add a test that searches the repository and finds no real Slack token, workspace ID, channel ID, or user ID outside fixtures with obviously fake values.
 

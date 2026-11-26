@@ -12,8 +12,9 @@
 // (`<https://github.com/…/pull/N|PR #N>`). Each is checked against a strict
 // shape before it is written.
 //
-// Repository name and developer label on every reply are WS5 (T025); the card
-// carries both here, as FR-6 orders its fields.
+// Every reply starts with the repository name and the developer label (FR-14,
+// FR-16, T025), so replies from several repositories and developers in one
+// channel stay apart. The card carries both as FR-6 orders its fields.
 
 import { capMessage, flattenLines, MAX_MESSAGE_CHARS, prepareAgentText, scrubSecrets } from "./text.mjs"
 import { CARD_REFRESH, KIND_TABLE } from "./events.mjs"
@@ -55,6 +56,10 @@ export const REPLY_TEMPLATES = Object.freeze({
   "dispatch-failed": "reviewer dispatch failed · {reviewer}",
   "status-changed": "status {fromStatus} → {toStatus}",
 })
+
+// The start of every reply. Its fields come from the delivery context, not
+// from the event, and are prepared here.
+export const REPLY_PREFIX = "{repo} · dev: {label}"
 
 // The fields events.mjs prepares (buildEventFields).
 export const REPLY_FIELDS = Object.freeze([
@@ -164,6 +169,18 @@ function prLink(context) {
 }
 
 /**
+ * `line` after the repository name and the developer label of `context`. A
+ * missing name or label drops its segment. `line` must already be inert.
+ */
+export function prefixReply(line, context = {}) {
+  const prefix = fillSegments(REPLY_PREFIX, {
+    repo: prepareAgentText(context.repoName || "", { maxChars: 120, singleLine: true }),
+    label: prepareAgentText(context.label || "", { maxChars: 80, singleLine: true }),
+  })
+  return prefix ? `${prefix} · ${line}` : line
+}
+
+/**
  * One reply line for a classified event (FR-7), or "" for `card-refresh`.
  * A mention is written only when the kind's row decided one and a configured
  * ID has the shape of a Slack user ID. The PR link is written only for
@@ -175,7 +192,7 @@ export function renderReply(classified, context = {}) {
     return ""
   }
   const fields = classified.fields && typeof classified.fields === "object" ? classified.fields : {}
-  const line = fillSegments(REPLY_TEMPLATES[kind], fields)
+  const line = prefixReply(fillSegments(REPLY_TEMPLATES[kind], fields), context)
   const link = kind === "ready-to-merge" ? prLink(context) : ""
   const mention = classified.mention ? mentionPrefix(context) : ""
   // Only the line is cut: the mention and the link are btrain's own markup

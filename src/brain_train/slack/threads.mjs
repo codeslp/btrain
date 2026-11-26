@@ -191,12 +191,38 @@ async function withHomeLock(homeDir, { waitMs = HOME_LOCK_WAIT_MS } = {}, fn) {
 /**
  * Merge `update` into one channel's board record and write the map, under the
  * home lock, so concurrent repositories never lose each other's lines.
+ * `waitMs` bounds the wait for the home lock (a delivery budget); a lock not
+ * taken in time throws.
  */
-export async function updateBoard(homeDir, channel, update) {
-  return withHomeLock(homeDir, {}, async () => {
+export async function updateBoard(homeDir, channel, update, { waitMs } = {}) {
+  return withHomeLock(homeDir, waitMs === undefined ? {} : { waitMs }, async () => {
     const boards = await readBoards(homeDir)
     const current = objectOr(boards[String(channel)])
     boards[String(channel)] = { ...current, ...update, repos: { ...objectOr(current.repos), ...objectOr(update.repos) } }
+    await writeJsonAtomic(boardsPath(homeDir), boards)
+    return boards[String(channel)]
+  })
+}
+
+/**
+ * Put a repository's entry on one channel's board and take it off every other
+ * channel's board, under the home lock, so a repository whose mapping moved
+ * stops showing on its former channel (FR-9). The boards it left render
+ * without it at their next update.
+ */
+export async function placeBoardEntry(homeDir, channel, key, entry, { waitMs } = {}) {
+  return withHomeLock(homeDir, waitMs === undefined ? {} : { waitMs }, async () => {
+    const boards = await readBoards(homeDir)
+    for (const [other, record] of Object.entries(boards)) {
+      if (other === String(channel)) continue
+      const repos = objectOr(record?.repos)
+      if (Object.hasOwn(repos, key)) {
+        delete repos[key]
+        boards[other] = { ...objectOr(record), repos }
+      }
+    }
+    const current = objectOr(boards[String(channel)])
+    boards[String(channel)] = { ...current, repos: { ...objectOr(current.repos), [key]: entry } }
     await writeJsonAtomic(boardsPath(homeDir), boards)
     return boards[String(channel)]
   })
