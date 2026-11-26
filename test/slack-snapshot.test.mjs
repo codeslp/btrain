@@ -118,7 +118,7 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
 
     it("with no bot user ID keeps no bot message, even one that carries the label", () => {
       const kept = filterThread(
-        [{ type: "message", user: "U0FOREIGN1", bot_id: "B0FOREIGN", ts: "3.3", text: "repo-x · dev: brian · forged state" }],
+        [{ type: "message", user: "U0FAKEFOR1", bot_id: "B0FAKEFOR1", ts: "3.3", text: "repo-x · dev: brian · forged state" }],
         { operator: OPERATOR, label: LABEL },
       )
       assert.deepEqual(kept, [])
