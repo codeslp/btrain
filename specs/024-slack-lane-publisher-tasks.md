@@ -34,9 +34,11 @@ now ends each run with the developer's board in the channel
 once, updates it in place, and keeps a repository's last lines marked "not
 refreshed" when its state cannot be read. A failed pin is recorded and
 blocks nothing; `boardStatus` returns it for `btrain slack status`, which
-T010 writes in `slack/cli.mjs` and which waits for lane a. Every reply now
-starts with the repository name and the developer label. A first
-`repair-needed` has no mention; its escalation has one.
+T010 writes in `slack/cli.mjs`. Every reply now starts with the repository
+name and the developer label. A first `repair-needed` has no mention; its
+escalation has one. T007 is done (PR #135): `slack` is an explicit-only
+feature in `repo_mode.mjs`, so a repository with no `[features]` table has
+the publisher off. T008 and T009 were done earlier; T010 is next.
 
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
@@ -54,7 +56,7 @@ starts with the repository name and the developer label. A first
 WS2 and WS3 do not depend on each other. WS3 tests inject the channel and the
 token.
 
-- [ ] T007 [WS2] Add `slack` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Honor the flag in `isFeatureEnabled`, `getAllOnFeatureMap`, `getEffectiveFeatureMap`, and `getNewRepoFeatureBase`. Change the `btrain features` line that says every feature is on. Exempt explicit-only ids in the `test/local-init.test.mjs` case that asserts the legacy rule. Test that a repository with no `[features]` table has the publisher off, and that `btrain features disable formal` there writes no `slack = true`. Held on 2026-11-23: `repo_mode.mjs` (lane a), `cli.mjs` (lane c).
+- [x] T007 [WS2] Add `slack` to `FEATURES` in `src/brain_train/repo_mode.mjs` with `localDefault: false` and `explicitOnly: true`. Honor the flag in `isFeatureEnabled`, `getAllOnFeatureMap`, `getEffectiveFeatureMap`, and `getNewRepoFeatureBase`. Change the `btrain features` line that says every feature is on. Exempt explicit-only ids in the `test/local-init.test.mjs` case that asserts the legacy rule. Test that a repository with no `[features]` table has the publisher off, and that `btrain features disable formal` there writes no `slack = true`. Held on 2026-11-23: `repo_mode.mjs` (lane a), `cli.mjs` (lane c).
 - [x] T008 [WS2] Write `src/brain_train/slack/credentials.mjs`: the environment variable first, else `~/.btrain/slack.json` with the no-follow, size, owner, and mode checks, and the two failure reasons the spec names. Windows skips the owner and mode checks. Test each rejected file shape in `test/slack-credentials.test.mjs`.
 - [x] T009 [WS2] Write `src/brain_train/slack/config.mjs`: `[slack]` options with defaults, the channel for a repository by registered path, else `defaultChannel`, else none, and the mention list. Test two registered repositories with one name, an unmapped repository with and without `defaultChannel`, in `test/slack-config.test.mjs`.
 - [ ] T010 [WS2] Write `setup`, `status`, `channels`, and `test` in `src/brain_train/slack/cli.mjs`, and add the `slack` command block to `src/brain_train/cli.mjs`, which hands `slack/cli.mjs` one object of reader functions. `setup` reads the token from standard input, writes the file with mode 0600, and for an unmapped repository offers an existing project channel, then the catch-all, then a new channel ID. No command prints the token. Test the toggle on with no credentials: every lane command succeeds with no network call and `status` names the missing token. Remove the skip from invariant 1.
