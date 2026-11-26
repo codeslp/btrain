@@ -63,6 +63,14 @@ channel, a 429 not retried before `Retry-After`) are covered by
 `test/slack-read-client.test.mjs` (T016) and, through the cycle, by the
 90-second `Retry-After` case of `test/slack-listen.test.mjs`.
 
+T002's helper is written ahead of T004: `test/helpers/fake-orchestrator-runner.mjs`
+installs the fake `claude`, records each run, and takes its behavior from a
+control file, with its own tests in `test/fake-orchestrator-runner.test.mjs`.
+Its default first event and its assistant and result events follow the
+documented stream-json shape, not a captured one, and every field a test
+checks can be set from the control file. T002 stays open until the T004
+fixture confirms those field names or replaces them.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Extend `test/helpers/fake-slack.mjs` with `conversations.history` and `conversations.replies`: scripted messages for each channel and thread, paging with `has_more` and `next_cursor`, newest first for history and earliest first for replies, every failure the fake already supports, and a rejection of a JSON body on `conversations.replies`.
