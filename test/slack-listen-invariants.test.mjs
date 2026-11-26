@@ -114,7 +114,9 @@ describe("the listener invariant harness itself", () => {
 })
 
 describe("spec 025 listener invariants", () => {
-  it("1. a repository with slack_listen off, or with no [features] table, is not served, and its channel is never read", { skip: "WS2: the toggle and served repositories (T015)" }, async () => { // btrain-allow: skipped-test
+  // The toggle and the served repositories exist (T011, T012), but this
+  // checks them through createListener, which WS3 writes (T017).
+  it("1. a repository with slack_listen off, or with no [features] table, is not served, and its channel is never read", { skip: "WS3: createListener (T017)" }, async () => { // btrain-allow: skipped-test
     const { createListener } = await slackModule("listen.mjs")
     for (const options of [{ slackListen: false }, { features: false }]) {
       const fixture = await createListenFixture(options)
@@ -286,15 +288,18 @@ describe("spec 025 listener invariants", () => {
     assert.doesNotMatch(source, /core\.mjs/, "the listener imports nothing from core.mjs")
   })
 
-  it("12. one listener runs for each btrain home", { skip: "WS2: the lease (T015)" }, async () => { // btrain-allow: skipped-test
+  // takeLease (T014, PR #130) returns { lease, reason, holder }: the second
+  // take is refused and names the first holder's process.
+  it("12. one listener runs for each btrain home", async () => {
     const fixture = await createListenFixture()
     const lease = await slackModule("lease.mjs")
     const first = await lease.takeLease(path.join(fixture.home, "slack"), { operator: OPERATOR })
-    assert.ok(first.held)
+    assert.ok(first.lease)
     const second = await lease.takeLease(path.join(fixture.home, "slack"), { operator: OPERATOR })
-    assert.equal(second.held, false)
-    assert.match(second.reason, new RegExp(String(process.pid)))
-    await first.release()
+    assert.equal(second.lease, null)
+    assert.equal(second.reason, "held")
+    assert.equal(second.holder?.pid, process.pid)
+    await first.lease.release()
   })
 
   it("13. core.mjs gains no function, patchHandoff keeps its line count, and runLoop changes once, by expectStatus", { skip: "WS6: checked after the last core.mjs edit of spec 025 (T031)" }, async () => { // btrain-allow: skipped-test
