@@ -42,7 +42,7 @@ import {
   syncSkills,
   syncTemplates,
   waitForHandoffStateChange,
-  readAllLaneStates,
+  parseCurrentSection,
   withFileLock,
   readWorkflowEvents,
   appendWorkflowEvent,
@@ -638,16 +638,25 @@ async function recordLaneActivity(repoRoot, options, command, subcommand) {
     const config = await readProjectConfig(repoRoot)
     const laneConfig = (getLaneConfigs(config) || []).find((lane) => lane.id === laneId)
     if (!laneConfig) return
-    const readLane = async () => ((await readAllLaneStates(repoRoot, config)) || []).find((lane) => lane._laneId === laneId) || null
-    if (!ACTIVITY_STATUSES.has((await readLane())?.status)) return
-    // The lane's handoff lock, the one updateHandoff takes.
+    // Only the selected lane is read, never the others (lane isolation): its
+    // handoff file's Current section, the lane's status, owner, and reviewer.
     const handoffPath = path.isAbsolute(laneConfig.handoffPath)
       ? laneConfig.handoffPath
       : path.resolve(resolveStateRoot(repoRoot), laneConfig.handoffPath)
+    const readLane = async () => {
+      try {
+        return parseCurrentSection(await fs.readFile(handoffPath, "utf8"))
+      } catch (error) {
+        if (error?.code === "ENOENT") return null
+        throw error
+      }
+    }
+    if (!ACTIVITY_STATUSES.has((await readLane())?.status)) return
     await recordReviewActivity({
       laneId,
       kind,
       identity: detectCurrentAgent(config),
+      // The lane's handoff lock, the one updateHandoff takes.
       withLaneLock: (fn) => withFileLock(`${handoffPath}.lock`, fn),
       readLane,
       readEvents: () => readWorkflowEvents(repoRoot, config, laneId),
