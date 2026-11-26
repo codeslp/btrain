@@ -216,3 +216,17 @@ function rowIdOrRejection(state, event, input) {
     return "rejected"
   }
 }
+
+// codex-reviewer on 481212a: the FR-3 refusal recommends --reviewer any-other.
+describe("--reviewer any-other on a reassignment (codex-reviewer on 481212a)", () => {
+  for (const lanes of [true, false]) {
+    it(`resolves to the first other-lab candidate, never the literal value (${lanes ? "lanes" : "no lanes"})`, async () => {
+      await withRepo({ lanes, agents: ["claude", "claude-reviewer", "codex-reviewer", "codex-second"] }, async ({ run, claim, reviewerOf }) => {
+        assert.equal((await claim(["--reviewer", "codex-second"])).code, 0)
+        const result = await run(["handoff", "update", ...(lanes ? ["--lane", "a"] : []), "--reviewer", "any-other", "--actor", "claude"])
+        assert.equal(result.code, 0, result.stderr)
+        assert.equal(await reviewerOf(), "codex-reviewer")
+      })
+    })
+  }
+})
