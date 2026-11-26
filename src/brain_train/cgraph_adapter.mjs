@@ -39,6 +39,26 @@ const TIMEOUTS = {
   health:         5_000,
 }
 const DEFAULT_TIMEOUT = 10_000
+
+// A [cgraph.timeouts] table in .btrain/project.toml overrides any of the
+// budgets above per command kind, in ms, for example `advise = "1000"` on a
+// slow machine. The TOML reader returns numbers as strings, so both forms are
+// accepted; anything that is not a positive integer keeps the default.
+// Node's timers hold at most 2^31 - 1 ms and fire after 1 ms for anything
+// larger, so a bigger value also keeps the default.
+const MAX_TIMER_MS = 2_147_483_647
+
+function resolveTimeouts(overrides) {
+  const resolved = { ...TIMEOUTS }
+  for (const kind of Object.keys(TIMEOUTS)) {
+    const raw = overrides?.[kind]
+    const isDigitString = typeof raw === "string" && /^\d+$/.test(raw.trim())
+    if (!isDigitString && typeof raw !== "number") continue
+    const value = Number(raw)
+    if (Number.isInteger(value) && value > 0 && value <= MAX_TIMER_MS) resolved[kind] = value
+  }
+  return resolved
+}
 const DAEMON_CONNECT_TIMEOUT = 1_000
 const STDERR_MAX_CHARS = 500
 const MAX_BUFFER = 10 * 1024 * 1024 // 10 MB
@@ -95,10 +115,10 @@ async function isExecutable(filePath) {
 // ---------------------------------------------------------------------------
 
 /** @returns {import("./cgraph_adapter.mjs").AdapterResult} */
-async function probeManifest(binPath, project) {
+async function probeManifest(binPath, project, timeouts = TIMEOUTS) {
   const args = ["manifest", "--json"]
   if (project) args.push("--project", project)
-  return execCommand(binPath, args, "manifest")
+  return execCommand(binPath, args, "manifest", { timeouts })
 }
 
 /**
@@ -170,10 +190,11 @@ async function tryDaemon(socketPath, command, args) {
  * @param {boolean} [opts.skipDaemon] - Force subprocess-only
  * @param {string} [opts.cwd] - Working directory
  * @param {object} [opts.env] - Extra environment variables
+ * @param {object} [opts.timeouts] - Per-kind budgets from resolveTimeouts
  * @returns {AdapterResult}
  */
 async function execCommand(binPath, args, kind, opts = {}) {
-  const timeout = TIMEOUTS[kind] || DEFAULT_TIMEOUT
+  const timeout = opts.timeouts?.[kind] || TIMEOUTS[kind] || DEFAULT_TIMEOUT
   const start = Date.now()
 
   // Try daemon first unless skipped
@@ -270,7 +291,7 @@ async function createAdapter(repoRoot, config) {
   const binPath = await resolveBinary(config)
   if (!binPath) return null
 
-  const manifestResult = await probeManifest(binPath, cgraphConfig.project)
+  const manifestResult = await probeManifest(binPath, cgraphConfig.project, resolveTimeouts(cgraphConfig.timeouts))
   if (!manifestResult.ok) return null
 
   return new CgraphAdapter(repoRoot, config, binPath, manifestResult.payload)
@@ -284,6 +305,7 @@ class CgraphAdapter {
     this.binPath = binPath
     this.manifest = manifest
     this._socketPath = this.cgraphConfig.socket_path || DEFAULT_SOCKET
+    this._timeouts = resolveTimeouts(this.cgraphConfig.timeouts)
   }
 
   // ---- Capability checks ----
@@ -609,6 +631,7 @@ class CgraphAdapter {
     return execCommand(this.binPath, args, kind, {
       socketPath: this._socketPath,
       cwd: this.repoRoot,
+      timeouts: this._timeouts,
     })
   }
 
@@ -727,6 +750,7 @@ export {
   hasCommand,
   probeManifest,
   resolveBinary,
+  resolveTimeouts,
   tryDaemon,
   // Constants for testing
   DEFAULT_TIMEOUT,
