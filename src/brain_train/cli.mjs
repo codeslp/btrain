@@ -50,6 +50,7 @@ import {
 } from "./core.mjs"
 import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
 import { formatReviewLine } from "./review/record.mjs"
+import { runSlackCommand, SLACK_SUBCOMMANDS } from "./slack/cli.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -158,6 +159,10 @@ Usage:
   btrain pr poll --lane <id> [--pr <number>] [--apply] [--format json|summary]  Fetch PR comments, classify bot feedback, and optionally update lane status.
   btrain pr request-review --lane <id> [--pr <number>] [--bots all|codex,unblocked]
                                                                                 Post configured bot review trigger comments such as @codex review and @unblocked review again.
+  btrain slack setup [--channel <id>] [--operator <id>]                          Read the Slack bot token from stdin into ~/.btrain/slack.json (0600) and map this repo to a channel
+  btrain slack status                                                            Show the publisher toggle, token source, channel, pending entries, pause, and board pin
+  btrain slack channels                                                          Print the path-to-channel map and the catch-all
+  btrain slack test                                                              Call auth.test, post one test message, and clear a delivery pause
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
@@ -2438,6 +2443,30 @@ async function run() {
       await runPrRequestReview(repoRoot, options)
       return
     }
+  }
+
+  if (command === "slack") {
+    const subcommand = SLACK_SUBCOMMANDS.includes(rest[0]) ? rest[0] : null
+    if (!subcommand) {
+      throw new BtrainError({
+        message: "`btrain slack` requires a subcommand.",
+        reason: rest[0] ? `Unknown subcommand: ${rest[0]}.` : "No subcommand was provided.",
+        fix: "btrain slack status",
+        context: `Available subcommands: ${SLACK_SUBCOMMANDS.join(", ")}.`,
+      })
+    }
+    const options = parseOptions(rest.slice(1))
+    const repoRoot = await resolveRepoRoot(options.repo)
+    const config = await readProjectConfig(repoRoot)
+    // One object of readers (plan WS2), so a later subcommand can need
+    // another without a change to this call.
+    process.exitCode = await runSlackCommand(subcommand, options, {
+      repoRoot,
+      config,
+      slackDir: path.join(resolveStateRoot(repoRoot), ".btrain", "slack"),
+      stdin: process.stdin,
+    })
+    return
   }
 
   if (command === "loop") {

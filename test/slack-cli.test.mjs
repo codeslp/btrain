@@ -1,0 +1,250 @@
+// Spec 024 FR-14, FR-16 and the plan's WS2 (T010): `btrain slack setup`,
+// `status`, `channels`, and `test`, through the real CLI with its own btrain
+// home and the fake Slack preload. No test calls Slack.
+import { after, describe, it } from "node:test"
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { execFile, spawn } from "node:child_process"
+import { promisify } from "node:util"
+import { withoutLaneScope } from "./helpers/runner-scope.mjs"
+import { fakeSlackProcessEnv, readFakeSlackLog } from "./helpers/fake-slack.mjs"
+import { writeEntry, writeDeliveryState, readDeliveryState, emptyDeliveryState } from "../src/brain_train/slack/outbox.mjs"
+import { updateBoard } from "../src/brain_train/slack/threads.mjs"
+
+const exec = promisify(execFile)
+const CLI = path.resolve("src/brain_train/cli.mjs")
+// Fake values, built at runtime so the source holds no secret-shaped string.
+const TOKEN = ["xoxb", "0000", "fake", "cli", "token"].join("-")
+const CHANNEL = "C0000FAKE"
+const OTHER_CHANNEL = "C0001FAKE"
+const CATCH_ALL = "C0002FAKE"
+const NEW_CHANNEL = "C0003FAKE"
+
+const roots = []
+after(async () => Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))))
+
+async function fixture({ toggle = "on" } = {}) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-slack-cli-")))
+  roots.push(root)
+  const repo = path.join(root, "repo")
+  const home = path.join(root, "home")
+  const logPath = path.join(root, "fake-calls.jsonl")
+  await fs.mkdir(home, { recursive: true })
+  await exec("git", ["init", "-q", repo])
+  const baseEnv = { ...withoutLaneScope(), BRAIN_TRAIN_HOME: home, BTRAIN_AGENT: "claude", BTRAIN_DASHBOARD_DISABLED: "1" }
+  delete baseEnv.BTRAIN_SLACK_BOT_TOKEN
+  const outputs = []
+
+  // Run the CLI, optionally with standard input. Never throws on exit codes.
+  function run(args, { input = "", script, env = {} } = {}) {
+    return new Promise((resolve) => {
+      const child = spawn("node", [CLI, ...args], {
+        cwd: repo,
+        env: { ...baseEnv, ...fakeSlackProcessEnv({ logPath, script, expectedToken: TOKEN }), ...env },
+      })
+      let stdout = ""
+      let stderr = ""
+      child.stdout.on("data", (chunk) => { stdout += chunk })
+      child.stderr.on("data", (chunk) => { stderr += chunk })
+      child.on("close", (code) => {
+        outputs.push(stdout, stderr)
+        resolve({ code, stdout, stderr })
+      })
+      child.stdin.end(input)
+    })
+  }
+
+  const init = await run(["init", repo, "--agent", "claude", "--agent", "codex", "--tracked", "--core-only", "--no-hooks"])
+  assert.equal(init.code, 0, init.stderr)
+  if (toggle !== "absent") {
+    const tomlPath = path.join(repo, ".btrain", "project.toml")
+    const toml = await fs.readFile(tomlPath, "utf8")
+    await fs.writeFile(tomlPath, `${toml.trimEnd()}\n\n[features]\nslack = ${toggle === "on"}\n`)
+  }
+  const slackFile = path.join(home, "slack.json")
+  const writeSettings = async (settings, mode = 0o600) => {
+    await fs.writeFile(slackFile, `${JSON.stringify(settings, null, 2)}\n`, { mode })
+    await fs.chmod(slackFile, mode)
+  }
+  const readSettings = async () => JSON.parse(await fs.readFile(slackFile, "utf8"))
+  return {
+    root, repo, home, slackFile, run, writeSettings, readSettings,
+    slackDir: path.join(repo, ".btrain", "slack"),
+    calls: () => readFakeSlackLog(logPath),
+    // No command may ever print the token.
+    assertTokenNeverPrinted: () => outputs.forEach((text) => assert.ok(!text.includes(TOKEN), "the token was printed")),
+  }
+}
+
+describe("btrain slack with no credentials (spec 024 T010)", () => {
+  it("lets every lane command succeed with no network call, and status names the missing token", async () => {
+    const f = await fixture()
+    for (const args of [
+      ["handoff", "claim", "--lane", "a", "--task", "fixture", "--owner", "claude", "--reviewer", "codex", "--files", "src/"],
+      ["handoff", "update", "--lane", "a", "--next", "keep going", "--actor", "claude"],
+      ["handoff", "--lane", "a"],
+      ["status"],
+    ]) {
+      const result = await f.run(args)
+      assert.equal(result.code, 0, `${args.join(" ")}: ${result.stderr}`)
+    }
+    const status = await f.run(["slack", "status"])
+    assert.equal(status.code, 0)
+    assert.match(status.stdout, /^publisher: on$/m)
+    assert.match(status.stdout, /^token: missing: no token in BTRAIN_SLACK_BOT_TOKEN or ~\/\.btrain\/slack\.json; run btrain slack setup$/m)
+    assert.match(status.stdout, /^channel: none mapped/m)
+    assert.deepEqual(f.calls(), [], "no Slack call")
+  })
+})
+
+describe("btrain slack setup", () => {
+  it("reads the token from standard input, writes slack.json with mode 0600, and maps --channel", async () => {
+    const f = await fixture()
+    const result = await f.run(["slack", "setup", "--channel", CHANNEL, "--operator", "U0000FAKE"], { input: `${TOKEN}\n` })
+    assert.equal(result.code, 0, result.stderr)
+    const stat = await fs.stat(f.slackFile)
+    assert.equal(stat.mode & 0o777, 0o600)
+    const settings = await f.readSettings()
+    assert.equal(settings.botToken, TOKEN)
+    assert.equal(settings.operator, "U0000FAKE")
+    assert.deepEqual(settings.channels, { [f.repo]: CHANNEL })
+    assert.match(result.stdout, new RegExp(`publishes to ${CHANNEL}`))
+    f.assertTokenNeverPrinted()
+  })
+
+  it("offers an existing project channel first, then the catch-all, then a new channel ID", async () => {
+    const f = await fixture()
+    await f.writeSettings({ channels: { "/work/other": OTHER_CHANNEL }, defaultChannel: CATCH_ALL })
+    const result = await f.run(["slack", "setup"], { input: `${TOKEN}\n1\n` })
+    assert.equal(result.code, 0, result.stderr)
+    const prompt = result.stderr.split("\n").filter((line) => /^\s+\d\) /.test(line))
+    assert.deepEqual(prompt, [
+      `  1) ${OTHER_CHANNEL} (carries /work/other)`,
+      `  2) the catch-all ${CATCH_ALL}`,
+      "  3) a new channel ID for this repository",
+    ])
+    assert.equal((await f.readSettings()).channels[f.repo], OTHER_CHANNEL, "folded into the existing project channel")
+    f.assertTokenNeverPrinted()
+  })
+
+  it("leaves the repository on the catch-all, or maps a new channel ID", async () => {
+    const onCatchAll = await fixture()
+    await onCatchAll.writeSettings({ defaultChannel: CATCH_ALL })
+    assert.equal((await onCatchAll.run(["slack", "setup"], { input: `${TOKEN}\n1\n` })).code, 0)
+    const caught = await onCatchAll.readSettings()
+    assert.equal(caught.channels?.[onCatchAll.repo], undefined)
+    assert.equal(caught.defaultChannel, CATCH_ALL)
+
+    const onNew = await fixture()
+    assert.equal((await onNew.run(["slack", "setup"], { input: `${TOKEN}\n2\n${NEW_CHANNEL}\n` })).code, 0)
+    assert.equal((await onNew.readSettings()).channels[onNew.repo], NEW_CHANNEL)
+
+    const newCatchAll = await fixture()
+    assert.equal((await newCatchAll.run(["slack", "setup"], { input: `${TOKEN}\n1\n${CATCH_ALL}\n` })).code, 0)
+    assert.equal((await newCatchAll.readSettings()).defaultChannel, CATCH_ALL, "the catch-all asks for its ID when none is set")
+  })
+
+  it("writes nothing for a token that is not a bot token, a bad channel, or an insecure file", async () => {
+    const f = await fixture()
+    const notBot = await f.run(["slack", "setup", "--channel", CHANNEL], { input: "not-a-token\n" })
+    assert.equal(notBot.code, 1)
+    await assert.rejects(fs.stat(f.slackFile))
+    const badChannel = await f.run(["slack", "setup", "--channel", "general"], { input: `${TOKEN}\n` })
+    assert.equal(badChannel.code, 1)
+    await assert.rejects(fs.stat(f.slackFile))
+    const badOperator = await f.run(["slack", "setup", "--channel", CHANNEL, "--operator", "dana"], { input: `${TOKEN}\n` })
+    assert.equal(badOperator.code, 1)
+    await assert.rejects(fs.stat(f.slackFile))
+
+    await f.writeSettings({ label: "dev" }, 0o644)
+    const insecure = await f.run(["slack", "setup", "--channel", CHANNEL], { input: `${TOKEN}\n` })
+    assert.equal(insecure.code, 1)
+    assert.match(insecure.stderr, /readable by others/)
+    assert.equal((await f.readSettings()).botToken, undefined)
+    f.assertTokenNeverPrinted()
+  })
+})
+
+describe("btrain slack channels and status", () => {
+  it("prints the path-to-channel map and the catch-all", async () => {
+    const f = await fixture()
+    await f.writeSettings({ botToken: TOKEN, channels: { [f.repo]: CHANNEL, "/work/other": CHANNEL, "/work/api": OTHER_CHANNEL }, defaultChannel: CATCH_ALL })
+    const result = await f.run(["slack", "channels"])
+    assert.equal(result.code, 0)
+    assert.equal(result.stdout, `${CHANNEL}\n  ${["/work/other", f.repo].sort().join(`\n  `)}\n${OTHER_CHANNEL}\n  /work/api\ncatch-all: ${CATCH_ALL}\n`)
+    f.assertTokenNeverPrinted()
+  })
+
+  it("shows the toggle, token source, channel, pending entries, pause, and board", async () => {
+    const f = await fixture({ toggle: "off" })
+    await f.writeSettings({ botToken: TOKEN, channels: { [f.repo]: CHANNEL } })
+    await writeEntry(f.slackDir, { laneId: "a", claimKey: "c", kind: "claimed", reply: true, fields: {} }, { now: () => Date.now() - 2 * 3600_000 })
+    await writeEntry(f.slackDir, { laneId: "a", claimKey: "c", kind: "sent-to-review", reply: true, fields: {} }, { now: () => Date.now() - 60_000 })
+    await writeDeliveryState(f.slackDir, { ...emptyDeliveryState(), paused: { error: "invalid_auth", at: new Date().toISOString() }, lastError: "invalid_auth" })
+    const result = await f.run(["slack", "status"])
+    assert.equal(result.code, 0)
+    assert.match(result.stdout, /^publisher: off/m)
+    assert.match(result.stdout, /^token: from ~\/\.btrain\/slack\.json$/m)
+    assert.match(result.stdout, new RegExp(`^channel: ${CHANNEL}$`, "m"))
+    assert.match(result.stdout, /^pending: 2, oldest 2h old$/m)
+    assert.match(result.stdout, /^paused: yes \(invalid_auth\); run btrain slack test to resume$/m)
+    assert.match(result.stdout, /^board: not posted yet$/m)
+    const fromEnv = await f.run(["slack", "status"], { env: { BTRAIN_SLACK_BOT_TOKEN: TOKEN } })
+    assert.match(fromEnv.stdout, /^token: from BTRAIN_SLACK_BOT_TOKEN$/m)
+    f.assertTokenNeverPrinted()
+  })
+})
+
+describe("the board in btrain slack status (spec 024 T022)", () => {
+  it("reports a failed pin, and a pinned board", async () => {
+    const f = await fixture()
+    await f.writeSettings({ botToken: TOKEN, channels: { [f.repo]: CHANNEL } })
+    await updateBoard(f.home, CHANNEL, { ts: "1700000000.000100", text: "board", pinned: false, pinError: "not_pinnable" })
+    const failed = await f.run(["slack", "status"])
+    assert.equal(failed.code, 0, "a failed pin blocks nothing")
+    assert.match(failed.stdout, /^board: posted, not pinned \(not_pinnable\)$/m)
+    await updateBoard(f.home, CHANNEL, { pinned: true, pinError: "" })
+    assert.match((await f.run(["slack", "status"])).stdout, /^board: posted and pinned$/m)
+  })
+})
+
+describe("btrain slack test", () => {
+  it("calls auth.test, posts one message, and clears a pause", async () => {
+    const f = await fixture()
+    await f.writeSettings({ botToken: TOKEN, label: "dana", channels: { [f.repo]: CHANNEL } })
+    await writeDeliveryState(f.slackDir, { ...emptyDeliveryState(), paused: { error: "token_revoked", at: new Date().toISOString() } })
+    const result = await f.run(["slack", "test"])
+    assert.equal(result.code, 0, result.stderr)
+    assert.deepEqual(f.calls().map((call) => call.method), ["auth.test", "chat.postMessage"])
+    assert.equal(f.calls()[1].body.channel, CHANNEL)
+    assert.match(f.calls()[1].body.text, /dev: dana/)
+    assert.equal((await readDeliveryState(f.slackDir)).paused, null)
+    f.assertTokenNeverPrinted()
+  })
+
+  it("fails without changing the pause when auth.test is refused, or with no channel", async () => {
+    const f = await fixture()
+    await f.writeSettings({ botToken: TOKEN, channels: { [f.repo]: CHANNEL } })
+    await writeDeliveryState(f.slackDir, { ...emptyDeliveryState(), paused: { error: "token_revoked", at: new Date().toISOString() } })
+    const refused = await f.run(["slack", "test"], { script: { queue: { "auth.test": [{ error: "invalid_auth" }] } } })
+    assert.equal(refused.code, 1)
+    assert.match(refused.stderr, /auth\.test failed \(invalid_auth\)/)
+    assert.equal((await readDeliveryState(f.slackDir)).paused.error, "token_revoked")
+
+    const unmapped = await fixture()
+    await unmapped.writeSettings({ botToken: TOKEN })
+    const noChannel = await unmapped.run(["slack", "test"])
+    assert.equal(noChannel.code, 1)
+    assert.deepEqual(unmapped.calls(), [])
+    f.assertTokenNeverPrinted()
+  })
+
+  it("refuses an unknown subcommand", async () => {
+    const f = await fixture()
+    const result = await f.run(["slack", "nope"])
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /setup, status, channels, test/)
+  })
+})
