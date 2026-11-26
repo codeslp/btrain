@@ -594,9 +594,87 @@ async function readText(targetPath) {
   return fs.readFile(targetPath, "utf8")
 }
 
+const MAX_WRITE_SYMLINK_HOPS = 40
+
+// Readers such as `btrain handoff wait`, the dashboard, and `btrain doctor`
+// read state files without taking the writer's lock. fs.writeFile truncates
+// the file before it writes, so such a reader could see an empty locks.json
+// (readJson then falls back to no locks) or a half-written handoff file. The
+// content goes to a temporary file in the same directory, and a rename puts
+// it in place, so a reader sees the old file or the new one, never a torn one.
+// A symlink stays a symlink: the rename targets the file it points to. An
+// existing file keeps its mode, so a hook stays executable.
 async function writeText(targetPath, content) {
   await ensureDir(path.dirname(targetPath))
-  await fs.writeFile(targetPath, content, "utf8")
+  let destination = targetPath
+  let mode
+  try {
+    destination = await fs.realpath(targetPath)
+    mode = (await fs.stat(destination)).mode & 0o7777
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error
+    // A dangling symlink, or a chain of them, still names the file to
+    // create. Follow every hop so the rename creates the last target and
+    // leaves each link in place.
+    destination = targetPath
+    for (let hop = 0; ; hop += 1) {
+      if (hop === MAX_WRITE_SYMLINK_HOPS) {
+        const loop = new Error(`ELOOP: too many symbolic links, write '${targetPath}'`)
+        loop.code = "ELOOP"
+        throw loop
+      }
+      let linkTarget
+      try {
+        linkTarget = await fs.readlink(destination)
+      } catch (readlinkError) {
+        if (readlinkError?.code === "EINVAL" || readlinkError?.code === "ENOENT") break
+        throw readlinkError
+      }
+      // Let the filesystem resolve everything but the last component of the
+      // target, unnormalized: realpath follows each symlinked directory
+      // before it applies a "..", where path.resolve would cancel the pair
+      // lexically and land elsewhere (for example "dir/../x" with dir a
+      // symlink, or "../x" under a symlinked parent). A missing directory on
+      // the way fails with ENOENT, as a native write through the link would.
+      const unresolved = path.isAbsolute(linkTarget)
+        ? linkTarget
+        : `${path.dirname(destination)}${path.sep}${linkTarget}`
+      const lastSeparator = unresolved.lastIndexOf(path.sep)
+      // A target ending in "/", "." or ".." needs no special case: if that
+      // directory exists the link is not dangling, and if it is missing this
+      // realpath fails.
+      const parent = await fs.realpath(unresolved.slice(0, lastSeparator) || path.sep)
+      destination = path.join(parent, unresolved.slice(lastSeparator + 1))
+    }
+  }
+  // A short fixed-shape name: appending to a long valid basename could pass
+  // the filesystem's 255-byte name limit.
+  const temporary = path.join(path.dirname(destination), `.btrain-write-${process.pid}-${randomUUID()}.tmp`)
+  // Someone who can write this directory must not be able to redirect the
+  // temporary file: "wx" refuses any existing name (a symlink included), the
+  // mode is set through the open descriptor rather than a path chmod would
+  // follow, and the rename goes ahead only if the name still holds the file
+  // this call wrote.
+  let handle
+  try {
+    handle = await fs.open(temporary, "wx", mode === undefined ? 0o666 : 0o600)
+    await handle.writeFile(content, "utf8")
+    if (mode !== undefined) await handle.chmod(mode)
+    const written = await handle.stat()
+    await handle.close()
+    handle = undefined
+    const current = await fs.lstat(temporary)
+    if (current.ino !== written.ino || current.dev !== written.dev) {
+      const replaced = new Error(`The temporary file ${temporary} was replaced before btrain could rename it into place.`)
+      replaced.code = "ETMPREPLACED"
+      throw replaced
+    }
+    await fs.rename(temporary, destination)
+  } catch (error) {
+    await handle?.close().catch(() => {})
+    await fs.rm(temporary, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 async function appendText(targetPath, content) {
@@ -4748,13 +4826,10 @@ async function readJsonLinesSnapshot(filePath) {
 }
 
 async function writeJsonLinesSnapshot(filePath, rows) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  const tmpPath = `${filePath}.tmp`
   const content = rows.length > 0
     ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
     : ""
-  await fs.writeFile(tmpPath, content, "utf8")
-  await fs.rename(tmpPath, filePath)
+  await writeText(filePath, content)
 }
 
 async function appendCgraphTelemetryRows(repoRoot, rows) {
@@ -7857,6 +7932,9 @@ async function waitForHandoffStateChange(
     sinceHash = "",
     timeoutMs = DEFAULT_LOOP_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_LOOP_POLL_INTERVAL_MS,
+    // Called once with the baseline hash before the first poll. A state
+    // change after this call wakes the waiter; one before it may not.
+    onBaseline,
   } = {},
 ) {
   const resolvedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 0
@@ -7876,6 +7954,10 @@ async function waitForHandoffStateChange(
       baselineHash,
       result: initial,
     }
+  }
+
+  if (typeof onBaseline === "function") {
+    await onBaseline(baselineHash)
   }
 
   const startedAt = Date.now()

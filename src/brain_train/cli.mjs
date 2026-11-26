@@ -1936,6 +1936,10 @@ async function run() {
         sinceHash: typeof options.since === "string" ? options.since : "",
         timeoutMs: Math.round(timeoutSeconds * 1000),
         pollIntervalMs: Math.round(pollIntervalSeconds * 1000),
+        // stderr keeps stdout's "handoff changed" / "timed out" contract.
+        onBaseline: (hash) => {
+          console.error(`waiting for ${laneId ? `lane ${laneId}` : "handoff"} to change from state hash ${hash}`)
+        },
       })
 
       if (waitResult.timedOut) {
