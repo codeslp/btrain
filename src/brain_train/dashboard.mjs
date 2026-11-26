@@ -346,10 +346,12 @@ async function ensureDashboard(repoRoot, {
   if (!startup.healthy) {
     if (!startup.exit) terminateProcess(child.pid)
     await removeDashboardState(env)
-    const how = startup.exit
-      ? `exited with ${startup.exit.signal ? `signal ${startup.exit.signal}` : `code ${startup.exit.code}`} before it became healthy`
-      : "did not become healthy"
-    throw new Error(`Dashboard ${how}. See ${logPath}.`)
+    let reason = "did not become healthy"
+    if (startup.exit) {
+      const how = startup.exit.signal ? `signal ${startup.exit.signal}` : `code ${startup.exit.code}`
+      reason = `exited with ${how} before it became healthy`
+    }
+    throw new Error(`Dashboard ${reason}. See ${logPath}.`)
   }
 
   let browserOpened = false
