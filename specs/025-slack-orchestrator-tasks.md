@@ -35,6 +35,15 @@ too: `slack_listen` is in `FEATURES` as explicit-only, with spec 024's
 `slack`, so a repository with no `[features]` table has it off and `btrain
 features` shows it off.
 
+T015 is done: `btrain slack whois [--channel <id>]` prints the author fields
+of a channel's last ten messages, never their text. The `slack` block's
+readers now carry `listRepos`, `findAvailableLane`, `readConfig`,
+`enteredByPrPoll` (the predicate in `slack/pr-poll.mjs` over the lane's own
+event log), and the CLI path. The listening manifest shipped in #134.
+Invariant 12 runs, rewritten for the lease API that #130 merged
+(`{ lease, reason, holder }`). Invariant 1 checks served repositories through
+`createListener`, so it stays skipped until T017 writes `listen.mjs`.
+
 ## Phase 1: Harness and pure parts (WS0, WS1)
 
 - [x] T001 [WS0] Extend `test/helpers/fake-slack.mjs` with `conversations.history` and `conversations.replies`: scripted messages for each channel and thread, paging with `has_more` and `next_cursor`, newest first for history and earliest first for replies, every failure the fake already supports, and a rejection of a JSON body on `conversations.replies`.
@@ -56,7 +65,7 @@ features` shows it off.
 - [x] T012 [WS2] Extend `src/brain_train/slack/config.mjs`: the `orchestrator` object of `slack.json`, `[slack.orchestrator]` of `project.toml`, the spec's defaults, and the served repositories (registered, both toggles on, a channel from the map or the catch-all). An empty `runner` means no model. Needs 024 T009.
 - [x] T013 [WS2] Write `src/brain_train/slack/inbox.mjs`: load, change, and write `inbox.json` by temporary file and rename with mode 0600; drop `handled` entries after 48 hours and old window times; refuse `approvalMinutes` above 24 hours; keep 20 results for each repository. Test a round trip and that a half-written temporary file is never read.
 - [x] T014 [WS2] Write `src/brain_train/slack/lease.mjs` over `slack/lock.mjs`: take and release the listener lease, touch it on a 15-second timer, and read its nonce again with synchronous calls as the last thing before each rename of `inbox.json`; the stop flag; the pause flag. Test that a second lease for one btrain home is refused with the holder named, and that a lease untouched for 60 seconds is taken over. Needs 024 T012.
-- [ ] T015 [WS2] Add `btrain slack whois [--channel <id>]` to `slack/cli.mjs` (author fields, no message text), add `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (the predicate of `enteredChangesRequestedViaPrPoll` over the lane's event log), and the CLI path to the readers object the `slack` block in `cli.mjs` passes, add the help lines, and ship `docs/slack-app-manifest-listen.json` with the publisher's scopes plus `channels:history` and `groups:history`. Remove the skips from invariants 1 and 12. Held on 2026-11-23: `cli.mjs` (lane c).
+- [x] T015 [WS2] Add `btrain slack whois [--channel <id>]` to `slack/cli.mjs` (author fields, no message text), add `listRepos`, `findAvailableLane`, a config reader, `enteredByPrPoll` (the predicate of `enteredChangesRequestedViaPrPoll` over the lane's event log), and the CLI path to the readers object the `slack` block in `cli.mjs` passes, add the help lines, and ship `docs/slack-app-manifest-listen.json` with the publisher's scopes plus `channels:history` and `groups:history`. Remove the skips from invariants 1 and 12. Held on 2026-11-23: `cli.mjs` (lane c).
 - [x] T016 [WS3] Write `src/brain_train/slack/read-client.mjs` over the low-level call of `slack/client.mjs`: the two read calls as GET requests, paging, the 60-second overlap, and the read budget of 30 a minute for a channel and 40 a minute for a method. Test six open threads on one channel and a 429 not retried before `Retry-After`. Needs 024 T013.
 - [ ] T017 [WS3] Write the cycle in `src/brain_train/slack/listen.mjs` and the `btrain slack listen` command: the seven steps of the plan, record before act, refusal to start with no `operator`, no served repository, or a live lease. In this workstream a mention gets the one-line note that the model is off and a command gets a note that commands are not built yet.
 - [ ] T018 [WS3] Add `--stop`, `--resume`, and the pause flag. `pause` drops the rest of what was read, and resume moves every channel cursor and every open thread's reply cursor to the current time. Open a conversation on a typed top-level mention, keep its reply cursor, and close it `conversationMinutes` after the operator's last message. Drain each served repository's outbox every cycle, also while paused. Needs 024 T015.

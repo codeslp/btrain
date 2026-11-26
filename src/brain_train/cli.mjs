@@ -3,6 +3,7 @@
 import fs from "node:fs/promises"
 import { realpathSync } from "node:fs"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { resolveStateRoot } from "./worktree.mjs"
 import {
   BtrainError,
@@ -43,6 +44,8 @@ import {
   syncTemplates,
   waitForHandoffStateChange,
   parseCurrentSection,
+  findAvailableLane,
+  readAllLaneStates,
   withFileLock,
   readWorkflowEvents,
   appendWorkflowEvent,
@@ -51,6 +54,7 @@ import {
 import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
 import { formatReviewLine } from "./review/record.mjs"
 import { runSlackCommand, SLACK_SUBCOMMANDS } from "./slack/cli.mjs"
+import { enteredByPrPoll } from "./slack/pr-poll.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -163,6 +167,7 @@ Usage:
   btrain slack status                                                            Show the publisher toggle, token source, channel, pending entries, pause, and board pin
   btrain slack channels                                                          Print the path-to-channel map and the catch-all
   btrain slack test                                                              Call auth.test, post one test message, and clear a delivery pause
+  btrain slack whois [--channel <id>]                                            Show the author fields (no text) of a channel's last ten messages
   btrain locks [--repo <path>]                                                   List all active file locks
   btrain locks release --path <path> [--repo <path>]                             Force-release a file lock
   btrain locks release-lane --lane <id> [--repo <path>]                          Release all locks for a lane
@@ -2467,6 +2472,18 @@ async function run() {
       config,
       slackDir: path.join(resolveStateRoot(repoRoot), ".btrain", "slack"),
       stdin: process.stdin,
+      // Spec 025 T015: what the listener needs from core.mjs, which slack/
+      // never imports.
+      listRepos,
+      findAvailableLane,
+      readConfig: readProjectConfig,
+      enteredByPrPoll: async (laneRoot, laneId) => {
+        const laneConfig = await readProjectConfig(laneRoot)
+        const lane = ((await readAllLaneStates(laneRoot, laneConfig)) || []).find((state) => state._laneId === laneId)
+          || (laneId ? null : (await checkHandoff(laneRoot)).current)
+        return enteredByPrPoll(await readWorkflowEvents(laneRoot, laneConfig, laneId || ""), lane)
+      },
+      cliPath: fileURLToPath(import.meta.url),
     })
     return
   }

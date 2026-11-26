@@ -10,14 +10,14 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import readline from "node:readline"
-import { authTest, postMessage } from "./client.mjs"
+import { authTest, callSlack, postMessage } from "./client.mjs"
 import { boardStatus } from "./board.mjs"
 import { channelForRepo, developerLabel, isSlackEnabled, listChannels } from "./config.mjs"
 import { btrainHome, CREDENTIAL_REASONS, loadSlackCredentials, MAX_CREDENTIAL_BYTES, readSlackFile, slackFilePath } from "./credentials.mjs"
 import { clearPause } from "./deliver.mjs"
 import { listEntries, readDeliveryState } from "./outbox.mjs"
 
-export const SLACK_SUBCOMMANDS = Object.freeze(["setup", "status", "channels", "test"])
+export const SLACK_SUBCOMMANDS = Object.freeze(["setup", "status", "channels", "test", "whois"])
 
 // A Slack bot token. The value is checked for shape only; `btrain slack test`
 // checks it against Slack.
@@ -56,6 +56,8 @@ export async function runSlackCommand(subcommand, options = {}, readers = {}) {
       return channels(readers, io)
     case "test":
       return test(readers, io)
+    case "whois":
+      return whois(options, readers, io)
     default:
       io.err(`btrain slack: unknown subcommand "${subcommand || ""}". Use one of: ${SLACK_SUBCOMMANDS.join(", ")}.`)
       return 1
@@ -313,5 +315,60 @@ async function test(readers, io) {
   }
   io.out(`posted a test message to ${channel}`)
   if (readers.slackDir) await clearPause(readers.slackDir)
+  return 0
+}
+
+// Spec 025 FR-5 (T015): the author fields of the last ten messages in a
+// channel, so a person can see what the listener will and will not hear. No
+// message text is printed.
+const WHOIS_LIMIT = 10
+
+async function whois(options, readers, io) {
+  const repoPath = path.resolve(String(readers.repoRoot || ""))
+  const credentials = await loadSlackCredentials({ env: io.env })
+  if (!credentials.token) {
+    io.err(`btrain slack whois: token ${reasonText(credentials.reason)}`)
+    return 1
+  }
+  let channel = ""
+  if (options.channel !== undefined) {
+    channel = String(options.channel).trim()
+    if (!CHANNEL_ID.test(channel)) {
+      io.err("btrain slack whois: --channel must be a Slack channel ID (C..., G..., or D...).")
+      return 1
+    }
+  } else {
+    channel = channelForRepo(credentials.settings, repoPath).channel
+    if (!channel) {
+      io.err("btrain slack whois: no channel is mapped for this repository. Pass --channel <id>.")
+      return 1
+    }
+  }
+  const result = await callSlack({
+    method: "conversations.history",
+    httpMethod: "GET",
+    token: credentials.token,
+    args: { channel, limit: WHOIS_LIMIT },
+    fetchImpl: readers.fetchImpl || globalThis.fetch,
+  })
+  if (!result.ok) {
+    io.err(`btrain slack whois: conversations.history failed (${result.error}).`)
+    return 1
+  }
+  const messages = Array.isArray(result.body?.messages) ? result.body.messages : []
+  // Newest first, as Slack returns them; the order is kept even if it does not.
+  const newestFirst = [...messages].sort((left, right) => Number(right?.ts || 0) - Number(left?.ts || 0)).slice(0, WHOIS_LIMIT)
+  const field = (value) => (typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) ? value : "-")
+  io.out(`channel ${channel}: the last ${newestFirst.length} message${newestFirst.length === 1 ? "" : "s"}, newest first`)
+  for (const message of newestFirst) {
+    io.out([
+      `ts=${field(message?.ts)}`,
+      `user=${field(message?.user)}`,
+      `bot_id=${field(message?.bot_id)}`,
+      `app_id=${field(message?.app_id)}`,
+      `client_msg_id=${message?.client_msg_id ? "yes" : "no"}`,
+      `subtype=${field(message?.subtype)}`,
+    ].join(" "))
+  }
   return 0
 }
