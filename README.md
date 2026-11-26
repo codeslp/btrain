@@ -144,9 +144,73 @@ On a terminal, `btrain init` asks which optional features to enable and which ag
 | `dashboard` | `btrain dashboard` and auto-start | on |
 | `agentchattr` | agentchattr sidecar | off |
 | `handoff_history` | handoff-history watcher scripts | off |
+| `slack` | the Slack lane publisher (see [Slack lane publisher](#slack-lane-publisher)) | off, explicit only |
+| `slack_listen` | the Slack listener (spec 025, in progress) | off, explicit only |
 
 Change them later with `btrain features enable formal` or `btrain features disable cgraph,loop`. A repo
-with no `[features]` table (every repo initialized before spec 022) has every feature on.
+with no `[features]` table (every repo initialized before spec 022) has every feature on, except the
+explicit-only features `slack` and `slack_listen`: each one is on only when its key is exactly `true`.
+
+---
+
+## Slack lane publisher
+
+The publisher posts lane status to Slack (spec 024). Each lane task gets one card, a top-level
+message that btrain keeps up to date. Each state change gets one short reply in the card's thread.
+Each developer gets one pinned board for each channel, with one line for each active lane. Slack is
+an output only: btrain does not read what people post there, and nothing posted there changes lane
+state. A Slack failure never changes the result or the exit code of a btrain command.
+
+### Set it up
+
+1. Create a Slack app from `docs/slack-app-manifest.json`, install it in your workspace, and keep it
+   an internal app of that one workspace. The manifest asks for two bot scopes: `chat:write` and
+   `pins:write`.
+2. Invite the app to the channel for your project. btrain never creates a channel and never picks one.
+3. In the repository, run `btrain slack setup --channel <channel id> --operator <your user id>`, and
+   paste the bot token (`xoxb-...`) when it asks. Setup reads the token from standard input, never
+   from an argument, and writes `~/.btrain/slack.json` with mode 0600.
+4. Turn the publisher on for the repository: add `slack = true` under `[features]` in
+   `.btrain/project.toml`, or run `btrain features enable slack`.
+5. Run `btrain slack test`. It calls Slack with the token and posts one test message to the channel.
+
+Secrets and Slack IDs stay in `~/.btrain/slack.json`, never in a repository. The
+`BTRAIN_SLACK_BOT_TOKEN` environment variable, when it is set, takes the place of the file's token.
+The file also holds your `label` (shown on every message), the `mention` list, the `channels` map from
+each registered repository path to its channel, and a `defaultChannel` for repositories with no entry.
+Several repositories can share one channel: every card, reply, and board line names its repository.
+
+### Commands
+
+| Command | What it does |
+|---------|--------------|
+| `btrain slack setup [--channel <id>] [--operator <id>]` | Write or update `~/.btrain/slack.json` and map this repository to a channel |
+| `btrain slack status` | Show the toggle, where the token comes from, the channel, queued entries, a pause, the last error, and the board's pin |
+| `btrain slack channels` | Show which repositories map to which channel, and the catch-all |
+| `btrain slack test` | Check the token, post one test message, and clear a pause |
+| `btrain slack flush` | Send this repository's queued entries now, with no time limit |
+| `btrain slack refresh` | Rewrite every active lane card and the board from current lane state |
+| `btrain slack whois [--channel <id>]` | Show who wrote a channel's last ten messages (author fields only, no text) |
+
+After each btrain command, the publisher sends the repository's queued entries for up to 2 seconds
+(`[slack].inline_timeout_ms`), after the command's own output. Slack takes about one message a second
+for each channel, so a busy command can leave entries for the next command or for `btrain slack flush`.
+When Slack refuses the token or the channel, the publisher pauses: commands print one warning line, and
+`btrain doctor` reports it until `btrain slack test` succeeds.
+
+### What is posted, and what is never posted
+
+- Posted: the repository name, your label, the lane, its status, the task, the owner and reviewer, the
+  PR number, the number of locked files, the last update time, and a short review summary.
+- Agent-written text is escaped, cut to `[slack].task_chars` and `[slack].summary_chars`, and scrubbed
+  with the secret patterns of `btrain review code`. It cannot make a mention, a channel-wide
+  notification, or a link.
+- Never posted: diffs, file contents, environment values, the full reviewer context, and the token.
+- btrain mentions people (the `mention` list) only when a PR is ready to merge, with its link, and when
+  a problem needs a person, such as an escalated repair or a failed reviewer dispatch.
+
+`btrain handoff --lane <id>` prints the lane's thread, so an agent with its own Slack access can post
+a question or a blocker for the operator there. btrain does not post for agents.
 
 ---
 
@@ -645,6 +709,7 @@ The original lane-less form remains available for single-lane repositories.
 | `BTRAIN_LANE_LOCKED` | Reject commands that try to leave `BTRAIN_LANE` when set to `1` |
 | `BRAIN_TRAIN_HOME` | Override the global btrain home directory. When it is unset, `btrain init` and `btrain register` do not add a repository under a temporary directory (`/tmp`, `/var/folders`, `$TMPDIR`) to the registry. The test preload gives each test process its own scratch home. |
 | `BTRAIN_NO_REGISTER` | Set to `1` to make `btrain init` and `btrain register` skip the registry entirely |
+| `BTRAIN_SLACK_BOT_TOKEN` | The Slack bot token for the publisher, in place of the token in `~/.btrain/slack.json` |
 | `HANDOFF_HISTORY_PATH` | Output file for the handoff history watcher |
 
 ---
