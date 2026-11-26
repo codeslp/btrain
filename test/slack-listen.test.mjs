@@ -381,6 +381,68 @@ describe("spec 025 WS3: btrain slack listen (T017)", () => {
   })
 })
 
+// codex-reviewer on 93f8cf3: state loaded before the lease, replies accepted
+// after a conversation expired, and thread cursors with no 24-hour floor.
+describe("spec 025 WS3: state and thread age across takeovers and restarts", () => {
+  it("reads the state again when it takes the lease, so a replacement built earlier acts once", async () => {
+    const fixture = await createFixture()
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    fake.history(CHANNEL, [message(OPERATOR, NOW, "btrain> status")])
+    const first = await listenerFor(fixture, fake, clockAt(NOW + 1000))
+    const replacement = await listenerFor(fixture, fake, clockAt(NOW + 2000))
+    assert.equal((await first.listener.acquire()).ok, true)
+    await first.listener.cycle()
+    await first.listener.stop()
+    assert.equal(fake.posts.length, 1)
+    assert.equal((await replacement.listener.acquire()).ok, true)
+    await replacement.listener.cycle()
+    await replacement.listener.stop()
+    assert.equal(fake.posts.length, 1, "the replacement does not answer the handled message again")
+  })
+
+  it("does not answer a reply sent after the conversation expired", async () => {
+    const fixture = await createFixture({ orchestrator: { conversationMinutes: 30 } })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hello`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const clock = clockAt(NOW + 1000)
+    const { listener } = await listenerFor(fixture, fake, clock)
+    await listener.cycle()
+    assert.equal(fake.posts.length, 1)
+    fake.replies(CHANNEL, tsAt(NOW), [parent, message(OPERATOR, NOW + 31 * MINUTE, "still there?")])
+    clock.t = NOW + 31 * MINUTE + 10_000
+    await listener.cycle()
+    assert.equal(fake.posts.length, 1, "no answer after the expiry")
+    const inbox = JSON.parse(await fs.readFile(path.join(fixture.slackDir, "inbox.json"), "utf8"))
+    assert.deepEqual(Object.keys(inbox.threads), [], "the conversation is closed, not renewed")
+  })
+
+  it("never reads a thread from more than 24 hours back and closes a turn a crash left busy", async () => {
+    const fixture = await createFixture()
+    const parentTs = tsAt(NOW)
+    const replyTs = tsAt(NOW + 1000)
+    writeInbox(fixture.slackDir, {
+      ...emptyInbox(),
+      channels: { [CHANNEL]: { cursor: replyTs } },
+      threads: { [`${CHANNEL}:${parentTs}`]: { lastOperatorTs: replyTs, replyCursor: replyTs, busy: true, queued: [], pending: null } },
+      handled: { [`${CHANNEL}:${parentTs}`]: new Date(NOW).toISOString(), [`${CHANNEL}:${replyTs}`]: new Date(NOW + 1000).toISOString() },
+    })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hello`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, parentTs, [parent, message(OPERATOR, NOW + 1000, "and lane b?")])
+    const clock = clockAt(NOW + 49 * 60 * MINUTE)
+    const { listener } = await listenerFor(fixture, fake, clock)
+    await listener.cycle()
+    clock.advance(10_000)
+    await listener.cycle()
+    assert.equal(fake.posts.length, 0, "nothing handled before the restart is answered again")
+    const inbox = JSON.parse(await fs.readFile(path.join(fixture.slackDir, "inbox.json"), "utf8"))
+    assert.deepEqual(Object.keys(inbox.threads), [], "the interrupted conversation is closed")
+  })
+})
+
 // codex-reviewer on c24ade8: the lease was checked only at state writes and
 // through a cached flag, so a takeover between two posts, or while the
 // publisher read lane state, still let posts out. Each Slack call now checks
