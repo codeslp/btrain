@@ -305,4 +305,62 @@ describe("state file writes", () => {
     assert.equal(await fs.readlink(path.join(stateDir, "actual", "middle")), "../registry.json")
     assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, "registry.json"), "utf8")).locks.length, 1)
   }))
+
+  // Security review on PR #138: a user who can write the state directory but
+  // not a privileged btrain's other files must not be able to redirect the
+  // temporary file. Mode changes go through the open descriptor, and a
+  // temporary path replaced after creation is refused before the rename.
+  it("never apply the preserved mode to the temporary file by path", () => withStateDir(async (repoRoot, stateDir) => {
+    const target = path.join(stateDir, "locks.json")
+    await fs.writeFile(target, '{"version":1,"locks":[]}')
+    await fs.chmod(target, 0o640)
+    const pathChmods = []
+    const chmod = fs.chmod
+    fs.chmod = async (candidate, ...rest) => {
+      if (path.basename(String(candidate)).startsWith(".btrain-write-")) pathChmods.push(candidate)
+      return chmod(candidate, ...rest)
+    }
+    try {
+      await acquireLocks(repoRoot, "a", "claude", ["src/"])
+    } finally {
+      fs.chmod = chmod
+    }
+    assert.deepEqual(pathChmods, [])
+    assert.equal((await fs.stat(target)).mode & 0o777, 0o640)
+  }))
+
+  it("refuse a temporary file that was replaced after it was created", () => withStateDir(async (repoRoot, stateDir) => {
+    const target = path.join(stateDir, "locks.json")
+    await fs.writeFile(target, '{"version":1,"locks":[]}')
+    await fs.chmod(target, 0o640)
+    const victim = path.join(path.dirname(stateDir), "victim.txt")
+    await fs.writeFile(victim, "victim")
+    await fs.chmod(victim, 0o600)
+    async function swap(candidate) {
+      await fs.rm(candidate, { force: true })
+      await fs.symlink(victim, candidate)
+    }
+    const isTemporary = (candidate) => path.basename(String(candidate)).startsWith(".btrain-write-")
+    const open = fs.open
+    const writeFile = fs.writeFile
+    fs.open = async (candidate, ...rest) => {
+      const handle = await open(candidate, ...rest)
+      if (isTemporary(candidate)) await swap(candidate)
+      return handle
+    }
+    fs.writeFile = async (candidate, ...rest) => {
+      await writeFile(candidate, ...rest)
+      if (isTemporary(candidate)) await swap(candidate)
+    }
+    try {
+      await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["src/"]))
+    } finally {
+      fs.open = open
+      fs.writeFile = writeFile
+    }
+    assert.equal((await fs.stat(victim)).mode & 0o777, 0o600)
+    assert.equal(await fs.readFile(victim, "utf8"), "victim")
+    assert.equal((await fs.lstat(target)).isSymbolicLink(), false)
+    assert.equal(await fs.readFile(target, "utf8"), '{"version":1,"locks":[]}')
+  }))
 })
