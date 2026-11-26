@@ -55,6 +55,10 @@ function tsOf(ms) {
   return `${Math.floor(ms / 1000)}.${String(Math.floor(ms) % 1000).padStart(3, "0")}000`
 }
 
+function laterTs(left, right) {
+  return compareTs(left, right) >= 0 ? left : right
+}
+
 function iso(ms) {
   return new Date(ms).toISOString()
 }
@@ -130,9 +134,21 @@ export async function createListener({
     else log(`auth.test failed: ${field(auth.error)}`)
   }
 
-  const loaded = loadInbox(slackDir)
-  if (loaded.error) log(`inbox: ${loaded.error}; starting from an empty state`)
-  let state = loaded.state
+  // The state as the file holds it. No run survives the process that started
+  // it, so a thread a crash left busy, or with messages queued for a run, is
+  // made idle again: its conversation then closes by its age.
+  const readState = () => {
+    const loaded = loadInbox(slackDir)
+    if (loaded.error) log(`inbox: ${loaded.error}; starting from an empty state`)
+    for (const [key, thread] of Object.entries(loaded.state.threads)) {
+      if (thread?.busy || thread?.queued?.length) {
+        loaded.state.threads[key] = { ...thread, busy: false, queued: [] }
+        log(`conversation ${key.replace(":", " ")}: its interrupted turn was dropped`)
+      }
+    }
+    return loaded.state
+  }
+  let state = readState()
   let lease = null
   let stopTimer = () => {}
   let lost = false
@@ -263,6 +279,11 @@ export async function createListener({
     else if (result.action === "close-thread") onThread?.()
   }
 
+  // A reply sent after an idle conversation expired: it is not answered, and
+  // the tick closes the conversation.
+  const expiredBefore = (thread, ts) => !thread.busy && !thread.pending
+    && slackTsToMs(ts) - slackTsToMs(thread.lastOperatorTs) > listening.orchestrator.conversationMinutes * 60 * 1000
+
   // A message the cursor's floor excludes: one sent before a resume, which
   // must not be handled even though the read overlap returns it.
   const beforeFloor = (ts, floor) => Boolean(floor) && compareTs(ts, floor) < 0
@@ -301,7 +322,9 @@ export async function createListener({
     const prefix = `${channel}:`
     const open = Object.entries(state.threads)
       .filter(([key]) => key.startsWith(prefix))
-      .map(([key, thread]) => ({ threadTs: key.slice(prefix.length), cursorTs: thread.replyCursor || thread.lastOperatorTs }))
+      // Never read further back than 24 hours, as for a channel: the handled
+      // set forgets a ts after 48.
+      .map(([key, thread]) => ({ threadTs: key.slice(prefix.length), cursorTs: laterTs(thread.replyCursor || thread.lastOperatorTs, tsOf(now() - DAY_MS)) }))
     const { results } = await reader.readThreads(channel, open)
     const context = channelContext(channel)
     for (const { threadTs, result } of results) {
@@ -314,6 +337,7 @@ export async function createListener({
         const thread = state.threads[key]
         if (!thread) break
         if (beforeFloor(message?.ts, thread.floor)) continue
+        if (expiredBefore(thread, message?.ts)) continue
         const heard = classifyInbound(message, { operator, botUserId, source: SOURCES.REPLIES, parentTs: threadTs })
         const command = heard.heard === HEARD.COMMAND ? parseOperatorCommand(message.text, context) : undefined
         if (compareTs(message.ts, thread.replyCursor) > 0) state.threads[key] = { ...thread, replyCursor: message.ts }
@@ -386,6 +410,8 @@ export async function createListener({
       const taken = await takeLease(slackDir, { operator })
       if (!taken.lease) return { ok: false, reason: taken.reason, holder: taken.holder }
       lease = taken.lease
+      // Another listener may have written the state since this one was built.
+      state = readState()
       stopTimer = startLeaseTimer(lease, { onLost: () => { lost = true } })
       return { ok: true, reason: taken.reason, holder: taken.holder }
     },
