@@ -214,10 +214,17 @@ function configuredPort(value, env) {
 const DASHBOARD_START_TIMEOUT_MS = 15_000
 
 async function waitForDashboard(port, fetchImpl, child) {
+  // The child can exit while ensureDashboard is still writing its state, and
+  // then its exit event has already been emitted. Read the recorded exit
+  // first, and listen only for an exit that is still to come.
   let exit = null
-  child?.once?.("exit", (code, signal) => {
-    exit = { code, signal }
-  })
+  if (typeof child?.exitCode === "number" || typeof child?.signalCode === "string") {
+    exit = { code: child.exitCode, signal: child.signalCode }
+  } else {
+    child?.once?.("exit", (code, signal) => {
+      exit = { code, signal }
+    })
+  }
   const deadline = Date.now() + DASHBOARD_START_TIMEOUT_MS
   while (Date.now() < deadline) {
     if (await probeDashboard(port, fetchImpl)) {
