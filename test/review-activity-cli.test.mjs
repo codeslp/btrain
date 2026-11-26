@@ -157,19 +157,31 @@ describe("review activity from the CLI, guarded paths (codex-reviewer on 3a9f33e
   })
 
   it("warns and still succeeds when the signal cannot be written (M10)", async () => {
-    await withReviewLane(async ({ repo, config, run, signals }) => {
-      const log = path.join(repo, ".btrain", "events", "lane-a.jsonl")
-      const before = (await readWorkflowEvents(repo, config, "a")).length
-      await fs.chmod(log, 0o444)
+    await withReviewLane(async ({ run, signals, handoffLock }) => {
+      // A failure that holds for every user, root included (the Codex bot on
+      // PR #140: mode 0444 does not stop root): a plain file at the lane's
+      // handoff lock path is an older client's lock, which withFileLock waits
+      // out until its timeout. Only the signal needs that lock.
+      await fs.writeFile(handoffLock, "an older client's lock")
       try {
         const result = await run(["handoff", "--lane", "a"], "beta")
         assert.equal(result.code, 0, result.stderr)
         assert.match(result.stderr, /review activity signal for lane a was not recorded/)
       } finally {
-        await fs.chmod(log, 0o644)
+        await fs.rm(handoffLock, { force: true })
       }
-      assert.equal((await readWorkflowEvents(repo, config, "a")).length, before)
       assert.deepEqual(await signals(), [])
+    })
+  })
+
+  it("reads only the selected lane: another lane's unreadable handoff changes nothing (Codex bot P1 on PR #140)", async () => {
+    await withReviewLane(async ({ repo, config, run, signals }) => {
+      const other = path.resolve(repo, getLaneConfigs(config).find((lane) => lane.id === "b").handoffPath)
+      await fs.rm(other, { force: true })
+      await fs.mkdir(other, { recursive: true })
+      const result = await run(["handoff", "--lane", "a"], "beta")
+      assert.doesNotMatch(result.stderr, /review activity signal for lane a was not recorded/)
+      assert.deepEqual((await signals()).map((event) => event.type), ["review-pickup"])
     })
   })
 
