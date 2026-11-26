@@ -10,6 +10,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { checkHandoff, listActiveOverrides } from "../src/brain_train/core.mjs"
+import { applyTransition } from "../src/brain_train/transitions.mjs"
 
 const exec = promisify(execFile)
 const CLI_PATH = path.resolve("src/brain_train/cli.mjs")
@@ -152,3 +153,66 @@ describe("the same rule for a reassignment (spec 023 T018)", () => {
     })
   })
 })
+
+// codex-reviewer's findings on 283cc91, committed before the fix.
+describe("same-lab-review overrides are spent only on success (codex-reviewer on 283cc91)", () => {
+  const sameLabGrants = async (repo) => (await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review")
+
+  it("spends the grant on a successful claim in a repository without lanes", async () => {
+    await withRepo({ lanes: false }, async ({ repo, claim, grant, reviewerOf }) => {
+      assert.equal((await grant()).code, 0)
+      const result = await claim(["--reviewer", "claude-reviewer"])
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [], "one approval permits one claim")
+    })
+  })
+
+  it("keeps the grant when the update it would permit is refused", async () => {
+    await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      // needs-review without review context or a diff is refused.
+      const refused = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--status", "needs-review", "--actor", "claude"])
+      assert.notEqual(refused.code, 0)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+      assert.equal((await sameLabGrants(repo)).length, 1, "the grant is still there")
+    })
+  })
+
+  it("never lets the grant make a lane author the reviewer", async () => {
+    await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      const author = await run(["handoff", "update", "--lane", "a", "--reviewer", "claude", "--actor", "claude"])
+      assert.notEqual(author.code, 0)
+      assert.match(author.stderr, /authored this lane/)
+      assert.equal(await reviewerOf(), "codex-reviewer")
+      assert.equal((await sameLabGrants(repo)).length, 1, "the grant is not spent on a refusal")
+    })
+  })
+})
+
+describe("the reviewerLabAllowed guard on rows 1 and 20 (codex-reviewer M13, M14)", () => {
+  it("row 1 matches a claim only while the reviewer's lab is allowed", () => {
+    const claimInput = (allowed) => ({ to: "in-progress", actor: "claude", filesNonEmpty: true, noConflict: true, distinctReviewer: true, reviewerLabAllowed: allowed })
+    assert.equal(applyTransition({ status: "idle" }, "handoff claim", claimInput(true)).row.id, "1")
+    assert.notEqual(rowIdOrRejection({ status: "idle" }, "handoff claim", claimInput(false)), "1")
+  })
+
+  it("row 20 matches a reassignment only while the reviewer's lab is allowed", () => {
+    const state = { status: "in-progress", owner: "claude", reviewer: "codex-reviewer" }
+    const reassignInput = (allowed) => ({ to: "in-progress", actor: "claude", distinctReviewer: true, reviewerIsPriorAuthor: false, prLinked: false, reviewerLabAllowed: allowed })
+    assert.equal(applyTransition(state, "handoff update --reassign", reassignInput(true)).row.id, "20")
+    assert.notEqual(rowIdOrRejection(state, "handoff update --reassign", reassignInput(false)), "20")
+  })
+})
+
+// The matched row id, or "rejected" when a retired legacy row refuses it.
+function rowIdOrRejection(state, event, input) {
+  try {
+    return applyTransition(state, event, input).row.id
+  } catch {
+    return "rejected"
+  }
+}
