@@ -650,11 +650,28 @@ async function writeText(targetPath, content) {
   // A short fixed-shape name: appending to a long valid basename could pass
   // the filesystem's 255-byte name limit.
   const temporary = path.join(path.dirname(destination), `.btrain-write-${process.pid}-${randomUUID()}.tmp`)
+  // Someone who can write this directory must not be able to redirect the
+  // temporary file: "wx" refuses any existing name (a symlink included), the
+  // mode is set through the open descriptor rather than a path chmod would
+  // follow, and the rename goes ahead only if the name still holds the file
+  // this call wrote.
+  let handle
   try {
-    await fs.writeFile(temporary, content, "utf8")
-    if (mode !== undefined) await fs.chmod(temporary, mode)
+    handle = await fs.open(temporary, "wx", mode === undefined ? 0o666 : 0o600)
+    await handle.writeFile(content, "utf8")
+    if (mode !== undefined) await handle.chmod(mode)
+    const written = await handle.stat()
+    await handle.close()
+    handle = undefined
+    const current = await fs.lstat(temporary)
+    if (current.ino !== written.ino || current.dev !== written.dev) {
+      const replaced = new Error(`The temporary file ${temporary} was replaced before btrain could rename it into place.`)
+      replaced.code = "ETMPREPLACED"
+      throw replaced
+    }
     await fs.rename(temporary, destination)
   } catch (error) {
+    await handle?.close().catch(() => {})
     await fs.rm(temporary, { force: true }).catch(() => {})
     throw error
   }

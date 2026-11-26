@@ -233,18 +233,24 @@ describe("state file writes", () => {
     await acquireLocks(repoRoot, "a", "claude", ["src/"])
     const target = path.join(stateDir, "locks.json")
     const before = await fs.readFile(target, "utf8")
-    const writeFile = fs.writeFile
-    fs.writeFile = async (candidate, ...rest) => {
+    // The temporary file is written through its descriptor, so the failure
+    // is injected into the handle that fs.open returns for it.
+    const open = fs.open
+    fs.open = async (candidate, ...rest) => {
+      const handle = await open(candidate, ...rest)
       if (path.basename(String(candidate)).startsWith(".btrain-write-")) {
-        await writeFile(candidate, "partial")
-        throw Object.assign(new Error("ENOSPC: injected"), { code: "ENOSPC" })
+        const writeFile = handle.writeFile.bind(handle)
+        handle.writeFile = async () => {
+          await writeFile("partial")
+          throw Object.assign(new Error("ENOSPC: injected"), { code: "ENOSPC" })
+        }
       }
-      return writeFile(candidate, ...rest)
+      return handle
     }
     try {
       await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["other/"]), { code: "ENOSPC" })
     } finally {
-      fs.writeFile = writeFile
+      fs.open = open
     }
     assert.equal(await fs.readFile(target, "utf8"), before)
     assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
@@ -362,5 +368,24 @@ describe("state file writes", () => {
     assert.equal(await fs.readFile(victim, "utf8"), "victim")
     assert.equal((await fs.lstat(target)).isSymbolicLink(), false)
     assert.equal(await fs.readFile(target, "utf8"), '{"version":1,"locks":[]}')
+  }))
+
+  it("refuse a temporary name that already exists, without following it", () => withStateDir(async (repoRoot, stateDir) => {
+    const victim = path.join(path.dirname(stateDir), "victim.txt")
+    await fs.writeFile(victim, "victim")
+    await fs.chmod(victim, 0o600)
+    const open = fs.open
+    fs.open = async (candidate, ...rest) => {
+      if (path.basename(String(candidate)).startsWith(".btrain-write-")) await fs.symlink(victim, candidate)
+      return open(candidate, ...rest)
+    }
+    try {
+      await assert.rejects(acquireLocks(repoRoot, "a", "claude", ["src/"]), { code: "EEXIST" })
+    } finally {
+      fs.open = open
+    }
+    assert.equal(await fs.readFile(victim, "utf8"), "victim")
+    assert.equal((await fs.stat(victim)).mode & 0o777, 0o600)
+    assert.deepEqual((await fs.readdir(stateDir)).filter((name) => name.endsWith(".tmp")), [])
   }))
 })
