@@ -49,6 +49,7 @@ import {
   detectCurrentAgent,
 } from "./core.mjs"
 import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
+import { formatReviewLine } from "./review/record.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -559,9 +560,15 @@ function formatRepoStatus(status) {
             : ""
       const repurposeSuffix = lane.repurposeReady ? ` [repurpose-ready: ${lane.repurposeReason}]` : ""
       const reasonSuffix = lane.reasonCode ? ` [reason: ${lane.reasonCode}]` : ""
+      // Spec 023 T011: the display state (in-review after pickup) is shown
+      // here; the stored status stays in the handoff file and the JSON.
       lines.push(
-        `  lane ${lane._laneId}: ${lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}${lockSuffix}${repurposeSuffix}${reasonSuffix}`,
+        `  lane ${lane._laneId}: ${lane.review?.display || lane.status} — ${lane.task || "(no task)"}${lane.owner ? ` (${lane.owner})` : ""}${lockSuffix}${repurposeSuffix}${reasonSuffix}`,
       )
+      const reviewLine = formatReviewLine(lane.review)
+      if (reviewLine) {
+        lines.push(`    ${reviewLine}`)
+      }
       if (lane.delegationPacket?.objective) {
         lines.push(`    objective: ${formatPacketValue(lane.delegationPacket.objective)}`)
       }

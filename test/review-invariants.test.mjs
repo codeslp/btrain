@@ -436,7 +436,7 @@ describe("spec 023 invariants", () => {
     }
   })
 
-  it("5. the stored status is never in-review or confirming-fix", { skip: "WS2: the review record and display (T011)" }, async () => { // btrain-allow: skipped-test
+  it("5. the stored status is never in-review or confirming-fix", async () => {
     const repo = await createReviewRepo()
     assert.equal((await repo.btrain(needsReviewArgs({ dispatch: false }))).code, 0)
     await repo.appendEvents(openAttemptEvents({ head: await repo.head() }))

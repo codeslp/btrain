@@ -60,6 +60,30 @@ function normalizeParagraphLines(value) {
     .filter(Boolean);
 }
 
+// Spec 023 T011: the review display line, the same text as `btrain status`
+// prints (formatReviewLine in src/brain_train/review/record.mjs, which this
+// CommonJS script cannot import).
+function formatReviewLine(review, now = Date.now()) {
+  if (!review || (!review.reviewer && !review.since)) {
+    return '';
+  }
+  const parts = [`review: ${review.display}`];
+  if (review.reviewer) {
+    parts.push(`reviewer ${review.reviewer}`);
+  }
+  if (review.since && review.since.at) {
+    const at = Date.parse(review.since.at);
+    parts.push(Number.isFinite(at) ? `${review.since.kind} ${Math.max(0, Math.floor((now - at) / 60000))}m ago` : review.since.kind);
+  }
+  if (review.tier) {
+    parts.push(`tier ${review.tier}`);
+  }
+  if (review.fallbackReason) {
+    parts.push(`fallback ${review.fallbackReason}`);
+  }
+  return parts.join(' · ');
+}
+
 function summarizeText(value) {
   return normalizeParagraphLines(value).join(' ');
 }
@@ -114,6 +138,10 @@ function buildLaneFullText(lane, repo) {
   }
   if (lane.reviewer) {
     lines.push(`Reviewer: ${lane.reviewer}`);
+  }
+  const reviewLine = formatReviewLine(lane.review);
+  if (reviewLine) {
+    lines.push(`R${reviewLine.slice(1)}`);
   }
   if (lane.repairOwner) {
     lines.push(`Repair owner: ${lane.repairOwner}`);
@@ -175,6 +203,8 @@ function toDashboardLane(lane, repo) {
     repoName: repo.name,
     repoPath: repo.path,
     status: lane.status || 'idle',
+    display: (lane.review && lane.review.display) || lane.status || 'idle',
+    review: formatReviewLine(lane.review),
     desc: task,
     writer,
     reviewer,
@@ -1088,7 +1118,7 @@ const server = http.createServer(async (req, res) => {
           const identity = getAgentIdentity(lane.hotSeat);
 
           return \`
-            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${escapeHtml(lane.repoName)} // \${lane.status.toUpperCase()}">
+            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${escapeHtml(lane.repoName)} // \${escapeHtml((lane.display || lane.status).toUpperCase())}">
               <div class="indicator-repo">\${escapeHtml(lane.repoName)}</div>
               <div class="lane-box \${lane.status}">\${escapeHtml(lane.laneId)}</div>
               \${hasHotSeat ? \`
@@ -1120,7 +1150,7 @@ const server = http.createServer(async (req, res) => {
             
             <div class="lane-header">
               <div class="lane-id">LANE \${escapeHtml(lane.laneId)}</div>
-              <div class="lane-status \${renderStatusClass(lane.status)}">[\${lane.status}]</div>
+              <div class="lane-status \${renderStatusClass(lane.status)}">[\${escapeHtml(lane.display || lane.status)}]</div>
             </div>
 
             \${lane.writer || lane.reviewer || lane.repairOwner ? \`

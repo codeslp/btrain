@@ -57,7 +57,11 @@ inventory test expects 72 (71 in the export block). T010 is done: `cli.mjs`
 calls `recordReviewActivity` once after `resolveRepoRoot` in `handoff`,
 `review`, and `pr`, under the lane's handoff lock, only for a lane in
 `needs-review` or `fix-confirmation`. A failure to record prints a warning
-and never fails the command. T011 follows.
+and never fails the command. T011 is done: `btrain status`, the lane
+guidance, and the dashboard show the display state (`in-review` after
+pickup), the reviewer, the time since dispatch or pickup, the tier, and the
+fallback reason, from `reviewSummary` in `review/record.mjs`. The handoff
+file and the JSON keep the stored status. Invariant 5 runs.
 
 ## Phase 1: Foundations that change no behavior (WS0, WS1, WS2)
 
@@ -71,7 +75,7 @@ and never fails the command. T011 follows.
 - [x] T008 [WS2] Export `appendWorkflowEvent`, `readWorkflowEvents`, and `detectCurrentAgent` from `src/brain_train/core.mjs`, regenerate `specs/020-ws2-export-baseline.json`, and in `test/decomposition_inventory.test.mjs` change the four 69s to 72 and the export block's 68 to 71. Say in the commit that the surface change is intended.
 - [x] T009 [WS2] Write the fold in `src/brain_train/review/record.mjs`: the events since the lane's last claim to the review record of the plan's data model. Test a fold over each event sequence, and that events before the last claim are ignored, in `test/review-record.test.mjs`.
 - [x] T010 [WS2] Write `src/brain_train/review/activity.mjs` and call its helper after `resolveRepoRoot` in each lane-scoped handler of `src/brain_train/cli.mjs`: `handoff`, `review`, and `pr`. The helper uses `detectCurrentAgent`. When the agent is verified and is the reviewer of the lane's open attempt, `btrain handoff` writes `review-pickup` once and any other command writes `review-progress`, at most once a minute. It also writes the pickup of the owner of a `fix-confirmation` lane. Each write takes the lane's handoff lock with `withFileLock`. Test that the dispatched reviewer writes one pickup, that `btrain review code --lane <id>` writes one progress event, and that another agent, an unverified actor, `btrain pr status`, and the startup snapshot write none.
-- [ ] T011 [WS2] Add the display state, the reviewer, the time since dispatch or pickup, the tier, and the fallback reason to `buildLaneGuidance` and `getStatus`, and show them in `scripts/serve-dashboard.js`. Test that after pickup `btrain status` shows `in-review` while the handoff file holds `needs-review`. Remove the skip from invariant 5.
+- [x] T011 [WS2] Add the display state, the reviewer, the time since dispatch or pickup, the tier, and the fallback reason to `buildLaneGuidance` and `getStatus`, and show them in `scripts/serve-dashboard.js`. Test that after pickup `btrain status` shows `in-review` while the handoff file holds `needs-review`. Remove the skip from invariant 5.
 
 **Independent check:** `btrain doctor` lists every agent's lab, and a dispatched reviewer's first `btrain handoff` shows the lane as `in-review`. No reviewer is chosen or dispatched differently from `main`.
 
