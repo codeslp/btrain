@@ -34,6 +34,23 @@ async function runHelper(args, options = {}) {
   }
 }
 
+// A job subshell that a broken helper stops signalling keeps looping after
+// the helper is gone. Its PID file comes from `sh -c 'echo "$PPID"'` (macOS
+// /bin/bash 3.2 has no BASHPID). Kill it, but only while that PID is still a
+// shell running this helper.
+async function killJobShell(pidFile) {
+  const pid = Number((await fs.readFile(pidFile, "utf8").catch(() => "")).trim())
+  if (!pid) return
+  const state = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(pid)]).catch(() => ({ stdout: "" }))
+  if (state.stdout.includes("zvec-context.sh")) {
+    try { process.kill(pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+  }
+}
+
+function isRunning(child) {
+  return child.exitCode === null && child.signalCode === null
+}
+
 async function writeFakeZg(binDir, { withNode = true } = {}) {
   if (withNode) await fs.symlink(process.execPath, path.join(binDir, "node"))
   const fakePath = path.join(binDir, "zg")
@@ -352,6 +369,153 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
   })
+  it("re-signals an executor that missed the first TERM", async () => {
+    // A TERM can land while the job subshell is still turning into node and
+    // be lost: bash catches it, then execs node before running the trap, and
+    // node runs zg to completion. Reproduce that loss on every run: the job
+    // subshell traps TERM with a handler that only records it, reports that
+    // it is ready, and execs node only after that handler has run. The
+    // helper is interrupted after the ready marker exists, so its first TERM
+    // is always swallowed, and only a repeated TERM cancels zg ("sleep 30")
+    // instead of waiting for it.
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    const ignoring = path.join(tmpDir, "job-traps-term")
+    const zgLog = path.join(tmpDir, "zg.log")
+    // The fake zg logs its PID and then execs "sleep 30", so the logged PID is
+    // the only process this test may clean up.
+    const zgPids = path.join(tmpDir, "zg.pids")
+    const jobPid = path.join(tmpDir, "job-pid")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    // An unrelated process that ps lists exactly like the fake zg's
+    // "sleep 30"; the cleanup must leave it alone.
+    const bystander = spawn("sleep", ["30"], { stdio: "ignore", env: { ...process.env, PATH: "/usr/bin:/bin" } })
+    await fs.writeFile(bashEnv, `set -T
+miss_first_term() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && [ "\${1#local secs=}" != "$1" ]; then
+    sh -c 'echo "$PPID"' > "$ZVEC_TEST_JOB_PID"
+    trap 'ZVEC_TEST_SWALLOWED=1' TERM
+    : > "$ZVEC_TEST_IGNORING"
+    while [ -z "\${ZVEC_TEST_SWALLOWED:-}" ]; do sleep 0.01; done
+  elif [ "$BASH_SUBSHELL" -eq 0 ] && [ "$1" = 'pid=$!' ]; then
+    trap - DEBUG
+    while [ ! -e "$ZVEC_TEST_IGNORING" ]; do sleep 0.01; done
+    on_signal 2
+  fi
+}
+trap 'miss_first_term "$BASH_COMMAND"' DEBUG
+`)
+    const started = Date.now()
+    try {
+      const result = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 20000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch, BASH_ENV: bashEnv,
+          ZVEC_TEST_IGNORING: ignoring, ZVEC_TEST_JOB_PID: jobPid, ZVEC_TEST_LOG: zgLog, ZVEC_TEST_PID_LOG: zgPids,
+          ZVEC_TEST_STATUS_SLEEP: "30" },
+      })
+      const elapsedMs = Date.now() - started
+      assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
+      // The 30 s zg sleep is the only thing that could take this long: a
+      // single dropped TERM would leave the helper waiting for all of it.
+      assert.ok(elapsedMs < 15000, `the helper waited ${elapsedMs}ms for zg instead of cancelling it`)
+      assert.deepEqual(await fs.readdir(scratch), [], "cancellation must leave no capture files")
+    } finally {
+      await killJobShell(jobPid)
+      const pids = (await fs.readFile(zgPids, "utf8").catch(() => "")).split("\n").filter(Boolean).map(Number)
+      for (const pid of pids) {
+        const state = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(pid)]).catch(() => ({ stdout: "" }))
+        if (state.stdout.trim() === "sleep 30") {
+          try { process.kill(pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      // ps, not the exit event: Node may not have processed a kill yet. A
+      // killed process is gone or a zombie ("Z") by the time ps runs.
+      const bystanderState = (await execFileAsync("/bin/ps", ["-o", "stat=", "-p", String(bystander.pid)])
+        .catch(() => ({ stdout: "" }))).stdout.trim()
+      const bystanderAlive = bystanderState !== "" && !bystanderState.startsWith("Z")
+      bystander.kill("SIGKILL")
+      assert.ok(bystanderAlive, "cleanup must not touch an unrelated sleep process")
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps re-signalling an executor that drops TERM past any retry window", async () => {
+    // The job subshell swallows TERM until it has seen 101 of them (more than
+    // the 100 a capped retry loop would send, about 10 s) and only then execs
+    // node. After the fifth it reports that it is holding out, and the test
+    // checks that the helper is still alive and still has its capture file:
+    // it must not exit or clean up while its executor runs. When it stops
+    // holding out it writes a release marker; a helper that gave up early
+    // exits before that marker exists. The helper finishes with 130 only if
+    // it keeps signalling until the job is gone.
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    const ready = path.join(tmpDir, "job-traps-term")
+    const holding = path.join(tmpDir, "job-holding")
+    const released = path.join(tmpDir, "job-released")
+    const jobPid = path.join(tmpDir, "job-pid")
+    const zgPids = path.join(tmpDir, "zg.pids")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    await fs.writeFile(bashEnv, `set -T
+hold_out() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && [ "\${1#local secs=}" != "$1" ]; then
+    ZVEC_TEST_SEEN=0
+    sh -c 'echo "$PPID"' > "$ZVEC_TEST_JOB_PID"
+    trap 'ZVEC_TEST_SEEN=$((ZVEC_TEST_SEEN + 1)); [ "$ZVEC_TEST_SEEN" -eq 5 ] && : > "$ZVEC_TEST_HOLDING"' TERM
+    : > "$ZVEC_TEST_READY"
+    while [ "$ZVEC_TEST_SEEN" -le 100 ]; do sleep 0.01; done
+    : > "$ZVEC_TEST_RELEASED"
+  elif [ "$BASH_SUBSHELL" -eq 0 ] && [ "$1" = 'pid=$!' ]; then
+    trap - DEBUG
+    while [ ! -e "$ZVEC_TEST_READY" ]; do sleep 0.01; done
+    on_signal 2
+  fi
+}
+trap 'hold_out "$BASH_COMMAND"' DEBUG
+`)
+    let helper
+    try {
+      const run = runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 40000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch, BASH_ENV: bashEnv,
+          ZVEC_TEST_READY: ready, ZVEC_TEST_HOLDING: holding,
+          ZVEC_TEST_RELEASED: released, ZVEC_TEST_JOB_PID: jobPid, ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"),
+          ZVEC_TEST_PID_LOG: zgPids, ZVEC_TEST_STATUS_SLEEP: "30" },
+        onSpawn: (child) => { helper = child },
+      })
+      while (!(await fs.access(holding).then(() => true, () => false))) {
+        assert.ok(isRunning(helper), "the helper exited before its executor held out")
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      assert.ok(isRunning(helper), "the helper must stay alive while its executor runs")
+      assert.equal((await fs.readdir(scratch)).filter((name) => name.startsWith("zvec-context.")).length, 1,
+        "the helper must keep its capture file while its executor runs")
+      const result = await run
+      assert.equal(await fs.access(released).then(() => true, () => false), true,
+        "the helper exited while its executor was still holding out")
+      assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
+      assert.deepEqual(await fs.readdir(scratch), [], "cancellation must leave no capture files")
+    } finally {
+      await killJobShell(jobPid)
+      const pids = (await fs.readFile(zgPids, "utf8").catch(() => "")).split("\n").filter(Boolean).map(Number)
+      for (const pid of pids) {
+        const state = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(pid)]).catch(() => ({ stdout: "" }))
+        if (state.stdout.trim() === "sleep 30") {
+          try { process.kill(pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("waits for the owned command to exit when the helper is cancelled", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
