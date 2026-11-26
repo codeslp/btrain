@@ -56,6 +56,11 @@ async function writeFakeBinary(dir, opts = {}) {
   return binPath
 }
 
+// The fake kkg is a Node script, and starting a process can take longer than
+// the real 200 ms advise budget on a loaded machine. Tests that are not about
+// budgets give every command kind a minute instead (see "timeout overrides").
+const GENEROUS_TIMEOUTS = Object.fromEntries(Object.entries(TIMEOUTS).map(([kind, ms]) => [kind, String(Math.max(ms, 60_000))]))
+
 /** Minimal valid manifest payload */
 function fakeManifest(commands = []) {
   return {
@@ -100,7 +105,7 @@ describe("cgraph_adapter", () => {
 
     it("uses bin_path from config when executable", async () => {
       const binPath = await writeFakeBinary(tmpDir, { stdout: "{}" })
-      const result = await resolveBinary({ cgraph: { bin_path: binPath } })
+      const result = await resolveBinary({ cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       assert.equal(result, binPath)
     })
   })
@@ -240,7 +245,7 @@ describe("cgraph_adapter", () => {
         stdout: JSON.stringify(manifest) + "\n",
       })
 
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       assert.notEqual(adapter, null)
       assert.equal(adapter.supports("audit"), true)
       assert.equal(adapter.supports("review-packet"), true)
@@ -317,14 +322,14 @@ describe("cgraph_adapter", () => {
     after(async () => { await rmDir(tmpDir) })
 
     it("blastRadius returns parsed result", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const result = await adapter.blastRadius(["src/foo.py"], "a")
       assert.equal(result.ok, true)
       assert.equal(result.payload.summary.nodes_in_scope, 3)
     })
 
     it("audit returns parsed result", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const result = await adapter.audit({ scope: "lane", files: ["src/foo.py", "src/bar.py"] })
       assert.equal(result.ok, true)
       assert.equal(result.payload.counts.warn, 1)
@@ -343,7 +348,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("audit omits --files when given an empty file list", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const beforeCalls = (await fs.readFile(logPath, "utf8"))
         .trim()
         .split("\n")
@@ -367,7 +372,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("audit indexes each in-scope file before running rules", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const beforeCalls = (await fs.readFile(logPath, "utf8"))
         .trim()
         .split("\n")
@@ -390,7 +395,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("advise uses positional situation and optional context", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const result = await adapter.advise("lock_overlap", "a", { files: "src/foo.py" })
       assert.equal(result.ok, true)
       assert.equal(result.payload.situation, "lock_overlap")
@@ -406,7 +411,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("driftCheck passes the since cursor through to cgraph", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const result = await adapter.driftCheck(["src/foo.py"], "a", "2026-04-20T00:00:00.000Z")
       assert.equal(result.ok, true)
       assert.equal(result.payload.since, "2026-04-20T00:00:00.000Z")
@@ -422,7 +427,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("syncCheck returns parsed result", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, source_checkout: "/tmp/cgraph" } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath, source_checkout: "/tmp/cgraph" } })
       const result = await adapter.syncCheck({ sourceDir: "/tmp/cgraph" })
       assert.equal(result.ok, true)
       assert.equal(result.payload.behind_by, 2)
@@ -438,7 +443,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("buildEventMetadata produces correct shape", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
 
       const reviewResult = {
         ok: true, kind: "review_packet", payload: {
@@ -472,7 +477,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("buildEventMetadata marks degraded on timeout", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
 
       const meta = adapter.buildEventMetadata({
         reviewPacket: {
@@ -486,7 +491,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("persistReviewPacket writes artifact file", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const payload = { source: "diff", touched_nodes: [], advisories: [] }
       const artifactPath = await adapter.persistReviewPacket("a", payload)
 
@@ -501,7 +506,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("doctorSummary reports binary and daemon status", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
       const summary = await adapter.doctorSummary()
 
       assert.equal(summary.ok, true)
@@ -511,7 +516,7 @@ describe("cgraph_adapter", () => {
     })
 
     it("startupSummary includes sync-check state when available", async () => {
-      const adapter = await createAdapter(tmpDir, { cgraph: { bin_path: binPath, source_checkout: "/tmp/cgraph" } })
+      const adapter = await createAdapter(tmpDir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath, source_checkout: "/tmp/cgraph" } })
       const summary = await adapter.startupSummary()
 
       assert.ok(summary.some((line) => line.includes("graph health: B")))
@@ -552,7 +557,7 @@ describe("cgraph_adapter", () => {
       ].join("\n")
       await fs.writeFile(binPath, script)
       await fs.chmod(binPath, 0o755)
-      return createAdapter(dir, { cgraph: { bin_path: binPath } })
+      return createAdapter(dir, { cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
     }
 
     it("flags an answer with no entities as inconclusive", async () => {

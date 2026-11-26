@@ -6,6 +6,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { withTrackedInit } from "./helpers/legacy-init.mjs"
+import { TIMEOUTS } from "../src/brain_train/cgraph_adapter.mjs"
 
 const exec = promisify(execFile)
 
@@ -175,6 +176,12 @@ async function appendCgraphConfig(repoRoot, binPath) {
     "[cgraph]",
     `bin_path = ${JSON.stringify(binPath)}`,
     `source_checkout = ${JSON.stringify(repoRoot)}`,
+    "",
+    // The fake kkg is a Node script; on a loaded machine starting it can take
+    // longer than the real 200 ms advise budget. Raise every budget to at
+    // least a minute so this test checks the wiring, not process start time.
+    "[cgraph.timeouts]",
+    ...Object.entries(TIMEOUTS).map(([kind, ms]) => `${kind} = "${Math.max(ms, 60_000)}"`),
   ].join("\n")
   await fs.appendFile(projectToml, extra, "utf8")
 }
