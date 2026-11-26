@@ -294,6 +294,34 @@ describe("dashboard lifecycle", () => {
     assert.equal((await getDashboardStatus(repoRoot, { env })).running, false)
   })
 
+  it("stops a dashboard child that never becomes healthy once startup gives up", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3725)
+    let child
+    try {
+      // Alive for the whole startup budget, but never listening.
+      const { elapsedMs } = await timed(assert.rejects(
+        ensureDashboard(repoRoot, {
+          env,
+          port,
+          openBrowser: false,
+          spawnImpl: (command, args, options) => {
+            child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], options)
+            return child
+          },
+        }),
+        /Dashboard did not become healthy/,
+      ), 25_000)
+      assert.ok(elapsedMs >= 14_000, `startup gave up after ${elapsedMs}ms, before its cap`)
+      assert.equal(await stateFileExists(env), false, "a failed startup must remove its dashboard state")
+      const exited = child.exitCode !== null || child.signalCode !== null
+        || await timed(new Promise((resolve) => child.once("exit", resolve)), 5000).then(() => true, () => false)
+      assert.ok(exited, "a dashboard child that never became healthy must be stopped")
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    }
+  })
+
   it("waits for a dashboard that is slow to start but still running", async () => {
     const { repoRoot, env } = await createDashboardRepo()
     const port = await findAvailableDashboardPort(3525)
