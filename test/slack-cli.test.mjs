@@ -244,6 +244,18 @@ describe("btrain slack test", () => {
     f.assertTokenNeverPrinted()
   })
 
+  it("fails, keeping the pause, when the test message cannot be posted (codex-reviewer M12)", async () => {
+    const f = await fixture()
+    await f.writeSettings({ botToken: TOKEN, channels: { [f.repo]: CHANNEL } })
+    await writeDeliveryState(f.slackDir, { ...emptyDeliveryState(), paused: { error: "not_in_channel", at: new Date().toISOString() } })
+    const result = await f.run(["slack", "test"], { script: { queue: { "chat.postMessage": [{ error: "not_in_channel" }] } } })
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, new RegExp(`posting to ${CHANNEL} failed \\(not_in_channel\\)`))
+    assert.doesNotMatch(result.stdout, /posted a test message/)
+    assert.equal((await readDeliveryState(f.slackDir)).paused.error, "not_in_channel")
+    f.assertTokenNeverPrinted()
+  })
+
   it("refuses an unknown subcommand", async () => {
     const f = await fixture()
     const result = await f.run(["slack", "nope"])
@@ -373,8 +385,11 @@ describe("btrain slack setup at a terminal (codex-reviewer on c888de6)", () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "slack-cli-tty-"))
     roots.push(home)
     const stdin = fakeTty([`${TOKEN.slice(0, 8)}\u0003`])
-    const code = await runSlackCommand("setup", { channel: CHANNEL }, { env: { BRAIN_TRAIN_HOME: home }, repoRoot: "/work/repo", stdin, out() {}, err() {} })
+    const errors = []
+    const code = await runSlackCommand("setup", { channel: CHANNEL }, { env: { BRAIN_TRAIN_HOME: home }, repoRoot: "/work/repo", stdin, out() {}, err: (line) => errors.push(line) })
     assert.equal(code, 1)
+    assert.match(errors.join("\n"), /cancelled/, "Ctrl-C says cancelled (codex-reviewer M15)")
+    assert.doesNotMatch(errors.join("\n"), /not a Slack bot token/)
     assert.deepEqual(stdin.rawModes, [true, false])
     await assert.rejects(fs.stat(path.join(home, "slack.json")))
   })
