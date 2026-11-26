@@ -218,3 +218,27 @@ export function orderCandidates(config, { owner = "", authorHistory = [], config
 
   return { otherLab, sameLab, authorLabs: labs, unknownReviewerOrder }
 }
+
+/**
+ * FR-3: may this explicitly named reviewer review the lane? `allowed` is false
+ * when the reviewer is same-lab, or has no lab, while at least one other-lab
+ * agent with a `cli` runner is configured. `any-other`, an empty name, or a
+ * repository with no other-lab agent is always allowed. `otherLab` lists the
+ * other-lab candidates the refusal names.
+ */
+export function checkReviewerLab(config, { owner = "", authorHistory = [], reviewer = "", configuredAgents } = {}) {
+  const named = normalizeName(reviewer)
+  const { otherLab, authorLabs: labs } = orderCandidates(config, { owner, authorHistory, configuredAgents })
+  if (!named || isAnyOther(named) || otherLab.length === 0) return { allowed: true, otherLab }
+  return { allowed: tierOf(named, { config, authorLabs: labs }) === TIERS.OTHER_LAB, otherLab }
+}
+
+/** The FR-3 refusal: `{ message, reason, fix }` for a BtrainError. */
+export function sameLabReviewerRefusal({ reviewer, otherLab = [], laneId = "", command = "handoff claim" }) {
+  const laneArg = laneId ? ` --lane ${laneId}` : ""
+  return {
+    message: `\`btrain ${command}\` refuses ${reviewer} as the reviewer: it is same-lab, or has no declared lab, while an other-lab reviewer is configured.`,
+    reason: `Spec 023 FR-3: a same-lab review needs a reason. Other-lab agents with a cli runner: ${otherLab.join(", ")}.`,
+    fix: `Name one of them (--reviewer ${otherLab[0] || "<agent>"}), pass --reviewer any-other, or attach a human-confirmed override: btrain override grant --action same-lab-review${laneArg || " --lane <id>"} --requested-by <agent> --confirmed-by <human> --reason "...".`,
+  }
+}

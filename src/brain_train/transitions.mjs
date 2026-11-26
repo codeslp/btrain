@@ -145,10 +145,13 @@ function optionalFlag(input, name) {
 function guardMatches(rowValue, state, input) {
   const guards = {
     "none": () => true,
+    // spec 023 FR-3: `reviewerLabAllowed` is false for an explicit same-lab
+    // or lab-less reviewer with no override while an other-lab agent exists.
     "files; conflicts; distinct reviewer": () =>
       optionalFlag(input, "filesNonEmpty")
       && optionalFlag(input, "noConflict")
-      && optionalFlag(input, "distinctReviewer"),
+      && optionalFlag(input, "distinctReviewer")
+      && optionalFlag(input, "reviewerLabAllowed"),
     "review context and diff": () =>
       optionalFlag(input, "reviewContextComplete") && optionalFlag(input, "diffPresent"),
     "reason code": () => input.reasonCode === undefined || !!input.reasonCode,
@@ -191,7 +194,8 @@ function guardMatches(rowValue, state, input) {
     "distinct owner and reviewer; no prior author as reviewer; no linked PR": () =>
       optionalFlag(input, "distinctReviewer")
       && input.reviewerIsPriorAuthor !== true
-      && !input.prLinked,
+      && !input.prLinked
+      && optionalFlag(input, "reviewerLabAllowed"),
     "actor unchecked": () => true,
     // L8 covers approval by anyone other than the recorded reviewer. When the
     // reviewer acts and row 4 still rejected, the cause is suspended coverage,
