@@ -363,7 +363,10 @@ export async function createListener({
   // pause is handled, in a channel or in an open thread.
   const resume = () => change((next) => {
     const nowTs = tsOf(now())
-    for (const channel of Object.keys(next.channels)) next.channels[channel] = { ...next.channels[channel], cursor: nowTs, floor: nowTs }
+    // Every served channel, read before the pause or not: one with no saved
+    // cursor would otherwise start at now and reach back a minute.
+    const channels = new Set([...Object.keys(next.channels), ...served.map((repo) => repo.channel)])
+    for (const channel of channels) next.channels[channel] = { ...next.channels[channel], cursor: nowTs, floor: nowTs }
     for (const key of Object.keys(next.threads)) next.threads[key] = { ...next.threads[key], replyCursor: nowTs, floor: nowTs }
     next.paused = ""
     log("resumed")
