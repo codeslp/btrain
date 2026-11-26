@@ -352,6 +352,60 @@ trap 'early_interrupt "$BASH_COMMAND"' DEBUG
       await fs.rm(tmpDir, { recursive: true, force: true })
     }
   })
+  it("re-signals an executor that missed the first TERM", async () => {
+    // A TERM can land while the job subshell is still turning into node and
+    // be lost; node then runs zg to completion. Reproduce that loss on every
+    // run: the job subshell ignores TERM until it execs node and reports it
+    // through a marker, and the helper is interrupted only after that marker
+    // exists. A single TERM is then dropped, and only a repeated one cancels
+    // zg ("sleep 30") instead of waiting for it.
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    const ignoring = path.join(tmpDir, "job-ignores-term")
+    const zgLog = path.join(tmpDir, "zg.log")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    await fs.writeFile(bashEnv, `set -T
+miss_first_term() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && [ "\${1#local secs=}" != "$1" ]; then
+    trap '' TERM
+    : > "$ZVEC_TEST_IGNORING"
+  elif [ "$BASH_SUBSHELL" -eq 0 ] && [ "$1" = 'pid=$!' ]; then
+    trap - DEBUG
+    while [ ! -e "$ZVEC_TEST_IGNORING" ]; do sleep 0.01; done
+    on_signal 2
+  fi
+}
+trap 'miss_first_term "$BASH_COMMAND"' DEBUG
+`)
+    const started = Date.now()
+    try {
+      const result = await runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 20000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch, BASH_ENV: bashEnv,
+          ZVEC_TEST_IGNORING: ignoring, ZVEC_TEST_LOG: zgLog, ZVEC_TEST_STATUS_SLEEP: "30" },
+      })
+      const elapsedMs = Date.now() - started
+      assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
+      // The 30 s zg sleep is the only thing that could take this long: a
+      // single dropped TERM would leave the helper waiting for all of it.
+      assert.ok(elapsedMs < 15000, `the helper waited ${elapsedMs}ms for zg instead of cancelling it`)
+      assert.deepEqual(await fs.readdir(scratch), [], "cancellation must leave no capture files")
+    } finally {
+      const ps = await execFileAsync("/bin/ps", ["-axo", "pid=,args="])
+      for (const line of ps.stdout.split("\n")) {
+        const sleeper = line.trim().match(/^(\d+)\s+sleep 30$/)
+        if (sleeper && (await fs.readFile(zgLog, "utf8").catch(() => "")).includes("CALL")) {
+          try { process.kill(Number(sleeper[1]), "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("waits for the owned command to exit when the helper is cancelled", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
