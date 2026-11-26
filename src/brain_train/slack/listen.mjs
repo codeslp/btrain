@@ -342,6 +342,8 @@ export async function createListener({
     for (const { threadTs, result } of results) {
       const key = `${prefix}${threadTs}`
       if (!result.ok) {
+        // A token, scope, or channel error is the batch's last result
+        // (read-client stops there), and the cycle reads nothing more of it.
         readFailed(result, `${channel} ${threadTs}`, () => change((next) => { delete next.threads[key] }))
         continue
       }
@@ -450,7 +452,11 @@ export async function createListener({
       if (!paused && !readingStopped && token) {
         const channels = [...new Set(served.map((repo) => repo.channel))].filter((channel) => !stoppedChannels.has(channel))
         for (const channel of channels) {
-          if (!(await readChannel(channel)) || !(await readThreads(channel))) break
+          // A read error takes effect at once: a token or scope error ends
+          // all reading, a channel error ends that channel's reads.
+          if (!(await readChannel(channel)) || readingStopped) break
+          if (stoppedChannels.has(channel)) continue
+          if (!(await readThreads(channel)) || readingStopped) break
         }
         if (lost) return { status: "lost-lease" }
       }

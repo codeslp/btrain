@@ -212,6 +212,9 @@ export function createReader({
         nextTurn.set(channel, result.deferred ? index : index + 1)
         if (result.deferred) break
         results.push({ threadTs, result })
+        // A token, scope, or channel error ends the batch: no further read of
+        // this channel may follow it (the plan's "Read errors").
+        if (!result.ok && (result.action === "stop-all" || result.action === "stop-channel")) break
       }
       return { results }
     },
