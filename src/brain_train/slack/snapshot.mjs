@@ -84,8 +84,10 @@ function typedByOperator(item, operator) {
     (!present(item.subtype) || item.subtype === "thread_broadcast")
 }
 
+// Only the configured btrain bot user. With no bot user ID nothing can be
+// attributed to btrain, so no bot message is kept (fail closed).
 function postedByBtrain(item, botUserId) {
-  return (present(item.bot_id) || present(item.app_id)) && (!botUserId || item.user === botUserId)
+  return Boolean(botUserId) && item.user === botUserId && (present(item.bot_id) || present(item.app_id))
 }
 
 /**
@@ -111,6 +113,7 @@ function laneLines(lane, { label, taskChars, summaryChars }) {
   const one = (value) => data(value, { singleLine: true })
   const lines = [
     `lane ${one(card.lane)} · ${one(card.status)}`,
+    `  dev: ${one(card.label) || "none"}`,
     `  task: ${one(card.task)}`,
     `  owner: ${one(card.owner)} · reviewer: ${one(card.reviewer)}${card.tier ? ` · tier: ${one(card.tier)}` : ""}`,
     `  pr: ${one(card.pr)} · locks: ${one(card.lockCount)} · updated: ${one(card.updated)}`,
