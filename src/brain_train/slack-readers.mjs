@@ -11,6 +11,7 @@ import {
   getLaneConfigs,
   listRepos,
   parseCurrentSection,
+  readAllLaneStates,
   readProjectConfig,
   readWorkflowEvents,
 } from "./core.mjs"
@@ -44,12 +45,25 @@ export async function readEnteredByPrPoll(repoRoot, laneId = "") {
   return enteredByPrPoll(await readWorkflowEvents(repoRoot, config, laneId), lane)
 }
 
+/**
+ * Spec 024 WS4: current lane states for delivery, each with its `laneId`. A
+ * repository with lanes turned off has one state, the single handoff, with
+ * the lane id "".
+ */
+export async function readLaneStates(repoRoot) {
+  const config = await readProjectConfig(repoRoot)
+  const lanes = await readAllLaneStates(repoRoot, config)
+  if (lanes) return lanes.map((lane) => ({ ...lane, laneId: lane._laneId }))
+  return [{ ...(await checkHandoff(repoRoot)).current, laneId: "" }]
+}
+
 /** The readers object of the `slack` block, beyond the repository fields. */
 export function buildSlackReaders({ cliPath }) {
   return {
     listRepos,
     findAvailableLane,
     readConfig: readProjectConfig,
+    readLanes: readLaneStates,
     enteredByPrPoll: readEnteredByPrPoll,
     cliPath,
   }

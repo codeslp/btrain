@@ -14,8 +14,12 @@ after(async () => Promise.all(roots.map((root) => fs.rm(root, { recursive: true,
 describe("spec 024 composition: claim to merge", () => {
   it("posts one card, a reply per step in its thread, and one pinned board", async () => {
     const fixture = await createSlackRepo({ prFlow: true, remote: "https://github.com/example-owner/example-repo.git", roots })
+    // Each command's 2-second budget sends about two messages (one a second
+    // per channel); a flush sends what it leaves. The board is first posted
+    // only while a lane is active, so one flush runs right after the claim.
     const steps = [
       { args: claimArgs() },
+      { args: ["slack", "flush"] },
       { args: needsReviewArgs() },
       { args: ["handoff", "request-changes", "--lane", "a", "--summary", "Add a test", "--reason-code", "spec-mismatch", "--actor", "codex"], agent: "codex" },
       { args: needsReviewArgs() },
@@ -29,6 +33,8 @@ describe("spec 024 composition: claim to merge", () => {
       const result = await fixture.btrain(args, { agent })
       assert.equal(result.code, 0, `${args.join(" ")}\n${result.stderr}`)
     }
+    const flush = await fixture.btrain(["slack", "flush"])
+    assert.equal(flush.code, 0, flush.stderr)
 
     const calls = fixture.calls()
     assert.deepEqual(fixture.refusals(), [], "no request went anywhere but the fake")
@@ -42,6 +48,8 @@ describe("spec 024 composition: claim to merge", () => {
     assert.equal(cards.length, 1, "one card for the lane task")
     assert.equal(board.length, 1, "one board for the developer")
     assert.equal(calls.filter((call) => call.method === "pins.add").length, 1, "the board is pinned once")
+    const lastBoard = calls.filter((call) => call.method === "chat.update" && call.body.ts === board[0].result.ts).at(-1)
+    assert.match(lastBoard?.body.text || "", /no active lanes/, "the board ends with no active lane")
 
     const cardTs = cards[0].result.ts
     const replies = calls.filter((call) => call.method === "chat.postMessage" && call.body.thread_ts)

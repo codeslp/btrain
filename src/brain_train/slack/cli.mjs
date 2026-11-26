@@ -16,8 +16,10 @@ import { channelForRepo, developerLabel, isSlackEnabled, listChannels } from "./
 import { btrainHome, CREDENTIAL_REASONS, loadSlackCredentials, MAX_CREDENTIAL_BYTES, readSlackFile, slackFilePath } from "./credentials.mjs"
 import { clearPause } from "./deliver.mjs"
 import { listEntries, readDeliveryState } from "./outbox.mjs"
+import { deliverToTarget, deliveryTarget } from "./target.mjs"
+import { scrubSecrets } from "./text.mjs"
 
-export const SLACK_SUBCOMMANDS = Object.freeze(["setup", "status", "channels", "test", "whois"])
+export const SLACK_SUBCOMMANDS = Object.freeze(["setup", "status", "channels", "test", "whois", "flush", "refresh"])
 
 // A Slack bot token. The value is checked for shape only; `btrain slack test`
 // checks it against Slack.
@@ -58,6 +60,10 @@ export async function runSlackCommand(subcommand, options = {}, readers = {}) {
       return test(readers, io)
     case "whois":
       return whois(options, readers, io)
+    case "flush":
+      return drain("flush", readers, io)
+    case "refresh":
+      return drain("refresh", readers, io)
     default:
       io.err(`btrain slack: unknown subcommand "${subcommand || ""}". Use one of: ${SLACK_SUBCOMMANDS.join(", ")}.`)
       return 1
@@ -268,6 +274,38 @@ async function status(readers, io) {
     const board = await boardStatus(btrainHome(io.env), channel)
     io.out(`board: ${!board.posted ? "not posted yet" : board.pinned ? "posted and pinned" : board.pinError ? `posted, not pinned (${board.pinError})` : "posted, not pinned yet"}`)
   }
+  return 0
+}
+
+// Spec 024 FR-11 (T018): `flush` drains the queue now, with no time budget;
+// `refresh` also re-renders every active card and the board from current lane
+// state. Both print one line of counts and exit 0, and skip while another
+// process holds the delivery lock. `readers.readLanes(repoRoot)` is the lane
+// state reader cli.mjs passes in.
+async function drain(subcommand, readers, io) {
+  const repoRoot = path.resolve(String(readers.repoRoot || ""))
+  if (!isSlackEnabled(readers.config)) {
+    io.out(`${subcommand}: the publisher is off ([features].slack is not true)`)
+    return 0
+  }
+  const target = await deliveryTarget(repoRoot, readers.config, { env: io.env })
+  if (!target.token) {
+    io.out(`${subcommand}: token ${reasonText(target.tokenReason)}`)
+    return 0
+  }
+  if (!target.channel) {
+    io.out(`${subcommand}: no channel is mapped for this repository; run btrain slack setup --channel <id>`)
+    return 0
+  }
+  await fs.mkdir(target.slackDir, { recursive: true })
+  const summary = await deliverToTarget(target, {
+    readLanes: typeof readers.readLanes === "function" ? () => readers.readLanes(repoRoot) : async () => [],
+    fetchImpl: readers.fetchImpl || globalThis.fetch,
+    now: readers.now,
+    refresh: subcommand === "refresh",
+  })
+  const reason = summary.reason ? ` (${scrubSecrets(summary.reason).text.slice(0, 200)})` : ""
+  io.out(`${subcommand}: ${summary.status}${reason} · sent ${summary.sent}, dropped ${summary.dropped}, collapsed ${summary.collapsed}, deferred ${summary.deferred}, cards ${summary.cards}`)
   return 0
 }
 

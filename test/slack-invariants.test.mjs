@@ -420,6 +420,10 @@ describe("spec 024 publisher invariants", () => {
     assert.equal((await fixture.btrain(claimArgs("a", "Task at claim time"))).code, 0)
     const cardPost = fixture.calls().find((call) => call.method === "chat.postMessage" && !call.body.thread_ts)
     assert.ok(cardPost?.result?.ts, "the claim posts a card")
+    // The claim's 2-second budget leaves the first board post owed (one
+    // message a second per channel); a flush posts it, so both refreshes
+    // below find a board to update.
+    assert.equal((await fixture.btrain(["slack", "flush"])).code, 0)
 
     // Card fields change while delivery is held, so those updates never reach
     // Slack. The next render must still show current state, not the claim's.

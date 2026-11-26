@@ -83,6 +83,7 @@ import { formatReviewLine, reviewSummary } from "./review/record.mjs"
 import { checkReviewerLab, orderCandidates, sameLabReviewerRefusal } from "./review/labs.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
+import { collectSlackDoctorFindings, offerDispatchFailure, offerWorkflowEvent } from "./slack/index.mjs"
 
 // ---------------------------------------------------------------------------
 // Atomic file locking — prevents TOCTOU races on shared state files
@@ -4372,6 +4373,8 @@ async function readWorkflowEvents(repoRoot, config, laneId = "") {
 async function appendWorkflowEvent(repoRoot, config, event) {
   const targetPath = getWorkflowEventLogPath(repoRoot, config, event.laneId || "")
   await appendText(targetPath, serializeWorkflowEvent(event))
+  // Spec 024 WS4: queue the Slack entry; returns at once with the toggle off and never throws.
+  await offerWorkflowEvent(repoRoot, config, event)
   return targetPath
 }
 
@@ -10049,6 +10052,7 @@ async function finishPatchWithReviewerDispatch(repoRoot, {
 
   if (dispatch.status === "failed" || dispatch.status === "timed-out") {
     const loopHint = laneId ? `btrain loop --lane ${laneId}` : "btrain loop"
+    await offerDispatchFailure(repoRoot, config, { laneId, lane: updatedCurrent, agentName: dispatch.agentName, status: dispatch.status, reason: dispatch.stopReason })
     throw new BtrainError({
       message: `Reviewer dispatch ${dispatch.status} for ${dispatch.agentName || "the reviewer"}.`,
       reason: dispatch.stopReason || "The reviewer runner exited without updating the lane.",
@@ -11855,6 +11859,8 @@ async function doctorRepo(repoRoot, { repair = false, skipFeedback = false, lane
   const review = collectReviewDoctorFindings(config)
   warnings.push(...review.warnings)
   issues.push(...review.errors)
+  // Spec 024 T019: the Slack publisher's findings, warnings only.
+  warnings.push(...(await collectSlackDoctorFindings(repoRoot, config)).warnings)
 
   return {
     repoRoot,

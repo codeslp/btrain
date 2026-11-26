@@ -41,7 +41,10 @@ describe("spec 024 WS4: a failed reviewer dispatch (T016)", () => {
     assert.ok(calls.length > 0, "the queue is delivered after the error")
     assert.equal(calls[0].outputBefore.stderr, Buffer.byteLength(result.stderr), "the error is printed before the first call")
     assert.equal(calls[0].outputBefore.stdout, Buffer.byteLength(result.stdout))
-    const failed = calls.find((call) => call.method === "chat.postMessage" && /reviewer dispatch failed/.test(call.body.text || ""))
+    // The inline budget sends about two messages at one a second; the rest
+    // of the queue waits for a later run.
+    assert.equal((await fixture.btrain(["slack", "flush"])).code, 0)
+    const failed = fixture.calls().find((call) => call.method === "chat.postMessage" && /reviewer dispatch failed/.test(call.body.text || ""))
     assert.ok(failed, "a dispatch-failed reply is posted")
     assert.ok(failed.body.thread_ts, "in the lane's thread")
     assert.match(failed.body.text, new RegExp(`<@${OPERATOR}>`), "it mentions the operator until spec 023 handles a failed dispatch")

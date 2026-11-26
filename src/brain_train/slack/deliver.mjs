@@ -147,6 +147,7 @@ export async function deliver(options = {}) {
       now = Date.now,
       sleep = defaultSleep,
       homeDir = btrainHome(process.env),
+      refresh = false,
     } = options
     if (!slackDir) return { ...summary, status: "skipped", reason: "no-state-dir" }
     if (!token) return { ...summary, status: "skipped", reason: "no-token" }
@@ -164,7 +165,7 @@ export async function deliver(options = {}) {
 
     const entries = await listEntries(slackDir)
     const label = String(context.label || "")
-    if (entries.length === 0 && Object.keys(state.cards).length === 0
+    if (!refresh && entries.length === 0 && Object.keys(state.cards).length === 0
       && !(await boardOwed(homeDir, channel, label)) && !(await readBoardPending(slackDir, channel))
       // Lines marked stale are reread once lane state can be read again.
       && !(await repoEntryStale(homeDir, channel, String(repo.path || slackDir)))) return summary
@@ -195,6 +196,18 @@ export async function deliver(options = {}) {
       return { ...summary, status: "error", reason: read.error }
     }
     const lanes = read.lanes
+    if (refresh) {
+      // `btrain slack refresh` (FR-11): every active lane task's card is owed
+      // an update from current state, and the board is rewritten even when
+      // its text has not changed.
+      for (const lane of lanes) {
+        if (["", "idle", "resolved"].includes(String(lane?.status || ""))) continue
+        const laneId = laneIdOf(lane)
+        const thread = await getThread(slackDir, laneId, lane.claimKey)
+        if (thread) state.cards[threadKey(laneId, lane.claimKey)] = { laneId, claimKey: lane.claimKey, channel: thread.channel, cardTs: thread.cardTs }
+      }
+      run.forceBoard = true
+    }
 
     const groups = new Map()
     for (const item of entries) {
@@ -441,7 +454,9 @@ async function deliverLane(run, laneId, laneState, items) {
       run.summary.deferred += fresh.length - index
       return "next"
     }
-    const text = entry.reply ? renderReply({ kind: entry.kind, mention: Boolean(entry.mention), fields: entry.fields || {} }, run.renderContext) : ""
+    // The PR link of a ready-to-merge reply was built when the entry was queued.
+    const replyContext = entry.prUrl ? { ...run.renderContext, prUrl: entry.prUrl } : run.renderContext
+    const text = entry.reply ? renderReply({ kind: entry.kind, mention: Boolean(entry.mention), fields: entry.fields || {} }, replyContext) : ""
     const result = await sendReply(entry, text)
     if (result.ok || result.drop) {
       if (!(await removeItems(run, [item], result.ok ? "sent" : "dropped"))) return "lost-lock"
@@ -609,7 +624,8 @@ async function publishBoardLocked(run) {
   let pinned = Boolean(record.pinned)
   let pinError = String(record.pinError || "")
 
-  if (!ts || text !== record.text) {
+  if (!ts || text !== record.text || run.forceBoard) {
+    run.forceBoard = false
     if (ts) {
       const sent = await send(run, run.channel, (options) => updateMessage({ ...options, channel: run.channel, ts, text }))
       if (sent.stop) return sent.stop

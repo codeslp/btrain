@@ -45,7 +45,8 @@ export async function createSlackRepo({
   runners = {},
   roots,
 } = {}) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-slack-wiring-")))
+  // The prefix leaves "slack" out, so a test can look for publisher lines.
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-publisher-wiring-")))
   roots?.push(root)
   const repo = path.join(root, "repo")
   const home = path.join(root, "home")
