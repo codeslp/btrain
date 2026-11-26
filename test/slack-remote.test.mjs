@@ -178,6 +178,6 @@ describe("pullRequestLink", () => {
     const reply = renderReply(ready, { repoName: "example-repo", label: "dev", mention: [], channel: "C0000FAKE", prUrl })
     assert.ok(reply.endsWith(` · <${prUrl}|PR #114>`), reply)
     const none = renderReply(ready, { repoName: "example-repo", label: "dev", mention: [], channel: "C0000FAKE", prUrl: pullRequestLink(config("remote.origin.url git@gitlab.example.test:team/app.git"), 114) })
-    assert.equal(none, "PR #114 clear · ready to merge")
+    assert.equal(none, "example-repo · dev: dev · PR #114 clear · ready to merge")
   })
 })

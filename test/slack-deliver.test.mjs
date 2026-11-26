@@ -29,12 +29,29 @@ const LANES = [
   { lane: "b", task: "Task B", owner: "codex", reviewer: "claude-reviewer", status: "in-progress", prNumber: "", lockedFiles: [], lastUpdated: "codex 2026-11-23T21:00:00.000Z" },
 ]
 
+// Every reply starts with the repository and the developer label (T025).
+const P = "fixture-repo · dev: test-dev · "
+
+function isBoardCall(call) {
+  if (call.method === "pins.add") return true
+  return ["chat.postMessage", "chat.update"].includes(call.method) && String(call.body?.text || "").startsWith("board · dev:")
+}
+
 async function setup({ lanes = LANES, start = Date.now() } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-slack-deliver-"))
   roots.push(root)
   const slackDir = path.join(root, ".btrain", "slack")
   const clock = { at: start }
-  const fake = createFakeSlack({ expectedToken: FAKE_BOT, now: () => clock.at })
+  const rawFake = createFakeSlack({ expectedToken: FAKE_BOT, now: () => clock.at })
+  // These tests are about replies and cards: `fake.calls` leaves out the
+  // board's post, update, and pin, which test/slack-board.test.mjs checks.
+  const fake = new Proxy(rawFake, {
+    get(target, prop) {
+      if (prop === "calls") return target.calls.filter((call) => !isBoardCall(call))
+      const value = Reflect.get(target, prop)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
   const now = () => clock.at
   const sleep = async (ms) => { clock.at += ms }
   const state = { lanes: lanes.map((lane) => ({ ...lane })) }
@@ -56,7 +73,7 @@ async function setup({ lanes = LANES, start = Date.now() } = {}) {
   })
   const posts = () => fake.calls.filter((call) => call.method === "chat.postMessage")
   const replies = () => posts().filter((call) => call.body.thread_ts)
-  return { root, slackDir, fake, clock, state, queue, run, posts, replies }
+  return { root, slackDir, fake, rawFake, clock, state, queue, run, posts, replies }
 }
 
 describe("deliver", () => {
@@ -72,7 +89,7 @@ describe("deliver", () => {
     const calls = t.fake.calls.map((call) => [call.method, call.body.thread_ts ? "reply" : call.method === "chat.update" ? "card-update" : "card"])
     assert.deepEqual(calls, [["chat.postMessage", "card"], ["chat.postMessage", "reply"], ["chat.postMessage", "reply"]])
     assert.match(t.fake.calls[0].body.text, /Task A, renamed after the claim/, "the card is rendered from current state, not the event")
-    assert.deepEqual(t.replies().map((call) => call.body.text), ["claude claimed lane a", "sent to review · reviewer codex-reviewer"])
+    assert.deepEqual(t.replies().map((call) => call.body.text), [`${P}claude claimed lane a`, `${P}sent to review · reviewer codex-reviewer`])
     const thread = await getThread(t.slackDir, "a", "claim-a")
     assert.equal(thread.channel, CHANNEL)
     assert.ok(thread.cardTs)
@@ -116,7 +133,7 @@ describe("deliver", () => {
     const retry = (await readDeliveryState(t.slackDir)).entries[left[0].entry.id]
     assert.equal(retry.attempts, 1)
     assert.ok(Date.parse(retry.nextTryAt) > t.clock.at)
-    assert.ok(t.replies().some((call) => call.body.text === "claude claimed lane b"))
+    assert.ok(t.replies().some((call) => call.body.text === `${P}claude claimed lane b`))
   })
 
   it("does not retry a 429 before its Retry-After", async () => {
@@ -131,7 +148,7 @@ describe("deliver", () => {
     t.clock.at += 61_000
     const result = await t.run()
     assert.equal(result.sent, 1)
-    assert.equal(t.replies().filter((call) => call.body.text === "claude claimed lane a").length, 2, "the rate-limited try, then the one after Retry-After")
+    assert.equal(t.replies().filter((call) => call.body.text === `${P}claude claimed lane a`).length, 2, "the rate-limited try, then the one after Retry-After")
   })
 
   it("pauses on a configuration error, sends nothing while paused, and resumes after clearPause", async () => {
@@ -187,7 +204,7 @@ describe("deliver", () => {
     await t.queue("a", "changes-requested", { reasonCode: "x" })
     const result = await t.run()
     assert.deepEqual([result.collapsed, result.sent], [3, 1])
-    assert.deepEqual(t.replies().map((call) => call.body.text), [collapsedReplyText(3), "claude requested changes · x"])
+    assert.deepEqual(t.replies().map((call) => call.body.text), [`${P}${collapsedReplyText(3)}`, `${P}claude requested changes · x`])
     assert.equal((await readDeliveryState(t.slackDir)).counters.collapsed, 3)
   })
 
@@ -222,7 +239,7 @@ describe("deliver", () => {
     t.state.lanes[0].status = "changes-requested"
     const result = await t.run()
     assert.equal(result.status, "done")
-    assert.equal(t.replies().filter((call) => call.body.text.startsWith("sent to review")).length, 2, "at most one duplicate")
+    assert.equal(t.replies().filter((call) => call.body.text.startsWith(`${P}sent to review`)).length, 2, "at most one duplicate")
     const lastCard = t.fake.calls.filter((call) => call.method === "chat.update").at(-1)
     assert.match(lastCard.body.text, /lane a · changes-requested/)
   })
@@ -507,7 +524,7 @@ describe("deliver", () => {
       await t.run()
       t.clock.at += 2 * HOUR
     }
-    assert.ok(t.replies().some((call) => call.body.text === "claude claimed lane a"))
+    assert.ok(t.replies().some((call) => call.body.text === `${P}claude claimed lane a`))
     assert.equal((await readDeliveryState(t.slackDir)).counters.sent, 1, "the entry was sent after four 503s and one unknown error")
   })
 

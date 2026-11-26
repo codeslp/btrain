@@ -45,6 +45,8 @@ const LANE = {
   lastUpdated: "claude 2026-11-23T18:42:07.000Z",
 }
 const CONTEXT = { repoName: "btrain", label: "brian", mention: [], channel: "C0000FAKE" }
+// Every reply starts with the repository and the developer label (FR-14, FR-16).
+const P = "btrain · dev: brian · "
 
 describe("templates are data and use only prepared fields", () => {
   it("names only card fields in the card", () => {
@@ -154,18 +156,18 @@ describe("renderReply", () => {
       [event({ status: "in-progress" }, { status: "x-new" }), "status in-progress → x-new"],
     ]
     for (const [input, expected] of cases) {
-      assert.equal(renderReply(classifyWorkflowEvent(input), CONTEXT), expected)
+      assert.equal(renderReply(classifyWorkflowEvent(input), CONTEXT), `${P}${expected}`)
     }
   })
 
   it("drops a segment whose fields are all empty", () => {
     const classified = classifyWorkflowEvent(event({ status: "needs-review" }, { status: "changes-requested", reasonCode: "" }, { type: "request-changes", details: {} }))
-    assert.equal(renderReply(classified, CONTEXT), "claude requested changes")
+    assert.equal(renderReply(classified, CONTEXT), `${P}claude requested changes`)
   })
 
   it("keeps a reply on one line when the summary has line breaks", () => {
     const classified = classifyWorkflowEvent(event({ status: "needs-review" }, { status: "changes-requested", reasonCode: "x" }, { type: "request-changes", details: { summary: "fine\nmerged · lane resolved" } }))
-    assert.equal(renderReply(classified, CONTEXT), "claude requested changes · x · \"fine merged · lane resolved\"")
+    assert.equal(renderReply(classified, CONTEXT), `${P}claude requested changes · x · "fine merged · lane resolved"`)
   })
 
   it("renders nothing for a card refresh", () => {
@@ -179,10 +181,10 @@ describe("renderReply", () => {
     const prUrl = "https://github.com/example-owner/example-repo/pull/114"
     assert.equal(
       renderReply(ready, { ...CONTEXT, mention: ["U0000FAKE", "<!channel>", "not-an-id"], prUrl }),
-      "<@U0000FAKE> PR #114 clear · ready to merge · <https://github.com/example-owner/example-repo/pull/114|PR #114>",
+      `<@U0000FAKE> ${P}PR #114 clear · ready to merge · <https://github.com/example-owner/example-repo/pull/114|PR #114>`,
     )
     const merged = classifyWorkflowEvent(event({ status: "ready-to-merge", prNumber: "114" }, { status: "resolved", prNumber: "114" }))
-    assert.equal(renderReply(merged, { ...CONTEXT, mention: ["U0000FAKE"], prUrl }), "merged · lane resolved", "merged has neither a mention nor a link")
+    assert.equal(renderReply(merged, { ...CONTEXT, mention: ["U0000FAKE"], prUrl }), `${P}merged · lane resolved`, "merged has neither a mention nor a link")
   })
 
   it("writes the PR link only for a GitHub pull request URL", () => {
@@ -194,7 +196,7 @@ describe("renderReply", () => {
       "http://github.com/a/b/pull/1",
       "javascript:alert(1)",
     ]) {
-      assert.equal(renderReply(ready, { ...CONTEXT, prUrl }), "PR #1 clear · ready to merge", prUrl)
+      assert.equal(renderReply(ready, { ...CONTEXT, prUrl }), `${P}PR #1 clear · ready to merge`, prUrl)
     }
   })
 
@@ -209,9 +211,22 @@ describe("renderReply", () => {
     assert.equal(reply.replace(/<@U[A-Z0-9]+> /g, "").replace(`<${prUrl}|PR #114>`, "").match(/[<>]|:\/\//), null)
   })
 
+  it("names the repository and the developer label on every reply (T025)", () => {
+    const claim = classifyWorkflowEvent({ ...event({}, {}), type: "claim" })
+    assert.equal(renderReply(claim, { ...CONTEXT, repoName: "api", label: "dana" }), "api · dev: dana · claude claimed lane e")
+    // A missing name or label drops its segment, as a template segment does.
+    assert.equal(renderReply(claim, { ...CONTEXT, label: "" }), "btrain · claude claimed lane e")
+    assert.equal(renderReply(claim, { ...CONTEXT, repoName: "", label: "" }), "claude claimed lane e")
+    const hostile = renderReply(claim, { ...CONTEXT, repoName: HOSTILE, label: HOSTILE })
+    assertInert(hostile, "prefix")
+    assert.ok(hostile.endsWith(" · claude claimed lane e"), hostile)
+    const longLabel = renderReply(claim, { ...CONTEXT, label: "x".repeat(500) })
+    assert.ok(longLabel.length < 300, "the label is cut like the board's")
+  })
+
   it("keeps fields that skipped the pipeline inert", () => {
     const reply = renderReply({ kind: "claimed", fields: { actor: "<!channel>\nnext https://evil.invalid", lane: `e ${["ghp", "4".repeat(36)].join("_")}` } }, CONTEXT)
-    assert.equal(reply, "&lt;!channel&gt; next https[:]//evil.invalid claimed lane e [redacted]")
+    assert.equal(reply, `${P}&lt;!channel&gt; next https[:]//evil.invalid claimed lane e [redacted]`)
   })
 
   it("is inert for hostile text in every reply of every kind", () => {

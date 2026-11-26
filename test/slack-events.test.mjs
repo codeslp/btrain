@@ -4,6 +4,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { CARD_REFRESH, classifyWorkflowEvent, KIND_TABLE, KINDS } from "../src/brain_train/slack/events.mjs"
+import { renderReply } from "../src/brain_train/slack/render.mjs"
 
 const lane = (overrides = {}) => ({
   task: "Change the feature",
@@ -140,5 +141,38 @@ describe("classifyWorkflowEvent: fields", () => {
     assert.equal(fields.actor, "&lt;!channel&gt; &amp; https[:]//evil.invalid")
     assert.ok(Array.from(fields.summary).length < 80, "the summary is cut to summary_chars before escaping")
     assert.ok(fields.summary.endsWith("…"))
+  })
+})
+
+describe("mentions only when automatic handling is exhausted (spec 024 FR-15, T024)", () => {
+  const context = { repoName: "btrain", label: "dev", mention: ["U0000FAKE"], prUrl: "https://github.com/example-owner/example-repo/pull/114" }
+  const reply = (event) => renderReply(classifyWorkflowEvent(event), context)
+
+  it("posts a first repair-needed without a mention and mentions its escalation", () => {
+    // The repair owner gets one attempt (spec 006 FR-7): no mention.
+    const first = update(lane({ status: "in-progress" }), lane({ status: "repair-needed", reasonCode: "stale-state", repairOwner: "claude", repairEscalation: "" }))
+    assert.equal(classifyWorkflowEvent(first).kind, "repair-needed")
+    assert.doesNotMatch(reply(first), /<@/)
+    // The attempt clears the repair; no mention either.
+    const cleared = update(lane({ status: "repair-needed", repairOwner: "claude" }), lane({ status: "in-progress" }))
+    assert.equal(classifyWorkflowEvent(cleared).kind, "repair-cleared")
+    assert.doesNotMatch(reply(cleared), /<@/)
+    // The lane needs repair again and escalates to a person (spec 006 FR-18).
+    const escalated = update(lane({ status: "in-progress" }), lane({ status: "repair-needed", reasonCode: "stale-state", repairOwner: "claude", repairEscalation: "human" }))
+    assert.equal(classifyWorkflowEvent(escalated).kind, "repair-needed")
+    assert.match(reply(escalated), /^<@U0000FAKE> btrain · dev: dev · needs repair/)
+  })
+
+  it("mentions a failed reviewer dispatch until spec 023 handles it (WS7)", () => {
+    const failed = { version: 1, recordedAt: "2026-11-23T21:45:00.123Z", type: "dispatch-failed", actor: "btrain", laneId: "a", before: lane({ status: "needs-review" }), after: lane({ status: "needs-review" }), details: { reviewer: "codex-reviewer" } }
+    assert.match(reply(failed), /^<@U0000FAKE> /)
+  })
+
+  it("links and mentions ready-to-merge, and merged has neither", () => {
+    const ready = update(lane({ status: "pr-review", prNumber: "114" }), lane({ status: "ready-to-merge", prNumber: "114" }))
+    assert.match(reply(ready), /^<@U0000FAKE> .* · <https:\/\/github\.com\/example-owner\/example-repo\/pull\/114\|PR #114>$/)
+    const merged = update(lane({ status: "ready-to-merge", prNumber: "114" }), lane({ status: "resolved", prNumber: "114", lockedFiles: [] }), { type: "resolve" })
+    assert.equal(classifyWorkflowEvent(merged).kind, "merged")
+    assert.equal(reply(merged), "btrain · dev: dev · merged · lane resolved")
   })
 })
