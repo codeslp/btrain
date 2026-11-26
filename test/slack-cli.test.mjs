@@ -12,6 +12,9 @@ import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { fakeSlackProcessEnv, readFakeSlackLog } from "./helpers/fake-slack.mjs"
 import { writeEntry, writeDeliveryState, readDeliveryState, emptyDeliveryState } from "../src/brain_train/slack/outbox.mjs"
 import { updateBoard } from "../src/brain_train/slack/threads.mjs"
+import { Readable } from "node:stream"
+import { runSlackCommand } from "../src/brain_train/slack/cli.mjs"
+import { loadSlackCredentials } from "../src/brain_train/slack/credentials.mjs"
 
 const exec = promisify(execFile)
 const CLI = path.resolve("src/brain_train/cli.mjs")
@@ -246,5 +249,51 @@ describe("btrain slack test", () => {
     const result = await f.run(["slack", "nope"])
     assert.notEqual(result.code, 0)
     assert.match(result.stderr, /setup, status, channels, test/)
+  })
+})
+
+// codex-reviewer's repros on 9c726f6, committed before the fix.
+describe("btrain slack setup and status, review repros (codex-reviewer on 9c726f6)", () => {
+  it("refuses a symlinked credential file without replacing its target", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "slack-cli-link-"))
+    roots.push(home)
+    const target = path.join(home, "target.json")
+    const original = JSON.stringify({ label: "original" })
+    await fs.writeFile(target, original, { mode: 0o600 })
+    await fs.symlink(target, path.join(home, "slack.json"))
+    assert.equal(await runSlackCommand("setup", { channel: CHANNEL }, {
+      env: { BRAIN_TRAIN_HOME: home }, repoRoot: "/work/repo", stdin: Readable.from([`${TOKEN}\n`]), out() {}, err() {},
+    }), 1)
+    assert.equal(await fs.readFile(target, "utf8"), original)
+  })
+
+  it("never replaces valid settings with a file its reader refuses (over the size limit)", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "slack-cli-size-"))
+    roots.push(home)
+    const env = { BRAIN_TRAIN_HOME: home }
+    const channels = Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`/work/${"repository".repeat(10)}/${i}`, CHANNEL]))
+    const original = JSON.stringify({ botToken: TOKEN, channels })
+    await fs.writeFile(path.join(home, "slack.json"), original, { mode: 0o600 })
+    assert.equal((await loadSlackCredentials({ env })).reason, "")
+    await runSlackCommand("setup", { channel: OTHER_CHANNEL }, {
+      env, repoRoot: "/work/new-repository", stdin: Readable.from([`${TOKEN}\n`]), out() {}, err() {},
+    })
+    assert.equal((await loadSlackCredentials({ env })).reason, "", "setup leaves loadable credentials")
+  })
+
+  it("maps the registered repository, not a linked worktree's path", async () => {
+    const f = await fixture()
+    await exec("git", ["-C", f.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "init"])
+    const worktree = path.join(f.root, "worktree")
+    await exec("git", ["-C", f.repo, "worktree", "add", "--detach", worktree, "HEAD"])
+    await f.writeSettings({ botToken: TOKEN, channels: { [f.repo]: CHANNEL } })
+    const status = await f.run(["slack", "status", "--repo", worktree])
+    assert.match(status.stdout, new RegExp(`^channel: ${CHANNEL}$`, "m"))
+    const fresh = await fixture()
+    await exec("git", ["-C", fresh.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "init"])
+    const freshWorktree = path.join(fresh.root, "worktree")
+    await exec("git", ["-C", fresh.repo, "worktree", "add", "--detach", freshWorktree, "HEAD"])
+    assert.equal((await fresh.run(["slack", "setup", "--channel", CHANNEL, "--repo", freshWorktree], { input: `${TOKEN}\n` })).code, 0)
+    assert.deepEqual(Object.keys((await fresh.readSettings()).channels), [fresh.repo], "setup maps the registered path")
   })
 })
