@@ -5672,11 +5672,13 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
   // Spec 023 FR-3 (T018, T019): a new same-lab or lab-less reviewer needs a
   // same-lab-review override for the lane while an other-lab agent with a cli
   // runner is configured; the override is consumed here.
-  // The override is consumed only after the update is published (patchHandoff
-  // calls consumeOverride), so a refused update never spends it, and it never
-  // waives author separation.
+  // patchHandoff spends the override after its own checks and immediately
+  // before the handoff write, so a refused update keeps it, and a second
+  // update that read the same override fails to spend it and never publishes.
+  // It never waives author separation.
   let reviewerLabAllowed
   let sameLabOverride = null
+  let overrideSpent = false
   if (reviewerChanged) {
     const reviewerLab = checkReviewerLab(config, {
       owner: updates.owner ?? existingCurrent.owner,
@@ -5711,10 +5713,13 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
     authorHistory: [...new Set([...authorHistory, nextOwnerKey].filter(Boolean))].sort(),
     // Row 20's guard inputs that patchHandoff spreads into its gate calls.
     gateFacts: reviewerLabAllowed === undefined ? {} : { reviewerLabAllowed },
-    // Spends the same-lab-review override this reassignment relies on, once
-    // the update is published.
+    // Spends the same-lab-review override this reassignment relies on. Called
+    // immediately before the handoff write; it throws when another operation
+    // already spent the override, so that operation alone publishes.
     consumeOverride: async () => {
-      if (sameLabOverride) await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId, overrideId: sameLabOverride.id, actor: actor || existingCurrent.owner })
+      if (!sameLabOverride || overrideSpent) return
+      await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId, overrideId: sameLabOverride.id, actor: actor || existingCurrent.owner })
+      overrideSpent = true
     },
   }
 }
@@ -6309,8 +6314,9 @@ async function claimHandoff(repoRoot, options) {
 
   // Spec 023 FR-3 (T018, T019): an explicit same-lab or lab-less reviewer
   // needs a same-lab-review override for the lane while an other-lab agent
-  // with a cli runner is configured. The override is consumed once the claim
-  // is published.
+  // with a cli runner is configured. The claim spends the override after its
+  // own checks and immediately before the handoff write; a second claim that
+  // read the same override fails to spend it and never publishes.
   const reviewerLab = checkReviewerLab(config, { owner: options.owner, reviewer: options.reviewer, configuredAgents })
   const sameLabOverride = reviewerLab.allowed
     ? null
@@ -6318,6 +6324,12 @@ async function claimHandoff(repoRoot, options) {
       && (record.laneId || "") === (laneId || "") && record.scope === (laneId ? "lane" : "repo")) || null
   if (!reviewerLab.allowed && !sameLabOverride) {
     throw new BtrainError(sameLabReviewerRefusal({ reviewer: options.reviewer, otherLab: reviewerLab.otherLab, laneId: laneId || "" }))
+  }
+  let sameLabOverrideSpent = false
+  const spendSameLabOverride = async (scopeLaneId) => {
+    if (!sameLabOverride || sameLabOverrideSpent) return
+    await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId: scopeLaneId, overrideId: sameLabOverride.id, actor: options.owner })
+    sameLabOverrideSpent = true
   }
 
   const validateLaneClaim = (source) => {
@@ -6398,6 +6410,7 @@ async function claimHandoff(repoRoot, options) {
     const publishClaim = async () => {
       const latestLane = await readLaneState(repoRoot, config, laneId)
       validateLaneClaim(latestLane)
+      await spendSameLabOverride(laneId)
       result = await updateHandoff(
       repoRoot,
       updates,
@@ -6426,9 +6439,6 @@ async function claimHandoff(repoRoot, options) {
       publishInsideLock: publishClaim,
       isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
     })
-    if (sameLabOverride) {
-      await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId, overrideId: sameLabOverride.id, actor: options.owner })
-    }
     await compactHandoffHistory(repoRoot, { config, laneId, actorLabel: options.owner })
     return result
   }
@@ -6443,6 +6453,7 @@ async function claimHandoff(repoRoot, options) {
   // spec 015 FR-5 advisory stage (spec 016 WS4): L13, a single-handoff claim
   // over an active handoff, is accepted with a record until enforcement.
   const claimAdvisory = advisoryRowId(claimTransition.row, existingCurrent, { to: "in-progress" })
+  await spendSameLabOverride("")
   const result = await updateHandoff(
     repoRoot,
     updates,
@@ -6464,9 +6475,6 @@ async function claimHandoff(repoRoot, options) {
       },
     },
   )
-  if (sameLabOverride) {
-    await consumeOverride(repoRoot, { config, action: "same-lab-review", laneId: "", overrideId: sameLabOverride.id, actor: options.owner })
-  }
   if (claimAdvisory) {
     options.onEvent?.(formatAdvisoryWarning(claimAdvisory, {
       event: "handoff claim",
@@ -6873,6 +6881,7 @@ async function patchHandoff(repoRoot, options) {
           )) {
             throw new BtrainError({ message: "The lane review range changed. Read the lane and retry." })
           }
+          await reassign.consumeOverride()
           updatedCurrent = await updateHandoff(...updateHandoffArgs)
         }
         await acquireLocks(repoRoot, laneId, effectiveOwner, effectiveFiles, {
@@ -6880,9 +6889,9 @@ async function patchHandoff(repoRoot, options) {
           isPublished: () => handoffPublished(handoffPath, updates.lastUpdated),
         })
       } else {
+        await reassign.consumeOverride()
         updatedCurrent = await updateHandoff(...updateHandoffArgs)
       }
-      await reassign.consumeOverride()
       return finishPatchWithReviewerDispatch(repoRoot, {
         previousStatus: existingCurrent.status,
         nextStatus,
@@ -7077,6 +7086,7 @@ async function patchHandoff(repoRoot, options) {
         })
       : null
 
+  await singleReassign.consumeOverride()
   const updatedCurrent = await updateHandoff(repoRoot, updates, {
     actorLabel: singleReassign.responsibleActor || resolvedActor || updates.owner || existingCurrent.owner || "btrain",
     delegationPacketSectionText:
@@ -7106,7 +7116,6 @@ async function patchHandoff(repoRoot, options) {
       ...(cgraphMetadata ? { cgraph: cgraphMetadata } : {}),
     },
   })
-  await singleReassign.consumeOverride()
   return finishPatchWithReviewerDispatch(repoRoot, {
     previousStatus: existingCurrent.status,
     nextStatus,
