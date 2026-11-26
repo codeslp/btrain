@@ -49,8 +49,8 @@ function resolveTimeouts(overrides) {
   if (!overrides || typeof overrides !== "object") return resolved
   for (const kind of Object.keys(TIMEOUTS)) {
     const raw = overrides[kind]
-    if (typeof raw === "string" && !/^\d+$/.test(raw.trim())) continue
-    if (typeof raw !== "string" && typeof raw !== "number") continue
+    const isDigitString = typeof raw === "string" && /^\d+$/.test(raw.trim())
+    if (!isDigitString && typeof raw !== "number") continue
     const value = Number(raw)
     if (Number.isSafeInteger(value) && value > 0) resolved[kind] = value
   }

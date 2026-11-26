@@ -105,7 +105,7 @@ describe("cgraph_adapter", () => {
 
     it("uses bin_path from config when executable", async () => {
       const binPath = await writeFakeBinary(tmpDir, { stdout: "{}" })
-      const result = await resolveBinary({ cgraph: { timeouts: GENEROUS_TIMEOUTS, bin_path: binPath } })
+      const result = await resolveBinary({ cgraph: { bin_path: binPath } })
       assert.equal(result, binPath)
     })
   })
