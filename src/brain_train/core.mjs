@@ -630,15 +630,24 @@ async function writeText(targetPath, content) {
         if (readlinkError?.code === "EINVAL" || readlinkError?.code === "ENOENT") break
         throw readlinkError
       }
-      // Resolve a relative target from the directory the filesystem follows:
-      // through a symlinked parent, a lexical "../" would land elsewhere.
-      let parent = path.dirname(destination)
+      // Let the filesystem resolve everything but the last component of the
+      // target, unnormalized: realpath follows each symlinked directory
+      // before it applies a "..", where path.resolve would cancel the pair
+      // lexically and land elsewhere (for example "dir/../x" with dir a
+      // symlink, or "../x" under a symlinked parent).
+      const unresolved = path.isAbsolute(linkTarget)
+        ? linkTarget
+        : `${path.dirname(destination)}${path.sep}${linkTarget}`
+      const lastSeparator = unresolved.lastIndexOf(path.sep)
+      const unresolvedParent = unresolved.slice(0, lastSeparator) || path.sep
+      let parent
       try {
-        parent = await fs.realpath(parent)
+        parent = await fs.realpath(unresolvedParent)
       } catch (parentError) {
         if (parentError?.code !== "ENOENT") throw parentError
+        parent = path.resolve(unresolvedParent)
       }
-      destination = path.resolve(parent, linkTarget)
+      destination = path.join(parent, unresolved.slice(lastSeparator + 1))
     }
   }
   // A short fixed-shape name: appending to a long valid basename could pass
