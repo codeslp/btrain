@@ -106,6 +106,23 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
       assert.deepEqual(kept.map((m) => m.author), ["btrain", "operator"])
     })
 
+    it("takes the label only from the reply prefix or the card's label line, not from text inside the message", () => {
+      const kept = filterThread(
+        [
+          botPost("3.4", "repo-x · dev: someone-else · changes requested · task mentions · dev: brian · text"),
+          botPost("3.5", "repo-x · lane a · in-progress\ndev: someone-else\ntask: dev: brian\nowner: x"),
+          botPost("3.6", "repo-x · dev: someone-else · summary\ndev: brian"),
+        ],
+        { operator: OPERATOR, botUserId: BOT, label: LABEL },
+      )
+      assert.deepEqual(kept, [])
+    })
+
+    it("drops a message from the operator's user ID that carries a bot_id", () => {
+      const kept = filterThread([typed("3.7", "posted with a bot_id", { bot_id: "B0FAKEBOT2" })], { operator: OPERATOR, botUserId: BOT, label: LABEL })
+      assert.deepEqual(kept, [])
+    })
+
     it("does not take a label that only starts the same way", () => {
       const kept = filterThread([botPost("3.1", "repo-x · dev: brian2 · claimed lane a")], { operator: OPERATOR, botUserId: BOT, label: LABEL })
       assert.deepEqual(kept, [])
