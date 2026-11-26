@@ -1118,7 +1118,7 @@ const server = http.createServer(async (req, res) => {
           const identity = getAgentIdentity(lane.hotSeat);
 
           return \`
-            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${escapeHtml(lane.repoName)} // \${lane.status.toUpperCase()}">
+            <div class="indicator-pill status-\${lane.status} \${hasHotSeat ? 'active' : ''}" onclick="scrollToCard('\${lane.id}', event)" title="\${escapeHtml(lane.repoName)} // \${escapeHtml((lane.display || lane.status).toUpperCase())}">
               <div class="indicator-repo">\${escapeHtml(lane.repoName)}</div>
               <div class="lane-box \${lane.status}">\${escapeHtml(lane.laneId)}</div>
               \${hasHotSeat ? \`
@@ -1150,7 +1150,7 @@ const server = http.createServer(async (req, res) => {
             
             <div class="lane-header">
               <div class="lane-id">LANE \${escapeHtml(lane.laneId)}</div>
-              <div class="lane-status \${renderStatusClass(lane.status)}">[\${lane.status}]</div>
+              <div class="lane-status \${renderStatusClass(lane.status)}">[\${escapeHtml(lane.display || lane.status)}]</div>
             </div>
 
             \${lane.writer || lane.reviewer || lane.repairOwner ? \`

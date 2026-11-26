@@ -8,6 +8,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import vm from "node:vm"
 import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { formatReviewLine, reviewSummary } from "../src/brain_train/review/record.mjs"
@@ -146,7 +147,9 @@ describe("the display in btrain status and btrain handoff (spec 023 T011)", () =
 })
 
 describe("the display in the dashboard (spec 023 T011)", () => {
-  it("shows the display state, reviewer, time, and tier for a lane under review", async (t) => {
+  // The dashboard with a fake `btrain` on PATH that prints this lane under
+  // review, picked up four minutes ago, by a same-lab fallback.
+  async function startDashboard(t) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-dashboard-display-"))
     roots.push(root)
     const bin = path.join(root, "bin")
@@ -165,17 +168,55 @@ describe("the display in the dashboard (spec 023 T011)", () => {
       server.stdout.on("data", (chunk) => { if (String(chunk).includes("running")) resolve() })
       server.on("exit", (code) => reject(new Error(`dashboard exited ${code}`)))
     })
-    const body = await new Promise((resolve, reject) => {
-      http.get(`http://127.0.0.1:${port}/api/status`, (res) => {
+    const get = (route) => new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${port}${route}`, (res) => {
         let data = ""
         res.on("data", (chunk) => { data += chunk })
-        res.on("end", () => resolve(JSON.parse(data)))
+        res.on("end", () => resolve(data))
       }).on("error", reject)
     })
-    const lane = body.lanes[0]
+    return { get }
+  }
+
+  it("serves the display state, reviewer, time, and tier for a lane under review", async (t) => {
+    const { get } = await startDashboard(t)
+    const lane = JSON.parse(await get("/api/status")).lanes[0]
     assert.equal(lane.status, "needs-review", "the stored status stays")
     assert.equal(lane.display, "in-review")
     assert.match(lane.review, /^review: in-review · reviewer beta · picked up 4m ago · tier same-lab · fallback no-other-lab-configured$/)
     assert.match(lane.fullText, /^Review: in-review · reviewer beta · picked up 4m ago · tier same-lab · fallback no-other-lab-configured$/m)
+  })
+
+  it("renders the display state on the visible card and indicator (codex-reviewer on c6aaa44)", async (t) => {
+    const { get } = await startDashboard(t)
+    const page = await get("/")
+    const apiStatus = await get("/api/status")
+    const script = /<script>([\s\S]*)<\/script>/.exec(page)[1]
+    // A stub DOM: every element keeps the HTML the page script gives it.
+    const elements = new Map()
+    const element = (id) => {
+      if (!elements.has(id)) elements.set(id, { id, innerHTML: "", value: "", checked: false, disabled: false, addEventListener() {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false } })
+      return elements.get(id)
+    }
+    const context = {
+      document: { getElementById: element, createElement: () => ({ innerHTML: "" }), querySelectorAll: () => [], addEventListener() {} },
+      window: {},
+      fetch: async () => ({ ok: true, json: async () => JSON.parse(apiStatus) }),
+      setInterval: () => 0,
+      setTimeout: (fn) => { fn(); return 0 },
+      console,
+      Set, Map, JSON, Date, Math, String, Number, Array, Object, Promise, encodeURIComponent,
+    }
+    context.window = context
+    vm.createContext(context)
+    vm.runInContext(script, context)
+    // fetchStatus runs at load; let its awaits settle.
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve))
+    const card = element("lanes-container").innerHTML
+    const indicator = element("lane-indicators-container").innerHTML
+    assert.match(card, /\[in-review\]/, "the card's status label shows the display state")
+    assert.doesNotMatch(card, /\[needs-review\]/)
+    assert.match(card, /data-status="needs-review"/, "workflow attributes keep the stored status")
+    assert.match(indicator, /\/\/ IN-REVIEW"/, "the indicator title shows the display state")
   })
 })
