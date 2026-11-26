@@ -133,6 +133,75 @@ describe("dashboard lifecycle", () => {
     }
   })
 
+  it("keeps the legacy port when the legacy dashboard is slow to exit", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3475)
+    // Exits 1.5 s after SIGTERM: longer than the old 1 s wait for the port,
+    // after which ensureDashboard silently moved to the next port.
+    const legacySource = [
+      "const http = require('node:http')",
+      "const port = Number(process.env.PORT)",
+      "const server = http.createServer((req, res) => {",
+      "  res.writeHead(200, { 'Content-Type': 'application/json' })",
+      "  res.end(JSON.stringify({ ok: true, repo: process.cwd(), port }))",
+      "}).listen(port, '127.0.0.1', () => process.stdout.write('listening\\n'))",
+      "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 1500))",
+    ].join("\n")
+    const legacy = spawn(process.execPath, ["-e", legacySource], {
+      cwd: repoRoot,
+      env: { ...env, PORT: String(port) },
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+    try {
+      await new Promise((resolve, reject) => {
+        legacy.stdout.once("data", resolve)
+        legacy.once("exit", () => reject(new Error("legacy dashboard exited before listening")))
+      })
+      await fs.writeFile(path.join(repoRoot, ".btrain", "dashboard.json"), JSON.stringify({ pid: legacy.pid, port, repo: repoRoot }), "utf8")
+
+      const started = await ensureDashboard(repoRoot, { env, port, openBrowser: false })
+      assert.equal(started.running, true)
+      assert.equal(started.port, port)
+    } finally {
+      legacy.kill("SIGKILL")
+    }
+  })
+
+  it("fails fast when the dashboard process exits during startup", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3500)
+    const started = Date.now()
+    await assert.rejects(
+      ensureDashboard(repoRoot, {
+        env,
+        port,
+        openBrowser: false,
+        spawnImpl: (command, args, options) => spawn(process.execPath, ["-e", "process.exit(3)"], options),
+      }),
+      /Dashboard exited with code 3 before it became healthy/,
+    )
+    assert.ok(Date.now() - started < 4000, "a dead dashboard must not use the whole startup budget")
+    assert.equal((await getDashboardStatus(repoRoot, { env })).running, false)
+  })
+
+  it("waits for a dashboard that is slow to start but still running", async () => {
+    const { repoRoot, env } = await createDashboardRepo()
+    const port = await findAvailableDashboardPort(3525)
+    // Answers health checks only after 6 s, past the old 5 s budget.
+    const result = await ensureDashboard(repoRoot, {
+      env,
+      port,
+      openBrowser: false,
+      spawnImpl: (command, args, options) => spawn(
+        process.execPath,
+        ["-e", `setTimeout(() => require(${JSON.stringify(args[0])}), 6000)`],
+        options,
+      ),
+    })
+    assert.equal(result.running, true)
+    assert.equal(result.port, port)
+  })
+
   it("stops the shared dashboard from any repo", async () => {
     const firstRepo = await createDashboardRepo()
     const secondRepo = await createDashboardRepo(firstRepo.env.BRAIN_TRAIN_HOME)
