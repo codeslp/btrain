@@ -50,9 +50,8 @@ const MAX_TIMER_MS = 2_147_483_647
 
 function resolveTimeouts(overrides) {
   const resolved = { ...TIMEOUTS }
-  if (!overrides || typeof overrides !== "object") return resolved
   for (const kind of Object.keys(TIMEOUTS)) {
-    const raw = overrides[kind]
+    const raw = overrides?.[kind]
     const isDigitString = typeof raw === "string" && /^\d+$/.test(raw.trim())
     if (!isDigitString && typeof raw !== "number") continue
     const value = Number(raw)
