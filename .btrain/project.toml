@@ -103,3 +103,10 @@ handoff_path = ".claude/collab/HANDOFF_O.md"
 [cgraph]
 enabled = true
 advise_on = ["lock_overlap", "drift", "packet_truncated"]
+
+# Spec 024 pilot (T028): the Slack lane publisher is on for this repository
+# only. Every feature absent from this table stays on; slack_listen is
+# explicit-only and stays off. Without ~/.btrain/slack.json the publisher
+# queues to the gitignored .btrain/slack/ and posts nothing.
+[features]
+slack = true
