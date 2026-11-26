@@ -11,7 +11,8 @@ import os from "node:os"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { appendWorkflowEvent, getStartupSnapshot, readProjectConfig, readWorkflowEvents } from "../src/brain_train/core.mjs"
+import { appendWorkflowEvent, getLaneConfigs, getStartupSnapshot, readProjectConfig, readWorkflowEvents, withFileLock } from "../src/brain_train/core.mjs"
+import { spawn } from "node:child_process"
 
 const exec = promisify(execFile)
 const CLI_PATH = path.resolve("src/brain_train/cli.mjs")
@@ -74,7 +75,10 @@ async function withReviewLane(fn) {
     details: { attemptId: "t1", requestId: "r1", reviewer: "beta", previousReviewer: "", reason: "", tier: "other-lab", head: await git(repo, "rev-parse", "HEAD"), opened: "dispatch", by: "btrain-system" },
   })
   const signals = async () => (await readWorkflowEvents(repo, config, "a")).filter((event) => event.type === "review-pickup" || event.type === "review-progress")
-  await fn({ repo, home, config, signals, run: (args, agent) => btrain(args, { cwd: repo, home, agent }) })
+  // The lane's handoff lock, the one updateHandoff takes (tracked mode: the
+  // state root is the repository).
+  const handoffLock = `${path.resolve(repo, getLaneConfigs(config).find((lane) => lane.id === "a").handoffPath)}.lock`
+  await fn({ repo, home, config, signals, handoffLock, run: (args, agent) => btrain(args, { cwd: repo, home, agent }) })
 }
 
 describe("review activity from the CLI (spec 023 T010)", () => {
@@ -114,6 +118,92 @@ describe("review activity from the CLI (spec 023 T010)", () => {
       await run(["pr", "status", "--lane", "a"], "beta")
       await getStartupSnapshot(repo)
       assert.deepEqual(await signals(), [])
+    })
+  })
+})
+
+// codex-reviewer's surviving mutants on 3a9f33e (M3, M6 to M10).
+describe("review activity from the CLI, guarded paths (codex-reviewer on 3a9f33e)", () => {
+  // Start the CLI without waiting for it, so a test can hold a lock meanwhile.
+  function start(args, { repo, home, agent }) {
+    const child = spawn("node", [CLI_PATH, ...args], { cwd: repo, env: cliEnv(home, agent) })
+    let stderr = ""
+    child.stderr.on("data", (chunk) => { stderr += chunk })
+    const done = new Promise((resolve) => child.on("close", (code) => resolve({ code, stderr })))
+    return { done }
+  }
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it("writes under the lane's handoff lock, and once for simultaneous pickups (M6, M7)", async () => {
+    await withReviewLane(async ({ repo, home, signals, handoffLock }) => {
+      let pending
+      await withFileLock(handoffLock, async () => {
+        pending = [start(["handoff", "--lane", "a"], { repo, home, agent: "beta" }), start(["handoff", "--lane", "a"], { repo, home, agent: "beta" })]
+        await pause(1500)
+        assert.deepEqual(await signals(), [], "no signal while the handoff lock is held")
+      })
+      for (const run of pending) assert.equal((await run.done).code, 0)
+      assert.deepEqual((await signals()).map((event) => event.type), ["review-pickup"], "exactly one pickup")
+    })
+  })
+
+  it("writes progress for a pr subcommand that is not status (M3)", async () => {
+    await withReviewLane(async ({ run, signals }) => {
+      // The command itself may fail (no GitHub here); the signal is recorded
+      // right after the repository is resolved.
+      await run(["pr", "poll", "--lane", "a"], "beta")
+      assert.deepEqual((await signals()).map((event) => event.type), ["review-progress"])
+    })
+  })
+
+  it("warns and still succeeds when the signal cannot be written (M10)", async () => {
+    await withReviewLane(async ({ repo, config, run, signals }) => {
+      const log = path.join(repo, ".btrain", "events", "lane-a.jsonl")
+      const before = (await readWorkflowEvents(repo, config, "a")).length
+      await fs.chmod(log, 0o444)
+      try {
+        const result = await run(["handoff", "--lane", "a"], "beta")
+        assert.equal(result.code, 0, result.stderr)
+        assert.match(result.stderr, /review activity signal for lane a was not recorded/)
+      } finally {
+        await fs.chmod(log, 0o644)
+      }
+      assert.equal((await readWorkflowEvents(repo, config, "a")).length, before)
+      assert.deepEqual(await signals(), [])
+    })
+  })
+
+  it("writes the owner's pickup of a fix-confirmation lane once (M8)", async () => {
+    await withReviewLane(async ({ repo, config, run, signals }) => {
+      const fixHead = await git(repo, "rev-parse", "HEAD")
+      await appendWorkflowEvent(repo, config, {
+        laneId: "a", type: "fix-applied", actor: "beta",
+        details: { attemptId: "t1", fixBase: fixHead, fixHead, commits: [fixHead], round: 1, files: ["src/feature.mjs"], changedLines: 1 },
+      })
+      // fix-confirmation has no CLI transition until WS7; set it in the file.
+      const handoffPath = path.resolve(repo, getLaneConfigs(config).find((lane) => lane.id === "a").handoffPath)
+      const text = await fs.readFile(handoffPath, "utf8")
+      await fs.writeFile(handoffPath, text.replace(/^Status: needs-review$/m, "Status: fix-confirmation"))
+      await run(["handoff", "--lane", "a"], "alpha")
+      await run(["handoff", "--lane", "a"], "alpha")
+      const written = await signals()
+      assert.deepEqual(written.map((event) => [event.type, event.actor, event.details.fixHead]), [["review-pickup", "alpha", fixHead]])
+    })
+  })
+
+  it("takes no lock for a lane that is not under review (M9)", async () => {
+    await withReviewLane(async ({ repo, home, signals, handoffLock, run }) => {
+      // Move the lane out of review: request changes as the reviewer.
+      const changes = await run(["handoff", "request-changes", "--lane", "a", "--summary", "needs a test", "--reason-code", "missing-verification"], "beta")
+      assert.equal(changes.code, 0, changes.stderr)
+      const before = (await signals()).length
+      await withFileLock(handoffLock, async () => {
+        const started = Date.now()
+        const result = await start(["handoff", "--lane", "a"], { repo, home, agent: "beta" }).done
+        assert.equal(result.code, 0, result.stderr)
+        assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms while the lock was held`)
+      })
+      assert.equal((await signals()).length, before)
     })
   })
 })
