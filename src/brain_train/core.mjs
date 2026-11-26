@@ -5631,6 +5631,25 @@ async function resolveReassignInputs(repoRoot, config, { laneId = "", existingCu
   const authorHistory = reassigning
     ? authorHistorySinceClaim(await readWorkflowEvents(repoRoot, config, laneId), existingCurrent)
     : new Set()
+  // Spec 023 FR-3: `--reviewer any-other` names no agent. It resolves to the
+  // first eligible candidate, other-lab then same-lab, that never owned the
+  // task, so the recorded reviewer is always an agent that can pick it up.
+  if (updates.reviewer !== undefined && isAnyOtherReviewerValue(updates.reviewer)) {
+    const candidates = orderCandidates(config, {
+      owner: updates.owner ?? existingCurrent.owner,
+      authorHistory: [...authorHistory],
+      configuredAgents: getConfiguredAgentNames(config),
+    })
+    const picked = candidates.otherLab[0] || candidates.sameLab[0] || ""
+    if (!picked) {
+      throw new BtrainError({
+        message: "`--reviewer any-other` found no agent that can review this lane.",
+        reason: "Every configured agent with a cli runner has owned this task.",
+        fix: `Name a reviewer: btrain handoff update${laneId ? ` --lane ${laneId}` : ""} --reviewer <agent>`,
+      })
+    }
+    updates.reviewer = picked
+  }
   const previousOwnerKey = normalizeAgentName(existingCurrent.owner).toLowerCase()
   const previousReviewerKey = normalizeAgentName(existingCurrent.reviewer).toLowerCase()
   const nextOwnerKey = normalizeAgentName(updates.owner ?? existingCurrent.owner).toLowerCase()
