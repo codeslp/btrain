@@ -422,6 +422,69 @@ trap 'miss_first_term "$BASH_COMMAND"' DEBUG
     }
   })
 
+  it("keeps re-signalling an executor that drops TERM past any retry window", async () => {
+    // The job subshell swallows TERM until it has seen 101 of them (more than
+    // the 100 a capped retry loop would send, about 10 s) and only then execs
+    // node. After the fifth it reports that it is holding out, and the test
+    // checks that the helper is still alive and still has its capture file:
+    // it must not exit or clean up while its executor runs. The helper
+    // finishes with 130 only if it keeps signalling until the job is gone.
+    const tmpDir = await makeTmpDir()
+    const binDir = path.join(tmpDir, "bin")
+    const scratch = path.join(tmpDir, "scratch")
+    const bashEnv = path.join(tmpDir, "bash-env")
+    const ready = path.join(tmpDir, "job-traps-term")
+    const holding = path.join(tmpDir, "job-holding")
+    const zgPids = path.join(tmpDir, "zg.pids")
+    await fs.mkdir(binDir)
+    await fs.mkdir(scratch)
+    await writeFakeZg(binDir)
+    await fs.writeFile(bashEnv, `set -T
+hold_out() {
+  if [ "$BASH_SUBSHELL" -gt 0 ] && [ "\${1#local secs=}" != "$1" ]; then
+    ZVEC_TEST_SEEN=0
+    trap 'ZVEC_TEST_SEEN=$((ZVEC_TEST_SEEN + 1)); [ "$ZVEC_TEST_SEEN" -eq 5 ] && : > "$ZVEC_TEST_HOLDING"' TERM
+    : > "$ZVEC_TEST_READY"
+    while [ "$ZVEC_TEST_SEEN" -le 100 ]; do sleep 0.01; done
+  elif [ "$BASH_SUBSHELL" -eq 0 ] && [ "$1" = 'pid=$!' ]; then
+    trap - DEBUG
+    while [ ! -e "$ZVEC_TEST_READY" ]; do sleep 0.01; done
+    on_signal 2
+  fi
+}
+trap 'hold_out "$BASH_COMMAND"' DEBUG
+`)
+    let helper
+    try {
+      const run = runHelper(["search", "query", "--root", tmpDir], {
+        cwd: tmpDir, timeout: 40000, killSignal: "SIGKILL",
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, TMPDIR: scratch, BASH_ENV: bashEnv,
+          ZVEC_TEST_READY: ready, ZVEC_TEST_HOLDING: holding, ZVEC_TEST_LOG: path.join(tmpDir, "zg.log"),
+          ZVEC_TEST_PID_LOG: zgPids, ZVEC_TEST_STATUS_SLEEP: "30" },
+        onSpawn: (child) => { helper = child },
+      })
+      while (!(await fs.access(holding).then(() => true, () => false))) {
+        assert.equal(helper.exitCode, null, "the helper exited before its executor held out")
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      assert.equal(helper.exitCode, null, "the helper must stay alive while its executor runs")
+      assert.equal((await fs.readdir(scratch)).filter((name) => name.startsWith("zvec-context.")).length, 1,
+        "the helper must keep its capture file while its executor runs")
+      const result = await run
+      assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`)
+      assert.deepEqual(await fs.readdir(scratch), [], "cancellation must leave no capture files")
+    } finally {
+      const pids = (await fs.readFile(zgPids, "utf8").catch(() => "")).split("\n").filter(Boolean).map(Number)
+      for (const pid of pids) {
+        const state = await execFileAsync("/bin/ps", ["-o", "args=", "-p", String(pid)]).catch(() => ({ stdout: "" }))
+        if (state.stdout.trim() === "sleep 30") {
+          try { process.kill(pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+        }
+      }
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("waits for the owned command to exit when the helper is cancelled", async () => {
     const tmpDir = await makeTmpDir()
     const binDir = path.join(tmpDir, "bin")
