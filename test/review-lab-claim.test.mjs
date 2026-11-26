@@ -376,3 +376,27 @@ describe("one same-lab-review grant under overrides.lock contention (codex-revie
     })
   })
 })
+
+// codex-reviewer on 1781a6a (M7, M8): the grant lookup in claimHandoff and
+// resolveReassignInputs must filter by lane. Without the filter it picks the
+// newest grant, here lane b's, and consumeOverride then refuses a valid claim
+// or reassignment on lane a.
+describe("lane a's grant with a newer lane b grant present (codex-reviewer M7, M8 on 1781a6a)", () => {
+  for (const reassign of [false, true]) {
+    it(`uses lane a's grant for a ${reassign ? "reassignment" : "claim"}`, async () => {
+      await withRepo({}, async ({ repo, run, claim, grant, reviewerOf }) => {
+        if (reassign) assert.equal((await claim()).code, 0)
+        assert.equal((await grant()).code, 0)
+        await new Promise((resolve) => setTimeout(resolve, 1100))
+        assert.equal((await grant(["--lane", "b"])).code, 0)
+        const result = reassign
+          ? await run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+          : await claim(["--reviewer", "claude-reviewer"])
+        assert.equal(result.code, 0, result.stderr)
+        assert.equal(await reviewerOf(), "claude-reviewer")
+        const remaining = (await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review")
+        assert.deepEqual(remaining.map((record) => record.laneId), ["b"])
+      })
+    })
+  }
+})
