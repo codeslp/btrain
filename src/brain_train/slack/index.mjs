@@ -21,12 +21,12 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { promisify } from "node:util"
 import { getSlackOptions, isSlackEnabled } from "./config.mjs"
-import { CARD_REFRESH, classifyWorkflowEvent } from "./events.mjs"
+import { claimKeyOf, classifyWorkflowEvent } from "./events.mjs"
 import { readDeliveryState, writeEntry } from "./outbox.mjs"
 import { pullRequestLink, REMOTE_CONFIG_PATTERN } from "./remote.mjs"
 import { deliverToTarget, deliveryTarget, slackDirFor } from "./target.mjs"
 import { prepareAgentText } from "./text.mjs"
-import { getThread, readClaimKey, recordClaimKey } from "./threads.mjs"
+import { getThread } from "./threads.mjs"
 
 export { collectSlackDoctorFindings } from "./doctor.mjs"
 
@@ -59,6 +59,22 @@ async function logError(slackDir, where, error) {
   }
 }
 
+// The events of one lane's log, parsed; a line that does not parse is skipped.
+async function readEventLog(eventLogPath) {
+  if (!eventLogPath) return []
+  const text = await fs.readFile(eventLogPath, "utf8").catch(() => "")
+  const events = []
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue
+    try {
+      events.push(JSON.parse(line))
+    } catch {
+      // A torn or foreign line names no claim.
+    }
+  }
+  return events
+}
+
 // The GitHub link of the lane's PR, from the base remote, or "".
 async function pullRequestUrl(stateRoot, prNumber) {
   if (!prNumber) return ""
@@ -74,12 +90,14 @@ async function pullRequestUrl(stateRoot, prNumber) {
 }
 
 /**
- * Queue an outbox entry for a workflow event (core.mjs, after the append).
- * A repository-wide event in a repository with lanes has no lane thread and
- * is not queued, nor is a card refresh for a lane never claimed while the
- * publisher was on.
+ * Queue an outbox entry for a workflow event (core.mjs, after the append to
+ * `eventLogPath`, the lane's log). The entry's claim key is the time of the
+ * lane's last claim event in that log (FR-5), so a task claimed while the
+ * publisher was off still gets its own card on its next event. A
+ * repository-wide event in a repository with lanes has no lane thread and is
+ * not queued.
  */
-export async function offerWorkflowEvent(repoRoot, config, event) {
+export async function offerWorkflowEvent(repoRoot, config, event, eventLogPath = "") {
   if (!isSlackEnabled(config)) return
   let slackDir = ""
   try {
@@ -87,14 +105,9 @@ export async function offerWorkflowEvent(repoRoot, config, event) {
     const laneId = String(event?.laneId || "")
     if (!laneId && lanesEnabled(config)) return
     const classified = classifyWorkflowEvent(event, { summaryChars: getSlackOptions(config).summaryChars })
-    let claimKey
-    if (event?.type === "claim") {
-      claimKey = String(event.recordedAt || new Date().toISOString())
-      await recordClaimKey(slackDir, laneId, claimKey)
-    } else {
-      claimKey = await readClaimKey(slackDir, laneId)
-      if (!claimKey && classified.kind === CARD_REFRESH) return
-    }
+    // The event is already appended, so a claim finds itself, with the time
+    // the log recorded (the event object may not carry it).
+    const claimKey = claimKeyOf(await readEventLog(eventLogPath))
     const entry = { laneId, claimKey, kind: classified.kind, reply: classified.reply, mention: classified.mention, fields: classified.fields }
     if (classified.kind === "ready-to-merge") {
       const prUrl = await pullRequestUrl(path.dirname(path.dirname(slackDir)), event?.after?.prNumber)
@@ -112,7 +125,7 @@ export async function offerWorkflowEvent(repoRoot, config, event) {
  * or timed out (core.mjs, before the throw). `lane` is the lane's state after
  * its update.
  */
-export async function offerDispatchFailure(repoRoot, config, { laneId = "", lane = {}, agentName = "", status = "", reason = "" } = {}) {
+export async function offerDispatchFailure(repoRoot, config, { laneId = "", lane = {}, agentName = "", status = "", reason = "", eventLogPath = "" } = {}) {
   if (!isSlackEnabled(config)) return
   const reviewer = agentName || lane?.reviewer || ""
   await offerWorkflowEvent(repoRoot, config, {
@@ -123,22 +136,28 @@ export async function offerDispatchFailure(repoRoot, config, { laneId = "", lane
     before: lane,
     after: { ...lane, reviewer },
     details: { summary: reason || `reviewer dispatch ${status || "failed"}` },
-  })
+  }, eventLogPath)
 }
 
 /**
- * The FR-12 thread line of one lane, or "" when the publisher is off or the
- * lane's current task has no thread.
+ * The FR-12 thread line of each lane whose current task has a thread, by lane
+ * id. `readLanes(repoRoot)` gives the lane states with their claim keys. Empty,
+ * with nothing read, when the publisher is off.
  */
-export async function threadLine(repoRoot, config, laneId = "") {
+export async function threadLines(repoRoot, config, readLanes) {
+  const lines = new Map()
   try {
-    if (!isSlackEnabled(config)) return ""
+    if (!isSlackEnabled(config)) return lines
     const slackDir = slackDirFor(repoRoot)
-    const thread = await getThread(slackDir, laneId, await readClaimKey(slackDir, laneId))
-    return thread ? `slack thread: ${thread.channel} ${thread.cardTs} · ${THREAD_GUIDANCE}` : ""
+    for (const lane of await readLanes(repoRoot)) {
+      const laneId = String(lane?.laneId ?? "")
+      const thread = await getThread(slackDir, laneId, lane?.claimKey)
+      if (thread) lines.set(laneId, `slack thread: ${thread.channel} ${thread.cardTs} · ${THREAD_GUIDANCE}`)
+    }
   } catch {
-    return ""
+    // No line is better than a failed command.
   }
+  return lines
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   readProjectConfig,
   readWorkflowEvents,
 } from "./core.mjs"
+import { claimKeyOf } from "./slack/events.mjs"
 import { enteredByPrPoll } from "./slack/pr-poll.mjs"
 import { resolveStateRoot } from "./worktree.mjs"
 
@@ -46,15 +47,21 @@ export async function readEnteredByPrPoll(repoRoot, laneId = "") {
 }
 
 /**
- * Spec 024 WS4: current lane states for delivery, each with its `laneId`. A
- * repository with lanes turned off has one state, the single handoff, with
- * the lane id "".
+ * Spec 024 WS4: current lane states for delivery, each with its `laneId` and
+ * the `claimKey` of its current task, read from the lane's own event log
+ * (FR-5). A repository with lanes turned off has one state, the single
+ * handoff, with the lane id "".
  */
 export async function readLaneStates(repoRoot) {
   const config = await readProjectConfig(repoRoot)
   const lanes = await readAllLaneStates(repoRoot, config)
-  if (lanes) return lanes.map((lane) => ({ ...lane, laneId: lane._laneId }))
-  return [{ ...(await checkHandoff(repoRoot)).current, laneId: "" }]
+  const states = lanes
+    ? lanes.map((lane) => ({ ...lane, laneId: lane._laneId }))
+    : [{ ...(await checkHandoff(repoRoot)).current, laneId: "" }]
+  return Promise.all(states.map(async (lane) => ({
+    ...lane,
+    claimKey: claimKeyOf(await readWorkflowEvents(repoRoot, config, lane.laneId)),
+  })))
 }
 
 /** The readers object of the `slack` block, beyond the repository fields. */

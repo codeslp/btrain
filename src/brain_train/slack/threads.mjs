@@ -49,28 +49,6 @@ export async function deleteThread(slackDir, laneId, claimKey) {
   await writeJsonAtomic(path.join(slackDir, THREADS_FILENAME), threads)
 }
 
-// Spec 024 WS4: the claim key of each lane's current task, recorded when its
-// claim event is offered, so the lane's later entries and the lane state that
-// delivery reads name the same lane task (FR-5). One file per lane, so two
-// lanes claimed at once never overwrite each other's key. A lane never
-// claimed while the publisher was on has the key "".
-export const CLAIMS_DIRNAME = "claims"
-
-function claimPath(slackDir, laneId) {
-  const id = String(laneId || "")
-  return path.join(slackDir, CLAIMS_DIRNAME, id ? `lane-${id}.json` : "repo.json")
-}
-
-/** The claim key of the lane's current task, or "". */
-export async function readClaimKey(slackDir, laneId) {
-  const record = objectOr(await readJsonOr(claimPath(slackDir, laneId), {}))
-  return typeof record.claimKey === "string" ? record.claimKey : ""
-}
-
-export async function recordClaimKey(slackDir, laneId, claimKey) {
-  await writeJsonAtomic(claimPath(slackDir, laneId), { claimKey: String(claimKey || "") })
-}
-
 export function boardsPath(homeDir) {
   return path.join(homeDir, BOARDS_RELATIVE)
 }

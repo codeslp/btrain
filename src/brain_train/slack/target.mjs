@@ -8,7 +8,6 @@ import { resolveStateRoot } from "../worktree.mjs"
 import { channelForRepo, developerLabel, getSlackOptions, mentionList } from "./config.mjs"
 import { btrainHome, loadSlackCredentials } from "./credentials.mjs"
 import { deliver } from "./deliver.mjs"
-import { readClaimKey } from "./threads.mjs"
 
 /** The repository's Slack state directory, in the state root a linked worktree shares. */
 export function slackDirFor(repoRoot) {
@@ -43,24 +42,9 @@ export async function deliveryTarget(repoRoot, config, { env = process.env } = {
 }
 
 /**
- * Wrap a reader of current lane states so each state carries `laneId` and the
- * claim key of the lane's current task, which delivery compares with an
- * entry's claim key (FR-5).
- */
-export function withClaimKeys(readLanes, slackDir) {
-  return async () => {
-    const lanes = (await readLanes()) || []
-    return Promise.all(lanes.map(async (lane) => {
-      const laneId = String(lane?.laneId ?? lane?._laneId ?? lane?.lane ?? "")
-      return { ...lane, laneId, claimKey: await readClaimKey(slackDir, laneId) }
-    }))
-  }
-}
-
-/**
  * Drain the target's outbox (deliver.mjs). `readLanes` reads the repository's
- * current lane states; `budgetMs` (default none), `refresh`, `fetchImpl`, and
- * `now` pass through.
+ * current lane states, each with its `laneId` and `claimKey` (FR-5);
+ * `budgetMs` (default none), `refresh`, `fetchImpl`, and `now` pass through.
  */
 export function deliverToTarget(target, { readLanes, fetchImpl = globalThis.fetch, budgetMs, refresh = false, now } = {}) {
   return deliver({
@@ -69,7 +53,7 @@ export function deliverToTarget(target, { readLanes, fetchImpl = globalThis.fetc
     channel: target.channel,
     token: target.token,
     fetchImpl,
-    readLanes: withClaimKeys(readLanes, target.slackDir),
+    readLanes,
     context: target.context,
     homeDir: target.homeDir,
     refresh,

@@ -53,7 +53,7 @@ import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
 import { formatReviewLine } from "./review/record.mjs"
 import { runSlackCommand, SLACK_SUBCOMMANDS } from "./slack/cli.mjs"
 import { buildSlackReaders, readLaneStates } from "./slack-readers.mjs"
-import { deliverAfterCommand, threadLine } from "./slack/index.mjs"
+import { deliverAfterCommand, threadLines } from "./slack/index.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -1680,18 +1680,6 @@ const LANE_LOCKED_ALLOWED_COMMANDS = new Set([
   "transitions",
 ])
 
-// Spec 024 FR-12 (T020): the Slack thread line of each lane `btrain handoff`
-// shows. Empty with the publisher off.
-async function readThreadLines(repoRoot, result) {
-  const config = await readProjectConfig(repoRoot)
-  const lines = new Map()
-  for (const laneId of result.lanes ? result.lanes.map((lane) => lane._laneId) : [""]) {
-    const line = await threadLine(repoRoot, config, laneId)
-    if (line) lines.set(laneId, line)
-  }
-  return lines
-}
-
 // Commands that deliver nothing afterwards: `btrain slack` delivers itself,
 // and the others are not about one repository's lanes.
 const NO_DELIVERY_COMMANDS = new Set(["slack", "init", "help", "--help", "-h", "--version", "-v"])
@@ -2134,7 +2122,8 @@ async function run() {
       console.log(`state hash: ${result.stateHash}`)
       return
     }
-    printHandoffState(result, { threadLines: await readThreadLines(repoRoot, result) })
+    // Spec 024 FR-12 (T020): each lane's Slack thread, empty with the publisher off.
+    printHandoffState(result, { threadLines: await threadLines(repoRoot, await readProjectConfig(repoRoot), readLaneStates) })
     return
   }
 

@@ -4374,7 +4374,7 @@ async function appendWorkflowEvent(repoRoot, config, event) {
   const targetPath = getWorkflowEventLogPath(repoRoot, config, event.laneId || "")
   await appendText(targetPath, serializeWorkflowEvent(event))
   // Spec 024 WS4: queue the Slack entry; returns at once with the toggle off and never throws.
-  await offerWorkflowEvent(repoRoot, config, event)
+  await offerWorkflowEvent(repoRoot, config, event, targetPath)
   return targetPath
 }
 
@@ -10052,7 +10052,7 @@ async function finishPatchWithReviewerDispatch(repoRoot, {
 
   if (dispatch.status === "failed" || dispatch.status === "timed-out") {
     const loopHint = laneId ? `btrain loop --lane ${laneId}` : "btrain loop"
-    await offerDispatchFailure(repoRoot, config, { laneId, lane: updatedCurrent, agentName: dispatch.agentName, status: dispatch.status, reason: dispatch.stopReason })
+    await offerDispatchFailure(repoRoot, config, { laneId, lane: updatedCurrent, agentName: dispatch.agentName, status: dispatch.status, reason: dispatch.stopReason, eventLogPath: getWorkflowEventLogPath(repoRoot, config, laneId) })
     throw new BtrainError({
       message: `Reviewer dispatch ${dispatch.status} for ${dispatch.agentName || "the reviewer"}.`,
       reason: dispatch.stopReason || "The reviewer runner exited without updating the lane.",
