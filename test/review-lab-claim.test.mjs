@@ -9,7 +9,7 @@ import os from "node:os"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { checkHandoff, listActiveOverrides } from "../src/brain_train/core.mjs"
+import { checkHandoff, listActiveOverrides, withFileLock } from "../src/brain_train/core.mjs"
 import { applyTransition } from "../src/brain_train/transitions.mjs"
 
 const exec = promisify(execFile)
@@ -285,6 +285,94 @@ describe("lane f adversarial review", () => {
       assert.equal(result.code, 0, result.stderr)
       assert.equal(await reviewerOf(), "claude-reviewer")
       assert.deepEqual((await listActiveOverrides(repo)).filter(r => r.action === "same-lab-review"), [])
+    })
+  })
+})
+
+// codex-reviewer on d954668: the grant was read before the handoff write and
+// spent after it, so two operations could publish on one grant while another
+// process held overrides.lock. A grant is now spent before the write, so while
+// that lock is held nothing that relies on a grant publishes, and after it is
+// released only one operation does.
+describe("one same-lab-review grant under overrides.lock contention (codex-reviewer on d954668)", () => {
+  const HOLD_MS = 1500
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const holdOverrides = (repo, fn) => withFileLock(path.join(repo, ".btrain", "overrides.lock"), fn)
+  const laneOf = async (repo, laneId = "a") => {
+    const state = await checkHandoff(repo)
+    return state.lanes ? state.lanes.find((lane) => lane._laneId === laneId) : state.current
+  }
+  const sameLabGrants = async (repo) => (await listActiveOverrides(repo)).filter((record) => record.action === "same-lab-review")
+
+  it("lets one of two reassignments publish on one grant", async () => {
+    await withRepo({ agents: ["claude", "claude-reviewer", "claude-second", "codex-reviewer"] }, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      let first, second, heldReviewer
+      await holdOverrides(repo, async () => {
+        first = run(["handoff", "update", "--lane", "a", "--reviewer", "claude-reviewer", "--actor", "claude"])
+        second = run(["handoff", "update", "--lane", "a", "--reviewer", "claude-second", "--actor", "claude"])
+        await pause(HOLD_MS)
+        heldReviewer = await reviewerOf()
+      })
+      assert.equal(heldReviewer, "codex-reviewer", "no reassignment publishes before its grant is spent")
+      const results = await Promise.all([first, second])
+      const winners = results.filter((result) => result.code === 0)
+      assert.equal(winners.length, 1, JSON.stringify(results))
+      assert.equal(await reviewerOf(), results[0].code === 0 ? "claude-reviewer" : "claude-second")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+
+  it("does not publish a lane claim before its grant is spent", async () => {
+    await withRepo({}, async ({ repo, claim, grant, reviewerOf }) => {
+      assert.equal((await grant()).code, 0)
+      let pending, heldStatus
+      await holdOverrides(repo, async () => {
+        pending = claim(["--reviewer", "claude-reviewer"])
+        await pause(HOLD_MS)
+        heldStatus = (await laneOf(repo))?.status
+      })
+      assert.notEqual(heldStatus, "in-progress")
+      const result = await pending
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+
+  it("does not publish a no-lanes claim before its grant is spent", async () => {
+    await withRepo({ lanes: false }, async ({ repo, claim, grant, reviewerOf }) => {
+      assert.equal((await grant()).code, 0)
+      let pending, heldStatus
+      await holdOverrides(repo, async () => {
+        pending = claim(["--reviewer", "claude-reviewer"])
+        await pause(HOLD_MS)
+        heldStatus = (await laneOf(repo))?.status
+      })
+      assert.notEqual(heldStatus, "in-progress")
+      const result = await pending
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [])
+    })
+  })
+
+  it("does not publish a no-lanes reassignment before its grant is spent", async () => {
+    await withRepo({ lanes: false }, async ({ repo, run, claim, grant, reviewerOf }) => {
+      assert.equal((await claim()).code, 0)
+      assert.equal((await grant()).code, 0)
+      let pending, heldReviewer
+      await holdOverrides(repo, async () => {
+        pending = run(["handoff", "update", "--reviewer", "claude-reviewer", "--actor", "claude"])
+        await pause(HOLD_MS)
+        heldReviewer = await reviewerOf()
+      })
+      assert.equal(heldReviewer, "codex-reviewer")
+      const result = await pending
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(await reviewerOf(), "claude-reviewer")
+      assert.deepEqual(await sameLabGrants(repo), [])
     })
   })
 })
