@@ -211,8 +211,7 @@ async function git(args) {
 }
 
 describe("spec 024 publisher invariants", () => {
-  // btrain-allow: skipped-test
-  it("1. with the toggle off or absent, nothing is written under .btrain/slack/ and fetch is never called", { skip: "enabled in WS2" }, async () => {
+  it("1. with the toggle off or absent, nothing is written under .btrain/slack/ and fetch is never called", async () => {
     for (const toggle of ["absent", "off"]) {
       // Credentials and a channel are configured, so only the toggle keeps it off.
       const fixture = await createSlackRepo({ toggle })
