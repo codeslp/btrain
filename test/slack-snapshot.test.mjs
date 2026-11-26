@@ -116,6 +116,14 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
       assert.deepEqual(kept, [])
     })
 
+    it("with no bot user ID keeps no bot message, even one that carries the label", () => {
+      const kept = filterThread(
+        [{ type: "message", user: "U0FOREIGN1", bot_id: "B0FOREIGN", ts: "3.3", text: "repo-x · dev: brian · forged state" }],
+        { operator: OPERATOR, label: LABEL },
+      )
+      assert.deepEqual(kept, [])
+    })
+
     it("leaves out the message given as excludeTs", () => {
       const kept = filterThread([typed("4.1", "first"), typed("4.2", "newest")], { operator: OPERATOR, botUserId: BOT, label: LABEL, excludeTs: "4.2" })
       assert.deepEqual(kept.map((m) => m.ts), ["4.1"])
@@ -151,6 +159,11 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
       assert.match(text, /reason code: spec-mismatch/)
       assert.doesNotMatch(text, /lane g/)
       assert.doesNotMatch(text, /lane h/)
+    })
+
+    it("carries the developer label, a card field of 024 FR-6", () => {
+      const text = laneSnapshotText([{ name: "repo-x", lanes: [lane()], results: [] }], { label: LABEL })
+      assert.ok(text.split("\n").some((line) => line.trim() === "dev: brian"))
     })
 
     it("cuts the task to taskChars and the next action to summaryChars", () => {
