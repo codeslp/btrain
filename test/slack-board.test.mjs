@@ -557,6 +557,60 @@ describe("board recovery guards (codex-reviewer on a3b8e1f)", () => {
   })
 })
 
+// The two P2 findings of the Codex GitHub bot on PR #137, committed before
+// their fix.
+describe("board findings of the Codex bot on PR #137", () => {
+  it("rereads a stale repository once it is readable, even with nothing queued", async () => {
+    const c = await channelFixture()
+    const api = c.repo("api")
+    await api.queue("a", "claimed")
+    await api.run()
+    // Lines changed while nothing is queued (say, another run cut off), and
+    // lane state cannot be read: the board shows the old lines, not refreshed.
+    await writeRepoEntry(api.homeDir, CHANNEL, { repoPath: api.repoPath, name: "api", lanes: [lane("a", { status: "needs-review" })] })
+    api.state.readError = "handoff lock busy"
+    c.clock.at += 5000
+    assert.equal((await api.run()).status, "error")
+    assert.match((await getBoard(api.homeDir, CHANNEL)).text, /not refreshed/)
+    // Readable again, still nothing queued: the mark goes.
+    api.state.readError = null
+    api.state.lanes = [lane("a", { status: "needs-review" })]
+    c.clock.at += 5000
+    await api.run()
+    const board = await getBoard(api.homeDir, CHANNEL)
+    assert.doesNotMatch(board.text, /not refreshed/)
+    assert.match(board.text, /lane a · needs-review/)
+  })
+
+  it("takes a repository off its former channel's board when it moves", async () => {
+    const OTHER = "C0001FAKE"
+    const c = await channelFixture()
+    const api = c.repo("api")
+    const web = c.repo("web", { lanes: [lane("b")] })
+    await api.queue("a", "claimed")
+    await api.run()
+    c.clock.at += 2000
+    await web.queue("b", "claimed")
+    await web.run()
+    assert.match((await getBoard(api.homeDir, CHANNEL)).text, /\napi\n[\s\S]*\nweb\n/)
+    // api is mapped to another channel now.
+    c.clock.at += 2000
+    await api.queue("a", "sent-to-review")
+    api.state.lanes = [lane("a", { status: "needs-review" })]
+    await api.run({ channel: OTHER })
+    assert.match((await getBoard(api.homeDir, OTHER)).text, /\napi\n {2}lane a · needs-review/)
+    // web's next delivery on the old channel no longer shows api.
+    c.clock.at += 2000
+    web.state.lanes = [lane("b", { status: "needs-review" })]
+    await web.queue("b", "sent-to-review")
+    await web.run()
+    const old = await getBoard(web.homeDir, CHANNEL)
+    assert.doesNotMatch(old.text, /\napi\n/)
+    assert.match(old.text, /\nweb\n {2}lane b · needs-review/)
+    assert.equal(old.repos[repoKey(api.repoPath)], undefined)
+  })
+})
+
 describe("shared channels (T025)", () => {
   it("gives two repositories of one developer one board and separate threads", async () => {
     const c = await channelFixture()
