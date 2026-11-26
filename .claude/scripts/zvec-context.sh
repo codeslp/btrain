@@ -78,18 +78,18 @@ on_signal() {
   # Running jobs have not been reaped, so their PIDs cannot be recycled.
   # One TERM is not enough: a TERM that lands while the job's subshell is
   # still turning into node can be lost, and node would then run zg to the
-  # end. Repeat it until no job is running. Node's handler is idempotent and
-  # escalates to KILL by itself after its grace period.
-  local job_pid tries=0
-  while [ -n "$(jobs -pr)" ] && [ "$tries" -lt 100 ]; do
+  # end. Repeat it until no job is running, however long that takes: a capped
+  # retry would leave a job that drops TERM for longer than the cap running
+  # with nothing left to stop it. The loop is also the wait: a job leaves
+  # `jobs -r` only once bash has reaped it, so the capture file stays until
+  # the executor has exited. Node's handler is idempotent and escalates to
+  # KILL by itself after its grace period.
+  local job_pid
+  while [ -n "$(jobs -pr)" ]; do
     for job_pid in $(jobs -pr); do
       kill -TERM "$job_pid" 2>/dev/null
     done
     sleep 0.1
-    tries=$((tries + 1))
-  done
-  for job_pid in $(jobs -p); do
-    wait "$job_pid" 2>/dev/null
   done
   cleanup_tmp
   exit $((128 + $1))
