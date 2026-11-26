@@ -91,6 +91,36 @@ async function probeLegacyDashboard(repoRoot, port, fetchImpl = fetch) {
     && await normalizedPath(payload.repo) === await normalizedPath(repoRoot)
 }
 
+function isProcessAlive(pid) {
+  if (!pid) {
+    return false
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === "EPERM"
+  }
+}
+
+// One health probe can miss its 750 ms budget on a loaded machine. While the
+// recorded process is still alive, keep asking; the cap only guards against a
+// process that stays up without ever answering, which is then not ours to stop.
+const DASHBOARD_PROBE_TIMEOUT_MS = 5_000
+
+async function probeRecordedDashboard(state, fetchImpl) {
+  const deadline = Date.now() + DASHBOARD_PROBE_TIMEOUT_MS
+  while (true) {
+    if (await probeDashboard(state.port, fetchImpl)) {
+      return true
+    }
+    if (!isProcessAlive(state.pid) || Date.now() >= deadline) {
+      return false
+    }
+    await delay(100)
+  }
+}
+
 function terminateProcess(pid) {
   if (!pid) {
     return false
@@ -352,7 +382,7 @@ async function stopDashboard(repoRoot, { env = process.env, fetchImpl = fetch } 
     return { stopped: stoppedLegacy, reason: stoppedLegacy ? "legacy" : "not-running" }
   }
 
-  const ownsProcess = state.port && await probeDashboard(state.port, fetchImpl)
+  const ownsProcess = Boolean(state.port) && await probeRecordedDashboard(state, fetchImpl)
   if (ownsProcess) {
     terminateProcess(state.pid)
   }
