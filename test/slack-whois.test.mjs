@@ -10,6 +10,9 @@ import { promisify } from "node:util"
 import { withoutLaneScope } from "./helpers/runner-scope.mjs"
 import { fakeSlackProcessEnv, readFakeSlackLog } from "./helpers/fake-slack.mjs"
 import { enteredByPrPoll } from "../src/brain_train/slack/pr-poll.mjs"
+import { runSlackCommand } from "../src/brain_train/slack/cli.mjs"
+import { buildSlackReaders, readEnteredByPrPoll } from "../src/brain_train/slack-readers.mjs"
+import { appendWorkflowEvent, getLaneConfigs, getRepoPaths, readProjectConfig } from "../src/brain_train/core.mjs"
 
 const exec = promisify(execFile)
 const CLI = path.resolve("src/brain_train/cli.mjs")
@@ -129,5 +132,128 @@ describe("enteredByPrPoll (spec 025 T015, the poll-pr check)", () => {
     assert.equal(enteredByPrPoll([], lane), false)
     assert.equal(enteredByPrPoll(null, lane), false)
     assert.equal(enteredByPrPoll([null, { after: null }], lane), false)
+  })
+})
+
+// codex-reviewer's surviving mutants on e8205cf (M1, M5, M8, M10, M15).
+describe("whois through runSlackCommand with a spy transport (codex-reviewer on e8205cf)", () => {
+  async function home(settings) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-whois-unit-"))
+    roots.push(dir)
+    if (settings) {
+      await fs.writeFile(path.join(dir, "slack.json"), JSON.stringify(settings), { mode: 0o600 })
+      await fs.chmod(path.join(dir, "slack.json"), 0o600)
+    }
+    return dir
+  }
+  // A fetch that records each request and answers conversations.history.
+  function spyFetch(messages) {
+    const requests = []
+    const fetchImpl = async (url, init) => {
+      requests.push({ url: String(url), method: init?.method, body: init?.body })
+      return { status: 200, headers: new Map(), json: async () => ({ ok: true, messages }) }
+    }
+    return { requests, fetchImpl }
+  }
+  async function whois(dir, fetchImpl, options = {}) {
+    const out = []
+    const err = []
+    const code = await runSlackCommand("whois", options, {
+      env: { BRAIN_TRAIN_HOME: dir }, repoRoot: "/work/repo", fetchImpl,
+      out: (line) => out.push(line), err: (line) => err.push(line),
+    })
+    return { code, out, err }
+  }
+
+  it("refuses with no token before any call (M1)", async () => {
+    const dir = await home(null)
+    const { requests, fetchImpl } = spyFetch([])
+    const result = await whois(dir, fetchImpl, { channel: CHANNEL })
+    assert.equal(result.code, 1)
+    assert.match(result.err.join("\n"), /token missing/)
+    assert.deepEqual(requests, [])
+  })
+
+  it("reads history with a GET and the channel and limit in the query (M5)", async () => {
+    const dir = await home({ botToken: TOKEN, channels: { "/work/repo": CHANNEL } })
+    const { requests, fetchImpl } = spyFetch([])
+    assert.equal((await whois(dir, fetchImpl)).code, 0)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].method, "GET")
+    assert.equal(requests[0].body, undefined)
+    const query = new URL(requests[0].url).searchParams
+    assert.equal(query.get("channel"), CHANNEL)
+    assert.equal(query.get("limit"), "10")
+    assert.match(requests[0].url, /conversations\.history/)
+  })
+
+  it("prints at most ten rows even when Slack returns more (M8)", async () => {
+    const dir = await home({ botToken: TOKEN, channels: { "/work/repo": CHANNEL } })
+    const { fetchImpl } = spyFetch(messages())
+    const result = await whois(dir, fetchImpl)
+    assert.equal(result.out.filter((line) => line.startsWith("ts=")).length, 10)
+  })
+
+  it("prints a dash for a field that is not a plain ID, and no control characters (M10)", async () => {
+    const dir = await home({ botToken: TOKEN, channels: { "/work/repo": CHANNEL } })
+    const { fetchImpl } = spyFetch([{ ts: "1700000001.000100", user: "U0000FAKE has spaces", bot_id: "\u001b[31mB0000FAKE", app_id: 42, subtype: { nested: true }, text: SECRET_TEXT }])
+    const result = await whois(dir, fetchImpl)
+    const [row] = result.out.filter((line) => line.startsWith("ts="))
+    assert.equal(row, "ts=1700000001.000100 user=- bot_id=- app_id=- client_msg_id=no subtype=-")
+    for (const line of result.out) assert.doesNotMatch(line, /[\u0000-\u001f\u007f]/)
+  })
+})
+
+describe("the enteredByPrPoll reader the CLI passes (codex-reviewer M15)", () => {
+  async function laneRepo({ lanes = true } = {}) {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-whois-reader-")))
+    roots.push(root)
+    const repo = path.join(root, "repo")
+    const home = path.join(root, "home")
+    await exec("git", ["init", "-q", repo])
+    const env = { ...withoutLaneScope(), BRAIN_TRAIN_HOME: home, BTRAIN_AGENT: "claude" }
+    await exec("node", [CLI, "init", repo, "--agent", "claude", "--agent", "codex", "--tracked", "--core-only", "--no-hooks"], { cwd: repo, env })
+    if (!lanes) {
+      const tomlPath = path.join(repo, ".btrain", "project.toml")
+      const toml = await fs.readFile(tomlPath, "utf8")
+      await fs.writeFile(tomlPath, toml.replace("[lanes]\nenabled = true", "[lanes]\nenabled = false"))
+    }
+    const config = await readProjectConfig(repo)
+    const setStatus = async (laneId, status) => {
+      const handoffPath = laneId
+        ? path.resolve(repo, getLaneConfigs(config).find((lane) => lane.id === laneId).handoffPath)
+        : getRepoPaths(repo).handoffPath
+      const text = await fs.readFile(handoffPath, "utf8")
+      await fs.writeFile(handoffPath, text.replace(/^Status: .*$/m, `Status: ${status}`))
+    }
+    const entered = (laneId, transitionEvent) => appendWorkflowEvent(repo, config, { laneId, type: "update", actor: "claude", before: { status: "pr-review" }, after: { status: "changes-requested" }, details: { transitionEvent } })
+    return { repo, setStatus, entered }
+  }
+
+  it("is true for a lane pr-poll moved to changes-requested, false for a local request", async () => {
+    const r = await laneRepo()
+    await r.setStatus("a", "changes-requested")
+    await r.entered("a", "pr-poll")
+    assert.equal(await buildSlackReaders({ cliPath: CLI }).enteredByPrPoll(r.repo, "a"), true)
+    await r.entered("a", "handoff request-changes")
+    assert.equal(await readEnteredByPrPoll(r.repo, "a"), false, "the newest entry decides")
+  })
+
+  it("reads only the named lane: another lane's pr-poll event does not count", async () => {
+    const r = await laneRepo()
+    await r.setStatus("a", "changes-requested")
+    await r.entered("a", "handoff request-changes")
+    await r.setStatus("b", "changes-requested")
+    await r.entered("b", "pr-poll")
+    assert.equal(await readEnteredByPrPoll(r.repo, "a"), false)
+    assert.equal(await readEnteredByPrPoll(r.repo, "b"), true)
+    assert.equal(await readEnteredByPrPoll(r.repo, "zz"), false, "an unknown lane")
+  })
+
+  it("falls back to the single handoff in a repository without lanes", async () => {
+    const r = await laneRepo({ lanes: false })
+    await r.setStatus("", "changes-requested")
+    await r.entered("", "pr-poll")
+    assert.equal(await readEnteredByPrPoll(r.repo, ""), true)
   })
 })

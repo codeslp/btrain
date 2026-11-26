@@ -44,8 +44,6 @@ import {
   syncTemplates,
   waitForHandoffStateChange,
   parseCurrentSection,
-  findAvailableLane,
-  readAllLaneStates,
   withFileLock,
   readWorkflowEvents,
   appendWorkflowEvent,
@@ -54,7 +52,7 @@ import {
 import { activityKindFor, recordReviewActivity } from "./review/activity.mjs"
 import { formatReviewLine } from "./review/record.mjs"
 import { runSlackCommand, SLACK_SUBCOMMANDS } from "./slack/cli.mjs"
-import { enteredByPrPoll } from "./slack/pr-poll.mjs"
+import { buildSlackReaders } from "./slack-readers.mjs"
 import {
   getConfiguredHarnessProfileId,
   inspectHarnessProfile,
@@ -2473,17 +2471,8 @@ async function run() {
       slackDir: path.join(resolveStateRoot(repoRoot), ".btrain", "slack"),
       stdin: process.stdin,
       // Spec 025 T015: what the listener needs from core.mjs, which slack/
-      // never imports.
-      listRepos,
-      findAvailableLane,
-      readConfig: readProjectConfig,
-      enteredByPrPoll: async (laneRoot, laneId) => {
-        const laneConfig = await readProjectConfig(laneRoot)
-        const lane = ((await readAllLaneStates(laneRoot, laneConfig)) || []).find((state) => state._laneId === laneId)
-          || (laneId ? null : (await checkHandoff(laneRoot)).current)
-        return enteredByPrPoll(await readWorkflowEvents(laneRoot, laneConfig, laneId || ""), lane)
-      },
-      cliPath: fileURLToPath(import.meta.url),
+      // never imports (slack-readers.mjs).
+      ...buildSlackReaders({ cliPath: fileURLToPath(import.meta.url) }),
     })
     return
   }
