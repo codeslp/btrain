@@ -190,7 +190,13 @@ Several repositories can share one channel: every card, reply, and board line na
 | `btrain slack test` | Check the token, post one test message, and clear a pause |
 | `btrain slack flush` | Send this repository's queued entries now, with no time limit |
 | `btrain slack refresh` | Rewrite every active lane card and the board from current lane state |
-| `btrain slack whois [--channel <id>]` | Show who wrote a channel's last ten messages (author fields only, no text) |
+| `btrain slack whois [--channel <id>]` | Show who wrote a channel's last ten messages (author fields only, no text). Optional: needs the read scopes below |
+
+`btrain slack whois` reads a channel, so it needs the read scopes `channels:history` and
+`groups:history` (for a private channel), which the publisher's manifest does not ask for. To use it,
+create the app from `docs/slack-app-manifest-listen.json` instead, or add those two scopes to the app,
+and install the app in the workspace again. The publisher alone needs only `chat:write` and
+`pins:write`.
 
 After each btrain command, the publisher sends the repository's queued entries for up to 2 seconds
 (`[slack].inline_timeout_ms`), after the command's own output. Slack takes about one message a second
