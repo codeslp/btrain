@@ -309,3 +309,48 @@ export function attemptsForCurrentRequest(record) {
 export function unacknowledgedLateReviews(record) {
   return (record?.lateReviews || []).filter((late) => !late.acknowledged)
 }
+
+/**
+ * What `btrain status`, the lane guidance, and the dashboard show about a
+ * lane's review (spec 023 T011): `{ display, reviewer, since, tier,
+ * fallbackReason }`. `display` is the display state, else the stored status;
+ * `since` is `{ kind, at }` for the active attempt's dispatch or pickup, or
+ * null. The stored status itself is never changed.
+ */
+export function reviewSummary(events, { status = "" } = {}) {
+  const record = foldReviewRecord(events, { status })
+  const attempt = activeAttempt(record)
+  const display = record.display || String(status || "")
+  if (attempt) {
+    return {
+      display,
+      reviewer: attempt.reviewer,
+      since: attempt.pickedUpAt ? { kind: "picked up", at: attempt.pickedUpAt } : { kind: "dispatched", at: attempt.startedAt },
+      tier: record.tier,
+      fallbackReason: record.fallbackReason,
+    }
+  }
+  if (record.display === DISPLAY_STATES.CONFIRMING_FIX && record.fix?.pickedUpAt) {
+    return { display, reviewer: "", since: { kind: "picked up", at: record.fix.pickedUpAt }, tier: "", fallbackReason: "" }
+  }
+  return { display, reviewer: "", since: null, tier: "", fallbackReason: "" }
+}
+
+/**
+ * One line for a review summary, or "" when there is no review to show:
+ * `review: in-review · reviewer beta · picked up 3m ago · tier other-lab`,
+ * with ` · fallback <reason>` for a same-lab fallback.
+ */
+export function formatReviewLine(summary, { now = Date.now() } = {}) {
+  if (!summary || (!summary.reviewer && !summary.since)) return ""
+  const parts = [`review: ${summary.display}`]
+  if (summary.reviewer) parts.push(`reviewer ${summary.reviewer}`)
+  if (summary.since?.at) {
+    const at = Date.parse(summary.since.at)
+    const minutes = Number.isFinite(at) ? Math.max(0, Math.floor((now - at) / 60_000)) : null
+    parts.push(minutes === null ? summary.since.kind : `${summary.since.kind} ${minutes}m ago`)
+  }
+  if (summary.tier) parts.push(`tier ${summary.tier}`)
+  if (summary.fallbackReason) parts.push(`fallback ${summary.fallbackReason}`)
+  return parts.join(" · ")
+}

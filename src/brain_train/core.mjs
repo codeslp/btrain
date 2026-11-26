@@ -79,6 +79,7 @@ import {
 } from "./unblocked/context.mjs"
 import { needsReviewGateScope } from "./needs_review_gate.mjs"
 import { collectReviewDoctorFindings } from "./review/doctor.mjs"
+import { formatReviewLine, reviewSummary } from "./review/record.mjs"
 import { advisoryRowId, applyTransition, classifyTransitionEvent, formatAdvisoryWarning, getPrimaryTransition } from "./transitions.mjs"
 import { collectRuntimeAgentHints } from "./runtime_agent_hints.mjs"
 
@@ -7590,11 +7591,13 @@ function buildLaneGuidance(laneId, current) {
           : `${reviewer}: review, then \`btrain handoff resolve --lane ${laneId} --summary "..."\`.`
       return [
         `${prefix}Waiting on peer review from ${reviewer}.`,
+        // Spec 023 T011: the display state, reviewer, time, tier, fallback.
+        formatReviewLine(current.review),
         lockLine,
         prLine,
         reviewerInstruction,
         `${owner}: work on another lane, or monitor this one with \`bth wait --lane ${laneId}\`.`,
-      ].join("\n")
+      ].filter(Boolean).join("\n")
     }
     case "LinkPr": {
       const owner = current.owner || "the active agent"
@@ -7755,6 +7758,12 @@ async function checkHandoff(repoRoot, options = {}) {
       config,
       decorateLaneStates(await readAllLaneStates(repoRoot, config), locks),
     )
+    // Spec 023 T011: the review display for the guidance, as in getStatus.
+    for (const laneState of laneStates) {
+      if (laneState.status === "needs-review" || laneState.status === "fix-confirmation") {
+        laneState.review = reviewSummary(await readWorkflowEvents(repoRoot, config, laneState._laneId), { status: laneState.status })
+      }
+    }
     const overrides = await listActiveOverrides(repoRoot)
     const laneGuidances = laneStates.map((state) => buildLaneGuidance(state._laneId, state))
 
@@ -11155,6 +11164,13 @@ async function getRepoStatus(repoRoot, laneId = "") {
       config,
       decorateLaneStates(scopedLaneStates, status.locks),
     )
+    // Spec 023 T011: the review display, folded only for a lane under
+    // review. The stored status is left as it is.
+    for (const laneState of status.lanes) {
+      if (laneState.status === "needs-review" || laneState.status === "fix-confirmation") {
+        laneState.review = reviewSummary(await readWorkflowEvents(repoRoot, config, laneState._laneId), { status: laneState.status })
+      }
+    }
     status.current = normalizedLaneId
       ? status.lanes[0]
       : getMostRecentlyUpdatedState(status.lanes, status.current)
