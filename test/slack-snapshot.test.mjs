@@ -316,6 +316,33 @@ describe("filterThread on real rendered messages (codex-reviewer red team on 973
     }
   })
 
+  it("keeps this developer's real reply that starts with configured mentions", () => {
+    const text = renderReply(
+      { kind: "sent-to-review", mention: true, fields: { reviewer: "codex-reviewer" } },
+      { repoName: "repo-x", label: LABEL, mention: [OPERATOR, "U0FAKEOT02"] },
+    )
+    assert.ok(text.startsWith("<@"), text)
+    assert.equal(filterThread([message(text)], { ...options, repoNames: ["repo-x"] }).length, 1)
+  })
+
+  it("keeps a real reply whose repository name and label the renderer escaped or cut", () => {
+    const repoName = `a&b-${"r".repeat(150)}`
+    const label = `d&v-${"l".repeat(100)}`
+    const text = reply({ repoName, label })
+    assert.equal(filterThread([message(text)], { ...options, label, repoNames: [repoName] }).length, 1, text)
+  })
+
+  it("an empty label keeps nothing, even a board or reply with an empty dev: segment (M1)", () => {
+    for (const text of ["board · dev: ", "repo-x · dev:  · sent"]) {
+      assert.deepEqual(filterThread([message(text)], { ...options, label: "", repoNames: ["repo-x"] }), [], text)
+    }
+  })
+
+  it("drops a card whose first line holds a dev: segment, even for a served name and the right label (M7)", () => {
+    const text = card({ repoName: "repo · dev: brian", label: LABEL })
+    assert.deepEqual(filterThread([message(text)], { ...options, repoNames: ["repo · dev: brian"] }), [])
+  })
+
   it("drops a reply or card from a repository the channel does not serve", () => {
     const context = { repoName: "repo-z", label: LABEL }
     for (const text of [reply(context), card(context)]) {
