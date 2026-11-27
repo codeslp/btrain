@@ -194,7 +194,7 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
 
     it("stops a run at turnSeconds; its process group is gone and the timeout reply is given", async () => {
       const runner = await fake({ neverExit: true })
-      const result = await runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 0.5, env: BASE_ENV })
+      const result = await runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 2, env: BASE_ENV })
       assert.equal(result.outcome, "timedOut")
       assert.equal(result.reply, RUN_REPLIES.timedOut)
       const [record] = await readFakeOrchestratorRecords(runner)
@@ -204,9 +204,9 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
     it("sends SIGKILL one second after SIGTERM to a run that ignores SIGTERM", async () => {
       const runner = await fake({ neverExit: true, ignoreTerm: true })
       const started = Date.now()
-      const result = await runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 0.5, env: BASE_ENV })
+      const result = await runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 2, env: BASE_ENV })
       assert.equal(result.outcome, "timedOut")
-      assert.ok(Date.now() - started >= 1400, "waited for the SIGKILL")
+      assert.ok(Date.now() - started >= 2900, "waited one second past the timer for the SIGKILL")
       const [record] = await readFakeOrchestratorRecords(runner)
       assert.equal(alive(record.pid), false)
     })
