@@ -19,6 +19,7 @@ import { writeInbox, emptyInbox } from "../src/brain_train/slack/inbox.mjs"
 import { requestStop, clearPaused, isPaused, leasePath } from "../src/brain_train/slack/lease.mjs"
 import { writeEntry } from "../src/brain_train/slack/outbox.mjs"
 import { REPLIES } from "../src/brain_train/slack/decide.mjs"
+import { installFakeOrchestratorRunner } from "./helpers/fake-orchestrator-runner.mjs"
 
 const exec = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -42,12 +43,20 @@ function cleanEnv(home) {
   return env
 }
 
+// The runner every listener test names: the T002 fake `claude`, never the
+// real CLI (spec 025: no test starts a real model). The listener runs its
+// profile check against it when it starts.
+async function fakeRunner(home) {
+  const runner = await installFakeOrchestratorRunner(path.join(home, "fake-runner"))
+  return `${runner.executable} -p`
+}
+
 async function writeSlackJson(home, repo, { operator = OPERATOR, orchestrator = {} } = {}) {
   await fs.mkdir(home, { recursive: true })
   const configPath = path.join(home, "slack.json")
   // pollSeconds 4: the outbox drain gets half of it, 2 seconds, enough for a
   // card and a reply at one message a second.
-  const settings = { botToken: TOKEN, label: "test-dev", channels: { [repo]: CHANNEL }, pollSeconds: 4, orchestrator: { runner: "claude -p", ...orchestrator } }
+  const settings = { botToken: TOKEN, label: "test-dev", channels: { [repo]: CHANNEL }, pollSeconds: 4, orchestrator: { runner: await fakeRunner(home), ...orchestrator } }
   if (operator) settings.operator = operator
   await fs.writeFile(configPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
   await fs.chmod(configPath, 0o600)
@@ -576,7 +585,7 @@ describe("spec 025 WS3: a resume covers every served channel", () => {
     const channelB = "C0000FAKB"
     await fs.mkdir(home, { recursive: true })
     const configPath = path.join(home, "slack.json")
-    await fs.writeFile(configPath, JSON.stringify({ botToken: TOKEN, operator: OPERATOR, channels: { [repoA]: CHANNEL, [repoB]: channelB }, pollSeconds: 4, orchestrator: { runner: "claude -p" } }), { mode: 0o600 })
+    await fs.writeFile(configPath, JSON.stringify({ botToken: TOKEN, operator: OPERATOR, channels: { [repoA]: CHANNEL, [repoB]: channelB }, pollSeconds: 4, orchestrator: { runner: await fakeRunner(home) } }), { mode: 0o600 })
     await fs.chmod(configPath, 0o600)
     await fs.writeFile(path.join(home, "repos.json"), JSON.stringify({ repos: [{ path: repoA, name: "repo-a" }, { path: repoB, name: "repo-b" }] }))
     const readers = {
@@ -615,7 +624,7 @@ async function twoChannelHome({ registered = ["a", "b"] } = {}) {
   const repos = { a: path.join(root, "repo-a"), b: path.join(root, "repo-b") }
   await fs.mkdir(home, { recursive: true })
   const configPath = path.join(home, "slack.json")
-  await fs.writeFile(configPath, JSON.stringify({ botToken: TOKEN, operator: OPERATOR, channels: { [repos.a]: CHANNEL, [repos.b]: CHANNEL_B }, pollSeconds: 4, orchestrator: { runner: "claude -p" } }), { mode: 0o600 })
+  await fs.writeFile(configPath, JSON.stringify({ botToken: TOKEN, operator: OPERATOR, channels: { [repos.a]: CHANNEL, [repos.b]: CHANNEL_B }, pollSeconds: 4, orchestrator: { runner: await fakeRunner(home) } }), { mode: 0o600 })
   await fs.chmod(configPath, 0o600)
   const register = (names) => fs.writeFile(path.join(home, "repos.json"), JSON.stringify({ repos: names.map((name) => ({ path: repos[name], name })) }))
   await register(registered)
