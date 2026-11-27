@@ -142,6 +142,26 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
       assert.equal(readRunnerCheck(h.slackDir), null)
     })
 
+    for (const how of ["abort", "timeout"]) {
+      it(`cliVersion kills a --version that ignores SIGTERM on ${how} (codex-reviewer round 3)`, async () => {
+        const h = await home()
+        const runner = await fakeRunner(path.join(h.root, "bin"), { neverExit: true, ignoreTerm: true })
+        const controller = new AbortController()
+        const version = cliVersion(`${runner.executable} -p`, { env: h.env, signal: controller.signal, timeoutMs: how === "timeout" ? 500 : 60_000 })
+        let record
+        for (let i = 0; i < 100 && !record; i += 1) {
+          ;[record] = await readFakeOrchestratorRecords(runner)
+          if (!record) await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        assert.ok(record, "the version command started")
+        if (how === "abort") controller.abort()
+        assert.equal(await version, "")
+        const gone = () => { try { process.kill(record.pid, 0); return false } catch { return true } }
+        for (let i = 0; i < 40 && !gone(); i += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+        assert.equal(gone(), true, "the --version process is gone")
+      })
+    }
+
     it("cliVersion reads the first line of '<runner> --version' and is empty when the runner is missing", async () => {
       const h = await home()
       const runner = await fakeRunner(path.join(h.root, "bin"), { raw: "2.1.274 (Claude Code)\nmore\n" })
