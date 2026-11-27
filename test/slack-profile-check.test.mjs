@@ -18,6 +18,7 @@ import {
 import { PROFILE_VERSION } from "../src/brain_train/slack/runner.mjs"
 import { collectSlackDoctorFindings } from "../src/brain_train/slack/doctor.mjs"
 import { setPaused } from "../src/brain_train/slack/lease.mjs"
+import { createListener } from "../src/brain_train/slack/listen.mjs"
 import {
   firstEventWith,
   installFakeOrchestratorRunner,
@@ -141,6 +142,55 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
     })
   })
 
+  describe("the check at listener start", () => {
+    async function listenerHome(runnerControl, { runner } = {}) {
+      const h = await home()
+      const fakeRun = runnerControl === undefined ? null : await versionedFake(path.join(h.root, "bin"), runnerControl)
+      const settings = { botToken: TOKEN, operator: OPERATOR, channels: {}, orchestrator: { runner: runner ?? `${fakeRun.executable} -p` } }
+      const file = path.join(h.dir, "slack.json")
+      await fs.writeFile(file, JSON.stringify(settings), { mode: 0o600 })
+      await fs.chmod(file, 0o600)
+      const fetch = async () => new Response(JSON.stringify({ ok: true, user_id: "U0FAKEBOT1" }), { status: 200, headers: { "content-type": "application/json" } })
+      const listener = await createListener({ home: h.dir, env: h.env, fetch, readers: { readConfig: async () => ({}), readRoster: async () => null }, now: () => 1700000000000 })
+      return { h, fakeRun, listener }
+    }
+
+    it("runs the profile check when the listener takes its lease, and keeps the verdict", async () => {
+      const { h, fakeRun, listener } = await listenerHome({})
+      const taken = await listener.acquire()
+      assert.equal(taken.ok, true)
+      assert.equal(listener.profile.ok, true, listener.profile.reason)
+      assert.equal(readRunnerCheck(h.slackDir).ok, true)
+      assert.equal((await readFakeOrchestratorRecords(fakeRun)).filter((rec) => rec.argv[0] !== "--version").length, 1)
+      await listener.stop()
+    })
+
+    it("a failed check at start leaves the model off with the reason", async () => {
+      const { listener } = await listenerHome({ firstEvent: firstEventWith({ skills: ["review"] }) })
+      await listener.acquire()
+      assert.equal(listener.profile.ok, false)
+      assert.match(listener.profile.reason, /skills/)
+      await listener.stop()
+    })
+
+    it("a saved verdict for the same runner and CLI version is used without a model run", async () => {
+      const { h, fakeRun, listener } = await listenerHome({})
+      saveVerdict(h.slackDir, { runner: `${fakeRun.executable} -p`, cliVersion: "9.9.9 (Claude Code)", ok: true })
+      await listener.acquire()
+      assert.equal(listener.profile.ok, true)
+      assert.deepEqual((await readFakeOrchestratorRecords(fakeRun)).filter((rec) => rec.argv[0] !== "--version"), [])
+      await listener.stop()
+    })
+
+    it("with the model off (empty runner) no check runs", async () => {
+      const { listener } = await listenerHome(undefined, { runner: "" })
+      await listener.acquire()
+      assert.equal(listener.profile.ok, false)
+      assert.match(listener.profile.reason, /model is off/)
+      await listener.stop()
+    })
+  })
+
   describe("btrain doctor listener findings", () => {
     async function repo(h, { slack = true, slackListen = true, auto } = {}) {
       const dir = path.join(h.root, "repo")
@@ -180,7 +230,7 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
     it("reports no operator, start or pause in auto, a runner with no profile, and a paused listener", async () => {
       const h = await home()
       await slackJson(h, { operator: "", runner: "claude -p --dangerously-skip-permissions" })
-      setPaused(h.slackDir)
+      await setPaused(h.slackDir)
       const r = await repo(h, { auto: ["status", "start", "pause"] })
       const { warnings } = await doctor(r, h)
       const text = warnings.join("\n")
