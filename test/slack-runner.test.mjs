@@ -318,6 +318,16 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
       assert.equal(result.reply, reply)
     })
 
+    it("rejects a system first event whose subtype is not init (M1)", () => {
+      assert.equal(checkFirstEvent(JSON.stringify({ ...DEFAULT_FIRST_EVENT, subtype: "other" })).ok, false)
+    })
+
+    it("an exit 0 whose result event has is_error true is a failed run, not a reply (M9)", async () => {
+      const result = await custom(`process.stdin.resume(); process.stdout.write(${JSON.stringify(`${init}${JSON.stringify({ type: "result", is_error: true, result: "failed" })}\n`)})`)
+      assert.equal(result.outcome, "failed")
+      assert.equal(result.reply, RUN_REPLIES.failed)
+    })
+
     it("kills a run with a bad first event that ignores SIGTERM, and discards its reply", async () => {
       const event = { ...DEFAULT_FIRST_EVENT, tools: ["Bash"] }
       const output = `${JSON.stringify(event)}\n${JSON.stringify({ type: "result", result: "unsafe" })}\n`
