@@ -37,8 +37,9 @@ export const PART_LABELS = Object.freeze({
 export const RESULTS_IN_SNAPSHOT = 20
 
 // The whole input's limit in characters (T022). Past it, the oldest thread
-// messages are left out first, then the lane snapshot is cut; the
-// instruction parts and the operator's newest message are always kept.
+// messages are left out first, then the lane snapshot is cut, then the
+// operator's newest message is cut; the instruction parts and every part
+// label are always kept.
 export const MAX_INPUT_CHARS = 60_000
 
 /**
@@ -280,7 +281,7 @@ export function buildRunInput({
   const repoNames = (Array.isArray(repos) ? repos : []).map((repo) => repo?.name).filter(Boolean)
   const earlier = filterThread(thread, { operator, botUserId, label, repoNames, excludeTs: newest?.ts ?? "" })
     .map((message) => `${message.author}: ${data(message.text)}`)
-  const newestText = data(decodeSlackText(typeof newest?.text === "string" ? newest.text : ""))
+  let newestText = data(decodeSlackText(typeof newest?.text === "string" ? newest.text : ""))
   let lanesText = laneSnapshotText(repos, { label, taskChars, summaryChars })
   const join = (threadLines, omitted) => [
     PART_LABELS.instruction,
@@ -300,7 +301,7 @@ export function buildRunInput({
     "",
   ].join("\n")
   // The cap: leave out the oldest thread messages first, then cut the lane
-  // snapshot. The instruction parts and the newest message stay whole.
+  // snapshot, then the newest message (below). The instruction parts stay.
   let kept = earlier
   let text = join(kept, 0)
   while (text.length > maxChars && kept.length > 0) {
@@ -310,6 +311,13 @@ export function buildRunInput({
   if (text.length > maxChars) {
     const room = Math.max(0, lanesText.length - (text.length - maxChars))
     lanesText = cutText(lanesText, room).text
+    text = join(kept, earlier.length - kept.length)
+  }
+  // Last, the newest message itself, which the scrub step can make longer
+  // than the operator typed it (runs of "=" are spaced out). Its label stays.
+  if (text.length > maxChars) {
+    const room = Math.max(0, newestText.length - (text.length - maxChars))
+    newestText = cutText(newestText, room).text
     text = join(kept, earlier.length - kept.length)
   }
   return text
