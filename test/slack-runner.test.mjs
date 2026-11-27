@@ -252,6 +252,30 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
       assert.match(result.reason, /64 KB/)
     })
 
+    it("an abort signal stops the run at once: its process group is gone and the outcome is cancelled", async () => {
+      const runner = await fake({ neverExit: true })
+      const controller = new AbortController()
+      const running = runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 60, env: BASE_ENV, signal: controller.signal })
+      for (let i = 0; i < 100 && (await readFakeOrchestratorRecords(runner)).length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      const started = Date.now()
+      controller.abort()
+      const result = await running
+      assert.equal(result.outcome, "cancelled")
+      assert.equal(result.profileFailed, false)
+      assert.ok(Date.now() - started < 5000)
+      const [record] = await readFakeOrchestratorRecords(runner)
+      assert.equal(alive(record.pid), false)
+    })
+
+    it("an already aborted signal starts no process", async () => {
+      const runner = await fake()
+      const controller = new AbortController()
+      controller.abort()
+      const result = await runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 5, env: BASE_ENV, signal: controller.signal })
+      assert.equal(result.outcome, "cancelled")
+      assert.deepEqual(await readFakeOrchestratorRecords(runner), [])
+    })
+
     it("a runner string with no profile starts no process", async () => {
       const runner = await fake()
       const result = await runOnce({ runner: `${runner.executable} -p --dangerously-skip-permissions`, input: "x", turnSeconds: 5, env: BASE_ENV })

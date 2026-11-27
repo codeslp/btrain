@@ -166,6 +166,7 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
     it("runs the profile check when the listener takes its lease, and keeps the verdict", async () => {
       const { h, fakeRun, listener } = await listenerHome({})
       const taken = await listener.acquire()
+      await listener.profileReady
       assert.equal(taken.ok, true)
       assert.equal(listener.profile.ok, true, listener.profile.reason)
       assert.equal(readRunnerCheck(h.slackDir).ok, true)
@@ -176,6 +177,7 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
     it("a failed check at start leaves the model off with the reason", async () => {
       const { listener } = await listenerHome({ firstEvent: firstEventWith({ skills: ["review"] }) })
       await listener.acquire()
+      await listener.profileReady
       assert.equal(listener.profile.ok, false)
       assert.match(listener.profile.reason, /skills/)
       await listener.stop()
@@ -189,6 +191,8 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
         const { h, fakeRun, listener } = await listenerHome(savedOk ? { firstEvent: firstEventWith({ tools: ["Bash"] }) } : {})
         saveVerdict(h.slackDir, { runner: `${fakeRun.executable} -p`, cliVersion: "9.9.9 (Claude Code)", ok: savedOk, reason: savedOk ? "" : "an earlier configuration reported tools" })
         await listener.acquire()
+        await listener.profileReady
+      await listener.profileReady
         assert.equal((await readFakeOrchestratorRecords(fakeRun)).filter((rec) => rec.argv[0] !== "--version").length, 1)
         assert.equal(listener.profile.ok, !savedOk)
         assert.equal(readRunnerCheck(h.slackDir).ok, !savedOk, "the fresh verdict is saved")
@@ -196,9 +200,30 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
       })
     }
 
+    it("acquire returns while the check runs, and stop cancels a stalled check at once without saving a verdict (PR #158 review)", async () => {
+      const { h, fakeRun, listener } = await listenerHome({ neverExit: true })
+      const started = Date.now()
+      assert.equal((await listener.acquire()).ok, true)
+      assert.ok(Date.now() - started < 5000, "acquire did not wait for the check")
+      assert.equal(listener.profile.ok, false)
+      assert.match(listener.profile.reason, /running/)
+      const records = async () => (await readFakeOrchestratorRecords(fakeRun)).filter((rec) => rec.argv[0] !== "--version")
+      for (let i = 0; i < 100 && (await records()).length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      const [check] = await records()
+      assert.ok(check, "the check started")
+      const stopping = Date.now()
+      await listener.stop()
+      assert.ok(Date.now() - stopping < 5000, "stop did not wait for turnSeconds")
+      assert.throws(() => process.kill(check.pid, 0), "the check's process is gone")
+      assert.equal(readRunnerCheck(h.slackDir), null)
+      await listener.profileReady
+      assert.equal(listener.profile.ok, false)
+    })
+
     it("with the model off (empty runner) no check runs", async () => {
       const { listener } = await listenerHome(undefined, { runner: "" })
       await listener.acquire()
+      await listener.profileReady
       assert.equal(listener.profile.ok, false)
       assert.match(listener.profile.reason, /model is off/)
       await listener.stop()
