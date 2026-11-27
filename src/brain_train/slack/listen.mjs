@@ -35,7 +35,7 @@ import { classifyInbound, HEARD, SOURCES } from "./inbound.mjs"
 import { checkApprovalMinutes, loadInbox, writeInbox } from "./inbox.mjs"
 import { consumeStop, isPaused, setPaused, startLeaseTimer, stopRequested, takeLease } from "./lease.mjs"
 import { createReader } from "./read-client.mjs"
-import { cliVersion, readRunnerCheck, runProfileCheck, verdictMatches } from "./profile-check.mjs"
+import { runProfileCheck } from "./profile-check.mjs"
 import { resolveProfile } from "./runner.mjs"
 import { deliverToTarget, deliveryTarget } from "./target.mjs"
 
@@ -414,9 +414,10 @@ export async function createListener({
     }
   }
 
-  // Spec 025 T023: the profile check when the listener starts. A saved
-  // verdict for this runner string, profile version, and CLI version is used
-  // as it is; otherwise the check runs once (a model run on the subscription).
+  // Spec 025 FR-15 and T023: the profile check runs every time the listener
+  // starts (a model run on the subscription), and its verdict is saved. Only
+  // `btrain doctor` reuses a saved verdict, so a failed one recovers once the
+  // configuration is fixed.
   let profile = { ok: false, reason: "the listener has not started" }
   const checkProfileAtStart = async () => {
     const runner = listening.orchestrator.runner
@@ -426,13 +427,7 @@ export async function createListener({
       log(`orchestrator runner has no profile: ${resolved.reason}`)
       return { ok: false, reason: resolved.reason }
     }
-    const version = await cliVersion(runner, { env: homeEnv })
-    const saved = readRunnerCheck(slackDir)
-    if (verdictMatches(saved, { runner, cliVersion: version })) {
-      log(`orchestrator profile: saved verdict ${saved.ok ? "passed" : "failed"}`)
-      return { ok: saved.ok, reason: saved.reason || "" }
-    }
-    const checked = await runProfileCheck({ runner, env: homeEnv, slackDir, turnSeconds: listening.orchestrator.turnSeconds, version, log })
+    const checked = await runProfileCheck({ runner, env: homeEnv, slackDir, turnSeconds: listening.orchestrator.turnSeconds, log })
     log(`orchestrator profile check ${checked.ok ? "passed" : `did not pass: ${checked.reason}`}`)
     return { ok: checked.ok, reason: checked.reason }
   }
