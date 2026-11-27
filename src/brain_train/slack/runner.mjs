@@ -212,6 +212,8 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-orchestrator-"))
   try {
+    // An abort while the directory was being made: nothing has started.
+    if (signal?.aborted) return { outcome: "cancelled", reply: "", reason: "the run was cancelled before it started", profileFailed: false }
     return await new Promise((resolve) => {
       // Output is kept as bytes and decoded once, so a UTF-8 character split
       // across chunks is not corrupted.

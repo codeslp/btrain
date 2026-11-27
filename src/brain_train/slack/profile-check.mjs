@@ -61,13 +61,15 @@ export function saveVerdict(slackDir, { runner, cliVersion: version, ok, reason 
 
 /**
  * The first line of `<runner executable> --version`, with the profile's
- * environment, or "" when it cannot be read. No model runs.
+ * environment, or "" when it cannot be read or `signal` aborts it. No
+ * model runs.
  */
-export function cliVersion(runner, { env = process.env } = {}) {
+export function cliVersion(runner, { env = process.env, signal } = {}) {
   const executable = String(runner ?? "").trim().split(/\s+/)[0]
-  if (!executable) return Promise.resolve("")
+  if (!executable || signal?.aborted) return Promise.resolve("")
   return new Promise((resolve) => {
-    const child = execFile(executable, ["--version"], { env: runnerEnv(env), timeout: VERSION_TIMEOUT_MS, maxBuffer: 64 * 1024 }, (error, stdout) => {
+    // `signal` kills the command at once when the caller stops.
+    const child = execFile(executable, ["--version"], { env: runnerEnv(env), timeout: VERSION_TIMEOUT_MS, maxBuffer: 64 * 1024, signal }, (error, stdout) => {
       if (error) return resolve("")
       resolve(String(stdout).split("\n")[0].trim().slice(0, VERSION_CHARS))
     })
@@ -86,7 +88,7 @@ export async function runProfileCheck({ runner, env = process.env, slackDir, tur
   if (!resolved.ok) return { ok: false, reason: resolved.reason, saved: false, cliVersion: "" }
   // A caller that already read the version passes it, so the verdict is
   // saved under the version it compared against.
-  if (typeof version !== "string") version = await cliVersion(runner, { env })
+  if (typeof version !== "string") version = await cliVersion(runner, { env, signal })
   const result = await runOnce({ runner, input: CHECK_INPUT, turnSeconds, env, log, signal })
   if (result.outcome === "reply" || result.profileFailed) {
     const ok = result.outcome === "reply"
