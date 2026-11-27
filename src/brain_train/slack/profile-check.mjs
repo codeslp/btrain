@@ -14,7 +14,7 @@
 // that could not judge it (missing executable, timed out, out of usage or
 // signed out, any other failure) saves nothing, so the next start tries again.
 
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { PROFILE_VERSION, resolveProfile, runOnce, runnerEnv } from "./runner.mjs"
@@ -23,6 +23,16 @@ export const RUNNER_CHECK_FILE = "runner-check.json"
 export const CHECK_INPUT = "Reply with OK"
 const VERSION_TIMEOUT_MS = 10_000
 const VERSION_CHARS = 200
+const VERSION_OUTPUT_CAP = 64 * 1024
+const KILL_GRACE_MS = 1000
+
+function killGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal)
+  } catch {
+    // The group is already gone.
+  }
+}
 
 function checkPath(slackDir) {
   return path.join(slackDir, RUNNER_CHECK_FILE)
@@ -64,18 +74,45 @@ export function saveVerdict(slackDir, { runner, cliVersion: version, ok, reason 
  * environment, or "" when it cannot be read or `signal` aborts it. No
  * model runs.
  */
-export function cliVersion(runner, { env = process.env, signal } = {}) {
+export function cliVersion(runner, { env = process.env, signal, timeoutMs = VERSION_TIMEOUT_MS } = {}) {
   const executable = String(runner ?? "").trim().split(/\s+/)[0]
   if (!executable || signal?.aborted) return Promise.resolve("")
   return new Promise((resolve) => {
-    // `signal` kills the command at once when the caller stops.
-    const child = execFile(executable, ["--version"], { env: runnerEnv(env), timeout: VERSION_TIMEOUT_MS, maxBuffer: 64 * 1024, signal }, (error, stdout) => {
-      if (error) return resolve("")
-      resolve(String(stdout).split("\n")[0].trim().slice(0, VERSION_CHARS))
+    // Its own process group, as a run has: on abort or timeout the group gets
+    // SIGTERM and, one second later, SIGKILL, so a command that ignores
+    // SIGTERM does not outlive the caller.
+    const child = spawn(executable, ["--version"], { env: runnerEnv(env), detached: true, stdio: ["pipe", "pipe", "ignore"] })
+    let stdout = ""
+    let failed = false
+    let killTimer = null
+    const stop = () => {
+      failed = true
+      killGroup(child.pid, "SIGTERM")
+      if (!killTimer) killTimer = setTimeout(() => killGroup(child.pid, "SIGKILL"), KILL_GRACE_MS)
+    }
+    const timer = setTimeout(stop, timeoutMs)
+    signal?.addEventListener("abort", stop, { once: true })
+    child.on("error", () => {
+      failed = true
+    })
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < VERSION_OUTPUT_CAP) stdout += chunk.toString("utf8")
     })
     // Nothing is written to it, so a CLI that reads it does not wait.
-    child.stdin?.on("error", () => {})
-    child.stdin?.end()
+    child.stdin.on("error", () => {})
+    child.stdin.end()
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", stop)
+      // A stopped group gets SIGKILL now rather than after the grace wait, so
+      // no SIGTERM-proof member is left behind.
+      if (killTimer) {
+        clearTimeout(killTimer)
+        killGroup(child.pid, "SIGKILL")
+      }
+      if (failed || code !== 0) return resolve("")
+      resolve(stdout.split("\n")[0].trim().slice(0, VERSION_CHARS))
+    })
   })
 }
 
