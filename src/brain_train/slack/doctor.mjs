@@ -52,7 +52,12 @@ async function collectListenerFindings(config, { env }) {
         const version = await cliVersion(runner, { env })
         let verdict = readRunnerCheck(slackDir)
         if (!verdictMatches(verdict, { runner, cliVersion: version }) && env.BTRAIN_LANE_LOCKED !== "1") {
-          await runProfileCheck({ runner, env, slackDir, turnSeconds: listening.orchestrator.turnSeconds, version })
+          const checked = await runProfileCheck({ runner, env, slackDir, turnSeconds: listening.orchestrator.turnSeconds, version })
+          // A run that could not judge the profile saves nothing, so the
+          // next check tries again; it is still reported now.
+          if (!checked.saved) {
+            warnings.push(`slack: the orchestrator profile check could not judge the profile (${checked.reason}); the model does not run until a check passes`)
+          }
           verdict = readRunnerCheck(slackDir)
         }
         if (verdictMatches(verdict, { runner, cliVersion: version }) && !verdict.ok) {
