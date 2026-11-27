@@ -465,6 +465,20 @@ describe("T022: the orchestrator reply header and the input size cap", () => {
     assert.match(input, /earlier messages left out/)
   })
 
+  it("the whole input stays capped when the newest message expands in the scrub step (codex-reviewer round 2)", () => {
+    const input = buildRunInput({ newest: { text: "=".repeat(40000) } })
+    assert.ok(input.length <= MAX_INPUT_CHARS, `${input.length} exceeds ${MAX_INPUT_CHARS}`)
+    assert.ok(input.includes(PART_LABELS.message), "the newest-message label stays")
+    assert.equal(input.split(PART_LABELS.message).length - 1, 1)
+  })
+
+  it("cuts a large lane snapshot even with no thread history (M14)", () => {
+    const lanes = Array.from({ length: 100 }, (_, i) => ({ laneId: String(i), status: "in-progress", task: "x".repeat(500) }))
+    const input = buildRunInput({ repos: [{ name: "repo", lanes }], maxChars: 4000 })
+    assert.ok(input.length <= 4000, `${input.length} exceeds 4000`)
+    assert.ok(input.includes(PART_LABELS.lanes))
+  })
+
   it("the default cap is MAX_INPUT_CHARS", () => {
     assert.ok(MAX_INPUT_CHARS >= 20_000 && MAX_INPUT_CHARS <= 200_000)
   })
