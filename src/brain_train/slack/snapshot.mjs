@@ -42,6 +42,17 @@ export const RESULTS_IN_SNAPSHOT = 20
 // label are always kept.
 export const MAX_INPUT_CHARS = 60_000
 
+// The cap counts and cuts in one unit, UTF-16 code units (`.length`), and a
+// cut never splits a surrogate pair. A section with no room is emptied: no
+// room is not "no limit".
+function cutToLength(text, room) {
+  if (room <= 0) return ""
+  if (text.length <= room) return text
+  let end = room - 1
+  if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end -= 1
+  return `${text.slice(0, end)}…`
+}
+
 /**
  * The first line of every reply the orchestrator posts (T022): one line the
  * thread filter recognizes as this developer's, followed by the prose.
@@ -309,15 +320,13 @@ export function buildRunInput({
     text = join(kept, earlier.length - kept.length)
   }
   if (text.length > maxChars) {
-    const room = Math.max(0, lanesText.length - (text.length - maxChars))
-    lanesText = cutText(lanesText, room).text
+    lanesText = cutToLength(lanesText, lanesText.length - (text.length - maxChars))
     text = join(kept, earlier.length - kept.length)
   }
   // Last, the newest message itself, which the scrub step can make longer
   // than the operator typed it (runs of "=" are spaced out). Its label stays.
   if (text.length > maxChars) {
-    const room = Math.max(0, newestText.length - (text.length - maxChars))
-    newestText = cutText(newestText, room).text
+    newestText = cutToLength(newestText, newestText.length - (text.length - maxChars))
     text = join(kept, earlier.length - kept.length)
   }
   return text
