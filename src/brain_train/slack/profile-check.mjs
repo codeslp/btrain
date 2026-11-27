@@ -81,13 +81,13 @@ export function cliVersion(runner, { env = process.env } = {}) {
  * Run the profile check and save its verdict when the run judged the
  * profile. Returns `{ ok, reason, saved, cliVersion }`.
  */
-export async function runProfileCheck({ runner, env = process.env, slackDir, turnSeconds = 180, version, log = () => {}, now = Date.now } = {}) {
+export async function runProfileCheck({ runner, env = process.env, slackDir, turnSeconds = 180, version, log = () => {}, now = Date.now, signal } = {}) {
   const resolved = resolveProfile(runner)
   if (!resolved.ok) return { ok: false, reason: resolved.reason, saved: false, cliVersion: "" }
   // A caller that already read the version passes it, so the verdict is
   // saved under the version it compared against.
   if (typeof version !== "string") version = await cliVersion(runner, { env })
-  const result = await runOnce({ runner, input: CHECK_INPUT, turnSeconds, env, log })
+  const result = await runOnce({ runner, input: CHECK_INPUT, turnSeconds, env, log, signal })
   if (result.outcome === "reply" || result.profileFailed) {
     const ok = result.outcome === "reply"
     saveVerdict(slackDir, { runner, cliVersion: version, ok, reason: ok ? "" : result.reason, now })

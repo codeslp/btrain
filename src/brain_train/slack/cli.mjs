@@ -325,7 +325,12 @@ async function listen(options, readers, io) {
   }
   io.out(`operator: ${listener.operator}`)
   for (const repo of listener.served) io.out(`serving ${repo.name} (${repo.path}) in ${repo.channel}`)
-  io.out(`runner: ${listener.runner || "none"} (profile check: ${listener.profile.ok ? "passed" : `not passed, ${listener.profile.reason}`})`)
+  io.out(`runner: ${listener.runner || "none"}`)
+  // The start-up profile check runs in the background; its verdict is
+  // printed when it finishes, and a stop does not wait for it.
+  listener.profileReady.then(() => {
+    io.out(`profile check: ${listener.profile.ok ? "passed" : `not passed, ${listener.profile.reason}`}`)
+  })
 
   let interrupted = false
   let wake = () => {}

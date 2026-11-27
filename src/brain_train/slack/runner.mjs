@@ -201,12 +201,14 @@ function logError(log, stderr) {
  * standard input, `turnSeconds` the time limit, `env` the environment to take
  * the allowed names from. Returns `{ outcome, reply, reason, profileFailed }`
  * where `outcome` is `reply`, `timedOut`, `missing`, `outOfUsage`, `failed`,
- * or `noProfile` (nothing started), and `reply` is the text to post: the
- * model's reply, or the fixed text of the outcome.
+ * `noProfile` (nothing started), or `cancelled` (the signal aborted it),
+ * and `reply` is the text to post: the model's reply, or the fixed text of
+ * the outcome. `signal` is an optional AbortSignal that stops the run.
  */
-export async function runOnce({ runner, input = "", turnSeconds = 180, env = process.env, platform = process.platform, log = () => {} } = {}) {
+export async function runOnce({ runner, input = "", turnSeconds = 180, env = process.env, platform = process.platform, log = () => {}, signal } = {}) {
   const resolved = resolveProfile(runner, { platform })
   if (!resolved.ok) return { outcome: "noProfile", reply: "", reason: resolved.reason, profileFailed: false }
+  if (signal?.aborted) return { outcome: "cancelled", reply: "", reason: "the run was cancelled before it started", profileFailed: false }
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-orchestrator-"))
   try {
@@ -238,6 +240,13 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
         timedOut = true
         stop()
       }, Math.max(0, Number(turnSeconds) * 1000))
+      // An abort (the listener stopping) ends the run at once.
+      let cancelled = false
+      const onAbort = () => {
+        cancelled = true
+        stop()
+      }
+      signal?.addEventListener("abort", onAbort, { once: true })
 
       child.on("error", (error) => {
         spawnError = error
@@ -275,6 +284,7 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
 
       child.on("close", (code) => {
         clearTimeout(turnTimer)
+        signal?.removeEventListener("abort", onAbort)
         if (killTimer) clearTimeout(killTimer)
         if (child.pid) killGroup(child.pid, "SIGKILL")
         logError(log, stderr)
@@ -287,6 +297,7 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
             ? done("missing", "the runner executable was not found")
             : done("failed", `the runner did not start (${spawnError.code || "error"})`)
         }
+        if (cancelled) return done("cancelled", "the run was cancelled")
         if (firstFailure) return done("failed", firstFailure, { profileFailed: true })
         if (timedOut) return done("timedOut", `the run passed ${turnSeconds} seconds`)
         const stdout = Buffer.concat(chunks).toString("utf8")
