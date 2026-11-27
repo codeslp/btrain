@@ -241,6 +241,11 @@ export async function createListener({
           await post(action.channel, action.thread, LISTEN_NOTES.commandsNotBuilt)
           break
         case "turn": {
+          if (pausedThisCycle || (await isPaused(slackDir))) {
+            log(`conversation turn in ${action.channel} ${action.thread}: dropped, the listener is paused`)
+            if (!(await finishTurn(action.channel, action.thread))) return
+            break
+          }
           if (!profile.ok) {
             log(`conversation turn in ${action.channel} ${action.thread}: the profile check has not passed`)
             await post(action.channel, action.thread, LISTEN_NOTES.profileNotReady)
@@ -502,6 +507,15 @@ export async function createListener({
         const { input, reason } = await buildTurnInput(action)
         if (!input) {
           log(`conversation turn in ${action.channel} ${action.thread}: ${reason}`)
+        } else if (!stillMine()) {
+          // The lease went while the input was built: this listener may act
+          // on nothing more, so no run and no reply.
+          log(`conversation turn in ${action.channel} ${action.thread}: the lease is gone; not run`)
+          return
+        } else if (!profile.ok) {
+          // Another turn failed the profile check while this one's input was built.
+          log(`conversation turn in ${action.channel} ${action.thread}: the profile check has not passed; not run`)
+          text = LISTEN_NOTES.profileNotReady
         } else {
           log(`conversation turn in ${action.channel} ${action.thread}: run started`)
           const result = await runOnce({ runner, input, turnSeconds: listening.orchestrator.turnSeconds, env: homeEnv, log, signal: controller.signal })
