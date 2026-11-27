@@ -921,6 +921,93 @@ describe("spec 025 WS4 (T022): orchestrator turns", () => {
     await listener.stop()
   })
 
+  const waitFor = async (check) => {
+    for (let i = 0; i < 200; i += 1) {
+      if (await check()) return
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    throw new Error("wait timed out")
+  }
+  const turnReaders = (readLanes) => ({
+    readConfig: async () => ({ features: { slack: true, slack_listen: true } }),
+    readRoster: async () => ({ laneIds: [], agents: [] }),
+    readLanes,
+  })
+
+  it("a lease lost while the input is built starts no run (codex-reviewer red team)", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "OK" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000), {
+      readers: turnReaders(async () => {
+        const file = leasePath(fixture.slackDir)
+        const held = JSON.parse(await fs.readFile(file, "utf8"))
+        await fs.writeFile(file, JSON.stringify({ ...held, nonce: "replacement" }))
+        return []
+      }),
+    })
+    try {
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 0, "no run after the lease is lost")
+    } finally {
+      await listener.stop()
+    }
+  })
+
+  it("a profile failure while another turn's input is built stops that turn from starting (codex-reviewer red team)", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { firstEvent: firstEventWith({ tools: ["Bash"] }), reply: "unsafe" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const a = message(OPERATOR, NOW, `${BOT_MENTION} A`)
+    const b = message(OPERATOR, NOW + 100, `${BOT_MENTION} B`)
+    fake.history(CHANNEL, [a, b])
+    fake.replies(CHANNEL, a.ts, [a])
+    fake.replies(CHANNEL, b.ts, [b])
+    let listener
+    let reads = 0
+    const made = await started(fixture, fake, clockAt(NOW + 1000), {
+      readers: turnReaders(async () => {
+        reads += 1
+        if (reads === 2) await waitFor(() => !listener.profile.ok)
+        return []
+      }),
+    })
+    listener = made.listener
+    try {
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 1, "only the first, failing run starts")
+    } finally {
+      await listener.stop()
+    }
+  })
+
+  it("a queued turn does not start while the listener is paused (codex-reviewer red team)", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "OK", delayMs: 150 })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const a = message(OPERATOR, NOW, `${BOT_MENTION} A`)
+    const b = message(OPERATOR, NOW + 100, "B")
+    const pause = message(OPERATOR, NOW + 200, "btrain> pause")
+    fake.history(CHANNEL, [a])
+    fake.replies(CHANNEL, a.ts, [a, b, pause])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    try {
+      await listener.cycle()
+      assert.equal(await isPaused(fixture.slackDir), true)
+      await listener.turnsSettled()
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 1, "the queued B does not run while paused")
+    } finally {
+      await listener.stop()
+    }
+  })
+
   it("a proposal in the reply is not run: the prose is posted with a not-built-yet note", async () => {
     const fixture = await createFixture()
     await setTurns(fixture, { reply: "Here is a plan.\nbtrain> status" })
