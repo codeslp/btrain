@@ -69,19 +69,32 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-// A btrain message carries the label in one fixed place: the second ` · `
-// segment of its first line (a reply, `{repo} · dev: {label} · …`, or the
-// board, `board · dev: {label}`), or its whole second line (a card,
-// `dev: {label}`). A label anywhere else is text, not the author.
-function carriesLabel(text, label) {
+// A btrain message carries the label in one fixed place, right after the
+// repository name: a reply starts `{repo} · dev: {label}` (then ` · …` or
+// the end), a card starts `{repo} · lane …` and its second line is
+// `dev: {label}`, and the board's first line is `board · dev: {label}`. The
+// text alone cannot show where a repository name ends (a name may hold
+// ` · dev: …`), so the name must be one of the channel's served repositories,
+// the longest that fits. A first line with more than one `dev:` segment is
+// dropped, and with no served names no reply or card is kept (fail closed).
+function carriesLabel(text, label, repoNames) {
   if (!label) return false
   const wanted = `dev: ${label}`
   const lines = String(text).split("\n")
-  const segment = lines[0].split(" · ")[1] ?? ""
-  // A message has one label slot: a first line whose second segment is a
-  // `dev:` segment is a reply or the board; otherwise it is a card.
-  if (segment.startsWith("dev: ")) return segment === wanted
-  return lines[1] === wanted
+  const first = lines[0]
+  if (first.split(" · ").filter((segment) => segment.startsWith("dev:")).length > 1) return false
+  if (first === `board · ${wanted}`) return true
+  const repo = [...repoNames]
+    .map(String)
+    .filter((name) => name && first.startsWith(`${name} · `))
+    .sort((left, right) => right.length - left.length)[0]
+  if (!repo) return false
+  const rest = first.slice(repo.length + " · ".length)
+  const devOnFirstLine = first.split(" · ").some((segment) => segment.startsWith("dev:"))
+  // A reply is one line. A card has no `dev:` segment on its first line.
+  if (rest.startsWith("dev:")) return lines.length === 1 && (rest === wanted || rest.startsWith(`${wanted} · `))
+  if (rest.startsWith("lane ")) return !devOnFirstLine && lines[1] === wanted
+  return false
 }
 
 function typedByOperator(item, operator) {
@@ -101,16 +114,18 @@ function postedByBtrain(item, botUserId) {
 /**
  * The thread's messages that reach the model, oldest first, as
  * `{ ts, author: "operator" | "btrain", text }` with Slack's encoding undone.
- * `excludeTs` leaves out one message (the newest, which is its own part).
+ * `repoNames` are the channel's served repositories, which a btrain message's
+ * prefix must name. `excludeTs` leaves out one message (the newest, which is
+ * its own part).
  */
-export function filterThread(messages, { operator, botUserId = "", label = "", excludeTs = "" } = {}) {
+export function filterThread(messages, { operator, botUserId = "", label = "", repoNames = [], excludeTs = "" } = {}) {
   const kept = []
   for (const item of Array.isArray(messages) ? messages : []) {
     if (!item || typeof item !== "object" || !present(item.ts) || item.ts === excludeTs) continue
     if (present(item.type) && item.type !== "message") continue
     const text = decodeSlackText(typeof item.text === "string" ? item.text : "")
     if (typedByOperator(item, operator)) kept.push({ ts: String(item.ts), author: "operator", text })
-    else if (postedByBtrain(item, botUserId) && carriesLabel(text, label)) kept.push({ ts: String(item.ts), author: "btrain", text })
+    else if (postedByBtrain(item, botUserId) && carriesLabel(text, label, repoNames)) kept.push({ ts: String(item.ts), author: "btrain", text })
   }
   return kept.sort((left, right) => Number(left.ts) - Number(right.ts))
 }
@@ -174,7 +189,8 @@ export function buildRunInput({
   taskChars = SLACK_DEFAULTS.taskChars,
   summaryChars = SLACK_DEFAULTS.summaryChars,
 } = {}) {
-  const earlier = filterThread(thread, { operator, botUserId, label, excludeTs: newest?.ts ?? "" })
+  const repoNames = (Array.isArray(repos) ? repos : []).map((repo) => repo?.name).filter(Boolean)
+  const earlier = filterThread(thread, { operator, botUserId, label, repoNames, excludeTs: newest?.ts ?? "" })
   const threadText = earlier.length > 0
     ? earlier.map((message) => `${message.author}: ${data(message.text)}`).join("\n")
     : "no earlier messages"
