@@ -220,6 +220,23 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
       assert.equal(listener.profile.ok, false)
     })
 
+    it("stop does not wait for a stalled '--version' (codex-reviewer round 2)", async () => {
+      const h = await home()
+      const fakeRun = await fakeRunner(path.join(h.root, "bin"), { neverExit: true })
+      const settings = { botToken: TOKEN, operator: OPERATOR, channels: {}, orchestrator: { runner: `${fakeRun.executable} -p` } }
+      const file = path.join(h.dir, "slack.json")
+      await fs.writeFile(file, JSON.stringify(settings), { mode: 0o600 })
+      await fs.chmod(file, 0o600)
+      const fetch = async () => new Response(JSON.stringify({ ok: true, user_id: "U0FAKEBOT1" }), { status: 200, headers: { "content-type": "application/json" } })
+      const listener = await createListener({ home: h.dir, env: h.env, fetch, readers: { readConfig: async () => ({}), readRoster: async () => null }, now: () => 1700000000000 })
+      await listener.acquire()
+      for (let i = 0; i < 100 && (await readFakeOrchestratorRecords(fakeRun)).length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      const started = Date.now()
+      await listener.stop()
+      assert.ok(Date.now() - started < 5000, `stop took ${Date.now() - started} ms`)
+      assert.equal(readRunnerCheck(h.slackDir), null)
+    })
+
     it("with the model off (empty runner) no check runs", async () => {
       const { listener } = await listenerHome(undefined, { runner: "" })
       await listener.acquire()

@@ -267,6 +267,16 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
       assert.equal(alive(record.pid), false)
     })
 
+    it("an abort right after the call, before the run starts, still cancels it (codex-reviewer round 2)", async () => {
+      const runner = await fake({ reply: "should not be posted" })
+      const controller = new AbortController()
+      const running = runOnce({ runner: `${runner.executable} -p`, input: "x", turnSeconds: 20, env: BASE_ENV, signal: controller.signal })
+      controller.abort()
+      const result = await running
+      assert.equal(result.outcome, "cancelled")
+      assert.notEqual(result.reply, "should not be posted")
+    })
+
     it("an already aborted signal starts no process", async () => {
       const runner = await fake()
       const controller = new AbortController()
