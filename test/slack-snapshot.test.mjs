@@ -13,11 +13,13 @@ import {
   laneSnapshotText,
   readInstructionText,
 } from "../src/brain_train/slack/snapshot.mjs"
+import { renderBoard, renderCard, renderReply } from "../src/brain_train/slack/render.mjs"
 
 const OPERATOR = "U0FAKEOP01"
 const OTHER = "U0FAKEOT02"
 const BOT = "U0FAKEBOT3"
 const LABEL = "brian"
+const REPOS = ["repo-x"]
 // A secret pattern btrain review code knows: an AWS access key ID shape.
 const SECRET = ["AKIA", "ABCDEFGHIJKLMNOP"].join("")
 
@@ -71,7 +73,7 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
           typed("1.000100", "<@U0FAKEBOT3> what is in review?"),
           botPost("1.000200", "repo-x · dev: brian · sent to review · reviewer codex-reviewer"),
         ],
-        { operator: OPERATOR, botUserId: BOT, label: LABEL },
+        { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS },
       )
       assert.deepEqual(kept.map((m) => [m.ts, m.author]), [
         ["1.000100", "operator"],
@@ -90,7 +92,7 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
           typed("1.5", "posted by an app as the operator", { app_id: "A0FAKEAPP2" }),
           typed("1.6", "a channel join", { subtype: "channel_join" }),
         ],
-        { operator: OPERATOR, botUserId: BOT, label: LABEL },
+        { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS },
       )
       assert.deepEqual(kept, [])
     })
@@ -101,7 +103,7 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
           botPost("2.1", "repo-x · lane e · needs-review\ndev: brian\ntask: Fix the cache"),
           typed("2.2", "go on", { subtype: "thread_broadcast" }),
         ],
-        { operator: OPERATOR, botUserId: BOT, label: LABEL },
+        { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS },
       )
       assert.deepEqual(kept.map((m) => m.author), ["btrain", "operator"])
     })
@@ -113,18 +115,18 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
           botPost("3.5", "repo-x · lane a · in-progress\ndev: someone-else\ntask: dev: brian\nowner: x"),
           botPost("3.6", "repo-x · dev: someone-else · summary\ndev: brian"),
         ],
-        { operator: OPERATOR, botUserId: BOT, label: LABEL },
+        { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS },
       )
       assert.deepEqual(kept, [])
     })
 
     it("drops a message from the operator's user ID that carries a bot_id", () => {
-      const kept = filterThread([typed("3.7", "posted with a bot_id", { bot_id: "B0FAKEBOT2" })], { operator: OPERATOR, botUserId: BOT, label: LABEL })
+      const kept = filterThread([typed("3.7", "posted with a bot_id", { bot_id: "B0FAKEBOT2" })], { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS })
       assert.deepEqual(kept, [])
     })
 
     it("does not take a label that only starts the same way", () => {
-      const kept = filterThread([botPost("3.1", "repo-x · dev: brian2 · claimed lane a")], { operator: OPERATOR, botUserId: BOT, label: LABEL })
+      const kept = filterThread([botPost("3.1", "repo-x · dev: brian2 · claimed lane a")], { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS })
       assert.deepEqual(kept, [])
     })
 
@@ -142,12 +144,12 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
     })
 
     it("leaves out the message given as excludeTs", () => {
-      const kept = filterThread([typed("4.1", "first"), typed("4.2", "newest")], { operator: OPERATOR, botUserId: BOT, label: LABEL, excludeTs: "4.2" })
+      const kept = filterThread([typed("4.1", "first"), typed("4.2", "newest")], { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS, excludeTs: "4.2" })
       assert.deepEqual(kept.map((m) => m.ts), ["4.1"])
     })
 
     it("decodes Slack's encoding in the kept text", () => {
-      const [message] = filterThread([typed("5.1", "a &lt;b&gt; &amp; <https://example.test/x|the doc>")], { operator: OPERATOR, botUserId: BOT, label: LABEL })
+      const [message] = filterThread([typed("5.1", "a &lt;b&gt; &amp; <https://example.test/x|the doc>")], { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS })
       assert.equal(message.text, "a <b> & the doc")
     })
   })
@@ -288,6 +290,56 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
       const threadPart = input.slice(input.indexOf(PART_LABELS.thread), input.indexOf(PART_LABELS.message))
       assert.match(threadPart, /no earlier messages/)
     })
+  })
+})
+
+describe("filterThread on real rendered messages (codex-reviewer red team on 973b4fc)", () => {
+  const options = { operator: OPERATOR, botUserId: BOT, label: LABEL }
+  const message = (text) => botPost("7.1", text)
+  const reply = (context) => renderReply({ kind: "claimed", fields: { actor: "claude", lane: "a" } }, context)
+  const card = (context) => renderCard({ laneId: "a", status: "in-progress", task: "t" }, context)
+
+  it("keeps this developer's real reply, card, and board for a served repository", () => {
+    const context = { repoName: "repo-x", label: LABEL }
+    const board = renderBoard([{ name: "repo-x", lanes: [] }], { label: LABEL })
+    for (const text of [reply(context), card(context), board]) {
+      assert.equal(filterThread([message(text)], { ...options, repoNames: ["repo-x"] }).length, 1, text)
+    }
+  })
+
+  it("drops another developer's reply and card whose repository name holds a label-shaped segment", () => {
+    const context = { repoName: "repo · dev: brian", label: "other" }
+    for (const repoNames of [["repo · dev: brian"], ["repo"], ["repo", "repo · dev: brian"], []]) {
+      for (const text of [reply(context), card(context)]) {
+        assert.deepEqual(filterThread([message(text)], { ...options, repoNames }), [], `${JSON.stringify(repoNames)}: ${text}`)
+      }
+    }
+  })
+
+  it("drops a reply or card from a repository the channel does not serve", () => {
+    const context = { repoName: "repo-z", label: LABEL }
+    for (const text of [reply(context), card(context)]) {
+      assert.deepEqual(filterThread([message(text)], { ...options, repoNames: ["repo-x"] }), [])
+    }
+  })
+
+  it("with no served repository names keeps no reply or card", () => {
+    const context = { repoName: "repo-x", label: LABEL }
+    for (const text of [reply(context), card(context)]) {
+      assert.deepEqual(filterThread([message(text)], options), [])
+    }
+  })
+
+  it("buildRunInput passes the snapshot's repository names to the thread filter", () => {
+    const input = buildRunInput({
+      repos: [{ name: "repo-x", lanes: [], results: [] }],
+      thread: [message(reply({ repoName: "repo-x", label: LABEL })), typed("7.9", "next")],
+      newest: typed("7.9", "next"),
+      operator: OPERATOR,
+      botUserId: BOT,
+      label: LABEL,
+    })
+    assert.match(input, /btrain: repo-x · dev: brian · claude claimed lane a/)
   })
 })
 
