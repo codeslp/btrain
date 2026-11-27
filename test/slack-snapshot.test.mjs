@@ -290,3 +290,23 @@ describe("slack/snapshot.mjs (spec 025 T021)", () => {
     })
   })
 })
+
+describe("slack/snapshot.mjs scrub guards (codex-reviewer mutation round on 572fd13)", () => {
+  it("scrubs a secret split by a control character before flattening (M14)", () => {
+    const text = buildRunInput({ newest: { text: `${["AKIA", "ABCDEFGH"].join("")}\u0000IJKLMNOP` } })
+    assert.match(text, /\[redacted\]/)
+    assert.doesNotMatch(text, /AKIA/)
+  })
+
+  it("cuts a reason code to summaryChars (M16)", () => {
+    const text = laneSnapshotText([{ lanes: [{ status: "changes-requested", reasonCode: "r".repeat(100) }] }], { summaryChars: 12 })
+    const reason = text.split("\n").find((line) => line.includes("reason code: ")).split("reason code: ")[1]
+    assert.equal(reason.length, 12)
+  })
+
+  it("scrubs a secret that flattening forms from mixed control and format characters (M17)", () => {
+    const text = buildRunInput({ newest: { text: `${"Bear" + "er"}\u0000${"y".repeat(15)}​${"y".repeat(15)}` } })
+    assert.match(text, /\[redacted\]/)
+    assert.doesNotMatch(text, /Bearer y{30}/)
+  })
+})
