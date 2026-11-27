@@ -173,14 +173,20 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
       await listener.stop()
     })
 
-    it("a saved verdict for the same runner and CLI version is used without a model run", async () => {
-      const { h, fakeRun, listener } = await listenerHome({})
-      saveVerdict(h.slackDir, { runner: `${fakeRun.executable} -p`, cliVersion: "9.9.9 (Claude Code)", ok: true })
-      await listener.acquire()
-      assert.equal(listener.profile.ok, true)
-      assert.deepEqual((await readFakeOrchestratorRecords(fakeRun)).filter((rec) => rec.argv[0] !== "--version"), [])
-      await listener.stop()
-    })
+    // FR-15: the check runs whenever the listener starts; only btrain doctor
+    // reuses a saved verdict. A saved failure therefore recovers once the
+    // configuration is fixed, and a saved pass is checked again.
+    for (const savedOk of [false, true]) {
+      it(`runs a fresh check at start despite a saved ${savedOk ? "pass" : "failure"} for the same runner and version`, async () => {
+        const { h, fakeRun, listener } = await listenerHome(savedOk ? { firstEvent: firstEventWith({ tools: ["Bash"] }) } : {})
+        saveVerdict(h.slackDir, { runner: `${fakeRun.executable} -p`, cliVersion: "9.9.9 (Claude Code)", ok: savedOk, reason: savedOk ? "" : "an earlier configuration reported tools" })
+        await listener.acquire()
+        assert.equal((await readFakeOrchestratorRecords(fakeRun)).filter((rec) => rec.argv[0] !== "--version").length, 1)
+        assert.equal(listener.profile.ok, !savedOk)
+        assert.equal(readRunnerCheck(h.slackDir).ok, !savedOk, "the fresh verdict is saved")
+        await listener.stop()
+      })
+    }
 
     it("with the model off (empty runner) no check runs", async () => {
       const { listener } = await listenerHome(undefined, { runner: "" })
