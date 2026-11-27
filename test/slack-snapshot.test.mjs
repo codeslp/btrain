@@ -6,12 +6,14 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import {
   INSTRUCTION_PATH,
+  MAX_INPUT_CHARS,
   PART_LABELS,
   RESULTS_IN_SNAPSHOT,
   buildRunInput,
   commandGrammarText,
   filterThread,
   laneSnapshotText,
+  orchestratorHeader,
   readInstructionText,
 } from "../src/brain_train/slack/snapshot.mjs"
 import { renderBoard, renderCard, renderReply } from "../src/brain_train/slack/render.mjs"
@@ -427,6 +429,44 @@ describe("PR #155 review: the command grammar and the repo= value", () => {
     assert.match(text, /repository repo-x \(repo=repo-x\)/)
     assert.match(text, /repository shared \(repo=\/work\/one\/shared\)/)
     assert.match(text, /repository shared \(repo=\/work\/two\/shared\)/)
+  })
+})
+
+describe("T022: the orchestrator reply header and the input size cap", () => {
+  it("keeps a multi-line orchestrator reply whose first line is 'orchestrator · dev: <label>'", () => {
+    const kept = filterThread(
+      [botPost("6.1", `${orchestratorHeader(LABEL)}\nLane e is in review.\nThe reviewer is codex-reviewer.`)],
+      { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS },
+    )
+    assert.equal(kept.length, 1)
+    assert.match(kept[0].text, /Lane e is in review\./)
+  })
+
+  it("drops another developer's orchestrator reply and a header line that is not the first line", () => {
+    const kept = filterThread(
+      [
+        botPost("6.2", `${orchestratorHeader("someone-else")}\nhi`),
+        botPost("6.3", `hello\n${orchestratorHeader(LABEL)}`),
+        botPost("6.4", `${orchestratorHeader(LABEL)} · extra\nhi`),
+      ],
+      { operator: OPERATOR, botUserId: BOT, label: LABEL, repoNames: REPOS },
+    )
+    assert.deepEqual(kept, [])
+  })
+
+  it("caps the whole input at maxChars by dropping the oldest thread messages first, keeping the newest message", () => {
+    const thread = Array.from({ length: 40 }, (_, i) => typed(`9.${String(i + 10).padStart(3, "0")}`, `message ${i} ${"x".repeat(200)}`))
+    const newest = typed("9.999", "the newest instruction")
+    const input = buildRunInput({ instruction: "FIXED", repos: [{ name: "repo-x", lanes: [lane()], results: [] }], thread: [...thread, newest], newest, operator: OPERATOR, botUserId: BOT, label: LABEL, maxChars: 4000 })
+    assert.ok(input.length <= 4000, `input is ${input.length} characters`)
+    assert.match(input, /the newest instruction/)
+    assert.match(input, /message 39 /, "the newest earlier message stays")
+    assert.doesNotMatch(input, /message 0 /, "the oldest is dropped")
+    assert.match(input, /earlier messages left out/)
+  })
+
+  it("the default cap is MAX_INPUT_CHARS", () => {
+    assert.ok(MAX_INPUT_CHARS >= 20_000 && MAX_INPUT_CHARS <= 200_000)
   })
 })
 

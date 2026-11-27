@@ -19,7 +19,10 @@ import { writeInbox, emptyInbox } from "../src/brain_train/slack/inbox.mjs"
 import { requestStop, clearPaused, isPaused, leasePath } from "../src/brain_train/slack/lease.mjs"
 import { writeEntry } from "../src/brain_train/slack/outbox.mjs"
 import { REPLIES } from "../src/brain_train/slack/decide.mjs"
-import { installFakeOrchestratorRunner } from "./helpers/fake-orchestrator-runner.mjs"
+import { firstEventWith, installFakeOrchestratorRunner, readFakeOrchestratorRecords, writeFakeOrchestratorControl } from "./helpers/fake-orchestrator-runner.mjs"
+import { PART_LABELS, orchestratorHeader } from "../src/brain_train/slack/snapshot.mjs"
+import { RUN_REPLIES } from "../src/brain_train/slack/runner.mjs"
+import { readRunnerCheck } from "../src/brain_train/slack/profile-check.mjs"
 
 const exec = promisify(execFile)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -170,7 +173,7 @@ describe("spec 025 WS3: which messages the cycle acts on", () => {
 })
 
 describe("spec 025 WS3: conversations", () => {
-  it("opens a thread on a typed mention, answers with the model note, reads it, and closes it after conversationMinutes", async () => {
+  it("opens a thread on a typed mention, answers (here with the not-ready note: no profile check ran), reads it, and closes it after conversationMinutes", async () => {
     const fixture = await createFixture({ orchestrator: { conversationMinutes: 30 } })
     const fake = createFakeSlack({ expectedToken: TOKEN })
     const parent = message(OPERATOR, NOW, `${BOT_MENTION} what is lane a doing?`)
@@ -181,7 +184,7 @@ describe("spec 025 WS3: conversations", () => {
     await listener.cycle()
     assert.equal(fake.posts.length, 1)
     assert.equal(fake.posts[0].body.thread_ts, tsAt(NOW))
-    assert.equal(fake.posts[0].body.text, LISTEN_NOTES.modelNotBuilt)
+    assert.equal(fake.posts[0].body.text, LISTEN_NOTES.profileNotReady)
 
     fake.replies(CHANNEL, tsAt(NOW), [parent, message(OPERATOR, NOW + 20_000, "and lane b?")])
     clock.advance(30_000)
@@ -252,7 +255,7 @@ describe("spec 025 WS3: the lease, stop, pause, and resume (T017, T018)", () => 
     await listener.cycle()
     assert.equal(fake.callsTo("conversations.history").length + fake.callsTo("conversations.replies").length, reads, "no read while paused")
     assert.ok(fake.posts.length > posts, "the outbox still drains")
-    assert.ok(fake.posts.slice(posts).every((post) => post.body.text !== LISTEN_NOTES.commandsNotBuilt && post.body.text !== LISTEN_NOTES.modelNotBuilt))
+    assert.ok(fake.posts.slice(posts).every((post) => post.body.text !== LISTEN_NOTES.commandsNotBuilt && post.body.text !== LISTEN_NOTES.profileNotReady))
 
     await clearPaused(fixture.slackDir)
     const beforeResume = fake.posts.length
@@ -753,5 +756,185 @@ describe("spec 025 WS3: the registry and toggles are read again every sixth cycl
     await cycle()
     await cycle()
     assert.equal(historyOf(fake, CHANNEL), readsOfA, "the unregistered repository's channel is no longer read")
+  })
+})
+
+describe("spec 025 WS4 (T022): orchestrator turns", () => {
+  // The fake runner of each fixture: run 0 is `--version`, run 1 the profile
+  // check at start, and runs 2 and later are turns, which follow `turn`.
+  const runnerOf = (fixture) => ({
+    controlPath: path.join(fixture.home, "fake-runner", "control.json"),
+    recordPath: path.join(fixture.home, "fake-runner", "record.jsonl"),
+  })
+  const setTurns = (fixture, turn, check = {}) => writeFakeOrchestratorControl(runnerOf(fixture), { runs: [{ raw: "9.9.9 (Claude Code)\n" }, check, turn] })
+  const turnRecords = async (fixture) => (await readFakeOrchestratorRecords(runnerOf(fixture))).slice(2)
+
+  async function started(fixture, fake, clock, extra) {
+    const made = await listenerFor(fixture, fake, clock, extra)
+    assert.equal((await made.listener.acquire()).ok, true)
+    await made.listener.profileReady
+    return made
+  }
+
+  // A cycle starts the turn; the next cycle, after the run ends, posts it.
+  async function cycleThroughTurn(listener) {
+    await listener.cycle()
+    await listener.turnsSettled()
+    await listener.cycle()
+  }
+
+  it("a typed mention starts one run with the snapshot input, and its reply is posted in the thread under the orchestrator header", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "Nothing is in review." })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} what is in review?`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    assert.equal(listener.profile.ok, true, listener.profile.reason)
+    await cycleThroughTurn(listener)
+    const turnPosts = fake.posts.filter((post) => post.body.thread_ts === tsAt(NOW))
+    assert.equal(turnPosts.length, 1)
+    assert.equal(turnPosts[0].body.text, `${orchestratorHeader("test-dev")}\nNothing is in review.`)
+    const [record] = await turnRecords(fixture)
+    assert.ok(record, "one turn ran")
+    assert.ok(record.argv.includes("--disable-slash-commands"))
+    assert.deepEqual(record.cwdListing, [])
+    assert.match(record.stdin, /what is in review\?/)
+    assert.ok(record.stdin.indexOf(PART_LABELS.message) > record.stdin.indexOf(PART_LABELS.lanes))
+    assert.match(record.stdin, /repository repo \(repo=repo\)/)
+    for (const name of record.envNames) assert.doesNotMatch(name, /KEY|TOKEN|BTRAIN|SLACK/)
+    assert.ok(!record.stdin.includes(TOKEN), "the token is not in the input")
+    await listener.stop()
+  })
+
+  it("a typed reply in the open thread starts the next run with no mention, and the input holds the earlier btrain reply", async () => {
+    const fixture = await createFixture({ orchestrator: { conversationMinutes: 30 } })
+    await setTurns(fixture, { reply: "OK" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hello`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const clock = clockAt(NOW + 1000)
+    const { listener } = await started(fixture, fake, clock)
+    await cycleThroughTurn(listener)
+    const botReply = { type: "message", user: FAKE_BOT_USER_ID, bot_id: "B0000FAKE", ts: tsAt(NOW + 5000), text: `${orchestratorHeader("test-dev")}\nOK` }
+    fake.replies(CHANNEL, tsAt(NOW), [parent, botReply, message(OPERATOR, NOW + 20_000, "and lane b?")])
+    clock.advance(30_000)
+    await cycleThroughTurn(listener)
+    const records = await turnRecords(fixture)
+    assert.equal(records.length, 2)
+    assert.match(records[1].stdin, /and lane b\?/)
+    assert.match(records[1].stdin, /btrain: orchestrator · dev: test-dev/)
+    await listener.stop()
+  })
+
+  it("a mention before the profile check has passed gets the not-ready note and starts no run", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "should not run" }, { firstEvent: firstEventWith({ skills: ["review"] }) })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    assert.equal(listener.profile.ok, false)
+    await cycleThroughTurn(listener)
+    assert.deepEqual(await turnRecords(fixture), [])
+    assert.deepEqual(fake.posts.filter((post) => post.body.thread_ts === tsAt(NOW)).map((post) => post.body.text), [LISTEN_NOTES.profileNotReady])
+    await listener.stop()
+  })
+
+  it("an ordinary run whose first event lists a tool is stopped, its output is not posted, the failure is saved, and no later run starts", async () => {
+    const fixture = await createFixture({ orchestrator: { conversationMinutes: 30 } })
+    await setTurns(fixture, { firstEvent: firstEventWith({ tools: ["Bash"] }), reply: "UNSAFE OUTPUT" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const clock = clockAt(NOW + 1000)
+    const { listener } = await started(fixture, fake, clock)
+    await cycleThroughTurn(listener)
+    const texts = fake.posts.map((post) => post.body.text)
+    assert.ok(texts.every((text) => !text.includes("UNSAFE OUTPUT")))
+    assert.ok(texts.some((text) => text.includes(RUN_REPLIES.failed)))
+    assert.equal(listener.profile.ok, false)
+    assert.equal(readRunnerCheck(fixture.slackDir).ok, false)
+    fake.replies(CHANNEL, tsAt(NOW), [parent, message(OPERATOR, NOW + 20_000, "again")])
+    clock.advance(30_000)
+    await cycleThroughTurn(listener)
+    assert.equal((await turnRecords(fixture)).length, 1, "no later run")
+    assert.ok(fake.posts.some((post) => post.body.text === LISTEN_NOTES.profileNotReady))
+    await listener.stop()
+  })
+
+  it("the listener completes a cycle while a run is in progress, and stop() ends the run", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { neverExit: true })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    await listener.cycle()
+    let record
+    for (let i = 0; i < 100 && !record; i += 1) {
+      ;[record] = await turnRecords(fixture)
+      if (!record) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.ok(record, "the run started")
+    const second = await listener.cycle()
+    assert.equal(second.status, "ok", "a cycle completes during the run")
+    const stopping = Date.now()
+    await listener.stop()
+    assert.ok(Date.now() - stopping < 5000)
+    assert.throws(() => process.kill(record.pid, 0), "the run is gone")
+  })
+
+  it("a run past turnSeconds gets the timeout reply", async () => {
+    const fixture = await createFixture({ orchestrator: { turnSeconds: 1 } })
+    await setTurns(fixture, { neverExit: true })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    await cycleThroughTurn(listener)
+    assert.ok(fake.posts.some((post) => post.body.text === `${orchestratorHeader("test-dev")}\n${RUN_REPLIES.timedOut}`), JSON.stringify(fake.posts.map((p) => p.body.text)))
+    await listener.stop()
+  })
+
+  it("a reply with a token pattern, a mention, and a link is posted redacted and escaped", async () => {
+    const fixture = await createFixture()
+    const secret = ["AKIA", "ABCDEFGHIJKLMNOP"].join("")
+    await setTurns(fixture, { reply: `key ${secret} for <@U0000OTHR> at https://example.test/x` })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    await cycleThroughTurn(listener)
+    const [post] = fake.posts.filter((p) => p.body.thread_ts === tsAt(NOW))
+    assert.ok(!post.body.text.includes(secret))
+    assert.match(post.body.text, /\[redacted\]/)
+    assert.ok(!post.body.text.includes("<@U0000OTHR>"))
+    assert.ok(!post.body.text.includes("https://"))
+    await listener.stop()
+  })
+
+  it("a proposal in the reply is not run: the prose is posted with a not-built-yet note", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "Here is a plan.\nbtrain> status" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} refresh?`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, tsAt(NOW), [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    await cycleThroughTurn(listener)
+    const texts = fake.posts.filter((p) => p.body.thread_ts === tsAt(NOW)).map((p) => p.body.text)
+    assert.equal(texts.length, 1)
+    assert.match(texts[0], /Here is a plan\./)
+    assert.ok(texts[0].includes(LISTEN_NOTES.proposalsNotBuilt))
+    assert.ok(!texts[0].includes("btrain> status"))
+    await listener.stop()
   })
 })
