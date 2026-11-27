@@ -27,7 +27,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { authTest, classifySlackError, ERROR_CLASSES, postMessage } from "./client.mjs"
-import { getListenerSettings, servedRepositories } from "./config.mjs"
+import { developerLabel, getListenerSettings, servedRepositories } from "./config.mjs"
 import { loadSlackCredentials } from "./credentials.mjs"
 import { compareTs, decide, slackTsToMs } from "./decide.mjs"
 import { parseOperatorCommand } from "./grammar.mjs"
@@ -35,13 +35,16 @@ import { classifyInbound, HEARD, SOURCES } from "./inbound.mjs"
 import { checkApprovalMinutes, loadInbox, writeInbox } from "./inbox.mjs"
 import { consumeStop, isPaused, setPaused, startLeaseTimer, stopRequested, takeLease } from "./lease.mjs"
 import { createReader } from "./read-client.mjs"
-import { runProfileCheck } from "./profile-check.mjs"
-import { resolveProfile } from "./runner.mjs"
+import { runProfileCheck, saveVerdict } from "./profile-check.mjs"
+import { splitModelReply } from "./reply.mjs"
+import { RUN_REPLIES, resolveProfile, runOnce } from "./runner.mjs"
+import { buildRunInput, orchestratorHeader, readInstructionText } from "./snapshot.mjs"
 import { deliverToTarget, deliveryTarget } from "./target.mjs"
 
 /** The fixed notes of this workstream (FR-1): what is not built yet. */
 export const LISTEN_NOTES = Object.freeze({
-  modelNotBuilt: "The orchestrator model is not built yet. Nothing ran.",
+  profileNotReady: "The orchestrator has not passed its profile check, so it did not run. Commands still work.",
+  proposalsNotBuilt: "Proposals from the orchestrator are not built yet, so this one was not posted and nothing ran.",
   commandsNotBuilt: "Commands typed in Slack are not built yet. Nothing ran.",
 })
 
@@ -238,11 +241,18 @@ export async function createListener({
           await post(action.channel, action.thread, LISTEN_NOTES.commandsNotBuilt)
           break
         case "turn": {
-          log(`conversation turn in ${action.channel} ${action.thread}: the model is not built yet`)
-          await post(action.channel, action.thread, LISTEN_NOTES.modelNotBuilt)
-          const done = decide(state, { kind: "turn-done", channel: action.channel, thread: action.thread }, decideConfig(), now())
-          if (!persist(done.state)) return
-          await act(done.actions)
+          if (pausedThisCycle || (await isPaused(slackDir))) {
+            log(`conversation turn in ${action.channel} ${action.thread}: dropped, the listener is paused`)
+            if (!(await finishTurn(action.channel, action.thread))) return
+            break
+          }
+          if (!profile.ok) {
+            log(`conversation turn in ${action.channel} ${action.thread}: the profile check has not passed`)
+            await post(action.channel, action.thread, LISTEN_NOTES.profileNotReady)
+            if (!(await finishTurn(action.channel, action.thread))) return
+            break
+          }
+          startTurn(action)
           break
         }
         case "pause":
@@ -434,7 +444,130 @@ export async function createListener({
     }
     const checked = await runProfileCheck({ runner, env: homeEnv, slackDir, turnSeconds: listening.orchestrator.turnSeconds, log, signal: profileAbort.signal })
     log(`orchestrator profile check ${checked.ok ? "passed" : `did not pass: ${checked.reason}`}`)
-    return { ok: checked.ok, reason: checked.reason }
+    return { ok: checked.ok, reason: checked.reason, cliVersion: checked.cliVersion }
+  }
+
+  // Spec 025 T022: orchestrator turns. A turn runs in the background, so the
+  // cycle loop keeps reading while a run is in progress; a finished run's
+  // reply is posted, and decide is told the turn is done, at the start of the
+  // next cycle, under the lease. `stop()` cancels running turns.
+  const label = developerLabel(credentials.settings)
+  const running = new Map()
+  const finished = []
+  let instructionText = null
+  // A turn whose thread read the budget deferred waits for the next cycle,
+  // at most this many times (about five minutes at the default pollSeconds).
+  const MAX_INPUT_DEFERRALS = 30
+  let cycleWaiters = []
+  const nextCycle = () => new Promise((resolve) => cycleWaiters.push(resolve))
+  const wakeTurns = () => {
+    const waiting = cycleWaiters
+    cycleWaiters = []
+    for (const resolve of waiting) resolve()
+  }
+
+  const finishTurn = async (channel, thread) => {
+    const done = decide(state, { kind: "turn-done", channel, thread }, decideConfig(), now())
+    if (!persist(done.state)) return false
+    await act(done.actions)
+    return !lost
+  }
+
+  // The model's raw reply as posted: the prose (scrubbed, escaped, cut by
+  // splitModelReply), a note in place of any proposal (WS6 builds them), and
+  // the orchestrator header as the first line.
+  const renderTurnReply = (raw, channel) => {
+    const split = splitModelReply(raw, { channel: channelContext(channel), approvalMinutes: listening.orchestrator.approvalMinutes })
+    const parts = [split.prose]
+    if (split.proposal) parts.push(LISTEN_NOTES.proposalsNotBuilt)
+    parts.push(...split.notes)
+    const body = parts.filter((part) => typeof part === "string" && part.trim() !== "").join("\n\n")
+    return body || RUN_REPLIES.failed
+  }
+
+  const buildTurnInput = async (action) => {
+    instructionText ??= await readInstructionText()
+    const read = await reader.readThread(action.channel, action.thread, "")
+    // The read budget is short (or a 429 holds the method): not a failure,
+    // the turn waits for a later cycle.
+    if (read.deferred) return { input: "", deferred: true, reason: "the thread read was deferred" }
+    if (!read.ok) return { input: "", reason: `the thread could not be read (${field(read.error)})` }
+    const newest = read.messages.find((item) => item?.ts === action.ts)
+    if (!newest) return { input: "", reason: "the operator's message was not in the thread" }
+    const repos = []
+    for (const repo of served.filter((item) => item.channel === action.channel)) {
+      let lanes = []
+      try {
+        lanes = await reading.readLanes(repo.path)
+      } catch {
+        log(`turn input: the lanes of ${repo.name} could not be read`)
+      }
+      repos.push({ name: repo.name, path: repo.path, lanes, results: state.results?.[repo.path] || [] })
+    }
+    return {
+      input: buildRunInput({ instruction: instructionText, repos, thread: read.messages, newest, operator, botUserId, label }),
+      reason: "",
+    }
+  }
+
+  const startTurn = (action) => {
+    const key = `${action.channel}:${action.thread}`
+    const controller = new AbortController()
+    const runner = listening.orchestrator.runner
+    const promise = (async () => {
+      let text = RUN_REPLIES.failed
+      const aborted = new Promise((resolve) => controller.signal.addEventListener("abort", () => resolve(true), { once: true }))
+      try {
+        let built = await buildTurnInput(action)
+        for (let waits = 0; built.deferred; waits += 1) {
+          if (waits >= MAX_INPUT_DEFERRALS) {
+            built = { input: "", reason: `the thread read stayed deferred for ${MAX_INPUT_DEFERRALS} cycles` }
+            break
+          }
+          log(`conversation turn in ${action.channel} ${action.thread}: the thread read was deferred; waiting for the next cycle`)
+          if (await Promise.race([nextCycle().then(() => false), aborted])) return
+          built = await buildTurnInput(action)
+        }
+        const { input, reason } = built
+        if (!input) {
+          log(`conversation turn in ${action.channel} ${action.thread}: ${reason}`)
+        } else if (!stillMine()) {
+          // The lease went while the input was built: this listener may act
+          // on nothing more, so no run and no reply.
+          log(`conversation turn in ${action.channel} ${action.thread}: the lease is gone; not run`)
+          return
+        } else if (!profile.ok) {
+          // Another turn failed the profile check while this one's input was built.
+          log(`conversation turn in ${action.channel} ${action.thread}: the profile check has not passed; not run`)
+          text = LISTEN_NOTES.profileNotReady
+        } else {
+          log(`conversation turn in ${action.channel} ${action.thread}: run started`)
+          const result = await runOnce({ runner, input, turnSeconds: listening.orchestrator.turnSeconds, env: homeEnv, log, signal: controller.signal })
+          if (result.outcome === "cancelled") return
+          if (result.profileFailed) {
+            // Every run is held to the profile check: a failure stops later runs.
+            saveVerdict(slackDir, { runner, cliVersion: profile.cliVersion || "", ok: false, reason: result.reason })
+            profile = { ok: false, reason: result.reason, cliVersion: profile.cliVersion }
+          }
+          log(`conversation turn in ${action.channel} ${action.thread}: ${result.outcome}`)
+          text = result.outcome === "reply" ? renderTurnReply(result.reply, action.channel) : (result.reply || RUN_REPLIES.failed)
+        }
+      } catch (error) {
+        log(`conversation turn in ${action.channel} ${action.thread}: failed (${field(error?.code || error?.name)})`)
+      }
+      if (controller.signal.aborted) return
+      finished.push({ channel: action.channel, thread: action.thread, text: `${orchestratorHeader(label)}\n${text}` })
+    })().finally(() => running.delete(key))
+    running.set(key, { controller, promise })
+  }
+
+  const postFinishedTurns = async () => {
+    while (finished.length > 0) {
+      if (!stillMine()) return
+      const item = finished.shift()
+      await post(item.channel, item.thread, item.text)
+      if (!(await finishTurn(item.channel, item.thread))) return
+    }
   }
 
   const listener = {
@@ -472,6 +605,11 @@ export async function createListener({
       return profile
     },
 
+    /** Resolves when every running orchestrator turn has ended (for tests). */
+    turnsSettled() {
+      return Promise.all([...running.values()].map((turn) => turn.promise))
+    },
+
     /** Resolves when the start-up profile check has finished or was cancelled. */
     get profileReady() {
       return profileReady
@@ -491,6 +629,9 @@ export async function createListener({
       }
       cycles += 1
       pausedThisCycle = false
+      await postFinishedTurns()
+      if (lost) return { status: "lost-lease" }
+      wakeTurns()
       const paused = await isPaused(slackDir)
       if (!paused && state.paused && !resume()) return { status: "lost-lease" }
       if (!paused && !readingStopped && token) {
@@ -518,7 +659,8 @@ export async function createListener({
     /** Stop the lease timer and release the lease. */
     async stop() {
       profileAbort.abort()
-      await profileReady
+      for (const turn of running.values()) turn.controller.abort()
+      await Promise.all([profileReady, ...[...running.values()].map((turn) => turn.promise)])
       stopTimer()
       if (lease && !lost) await lease.release()
       lease = null

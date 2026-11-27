@@ -36,6 +36,31 @@ export const PART_LABELS = Object.freeze({
 
 export const RESULTS_IN_SNAPSHOT = 20
 
+// The whole input's limit in characters (T022). Past it, the oldest thread
+// messages are left out first, then the lane snapshot is cut, then the
+// operator's newest message is cut; the instruction parts and every part
+// label are always kept.
+export const MAX_INPUT_CHARS = 60_000
+
+// The cap counts and cuts in one unit, UTF-16 code units (`.length`), and a
+// cut never splits a surrogate pair. A section with no room is emptied: no
+// room is not "no limit".
+function cutToLength(text, room) {
+  if (room <= 0) return ""
+  if (text.length <= room) return text
+  let end = room - 1
+  if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end -= 1
+  return `${text.slice(0, end)}…`
+}
+
+/**
+ * The first line of every reply the orchestrator posts (T022): one line the
+ * thread filter recognizes as this developer's, followed by the prose.
+ */
+export function orchestratorHeader(label) {
+  return `orchestrator · dev: ${asRendered(label, REPLY_CUTS.label)}`
+}
+
 const INACTIVE_STATUSES = new Set(["", "idle", "resolved"])
 
 // What each key's value looks like, for the generated grammar.
@@ -132,6 +157,9 @@ function asRendered(value, maxChars) {
 function carriesLabel(text, label, repoNames) {
   if (!label) return false
   const lines = String(text).split("\n")
+  // An orchestrator reply (T022): its first line is exactly the header, and
+  // its prose follows on the next lines.
+  if (lines[0] === orchestratorHeader(label)) return true
   // A reply may start with btrain's own mention prefix (`<@U…> <@U…> `).
   const first = lines[0].replace(MENTION_PREFIX, "")
   const devSegments = first.split(" · ").filter((segment) => segment.startsWith("dev:")).length
@@ -259,27 +287,47 @@ export function buildRunInput({
   label = "",
   taskChars = SLACK_DEFAULTS.taskChars,
   summaryChars = SLACK_DEFAULTS.summaryChars,
+  maxChars = MAX_INPUT_CHARS,
 } = {}) {
   const repoNames = (Array.isArray(repos) ? repos : []).map((repo) => repo?.name).filter(Boolean)
   const earlier = filterThread(thread, { operator, botUserId, label, repoNames, excludeTs: newest?.ts ?? "" })
-  const threadText = earlier.length > 0
-    ? earlier.map((message) => `${message.author}: ${data(message.text)}`).join("\n")
-    : "no earlier messages"
-  const newestText = data(decodeSlackText(typeof newest?.text === "string" ? newest.text : ""))
-  return [
+    .map((message) => `${message.author}: ${data(message.text)}`)
+  let newestText = data(decodeSlackText(typeof newest?.text === "string" ? newest.text : ""))
+  let lanesText = laneSnapshotText(repos, { label, taskChars, summaryChars })
+  const join = (threadLines, omitted) => [
     PART_LABELS.instruction,
     scrub(instruction).trimEnd(),
     "",
     commandGrammarText(),
     "",
     PART_LABELS.lanes,
-    laneSnapshotText(repos, { label, taskChars, summaryChars }),
+    lanesText,
     "",
     PART_LABELS.thread,
-    threadText,
+    ...(omitted > 0 ? [`(${omitted} earlier messages left out to fit the input limit)`] : []),
+    ...(threadLines.length > 0 ? threadLines : omitted > 0 ? [] : ["no earlier messages"]),
     "",
     PART_LABELS.message,
     newestText,
     "",
   ].join("\n")
+  // The cap: leave out the oldest thread messages first, then cut the lane
+  // snapshot, then the newest message (below). The instruction parts stay.
+  let kept = earlier
+  let text = join(kept, 0)
+  while (text.length > maxChars && kept.length > 0) {
+    kept = kept.slice(1)
+    text = join(kept, earlier.length - kept.length)
+  }
+  if (text.length > maxChars) {
+    lanesText = cutToLength(lanesText, lanesText.length - (text.length - maxChars))
+    text = join(kept, earlier.length - kept.length)
+  }
+  // Last, the newest message itself, which the scrub step can make longer
+  // than the operator typed it (runs of "=" are spaced out). Its label stays.
+  if (text.length > maxChars) {
+    newestText = cutToLength(newestText, newestText.length - (text.length - maxChars))
+    text = join(kept, earlier.length - kept.length)
+  }
+  return text
 }
