@@ -661,9 +661,13 @@ starts a real model.
 - The run's input contains the operator's messages marked as the instruction
   and the lane snapshot, and nothing from other authors in the channel.
 - The `claude` profile starts the runner with no tools, no customizations,
-  no MCP servers, and no saved session, in an empty directory, with no API
-  key, btrain, or Slack variable in its environment. A runner with no
-  profile is not started.
+  no skills or slash commands, no MCP servers, and no saved session, in an
+  empty directory, with no API key, btrain, or Slack variable in its
+  environment. A runner with no profile is not started.
+- A run whose first event lists a tool, an MCP server, a skill, a slash
+  command, or any agent set other than exactly the four built-in agents, or
+  names an API key as its credential source, is stopped and its output is
+  not posted.
 - A reply that contains a Slack token pattern, a mention, or a link is posted
   redacted and escaped.
 - A reply with a `start` proposal is posted in canonical form and waits. It
