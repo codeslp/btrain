@@ -325,7 +325,7 @@ async function listen(options, readers, io) {
   }
   io.out(`operator: ${listener.operator}`)
   for (const repo of listener.served) io.out(`serving ${repo.name} (${repo.path}) in ${repo.channel}`)
-  io.out(`runner: ${listener.runner || "none"} (the model is not built yet)`)
+  io.out(`runner: ${listener.runner || "none"} (profile check: ${listener.profile.ok ? "passed" : `not passed, ${listener.profile.reason}`})`)
 
   let interrupted = false
   let wake = () => {}

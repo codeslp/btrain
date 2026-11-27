@@ -35,6 +35,8 @@ import { classifyInbound, HEARD, SOURCES } from "./inbound.mjs"
 import { checkApprovalMinutes, loadInbox, writeInbox } from "./inbox.mjs"
 import { consumeStop, isPaused, setPaused, startLeaseTimer, stopRequested, takeLease } from "./lease.mjs"
 import { createReader } from "./read-client.mjs"
+import { cliVersion, readRunnerCheck, runProfileCheck, verdictMatches } from "./profile-check.mjs"
+import { resolveProfile } from "./runner.mjs"
 import { deliverToTarget, deliveryTarget } from "./target.mjs"
 
 /** The fixed notes of this workstream (FR-1): what is not built yet. */
@@ -412,6 +414,29 @@ export async function createListener({
     }
   }
 
+  // Spec 025 T023: the profile check when the listener starts. A saved
+  // verdict for this runner string, profile version, and CLI version is used
+  // as it is; otherwise the check runs once (a model run on the subscription).
+  let profile = { ok: false, reason: "the listener has not started" }
+  const checkProfileAtStart = async () => {
+    const runner = listening.orchestrator.runner
+    if (!runner) return { ok: false, reason: "the model is off (empty runner)" }
+    const resolved = resolveProfile(runner)
+    if (!resolved.ok) {
+      log(`orchestrator runner has no profile: ${resolved.reason}`)
+      return { ok: false, reason: resolved.reason }
+    }
+    const version = await cliVersion(runner, { env: homeEnv })
+    const saved = readRunnerCheck(slackDir)
+    if (verdictMatches(saved, { runner, cliVersion: version })) {
+      log(`orchestrator profile: saved verdict ${saved.ok ? "passed" : "failed"}`)
+      return { ok: saved.ok, reason: saved.reason || "" }
+    }
+    const checked = await runProfileCheck({ runner, env: homeEnv, slackDir, turnSeconds: listening.orchestrator.turnSeconds, version, log })
+    log(`orchestrator profile check ${checked.ok ? "passed" : `did not pass: ${checked.reason}`}`)
+    return { ok: checked.ok, reason: checked.reason }
+  }
+
   const listener = {
     operator,
     token,
@@ -430,7 +455,16 @@ export async function createListener({
       // Another listener may have written the state since this one was built.
       state = readState()
       stopTimer = startLeaseTimer(lease, { onLost: () => { lost = true } })
+      profile = await checkProfileAtStart()
       return { ok: true, reason: taken.reason, holder: taken.holder }
+    },
+
+    /**
+     * The profile verdict this listener started with (T023): `{ ok, reason }`.
+     * The model runs only when it is ok.
+     */
+    get profile() {
+      return profile
     },
 
     /** One cycle of the plan's seven steps. */
