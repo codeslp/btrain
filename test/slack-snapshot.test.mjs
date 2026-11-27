@@ -472,6 +472,18 @@ describe("T022: the orchestrator reply header and the input size cap", () => {
     assert.equal(input.split(PART_LABELS.message).length - 1, 1)
   })
 
+  it("the cap holds for a newest message of astral characters (codex-reviewer round 3)", () => {
+    const input = buildRunInput({ newest: { text: "😀".repeat(40000) } })
+    assert.ok(input.length <= MAX_INPUT_CHARS, `${input.length} exceeds ${MAX_INPUT_CHARS}`)
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(input), "no lone high surrogate from a cut")
+  })
+
+  it("the cap holds when the lane snapshot alone has no room left and the newest message expands (codex-reviewer round 3)", () => {
+    const repos = [{ name: "repo", lanes: Array.from({ length: 200 }, (_, i) => ({ laneId: String(i), status: "in-progress", task: "x".repeat(500) })) }]
+    const input = buildRunInput({ repos, newest: { text: "=".repeat(40000) } })
+    assert.ok(input.length <= MAX_INPUT_CHARS, `${input.length} exceeds ${MAX_INPUT_CHARS}`)
+  })
+
   it("cuts a large lane snapshot even with no thread history (M14)", () => {
     const lanes = Array.from({ length: 100 }, (_, i) => ({ laneId: String(i), status: "in-progress", task: "x".repeat(500) }))
     const input = buildRunInput({ repos: [{ name: "repo", lanes }], maxChars: 4000 })
