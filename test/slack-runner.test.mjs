@@ -42,7 +42,7 @@ const BASE_ENV = {
   HOME: os.tmpdir(),
   TMPDIR: os.tmpdir(),
   LANG: "C",
-  ANTHROPIC_API_KEY: "value-that-must-not-pass",
+  ANTHROPIC_API_KEY: "value-that-must-not-pass", // btrain-allow: env-var-required (a fake value the runner must drop)
   BTRAIN_AGENT: "claude",
   SLACK_THING: "x",
   GITHUB_TOKEN: "y",
