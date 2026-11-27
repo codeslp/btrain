@@ -455,6 +455,16 @@ export async function createListener({
   const running = new Map()
   const finished = []
   let instructionText = null
+  // A turn whose thread read the budget deferred waits for the next cycle,
+  // at most this many times (about five minutes at the default pollSeconds).
+  const MAX_INPUT_DEFERRALS = 30
+  let cycleWaiters = []
+  const nextCycle = () => new Promise((resolve) => cycleWaiters.push(resolve))
+  const wakeTurns = () => {
+    const waiting = cycleWaiters
+    cycleWaiters = []
+    for (const resolve of waiting) resolve()
+  }
 
   const finishTurn = async (channel, thread) => {
     const done = decide(state, { kind: "turn-done", channel, thread }, decideConfig(), now())
@@ -478,7 +488,10 @@ export async function createListener({
   const buildTurnInput = async (action) => {
     instructionText ??= await readInstructionText()
     const read = await reader.readThread(action.channel, action.thread, "")
-    if (!read.ok) return { input: "", reason: `the thread could not be read (${field(read.error || (read.deferred ? "deferred" : ""))})` }
+    // The read budget is short (or a 429 holds the method): not a failure,
+    // the turn waits for a later cycle.
+    if (read.deferred) return { input: "", deferred: true, reason: "the thread read was deferred" }
+    if (!read.ok) return { input: "", reason: `the thread could not be read (${field(read.error)})` }
     const newest = read.messages.find((item) => item?.ts === action.ts)
     if (!newest) return { input: "", reason: "the operator's message was not in the thread" }
     const repos = []
@@ -503,8 +516,19 @@ export async function createListener({
     const runner = listening.orchestrator.runner
     const promise = (async () => {
       let text = RUN_REPLIES.failed
+      const aborted = new Promise((resolve) => controller.signal.addEventListener("abort", () => resolve(true), { once: true }))
       try {
-        const { input, reason } = await buildTurnInput(action)
+        let built = await buildTurnInput(action)
+        for (let waits = 0; built.deferred; waits += 1) {
+          if (waits >= MAX_INPUT_DEFERRALS) {
+            built = { input: "", reason: `the thread read stayed deferred for ${MAX_INPUT_DEFERRALS} cycles` }
+            break
+          }
+          log(`conversation turn in ${action.channel} ${action.thread}: the thread read was deferred; waiting for the next cycle`)
+          if (await Promise.race([nextCycle().then(() => false), aborted])) return
+          built = await buildTurnInput(action)
+        }
+        const { input, reason } = built
         if (!input) {
           log(`conversation turn in ${action.channel} ${action.thread}: ${reason}`)
         } else if (!stillMine()) {
@@ -607,6 +631,7 @@ export async function createListener({
       pausedThisCycle = false
       await postFinishedTurns()
       if (lost) return { status: "lost-lease" }
+      wakeTurns()
       const paused = await isPaused(slackDir)
       if (!paused && state.paused && !resume()) return { status: "lost-lease" }
       if (!paused && !readingStopped && token) {
