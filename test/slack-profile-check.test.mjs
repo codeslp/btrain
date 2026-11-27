@@ -1,0 +1,230 @@
+// Spec 025 T023 (WS4 step 5): the profile check, runner-check.json, the check
+// at listener start, and the listener findings of `btrain doctor`. Every run
+// is the T002 fake `claude`. Skipped on Windows, as the fake is.
+
+import { after, describe, it } from "node:test"
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import {
+  RUNNER_CHECK_FILE,
+  cliVersion,
+  readRunnerCheck,
+  runProfileCheck,
+  saveVerdict,
+  verdictMatches,
+} from "../src/brain_train/slack/profile-check.mjs"
+import { PROFILE_VERSION } from "../src/brain_train/slack/runner.mjs"
+import { collectSlackDoctorFindings } from "../src/brain_train/slack/doctor.mjs"
+import { setPaused } from "../src/brain_train/slack/lease.mjs"
+import {
+  firstEventWith,
+  installFakeOrchestratorRunner,
+  readFakeOrchestratorRecords,
+  writeFakeOrchestratorControl,
+} from "./helpers/fake-orchestrator-runner.mjs"
+
+const skip = process.platform === "win32"
+const roots = []
+after(async () => Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))))
+
+const OPERATOR = "U0000OPER"
+const CHANNEL = "C0000FAKE"
+const TOKEN = ["xoxb", "0000", "fake", "check", "token"].join("-")
+
+async function home() {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "btrain-profile-check-")))
+  roots.push(root)
+  const dir = path.join(root, "home")
+  await fs.mkdir(path.join(dir, "slack"), { recursive: true })
+  const env = { PATH: "/usr/bin:/bin", HOME: root, TMPDIR: os.tmpdir(), BRAIN_TRAIN_HOME: dir }
+  return { root, dir, slackDir: path.join(dir, "slack"), env }
+}
+
+async function fakeRunner(where, control) {
+  const runner = await installFakeOrchestratorRunner(where)
+  if (control) await writeFakeOrchestratorControl(runner, control)
+  return runner
+}
+
+// The fake answers `--version` like any run: its reply is the version line.
+async function versionedFake(where, control = {}) {
+  return fakeRunner(where, { runs: [{ raw: "9.9.9 (Claude Code)\n" }, control] })
+}
+
+describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
+  describe("runProfileCheck", () => {
+    it("runs the profile once with 'Reply with OK', passes it, and saves the verdict with the runner, profile version, and CLI version", async () => {
+      const h = await home()
+      const runner = await versionedFake(path.join(h.root, "bin"))
+      const verdict = await runProfileCheck({ runner: `${runner.executable} -p`, env: h.env, slackDir: h.slackDir, turnSeconds: 20 })
+      assert.equal(verdict.ok, true, verdict.reason)
+      const records = await readFakeOrchestratorRecords(runner)
+      assert.deepEqual(records[0].argv, ["--version"])
+      assert.equal(records[1].stdin, "Reply with OK")
+      assert.ok(records[1].argv.includes("--disable-slash-commands"))
+      const saved = readRunnerCheck(h.slackDir)
+      assert.equal(saved.ok, true)
+      assert.equal(saved.runner, `${runner.executable} -p`)
+      assert.equal(saved.profileVersion, PROFILE_VERSION)
+      assert.match(saved.cliVersion, /9\.9\.9/)
+      assert.ok(Date.parse(saved.checkedAt))
+      const stat = await fs.stat(path.join(h.slackDir, RUNNER_CHECK_FILE))
+      assert.equal(stat.mode & 0o777, 0o600)
+    })
+
+    it("fails the profile for a first event with a tool, an MCP server, an API key, a skill, a slash command, or a fifth agent, and saves the failure", async () => {
+      const failing = [
+        { tools: ["Bash"] },
+        { mcp_servers: [{ name: "x" }] },
+        { apiKeySource: "ANTHROPIC_API_KEY" },
+        { skills: ["review"] },
+        { slash_commands: ["review"] },
+        { agents: ["claude", "Explore", "general-purpose", "Plan", "web-fetch"] },
+      ]
+      for (const overrides of failing) {
+        const h = await home()
+        const runner = await versionedFake(path.join(h.root, "bin"), { firstEvent: firstEventWith(overrides) })
+        const verdict = await runProfileCheck({ runner: `${runner.executable} -p`, env: h.env, slackDir: h.slackDir, turnSeconds: 20 })
+        assert.equal(verdict.ok, false, JSON.stringify(overrides))
+        assert.ok(verdict.reason)
+        assert.equal(readRunnerCheck(h.slackDir).ok, false)
+      }
+    })
+
+    it("saves nothing when the run cannot judge the profile (missing, timed out, out of usage)", async () => {
+      const h = await home()
+      const missing = await runProfileCheck({ runner: `${path.join(h.root, "nowhere", "claude")} -p`, env: h.env, slackDir: h.slackDir, turnSeconds: 5 })
+      assert.equal(missing.ok, false)
+      assert.equal(missing.saved, false)
+      const runner = await versionedFake(path.join(h.root, "bin"), { reply: "Failed to authenticate: OAuth session expired", exitCode: 1 })
+      const usage = await runProfileCheck({ runner: `${runner.executable} -p`, env: h.env, slackDir: h.slackDir, turnSeconds: 20 })
+      assert.equal(usage.ok, false)
+      assert.equal(usage.saved, false)
+      assert.equal(readRunnerCheck(h.slackDir), null)
+    })
+
+    it("a runner string with no profile is not started and not saved", async () => {
+      const h = await home()
+      const runner = await fakeRunner(path.join(h.root, "bin"))
+      const verdict = await runProfileCheck({ runner: `${runner.executable} -p --dangerously-skip-permissions`, env: h.env, slackDir: h.slackDir, turnSeconds: 5 })
+      assert.equal(verdict.ok, false)
+      assert.deepEqual(await readFakeOrchestratorRecords(runner), [])
+      assert.equal(readRunnerCheck(h.slackDir), null)
+    })
+  })
+
+  describe("the saved verdict", () => {
+    it("matches only the same runner string, profile version, and CLI version", () => {
+      const verdict = { runner: "claude -p", profileVersion: PROFILE_VERSION, cliVersion: "2.1.274", ok: true }
+      assert.equal(verdictMatches(verdict, { runner: "claude -p", cliVersion: "2.1.274" }), true)
+      assert.equal(verdictMatches(verdict, { runner: "claude -p --model opus", cliVersion: "2.1.274" }), false)
+      assert.equal(verdictMatches(verdict, { runner: "claude -p", cliVersion: "2.1.275" }), false)
+      assert.equal(verdictMatches({ ...verdict, profileVersion: PROFILE_VERSION + 1 }, { runner: "claude -p", cliVersion: "2.1.274" }), false)
+      assert.equal(verdictMatches(null, { runner: "claude -p", cliVersion: "2.1.274" }), false)
+    })
+
+    it("saveVerdict records a failed ordinary run, and an unreadable file reads as no verdict", async () => {
+      const h = await home()
+      saveVerdict(h.slackDir, { runner: "claude -p", cliVersion: "1", ok: false, reason: "the run reports tools" })
+      assert.equal(readRunnerCheck(h.slackDir).reason, "the run reports tools")
+      await fs.writeFile(path.join(h.slackDir, RUNNER_CHECK_FILE), "{not json")
+      assert.equal(readRunnerCheck(h.slackDir), null)
+    })
+
+    it("cliVersion reads the first line of '<runner> --version' and is empty when the runner is missing", async () => {
+      const h = await home()
+      const runner = await fakeRunner(path.join(h.root, "bin"), { raw: "2.1.274 (Claude Code)\nmore\n" })
+      assert.match(await cliVersion(`${runner.executable} -p`, { env: h.env }), /2\.1\.274/)
+      assert.equal(await cliVersion(`${path.join(h.root, "none", "claude")} -p`, { env: h.env }), "")
+    })
+  })
+
+  describe("btrain doctor listener findings", () => {
+    async function repo(h, { slack = true, slackListen = true, auto } = {}) {
+      const dir = path.join(h.root, "repo")
+      await fs.mkdir(dir, { recursive: true })
+      const config = { features: { slack, slack_listen: slackListen } }
+      if (auto) config.slack = { orchestrator: { auto } }
+      return { dir, config }
+    }
+
+    async function slackJson(h, { operator = OPERATOR, runner } = {}) {
+      const settings = { botToken: TOKEN, channels: { [path.join(h.root, "repo")]: CHANNEL }, orchestrator: { runner } }
+      if (operator) settings.operator = operator
+      const file = path.join(h.dir, "slack.json")
+      await fs.writeFile(file, JSON.stringify(settings), { mode: 0o600 })
+      await fs.chmod(file, 0o600)
+    }
+
+    const doctor = (r, h, extra = {}) => collectSlackDoctorFindings(r.dir, r.config, { env: { ...h.env, ...extra } })
+
+    it("with slack_listen off reads nothing and starts nothing", async () => {
+      const h = await home()
+      const runner = await versionedFake(path.join(h.root, "bin"))
+      await slackJson(h, { runner: `${runner.executable} -p` })
+      const r = await repo(h, { slackListen: false })
+      const { warnings } = await doctor(r, h)
+      assert.ok(!warnings.some((w) => w.includes("listener")), warnings.join("\n"))
+      assert.deepEqual(await readFakeOrchestratorRecords(runner), [])
+    })
+
+    it("reports slack_listen on with slack off", async () => {
+      const h = await home()
+      const r = await repo(h, { slack: false })
+      const { warnings } = await doctor(r, h)
+      assert.ok(warnings.some((w) => /slack_listen is on but \[features\]\.slack is off/.test(w)), warnings.join("\n"))
+    })
+
+    it("reports no operator, start or pause in auto, a runner with no profile, and a paused listener", async () => {
+      const h = await home()
+      await slackJson(h, { operator: "", runner: "claude -p --dangerously-skip-permissions" })
+      setPaused(h.slackDir)
+      const r = await repo(h, { auto: ["status", "start", "pause"] })
+      const { warnings } = await doctor(r, h)
+      const text = warnings.join("\n")
+      assert.match(text, /no operator/)
+      assert.match(text, /auto/)
+      assert.match(text, /start/)
+      assert.match(text, /pause/)
+      assert.match(text, /no profile/)
+      assert.match(text, /listener is paused/)
+    })
+
+    it("runs the check when no verdict is saved, reports a failure, and does not run it again for the same runner and version", async () => {
+      const h = await home()
+      const runner = await versionedFake(path.join(h.root, "bin"), { firstEvent: firstEventWith({ tools: ["Bash"] }) })
+      await slackJson(h, { runner: `${runner.executable} -p` })
+      const r = await repo(h)
+      const first = await doctor(r, h)
+      assert.ok(first.warnings.some((w) => /profile check failed/.test(w)), first.warnings.join("\n"))
+      const startsAfterFirst = (await readFakeOrchestratorRecords(runner)).filter((rec) => rec.argv[0] !== "--version").length
+      assert.equal(startsAfterFirst, 1)
+      await writeFakeOrchestratorControl(runner, { raw: "9.9.9 (Claude Code)\n" })
+      const second = await doctor(r, h)
+      assert.ok(second.warnings.some((w) => /profile check failed/.test(w)), "the saved verdict is reported")
+      const startsAfterSecond = (await readFakeOrchestratorRecords(runner)).filter((rec) => rec.argv[0] !== "--version").length
+      assert.equal(startsAfterSecond, 1, "no second model run")
+    })
+
+    it("never runs the check in a lane-pinned session", async () => {
+      const h = await home()
+      const runner = await versionedFake(path.join(h.root, "bin"))
+      await slackJson(h, { runner: `${runner.executable} -p` })
+      const r = await repo(h)
+      await doctor(r, h, { BTRAIN_LANE_LOCKED: "1", BTRAIN_LANE: "a" })
+      const starts = (await readFakeOrchestratorRecords(runner)).filter((rec) => rec.argv[0] !== "--version")
+      assert.deepEqual(starts, [])
+      assert.equal(readRunnerCheck(h.slackDir), null)
+    })
+
+    it("an empty runner (model off) runs no check and reports no runner finding", async () => {
+      const h = await home()
+      await slackJson(h, { runner: "" })
+      const r = await repo(h)
+      const { warnings } = await doctor(r, h)
+      assert.ok(!warnings.some((w) => /profile/.test(w)), warnings.join("\n"))
+    })
+  })
+})
