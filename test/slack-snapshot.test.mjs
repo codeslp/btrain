@@ -15,6 +15,7 @@ import {
   readInstructionText,
 } from "../src/brain_train/slack/snapshot.mjs"
 import { renderBoard, renderCard, renderReply } from "../src/brain_train/slack/render.mjs"
+import { parseModelCommand } from "../src/brain_train/slack/grammar.mjs"
 
 const OPERATOR = "U0FAKEOP01"
 const OTHER = "U0FAKEOT02"
@@ -394,6 +395,27 @@ describe("PR #155 review: the command grammar and the repo= value", () => {
     const input = buildRunInput({ instruction: "FIXED", repos: [], newest: typed("8.1", "hi"), operator: OPERATOR })
     const instructionPart = input.slice(0, input.indexOf(PART_LABELS.lanes))
     assert.ok(instructionPart.includes(grammar.trim()), "the grammar is part of the instruction part")
+  })
+
+  it("every verb block in the grammar, filled with real values, parses as a model proposal", () => {
+    const fill = (line) => line
+      .replace("[repo=<repo>]", "repo=repo-x")
+      .replace("<lane>", "e")
+      .replace("<agent>", "claude")
+      .replace("<comma list of paths relative to the repository>", "src/a.mjs, test/a.test.mjs")
+      .replace("<text>", "do the thing")
+      .replace(/ \((required|optional)\)$/, "")
+    const channel = { repos: [{ name: "repo-x", path: "/work/repo-x", laneIds: ["e"], agents: ["claude"] }] }
+    const blocks = commandGrammarText().split("\n").reduce((list, line) => {
+      if (line.startsWith("btrain> ")) list.push([line])
+      else if (/^ {2}[a-z-]+: /.test(line) && list.length > 0) list.at(-1).push(line)
+      return list
+    }, [])
+    assert.equal(blocks.length, 5)
+    for (const block of blocks) {
+      const parsed = parseModelCommand(block.map(fill).join("\n"), channel)
+      assert.equal(parsed.ok, true, `${block[0]}: ${parsed.reason}`)
+    }
   })
 
   it("shows each repository's repo= value: its name when unique, its registered path when names repeat", () => {

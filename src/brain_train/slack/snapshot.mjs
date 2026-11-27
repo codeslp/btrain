@@ -23,6 +23,7 @@ import { buildCardFields } from "./render.mjs"
 import { cutText, flattenLines, prepareAgentText, scrubSecrets } from "./text.mjs"
 import { decodeSlackText } from "./grammar.mjs"
 import { SLACK_DEFAULTS } from "./config.mjs"
+import { APPROVAL, VERBS } from "./verbs.mjs"
 
 export const INSTRUCTION_PATH = new URL("./orchestrator-instructions.txt", import.meta.url)
 
@@ -36,6 +37,44 @@ export const PART_LABELS = Object.freeze({
 export const RESULTS_IN_SNAPSHOT = 20
 
 const INACTIVE_STATUSES = new Set(["", "idle", "resolved"])
+
+// What each key's value looks like, for the generated grammar.
+const VALUE_HINTS = Object.freeze({
+  repo: "<repo>",
+  lane: "<lane>",
+  owner: "<agent>",
+  reviewer: "<agent>",
+  files: "<comma list of paths relative to the repository>",
+})
+
+/**
+ * The command grammar, generated from the verb table so it cannot drift from
+ * what the listener accepts. A verb only the operator may type (`pause`) is
+ * left out: a proposal for it is always rejected.
+ */
+export function commandGrammarText() {
+  const lines = [
+    "Command grammar (generated from btrain's verb table). A proposal is one block: the btrain> line, then one `key: value` line for each field, with no blank line inside the block. A value holds no line break and does not start with \"-\". Leave out [repo=<repo>] only when the channel serves one repository; otherwise use the repo= value the lane snapshot shows. <lane> is a lane ID of that repository and <agent> is one of its active agents.",
+    "",
+  ]
+  const waits = []
+  for (const [name, definition] of Object.entries(VERBS)) {
+    if (definition.approval === APPROVAL.TYPED_ONLY) continue
+    const head = [`btrain> ${name}`]
+    for (const key of definition.args) {
+      const hint = VALUE_HINTS[key] || "<text>"
+      head.push(key === "repo" ? `[repo=${hint}]` : `${key}=${hint}`)
+    }
+    lines.push(head.join(" "))
+    for (const key of definition.fields) {
+      const need = definition.required.includes(key) ? "required" : "optional"
+      lines.push(`  ${key}: ${VALUE_HINTS[key] || "<text>"} (${need})`)
+    }
+    if (definition.approval === APPROVAL.REQUIRED) waits.push(name)
+  }
+  if (waits.length > 0) lines.push("", `A proposal for ${waits.join(" or ")} always waits for the operator's approve.`)
+  return lines.join("\n")
+}
 
 /** The shipped instruction text. */
 export async function readInstructionText() {
@@ -184,8 +223,15 @@ function resultLine(result, summaryChars) {
  */
 export function laneSnapshotText(repos, { label = "", taskChars = SLACK_DEFAULTS.taskChars, summaryChars = SLACK_DEFAULTS.summaryChars } = {}) {
   const out = []
-  for (const repo of Array.isArray(repos) ? repos : []) {
-    out.push(`repository ${data(repo?.name || "repository", { singleLine: true })}`)
+  const list = Array.isArray(repos) ? repos : []
+  const nameCounts = new Map()
+  for (const repo of list) nameCounts.set(repo?.name || "repository", (nameCounts.get(repo?.name || "repository") || 0) + 1)
+  for (const repo of list) {
+    // The value `resolveRepo` accepts: the name when no other served
+    // repository has it, else the registered path.
+    const name = repo?.name || "repository"
+    const repoValue = nameCounts.get(name) > 1 && repo?.path ? repo.path : name
+    out.push(`repository ${data(name, { singleLine: true })} (repo=${data(repoValue, { singleLine: true })})`)
     const active = (Array.isArray(repo?.lanes) ? repo.lanes : []).filter((lane) => !INACTIVE_STATUSES.has(String(lane?.status ?? "")))
     if (active.length === 0) out.push("  no active lanes")
     for (const lane of active) {
@@ -223,6 +269,8 @@ export function buildRunInput({
   return [
     PART_LABELS.instruction,
     scrub(instruction).trimEnd(),
+    "",
+    commandGrammarText(),
     "",
     PART_LABELS.lanes,
     laneSnapshotText(repos, { label, taskChars, summaryChars }),
