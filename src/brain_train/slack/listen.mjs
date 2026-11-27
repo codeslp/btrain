@@ -35,6 +35,8 @@ import { classifyInbound, HEARD, SOURCES } from "./inbound.mjs"
 import { checkApprovalMinutes, loadInbox, writeInbox } from "./inbox.mjs"
 import { consumeStop, isPaused, setPaused, startLeaseTimer, stopRequested, takeLease } from "./lease.mjs"
 import { createReader } from "./read-client.mjs"
+import { runProfileCheck } from "./profile-check.mjs"
+import { resolveProfile } from "./runner.mjs"
 import { deliverToTarget, deliveryTarget } from "./target.mjs"
 
 /** The fixed notes of this workstream (FR-1): what is not built yet. */
@@ -412,6 +414,29 @@ export async function createListener({
     }
   }
 
+  // Spec 025 FR-15 and T023: the profile check runs every time the listener
+  // starts (a model run on the subscription), and its verdict is saved. Only
+  // `btrain doctor` reuses a saved verdict, so a failed one recovers once the
+  // configuration is fixed.
+  // The check runs in the background, so a stalled runner never delays the
+  // cycle loop or a stop request; `stop()` cancels it. The model runs only
+  // once `profile.ok` is true.
+  let profile = { ok: false, reason: "the listener has not started" }
+  let profileReady = Promise.resolve()
+  const profileAbort = new AbortController()
+  const checkProfileAtStart = async () => {
+    const runner = listening.orchestrator.runner
+    if (!runner) return { ok: false, reason: "the model is off (empty runner)" }
+    const resolved = resolveProfile(runner)
+    if (!resolved.ok) {
+      log(`orchestrator runner has no profile: ${resolved.reason}`)
+      return { ok: false, reason: resolved.reason }
+    }
+    const checked = await runProfileCheck({ runner, env: homeEnv, slackDir, turnSeconds: listening.orchestrator.turnSeconds, log, signal: profileAbort.signal })
+    log(`orchestrator profile check ${checked.ok ? "passed" : `did not pass: ${checked.reason}`}`)
+    return { ok: checked.ok, reason: checked.reason }
+  }
+
   const listener = {
     operator,
     token,
@@ -430,7 +455,26 @@ export async function createListener({
       // Another listener may have written the state since this one was built.
       state = readState()
       stopTimer = startLeaseTimer(lease, { onLost: () => { lost = true } })
+      profile = { ok: false, reason: "the profile check is running" }
+      profileReady = checkProfileAtStart()
+        .catch((error) => ({ ok: false, reason: `the profile check failed to run (${field(error?.code || error?.message)})` }))
+        .then((verdict) => {
+          profile = verdict
+        })
       return { ok: true, reason: taken.reason, holder: taken.holder }
+    },
+
+    /**
+     * The profile verdict this listener started with (T023): `{ ok, reason }`.
+     * The model runs only when it is ok.
+     */
+    get profile() {
+      return profile
+    },
+
+    /** Resolves when the start-up profile check has finished or was cancelled. */
+    get profileReady() {
+      return profileReady
     },
 
     /** One cycle of the plan's seven steps. */
@@ -473,6 +517,8 @@ export async function createListener({
 
     /** Stop the lease timer and release the lease. */
     async stop() {
+      profileAbort.abort()
+      await profileReady
       stopTimer()
       if (lease && !lost) await lease.release()
       lease = null

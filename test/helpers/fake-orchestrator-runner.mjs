@@ -41,6 +41,8 @@
 //   ignoreTerm  ignore SIGTERM, for tests of the SIGKILL that follows it.
 //   rateLimitFirst  write the rate limit event before the assistant event
 //               instead of after it; real runs do both.
+//   raw         write this text to standard output instead of a stream, then
+//               exit with `exitCode` (for `claude --version`).
 //   runs       a list of controls: the Nth run (counted from the records
 //               already written) follows the Nth, later runs the last. Runs
 //               are counted at start, so give concurrent runs one control.
@@ -71,6 +73,7 @@ const CONTROL_KEYS = new Set([
   "neverExit",
   "ignoreTerm",
   "rateLimitFirst",
+  "raw",
   "runs",
 ])
 
@@ -215,6 +218,11 @@ export async function runFakeOrchestrator(dir) {
     pid: process.pid,
   }
   fs.appendFileSync(recordPath, `${JSON.stringify(record)}\n`)
+
+  if (typeof control.raw === "string") {
+    await new Promise((resolve) => process.stdout.write(control.raw, resolve))
+    process.exit(Number.isInteger(control.exitCode) ? control.exitCode : 0)
+  }
 
   const firstEvent = Object.hasOwn(control, "firstEvent") ? control.firstEvent : { ...DEFAULT_FIRST_EVENT, cwd }
   if (typeof firstEvent === "string") await writeLine(firstEvent)
