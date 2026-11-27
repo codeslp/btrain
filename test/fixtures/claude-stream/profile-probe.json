@@ -1,5 +1,5 @@
 {
-  "about": "Spec 025 T004: one real run of the claude profile, field names only. No value from the run is stored except the facts below.",
+  "about": "Spec 025 T004 and the FR-15 amendment: real runs of the claude profile, field names and counts only. No value from a run is stored except the facts below.",
   "probe": {
     "date": "2026-11-26",
     "cliVersion": "2.1.274",
@@ -160,5 +160,170 @@
     "result.is_error": false,
     "result.result": "OK",
     "assistant.message.content[0].type": "text"
+  },
+  "profileProbe": {
+    "about": "The run that FR-15's amended profile check is written against (Brian approved option (a), 2026-11-26).",
+    "date": "2026-11-26",
+    "cliVersion": "2.1.274",
+    "arguments": [
+      "-p",
+      "--tools",
+      "",
+      "--safe-mode",
+      "--restricted",
+      "--strict-mcp-config",
+      "--no-session-persistence",
+      "--permission-prompts",
+      "none",
+      "--disable-slash-commands",
+      "--output-format",
+      "stream-json",
+      "--verbose"
+    ],
+    "input": "Reply with OK",
+    "environmentNames": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "SHELL",
+      "TERM",
+      "TMPDIR",
+      "USER"
+    ],
+    "exitCode": 0,
+    "stderr": "",
+    "subscriptionLogin": true,
+    "firstEventReports": {
+      "tools": [],
+      "mcp_servers": [],
+      "apiKeySource": "none",
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan"
+      ],
+      "plugins": [],
+      "skillsCount": 0,
+      "slashCommandsCount": 0,
+      "messaging_socket_path": "set (value not stored; FR-15 does not check it)"
+    },
+    "streamOrder": [
+      "system",
+      "rate_limit_event",
+      "assistant",
+      "result"
+    ],
+    "fields": {
+      "system.init": [
+        "agents",
+        "analytics_disabled",
+        "apiKeySource",
+        "capabilities",
+        "claude_code_version",
+        "cwd",
+        "fast_mode_disabled_reason",
+        "fast_mode_state",
+        "mcp_servers",
+        "messaging_socket_path",
+        "model",
+        "output_style",
+        "permissionMode",
+        "plugins",
+        "product_feedback_disabled",
+        "session_id",
+        "skills",
+        "slash_commands",
+        "subtype",
+        "tools",
+        "type",
+        "uuid"
+      ],
+      "assistant": [
+        "message",
+        "parent_tool_use_id",
+        "request_id",
+        "session_id",
+        "timestamp",
+        "type",
+        "uuid"
+      ],
+      "assistant.message": [
+        "container",
+        "content",
+        "context_management",
+        "diagnostics",
+        "id",
+        "model",
+        "role",
+        "stop_details",
+        "stop_reason",
+        "stop_sequence",
+        "type",
+        "usage"
+      ],
+      "rate_limit_event": [
+        "rate_limit_info",
+        "session_id",
+        "type",
+        "uuid"
+      ],
+      "rate_limit_event.rate_limit_info": [
+        "isUsingOverage",
+        "overageDisabledReason",
+        "overageStatus",
+        "rateLimitType",
+        "resetsAt",
+        "status",
+        "unifiedWindows"
+      ],
+      "result": [
+        "api_error_status",
+        "duration_api_ms",
+        "duration_ms",
+        "fast_mode_disabled_reason",
+        "fast_mode_state",
+        "first_content_frame_ms",
+        "is_error",
+        "modelUsage",
+        "num_turns",
+        "permission_denials",
+        "queued_turn_count",
+        "result",
+        "result_index",
+        "session_id",
+        "stop_reason",
+        "subagent_stats",
+        "subtype",
+        "terminal_reason",
+        "time_to_request_ms",
+        "total_cost_usd",
+        "ttft_ms",
+        "ttft_stream_ms",
+        "type",
+        "usage",
+        "uuid"
+      ]
+    }
+  },
+  "streamOrderVaries": {
+    "note": "The two successful probes sent rate_limit_event in different places, so a reader finds the result event by its type, never by its position.",
+    "orders": [
+      [
+        "system",
+        "assistant",
+        "rate_limit_event",
+        "result"
+      ],
+      [
+        "system",
+        "rate_limit_event",
+        "assistant",
+        "result"
+      ]
+    ]
+  },
+  "failedRunsWhileLoggedOut": {
+    "note": "Two runs while the subscription login had expired exited 1 with an authentication_failed assistant event and is_error true on the result, and also listed a fifth agent and one builtin plugin. Those values came from the logged-out state, not from the profile."
   }
 }

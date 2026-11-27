@@ -39,17 +39,21 @@
 //   delayMs     milliseconds between the first event and the rest. Default 0.
 //   neverExit   stay alive after the first event until signalled.
 //   ignoreTerm  ignore SIGTERM, for tests of the SIGKILL that follows it.
-//   runs        a list of controls: the Nth run (counted from the records
+//   rateLimitFirst  write the rate limit event before the assistant event
+//               instead of after it; real runs do both.
+//   runs       a list of controls: the Nth run (counted from the records
 //               already written) follows the Nth, later runs the last. Runs
 //               are counted at start, so give concurrent runs one control.
 //
-// The stream shape. The default stream has the event order and the field
-// names of one real run of the `claude` profile (CLI 2.1.274), stored by
-// task T004 in `test/fixtures/claude-stream/profile-probe.json`: a
-// `system`/`init` event, an `assistant` event, a `rate_limit_event`, and a
-// `result` event. The values are fake. A test checks the names against the
-// fixture, so a new probe that changes them fails that test until this file
-// follows.
+// The stream shape. The default stream has the field names of the real run
+// of the amended `claude` profile (CLI 2.1.274, with
+// `--disable-slash-commands`), stored as `profileProbe` in
+// `test/fixtures/claude-stream/profile-probe.json`: a `system`/`init` event
+// first, then an `assistant` event, a `rate_limit_event`, and a `result`
+// event. Real runs put the rate limit event before or after the assistant
+// event, so a reader finds events by type. The values are fake. A test
+// checks the names against the fixture, so a new probe that changes them
+// fails that test until this file follows.
 
 import fs from "node:fs"
 import fsp from "node:fs/promises"
@@ -66,8 +70,12 @@ const CONTROL_KEYS = new Set([
   "delayMs",
   "neverExit",
   "ignoreTerm",
+  "rateLimitFirst",
   "runs",
 ])
+
+/** The four built-in agents the amended FR-15 check requires, exactly. */
+export const BUILT_IN_AGENTS = Object.freeze(["claude", "Explore", "general-purpose", "Plan"])
 
 // Names Node adds to its own environment as it starts, so they are not what
 // the runner passed. On macOS, CoreFoundation sets `__CF_USER_TEXT_ENCODING`
@@ -81,9 +89,10 @@ const FAKE_UUID = "00000000-0000-4000-8000-000000000001"
 const FAKE_VERSION = "0.0.0-fake"
 
 /**
- * The first event of a run that passes the spec 025 FR-15 check: no tools,
- * no MCP servers, and the subscription login as the credential source
- * (`apiKeySource: "none"`, as the T004 probe reported).
+ * The first event of a run that passes the amended spec 025 FR-15 check: no
+ * tools, no MCP servers, the subscription login as the credential source
+ * (`apiKeySource: "none"`), no skills, no slash commands, and exactly the
+ * four built-in agents, as the profile probe reported.
  */
 export const DEFAULT_FIRST_EVENT = deepFreeze({
   type: "system",
@@ -95,11 +104,10 @@ export const DEFAULT_FIRST_EVENT = deepFreeze({
   model: FAKE_MODEL,
   permissionMode: "default",
   slash_commands: [],
-  terminal_slash_commands: [],
   apiKeySource: "none",
   claude_code_version: FAKE_VERSION,
   output_style: "default",
-  agents: [],
+  agents: [...BUILT_IN_AGENTS],
   skills: [],
   plugins: [],
   capabilities: [],
@@ -220,8 +228,9 @@ export async function runFakeOrchestrator(dir) {
 
   const reply = Object.hasOwn(control, "reply") ? control.reply : "OK"
   if (reply !== null) {
-    await writeLine(JSON.stringify(assistantEvent(String(reply))))
-    await writeLine(JSON.stringify(rateLimitEvent()))
+    const middle = [assistantEvent(String(reply)), rateLimitEvent()]
+    if (control.rateLimitFirst) middle.reverse()
+    for (const event of middle) await writeLine(JSON.stringify(event))
     await writeLine(JSON.stringify(resultEvent(String(reply))))
   }
   if (control.stderr) await new Promise((resolve) => process.stderr.write(String(control.stderr), resolve))
