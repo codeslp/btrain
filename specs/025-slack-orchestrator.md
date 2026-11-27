@@ -474,12 +474,15 @@ enforced by the listener, which does not depend on the model following it.
   other word has no profile. This version has a profile for macOS and Linux
   only.
 - **Profile.** A profile must give a run with no tools, no project or user
-  customizations, no MCP servers or connectors, and no saved session. For
-  the `claude` CLI at the time of writing that is
+  customizations, no skills or slash commands, no MCP servers or connectors,
+  and no saved session. For the `claude` CLI at the time of writing that is
   `--tools "" --safe-mode --restricted --strict-mcp-config
-  --no-session-persistence --permission-prompts none`. `--restricted` makes
-  the CLI ignore user, project, and local settings files, which could
-  otherwise set an API key or a key helper. `--bare` is not used because it
+  --no-session-persistence --permission-prompts none
+  --disable-slash-commands`. `--restricted` makes the CLI ignore user,
+  project, and local settings files, which could otherwise set an API key or
+  a key helper. `--disable-slash-commands` removes the skills and slash
+  commands that the CLI otherwise lists even under `--safe-mode` and
+  `--restricted`. `--bare` is not used because it
   skips the keychain read that a subscription login needs.
 - **No repository access.** The run starts in an empty temporary directory.
   It reads no files and runs no commands, so it cannot run btrain, change
@@ -493,12 +496,21 @@ enforced by the listener, which does not depend on the model following it.
 - **`HOME` is not a secret boundary.** The run can be given `HOME` because
   it has no tool that reads a file. The no-tools profile is the control.
 - **Profile check.** The check starts the runner once with the profile
-  and fails the profile when the CLI reports any tool, any MCP server, or an
-  API key as its credential source. A failed profile is not used, so a run
-  cannot fall back to metered usage. Every later run is started with the
-  same arguments and is held to the same test on what it reports about
-  itself: a run that reports a tool, an MCP server, or an API key is
-  stopped, its output is discarded, and the profile is marked failed. The
+  and fails the profile when the CLI reports any of these about the run:
+  - any tool;
+  - any MCP server;
+  - an API key as its credential source;
+  - any skill;
+  - any slash command;
+  - any agent other than the four built-in agents `claude`, `Explore`,
+    `general-purpose`, and `Plan`, or any of those four missing.
+
+  The messaging socket path the CLI reports is not checked: every run
+  reports one, and a run with no tools cannot use it. A failed profile is
+  not used, so a run cannot fall back to metered usage. Every later run is
+  started with the same arguments and is held to the same test on what it
+  reports about itself: a run that fails it is stopped, its output is
+  discarded, and the profile is marked failed. The
   verdict is saved with the runner
   string and the CLI's version. The check runs when the listener starts, and
   when `btrain doctor` finds no saved verdict for the current runner and

@@ -379,14 +379,14 @@ found by the basename of the runner's first word. The first version has one:
 | Field | `claude` |
 | --- | --- |
 | Extra words allowed in `orchestrator.runner` | `-p` or `--print`, `--model <name>`, `--effort <level>` |
-| Arguments added | `--tools ""`, `--safe-mode`, `--restricted`, `--strict-mcp-config`, `--no-session-persistence`, `--permission-prompts none`, `--output-format stream-json`, `--verbose` |
+| Arguments added | `--tools ""`, `--safe-mode`, `--restricted`, `--strict-mcp-config`, `--no-session-persistence`, `--permission-prompts none`, `--disable-slash-commands`, `--output-format stream-json`, `--verbose` |
 | Input | Standard input |
-| Output | A stream of JSON events on standard output. The reply is the text of the final result event |
+| Output | A stream of JSON events on standard output. The reply is the text of the event whose `type` is `result`, found by its type: the place of the other events in the stream varies from run to run |
 | Environment | `PATH`, `HOME`, `TMPDIR`, `TERM`, `LANG`, `SHELL`, `USER`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms, `CLAUDE_CONFIG_DIR` |
 | Platforms | macOS and Linux |
 
-All eight flags are in `claude --help` for version 2.1.274, checked on
-2026-11-23. That shows the flags exist. It does not show what a run with
+All nine flags are in `claude --help` for version 2.1.274, checked on
+2026-11-23 (`--disable-slash-commands` on 2026-11-26). That shows the flags exist. It does not show what a run with
 them can do. The help text says `--tools ""` disables all tools and that
 `--restricted` ignores user, project, and local settings files. It says
 nothing about a key the CLI has already stored in its configuration
@@ -447,9 +447,12 @@ pending when that post returns its `ts`.
 **Every run is checked.** A run uses the same arguments as the profile
 check, so there is no difference between what was checked and what runs.
 The listener reads the first event of each run's stream. If that event
-lists any tool, lists any MCP server, names an API key as the credential
-source, or cannot be read, the listener stops the run, posts the fixed
-"failed" reply, discards any output, and marks the profile failed. No later
+lists any tool, any MCP server, any skill, or any slash command; names an
+API key as the credential source; lists agents other than exactly
+`claude`, `Explore`, `general-purpose`, and `Plan`; or cannot be read, the
+listener stops the run, posts the fixed "failed" reply, discards any
+output, and marks the profile failed. The messaging socket path in that
+event is not checked (spec 025 FR-15). No later
 run starts until a profile check passes again.
 
 **The profile check.** `runProfileCheck` starts the runner once with the
@@ -457,9 +460,12 @@ profile and the input "Reply with OK", and applies the same test to its
 first event. The verdict is saved in `runner-check.json` with the runner
 string, the profile version, and the output of `claude --version`.
 
-Both depend on the first event reporting those three things. WS0 step 4
-finds out on a real run. If it does not, the profile has no proof and WS4
-does not start until spec 025 FR-15 is amended.
+Both depend on what the first event reports. WS0 step 4 found out on a
+real run, and FR-15 was amended on 2026-11-26 after a second run with
+`--disable-slash-commands`: that run's first event reported no tools, no
+MCP servers, `apiKeySource: "none"`, no skills, no slash commands, and
+exactly the four built-in agents. Both runs are recorded in
+`test/fixtures/claude-stream/profile-probe.json`.
 
 The check runs when the listener starts and when `btrain doctor` finds no
 saved verdict for the current runner string, profile version, and CLI
@@ -744,8 +750,13 @@ first. Run
    - A second message in a thread waits for the first reply.
    - The listener completes a cycle while a run is in progress.
    - The profile check fails a first event that lists a tool, one that lists
-     an MCP server, and one whose credential source is an API key. A failed
-     check stops every run, and `btrain doctor` reports it.
+     an MCP server, one whose credential source is an API key, one that lists
+     a skill, one that lists a slash command, one that lists a fifth agent,
+     and one that lacks a built-in agent. It passes one whose messaging socket
+     path is set. A failed check stops every run, and `btrain doctor` reports
+     it.
+   - The reply is read from the `result` event wherever it falls in the
+     stream, including after a `rate_limit_event`.
    - An ordinary run whose first event lists a tool is stopped, its output is
      not posted, and no later run starts.
    - With `runner` set to an empty string, a mention gets the one-line note

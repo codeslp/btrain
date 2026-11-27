@@ -104,12 +104,15 @@ describe("fake orchestrator runner (spec 025 T002)", { skip }, () => {
     assert.equal(typeof record.pid, "number")
   })
 
-  it("the default first event reports no tools, no MCP server, and no API key", () => {
+  it("the default first event passes the amended FR-15 check", () => {
     assert.equal(DEFAULT_FIRST_EVENT.type, "system")
     assert.equal(DEFAULT_FIRST_EVENT.subtype, "init")
     assert.deepEqual(DEFAULT_FIRST_EVENT.tools, [])
     assert.deepEqual(DEFAULT_FIRST_EVENT.mcp_servers, [])
     assert.equal(DEFAULT_FIRST_EVENT.apiKeySource, "none")
+    assert.deepEqual(DEFAULT_FIRST_EVENT.skills, [])
+    assert.deepEqual(DEFAULT_FIRST_EVENT.slash_commands, [])
+    assert.deepEqual(DEFAULT_FIRST_EVENT.agents, ["claude", "Explore", "general-purpose", "Plan"])
   })
 
   it("records environment names only, exactly the ones it was given", async () => {
@@ -250,26 +253,39 @@ describe("fake orchestrator runner (spec 025 T002)", { skip }, () => {
     assert.deepEqual(await readFakeOrchestratorRecords(runner), [])
   })
 
-  it("writes the stream the T004 probe captured: event order and every field name", async () => {
-    const probe = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8"))
+  it("writes the stream of the amended profile's probe: every event type and field name, found by type", async () => {
+    const probe = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8")).profileProbe
     const { runner, cwd, env } = await setup()
     const { stdout } = await startRun(runner.executable, { cwd, env }).exited
     const stream = events(stdout)
-    assert.deepEqual(stream.map((event) => event.type), probe.streamOrder)
-    const [init, assistant, rateLimit, result] = stream
+    assert.deepEqual(stream.map((event) => event.type).sort(), [...probe.streamOrder].sort())
+    assert.equal(stream[0].type, "system", "the first event is the init event")
+    const byType = (type) => stream.find((event) => event.type === type)
     const keys = (object) => Object.keys(object).sort()
-    assert.deepEqual(keys(init), probe.fields["system.init"])
-    assert.deepEqual(keys(assistant), probe.fields.assistant)
-    assert.deepEqual(keys(assistant.message), probe.fields["assistant.message"])
-    assert.deepEqual(keys(assistant.message.content[0]), probe.fields["assistant.message.content[0]"])
-    assert.deepEqual(keys(rateLimit), probe.fields.rate_limit_event)
-    assert.deepEqual(keys(rateLimit.rate_limit_info), probe.fields["rate_limit_event.rate_limit_info"])
-    assert.deepEqual(keys(result), probe.fields.result)
-    for (const [field, value] of Object.entries(probe.firstEventReports)) {
-      assert.deepEqual(init[field], value, `first event ${field}`)
+    assert.deepEqual(keys(byType("system")), probe.fields["system.init"])
+    assert.deepEqual(keys(byType("assistant")), probe.fields.assistant)
+    assert.deepEqual(keys(byType("assistant").message), probe.fields["assistant.message"])
+    assert.deepEqual(keys(byType("rate_limit_event")), probe.fields.rate_limit_event)
+    assert.deepEqual(keys(byType("rate_limit_event").rate_limit_info), probe.fields["rate_limit_event.rate_limit_info"])
+    assert.deepEqual(keys(byType("result")), probe.fields.result)
+    const init = byType("system")
+    for (const field of ["tools", "mcp_servers", "apiKeySource", "agents", "plugins"]) {
+      assert.deepEqual(init[field], probe.firstEventReports[field], `first event ${field}`)
     }
-    assert.equal(result.subtype, probe.values["result.subtype"])
-    assert.equal(result.is_error, probe.values["result.is_error"])
+    assert.equal(init.skills.length, probe.firstEventReports.skillsCount)
+    assert.equal(init.slash_commands.length, probe.firstEventReports.slashCommandsCount)
+    assert.equal(byType("result").result, "OK")
+  })
+
+  it("rateLimitFirst puts the rate limit event before the assistant event, as one real run did", async () => {
+    const fixture = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8"))
+    for (const [rateLimitFirst, order] of [[false, fixture.streamOrderVaries.orders[0]], [true, fixture.streamOrderVaries.orders[1]]]) {
+      const { runner, cwd, env } = await setup({ rateLimitFirst })
+      const { stdout } = await startRun(runner.executable, { cwd, env }).exited
+      const stream = events(stdout)
+      assert.deepEqual(stream.map((event) => event.type), order)
+      assert.equal(stream.find((event) => event.type === "result").result, "OK")
+    }
   })
 
   it("a null reply still writes no assistant, rate limit, or result event", async () => {
@@ -280,6 +296,27 @@ describe("fake orchestrator runner (spec 025 T002)", { skip }, () => {
 })
 
 describe("T004 profile probe fixture", () => {
+  it("records the amended profile's run: subscription login and a first event that passes the amended check", async () => {
+    const probe = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8")).profileProbe
+    assert.equal(probe.subscriptionLogin, true)
+    assert.ok(probe.arguments.includes("--disable-slash-commands"))
+    assert.equal(probe.exitCode, 0)
+    const reports = probe.firstEventReports
+    assert.deepEqual(reports.tools, [])
+    assert.deepEqual(reports.mcp_servers, [])
+    assert.equal(reports.apiKeySource, "none")
+    assert.deepEqual(reports.agents, ["claude", "Explore", "general-purpose", "Plan"])
+    assert.equal(reports.skillsCount, 0)
+    assert.equal(reports.slashCommandsCount, 0)
+  })
+
+  it("records that the event order varies between real runs", async () => {
+    const fixture = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8"))
+    const [one, two] = fixture.streamOrderVaries.orders
+    assert.notDeepEqual(one, two)
+    assert.deepEqual([...one].sort(), [...two].sort())
+  })
+
   it("records the subscription login and a first event that passes the FR-15 check", async () => {
     const probe = JSON.parse(await fs.readFile(PROBE_FIXTURE, "utf8"))
     assert.equal(probe.subscriptionLogin.used, true)
