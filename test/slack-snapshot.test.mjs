@@ -9,6 +9,7 @@ import {
   PART_LABELS,
   RESULTS_IN_SNAPSHOT,
   buildRunInput,
+  commandGrammarText,
   filterThread,
   laneSnapshotText,
   readInstructionText,
@@ -373,6 +374,37 @@ describe("filterThread on real rendered messages (codex-reviewer red team on 973
       label: LABEL,
     })
     assert.match(input, /btrain: repo-x · dev: brian · claude claimed lane a/)
+  })
+})
+
+describe("PR #155 review: the command grammar and the repo= value", () => {
+  it("the instruction part holds the command grammar generated from the verb table", () => {
+    const grammar = commandGrammarText()
+    for (const verb of ["status", "flush", "poll-pr", "retry-review", "start"]) {
+      assert.match(grammar, new RegExp(`btrain> ${verb}\\b`), verb)
+    }
+    assert.match(grammar, /btrain> retry-review \[repo=<repo>\] lane=<lane>/)
+    assert.match(grammar, /btrain> start \[repo=<repo>\] owner=<agent>/)
+    for (const field of ["task", "files", "reviewer", "objective", "deliverable", "acceptance", "done-when"]) {
+      assert.match(grammar, new RegExp(`^\\s*${field}: `, "m"), field)
+    }
+    assert.match(grammar, /task: .*required/)
+    assert.match(grammar, /files: .*comma/)
+    assert.doesNotMatch(grammar, /btrain> pause/, "pause is typed by the operator only, never proposed")
+    const input = buildRunInput({ instruction: "FIXED", repos: [], newest: typed("8.1", "hi"), operator: OPERATOR })
+    const instructionPart = input.slice(0, input.indexOf(PART_LABELS.lanes))
+    assert.ok(instructionPart.includes(grammar.trim()), "the grammar is part of the instruction part")
+  })
+
+  it("shows each repository's repo= value: its name when unique, its registered path when names repeat", () => {
+    const text = laneSnapshotText([
+      { name: "repo-x", path: "/work/one/repo-x", lanes: [], results: [] },
+      { name: "shared", path: "/work/one/shared", lanes: [], results: [] },
+      { name: "shared", path: "/work/two/shared", lanes: [], results: [] },
+    ], { label: LABEL })
+    assert.match(text, /repository repo-x \(repo=repo-x\)/)
+    assert.match(text, /repository shared \(repo=\/work\/one\/shared\)/)
+    assert.match(text, /repository shared \(repo=\/work\/two\/shared\)/)
   })
 })
 
