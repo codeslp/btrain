@@ -1081,6 +1081,35 @@ describe("spec 025 WS4 (T022): orchestrator turns", () => {
     }
   })
 
+  it("a deferred thread read keeps the turn pending and retries it at a later cycle, instead of failing it (PR #159 review)", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "after the wait" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} hi`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, parent.ts, [parent])
+    // The first thread read is rate-limited: the read client holds the
+    // method and defers reads until Retry-After has passed on the clock.
+    fake.queue("conversations.replies", { retryAfter: 5 })
+    const clock = clockAt(NOW + 1000)
+    const { listener } = await started(fixture, fake, clock)
+    try {
+      await listener.cycle()
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      await listener.cycle()
+      assert.equal((await turnRecords(fixture)).length, 0, "no run while the read is deferred")
+      assert.ok(!fake.posts.some((post) => post.body.text.includes(RUN_REPLIES.failed)), "the deferral is not a failure")
+      clock.advance(10_000)
+      await listener.cycle()
+      await listener.turnsSettled()
+      await listener.cycle()
+      assert.equal((await turnRecords(fixture)).length, 1, "the turn ran once the budget allowed")
+      assert.ok(fake.posts.some((post) => post.body.text === `${orchestratorHeader("test-dev")}\nafter the wait`), JSON.stringify(fake.posts.map((post) => post.body.text)))
+    } finally {
+      await listener.stop()
+    }
+  })
+
   it("a proposal in the reply is not run: the prose is posted with a not-built-yet note", async () => {
     const fixture = await createFixture()
     await setTurns(fixture, { reply: "Here is a plan.\nbtrain> status" })
