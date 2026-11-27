@@ -211,7 +211,9 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "btrain-orchestrator-"))
   try {
     return await new Promise((resolve) => {
-      let stdout = ""
+      // Output is kept as bytes and decoded once, so a UTF-8 character split
+      // across chunks is not corrupted.
+      const chunks = []
       let stdoutBytes = 0
       let capped = false
       let stderr = ""
@@ -246,20 +248,21 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
         if (stdoutBytes + chunk.length > OUTPUT_CAP_BYTES) {
           capped = true
           const room = OUTPUT_CAP_BYTES - stdoutBytes
-          if (room > 0) stdout += chunk.subarray(0, room).toString("utf8")
+          if (room > 0) chunks.push(chunk.subarray(0, room))
           stdoutBytes = OUTPUT_CAP_BYTES
         } else {
-          stdout += chunk.toString("utf8")
+          chunks.push(chunk)
           stdoutBytes += chunk.length
         }
         if (!firstChecked) {
-          const end = stdout.indexOf("\n")
+          const kept = Buffer.concat(chunks)
+          const end = kept.indexOf(0x0a)
           if (end >= 0 || capped) {
             firstChecked = true
-            const check = checkFirstEvent(end >= 0 ? stdout.slice(0, end) : stdout)
+            const check = checkFirstEvent((end >= 0 ? kept.subarray(0, end) : kept).toString("utf8"))
             if (!check.ok) {
               firstFailure = check.reason
-              stdout = ""
+              chunks.length = 0
               stop()
             }
           }
@@ -286,10 +289,14 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
         }
         if (firstFailure) return done("failed", firstFailure, { profileFailed: true })
         if (timedOut) return done("timedOut", `the run passed ${turnSeconds} seconds`)
+        const stdout = Buffer.concat(chunks).toString("utf8")
         if (!firstChecked && stdout.trim() !== "") {
           const check = checkFirstEvent(stdout.trim())
           if (!check.ok) return done("failed", check.reason, { profileFailed: true })
         }
+        // A run that exits 0 without a first event cannot be checked: the
+        // profile fails, as for an unreadable first event.
+        if (code === 0 && stdout.trim() === "") return done("failed", "the run wrote no first event", { profileFailed: true })
         const events = parseLines(stdout)
         const result = events.find((event) => event?.type === "result")
         if (code !== 0 || result?.is_error === true) {
@@ -298,7 +305,6 @@ export async function runOnce({ runner, input = "", turnSeconds = 180, env = pro
           return done("failed", `exit ${code}`)
         }
         if (capped) return done("failed", "the output passed 64 KB")
-        if (stdout.trim() === "") return done("failed", "the run wrote no output")
         if (!result || typeof result.result !== "string" || result.result.trim() === "") {
           return done("failed", "the run wrote no result event with text")
         }
