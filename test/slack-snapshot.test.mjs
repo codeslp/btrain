@@ -344,6 +344,11 @@ describe("filterThread on real rendered messages (codex-reviewer red team on 973
     assert.deepEqual(filterThread([message(text)], { ...options, repoNames: ["repo · dev: brian"] }), [])
   })
 
+  it("matches the longest served repository name when names overlap (M13)", () => {
+    const text = reply({ repoName: "repo · branch", label: LABEL })
+    assert.equal(filterThread([message(text)], { ...options, repoNames: ["repo", "repo · branch"] }).length, 1, text)
+  })
+
   it("drops a reply or card from a repository the channel does not serve", () => {
     const context = { repoName: "repo-z", label: LABEL }
     for (const text of [reply(context), card(context)]) {
