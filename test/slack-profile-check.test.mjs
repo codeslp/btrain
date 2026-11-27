@@ -126,6 +126,14 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
       assert.equal(verdictMatches(null, { runner: "claude -p", cliVersion: "2.1.274" }), false)
     })
 
+    it("a saved verdict whose ok is not a boolean reads as no verdict (M4)", async () => {
+      const h = await home()
+      for (const ok of ["false", 0, null, undefined]) {
+        await fs.writeFile(path.join(h.slackDir, RUNNER_CHECK_FILE), JSON.stringify({ runner: "claude -p", profileVersion: PROFILE_VERSION, cliVersion: "2.0", ok }))
+        assert.equal(readRunnerCheck(h.slackDir), null, JSON.stringify(ok))
+      }
+    })
+
     it("saveVerdict records a failed ordinary run, and an unreadable file reads as no verdict", async () => {
       const h = await home()
       saveVerdict(h.slackDir, { runner: "claude -p", cliVersion: "1", ok: false, reason: "the run reports tools" })
@@ -262,6 +270,15 @@ describe("slack/profile-check.mjs (spec 025 T023)", { skip }, () => {
       assert.ok(second.warnings.some((w) => /profile check failed/.test(w)), "the saved verdict is reported")
       const startsAfterSecond = (await readFakeOrchestratorRecords(runner)).filter((rec) => rec.argv[0] !== "--version").length
       assert.equal(startsAfterSecond, 1, "no second model run")
+    })
+
+    it("reports a check that could not run (a missing runner), without saving a verdict", async () => {
+      const h = await home()
+      await slackJson(h, { runner: `${path.join(h.root, "missing", "claude")} -p` })
+      const r = await repo(h)
+      const { warnings } = await doctor(r, h)
+      assert.ok(warnings.some((w) => /profile check could not judge the profile .*not found/.test(w)), warnings.join("\n"))
+      assert.equal(readRunnerCheck(h.slackDir), null)
     })
 
     it("never runs the check in a lane-pinned session", async () => {
