@@ -20,7 +20,7 @@
 
 import fs from "node:fs/promises"
 import { buildCardFields } from "./render.mjs"
-import { cutText, flattenLines, scrubSecrets } from "./text.mjs"
+import { cutText, flattenLines, prepareAgentText, scrubSecrets } from "./text.mjs"
 import { decodeSlackText } from "./grammar.mjs"
 import { SLACK_DEFAULTS } from "./config.mjs"
 
@@ -69,6 +69,19 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
+// The cut lengths render.mjs uses for the repository name and the label: a
+// reply prefix and the board (`prefixReply`, `renderBoard`), and a card
+// (`buildCardFields`).
+const REPLY_CUTS = Object.freeze({ repo: 120, label: 80 })
+const CARD_CUTS = Object.freeze({ repo: 200, label: 200 })
+const MENTION_PREFIX = /^(?:<@[UW][A-Z0-9]{2,20}> )+/
+
+// A name or label as it reads in a decoded btrain message: prepared as the
+// renderer prepares it (scrubbed, cut, escaped, defanged), then decoded.
+function asRendered(value, maxChars) {
+  return decodeSlackText(prepareAgentText(String(value ?? ""), { maxChars, singleLine: true }))
+}
+
 // A btrain message carries the label in one fixed place, right after the
 // repository name: a reply starts `{repo} · dev: {label}` (then ` · …` or
 // the end), a card starts `{repo} · lane …` and its second line is
@@ -79,22 +92,34 @@ function escapeRegex(value) {
 // dropped, and with no served names no reply or card is kept (fail closed).
 function carriesLabel(text, label, repoNames) {
   if (!label) return false
-  const wanted = `dev: ${label}`
   const lines = String(text).split("\n")
-  const first = lines[0]
-  if (first.split(" · ").filter((segment) => segment.startsWith("dev:")).length > 1) return false
-  if (first === `board · ${wanted}`) return true
+  // A reply may start with btrain's own mention prefix (`<@U…> <@U…> `).
+  const first = lines[0].replace(MENTION_PREFIX, "")
+  const devSegments = first.split(" · ").filter((segment) => segment.startsWith("dev:")).length
+  if (devSegments > 1) return false
+  const replyLabel = `dev: ${asRendered(label, REPLY_CUTS.label)}`
+  if (first === `board · ${replyLabel}`) return true
+  // A reply is one line whose label follows the repository name.
+  const replyRest = afterServedRepo(first, repoNames, REPLY_CUTS.repo)
+  if (replyRest.startsWith("dev:")) {
+    return lines.length === 1 && (replyRest === replyLabel || replyRest.startsWith(`${replyLabel} · `))
+  }
+  // A card has no `dev:` segment on its first line and its label on line 2.
+  const cardRest = afterServedRepo(first, repoNames, CARD_CUTS.repo)
+  if (cardRest.startsWith("lane ")) {
+    return devSegments === 0 && lines[1] === `dev: ${asRendered(label, CARD_CUTS.label)}`
+  }
+  return false
+}
+
+// The rest of `first` after the longest served repository name (as rendered
+// with this cut) and ` · `, or "" when no served name fits.
+function afterServedRepo(first, repoNames, maxChars) {
   const repo = [...repoNames]
-    .map(String)
+    .map((name) => asRendered(name, maxChars))
     .filter((name) => name && first.startsWith(`${name} · `))
     .sort((left, right) => right.length - left.length)[0]
-  if (!repo) return false
-  const rest = first.slice(repo.length + " · ".length)
-  const devOnFirstLine = first.split(" · ").some((segment) => segment.startsWith("dev:"))
-  // A reply is one line. A card has no `dev:` segment on its first line.
-  if (rest.startsWith("dev:")) return lines.length === 1 && (rest === wanted || rest.startsWith(`${wanted} · `))
-  if (rest.startsWith("lane ")) return !devOnFirstLine && lines[1] === wanted
-  return false
+  return repo ? first.slice(repo.length + " · ".length) : ""
 }
 
 function typedByOperator(item, operator) {

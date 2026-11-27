@@ -328,8 +328,9 @@ describe("filterThread on real rendered messages (codex-reviewer red team on 973
   it("keeps a real reply whose repository name and label the renderer escaped or cut", () => {
     const repoName = `a&b-${"r".repeat(150)}`
     const label = `d&v-${"l".repeat(100)}`
-    const text = reply({ repoName, label })
-    assert.equal(filterThread([message(text)], { ...options, label, repoNames: [repoName] }).length, 1, text)
+    for (const text of [reply({ repoName, label }), card({ repoName, label })]) {
+      assert.equal(filterThread([message(text)], { ...options, label, repoNames: [repoName] }).length, 1, text)
+    }
   })
 
   it("an empty label keeps nothing, even a board or reply with an empty dev: segment (M1)", () => {
