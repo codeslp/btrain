@@ -139,7 +139,19 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
       assert.equal(result.outcome, "reply", result.reason)
       assert.equal(result.reply, "Lane e is in review.")
       const [record] = await readFakeOrchestratorRecords(runner)
-      assert.deepEqual(record.argv, ["-p", ...ADDED_ARGS])
+      // A literal list, independent of ADDED_ARGS, so removing any flag fails.
+      assert.deepEqual(record.argv, [
+        "-p",
+        "--tools", "",
+        "--safe-mode",
+        "--restricted",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--permission-prompts", "none",
+        "--disable-slash-commands",
+        "--output-format", "stream-json",
+        "--verbose",
+      ])
       assert.deepEqual(record.cwdListing, [])
       assert.equal(record.stdin, "what is in review?")
       for (const name of record.envNames) {
@@ -255,6 +267,64 @@ describe("slack/runner.mjs (spec 025 T020)", { skip }, () => {
       const joined = lines.join("\n")
       assert.match(joined, /boom/)
       assert.ok(!joined.includes(secret))
+    })
+  })
+
+  describe("runOnce edge cases (codex-reviewer red team on 19b8f47)", () => {
+    async function custom(body, options = {}) {
+      const dir = await tempDir("runner-red-team-")
+      const executable = path.join(dir, "claude")
+      await fs.writeFile(executable, `#!${process.execPath}\n${body}\n`, { mode: 0o755 })
+      return runOnce({ runner: `${executable} -p`, turnSeconds: 3, env: BASE_ENV, ...options })
+    }
+    const init = `${JSON.stringify(DEFAULT_FIRST_EVENT)}\n`
+
+    it("keeps a Unicode result whose UTF-8 bytes are split across chunks", async () => {
+      const result = await custom(`
+        process.stdin.resume();
+        process.stdout.write(${JSON.stringify(init)});
+        const line = Buffer.from(JSON.stringify({ type: "result", result: "café" }) + "\\n");
+        const split = line.indexOf(Buffer.from("é")) + 1;
+        process.stdout.write(line.subarray(0, split));
+        setTimeout(() => process.stdout.write(line.subarray(split)), 100);
+      `)
+      assert.equal(result.outcome, "reply", result.reason)
+      assert.equal(result.reply, "café")
+    })
+
+    it("keeps a first event whose UTF-8 bytes are split across chunks", async () => {
+      const event = Buffer.from(`${JSON.stringify({ ...DEFAULT_FIRST_EVENT, model: "modèle" })}\n`)
+      const result = await custom(`
+        process.stdin.resume();
+        const event = Buffer.from(${JSON.stringify(event.toString("base64"))}, "base64");
+        const split = event.indexOf(Buffer.from("è")) + 1;
+        process.stdout.write(event.subarray(0, split));
+        setTimeout(() => { process.stdout.write(event.subarray(split)); process.stdout.write(JSON.stringify({ type: "result", result: "ok" }) + "\\n") }, 100);
+      `)
+      assert.equal(result.outcome, "reply", result.reason)
+    })
+
+    it("an exit 0 with no first event marks the profile failed", async () => {
+      const result = await custom("process.stdin.resume()")
+      assert.equal(result.outcome, "failed")
+      assert.equal(result.profileFailed, true)
+    })
+
+    it("accepts output of exactly the cap", async () => {
+      const overhead = Buffer.byteLength(`${init}${JSON.stringify({ type: "result", result: "" })}\n`)
+      const reply = "x".repeat(OUTPUT_CAP_BYTES - overhead)
+      const result = await custom(`process.stdin.resume(); process.stdout.write(${JSON.stringify(`${init}${JSON.stringify({ type: "result", result: reply })}\n`)})`)
+      assert.equal(result.outcome, "reply", result.reason)
+      assert.equal(result.reply, reply)
+    })
+
+    it("kills a run with a bad first event that ignores SIGTERM, and discards its reply", async () => {
+      const event = { ...DEFAULT_FIRST_EVENT, tools: ["Bash"] }
+      const output = `${JSON.stringify(event)}\n${JSON.stringify({ type: "result", result: "unsafe" })}\n`
+      const result = await custom(`process.stdin.resume(); process.on("SIGTERM", () => {}); process.stdout.write(${JSON.stringify(output)}); setInterval(() => {}, 60000)`)
+      assert.equal(result.outcome, "failed")
+      assert.equal(result.profileFailed, true)
+      assert.ok(!result.reply.includes("unsafe"))
     })
   })
 })
