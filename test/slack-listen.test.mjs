@@ -1008,6 +1008,79 @@ describe("spec 025 WS4 (T022): orchestrator turns", () => {
     }
   })
 
+  it("a newest message missing from the fetched thread starts no run (codex-reviewer M9)", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "OK" })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} missing`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, parent.ts, [])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    try {
+      await cycleThroughTurn(listener)
+      assert.equal((await turnRecords(fixture)).length, 0)
+    } finally {
+      await listener.stop()
+    }
+  })
+
+  it("four threads start at most three runs, and the fourth waits for one to end", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "OK", delayMs: 300 })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parents = Array.from({ length: 4 }, (_, i) => message(OPERATOR, NOW + i * 100, `${BOT_MENTION} thread ${i}`))
+    fake.history(CHANNEL, parents)
+    for (const parent of parents) fake.replies(CHANNEL, parent.ts, [parent])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    try {
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 3)
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 4)
+    } finally {
+      await listener.stop()
+    }
+  })
+
+  it("a second message in one thread waits for the first reply", async () => {
+    const fixture = await createFixture()
+    await setTurns(fixture, { reply: "OK", delayMs: 300 })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} first`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, parent.ts, [parent, message(OPERATOR, NOW + 100, "second")])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    try {
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 1)
+      await listener.cycle()
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 2)
+    } finally {
+      await listener.stop()
+    }
+  })
+
+  it("maxTurnsPerHour also refuses a queued turn", async () => {
+    const fixture = await createFixture({ orchestrator: { maxTurnsPerHour: 1 } })
+    await setTurns(fixture, { reply: "OK", delayMs: 300 })
+    const fake = createFakeSlack({ expectedToken: TOKEN })
+    const parent = message(OPERATOR, NOW, `${BOT_MENTION} first`)
+    fake.history(CHANNEL, [parent])
+    fake.replies(CHANNEL, parent.ts, [parent, message(OPERATOR, NOW + 100, "second")])
+    const { listener } = await started(fixture, fake, clockAt(NOW + 1000))
+    try {
+      await cycleThroughTurn(listener)
+      await listener.turnsSettled()
+      assert.equal((await turnRecords(fixture)).length, 1)
+    } finally {
+      await listener.stop()
+    }
+  })
+
   it("a proposal in the reply is not run: the prose is posted with a not-built-yet note", async () => {
     const fixture = await createFixture()
     await setTurns(fixture, { reply: "Here is a plan.\nbtrain> status" })
